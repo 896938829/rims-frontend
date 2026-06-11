@@ -1,0 +1,37 @@
+LICENSE
+  6ca7e8ba1947a3ae 1-45,49-568,576-577,581-635,639-661
+  71931b1d35bb4f3c 46-48,569-575,578-580,636-638
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.22",
+  "base_commit_sha": "a53e6598197ddbdd85acc05f61d6782355b9dd6d",
+  "prompts": {
+    "6ca7e8ba1947a3ae": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019eb495-fe12-7311-9f6a-ee6c1abe1e4e",
+        "model": "gpt-5.5"
+      },
+      "human_author": "p-Wangsb",
+      "messages": [],
+      "total_additions": 903,
+      "total_deletions": 0,
+      "accepted_lines": 645,
+      "overriden_lines": 0
+    },
+    "71931b1d35bb4f3c": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019eb49a-9efc-7d30-bbd1-3a40928429a9",
+        "model": "gpt-5.5"
+      },
+      "human_author": "p-Wangsb",
+      "messages": [],
+      "total_additions": 16,
+      "total_deletions": 17,
+      "accepted_lines": 16,
+      "overriden_lines": 0
+    }
+  }
+}
