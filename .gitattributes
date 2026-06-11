@@ -1,0 +1,19 @@
+* text=auto
+
+# Repository metadata.
+.gitattributes text eol=lf
+
+# Keep executable scripts portable across platforms.
+*.sh text eol=lf
+gradlew text eol=lf
+
+# Windows command scripts should keep CRLF line endings.
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
+# Binary assets and archives.
+*.ico binary
+*.jar binary
+*.jpg binary
+*.jpeg binary
+*.png binary
