@@ -1,0 +1,34 @@
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.22",
+  "base_commit_sha": "fcc9f2846236e0853965d6316091b722669108b6",
+  "prompts": {
+    "3fa5eb10705fe446": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019eb61c-cc23-7d43-865a-43586dfea07e",
+        "model": "gpt-5.5"
+      },
+      "human_author": "p-Wangsb",
+      "messages": [],
+      "total_additions": 18,
+      "total_deletions": 1,
+      "accepted_lines": 17,
+      "overriden_lines": 0
+    },
+    "93c965716166fa6b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ec913-837e-7c01-b560-bbcb6a236920",
+        "model": "unknown"
+      },
+      "human_author": "p-Wangsb",
+      "messages": [],
+      "total_additions": 9052,
+      "total_deletions": 9074,
+      "accepted_lines": 4526,
+      "overriden_lines": 0
+    }
+  }
+}
