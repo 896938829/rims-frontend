@@ -16,17 +16,26 @@ final class SampleViewModel extends ChangeNotifier {
   bool _isLoading = false;
   List<SampleItem> _items = const [];
   Failure? _failure;
+  bool _isDisposed = false;
 
   bool get isLoading => _isLoading;
   List<SampleItem> get items => _items;
   Failure? get failure => _failure;
 
   Future<void> loadItems() async {
+    if (_isDisposed) {
+      return;
+    }
+
     _isLoading = true;
     _failure = null;
-    notifyListeners();
+    _notifyListenersIfMounted();
 
     final result = await _getSampleItemsUseCase();
+
+    if (_isDisposed) {
+      return;
+    }
 
     result.when(
       success: (items) {
@@ -39,6 +48,18 @@ final class SampleViewModel extends ChangeNotifier {
     );
 
     _isLoading = false;
-    notifyListeners();
+    _notifyListenersIfMounted();
+  }
+
+  @override
+  void dispose() {
+    _isDisposed = true;
+    super.dispose();
+  }
+
+  void _notifyListenersIfMounted() {
+    if (!_isDisposed) {
+      notifyListeners();
+    }
   }
 }
