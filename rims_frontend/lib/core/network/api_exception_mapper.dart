@@ -67,12 +67,10 @@ final class ApiExceptionMapper {
 
   String _messageFrom(DioException error) {
     final data = error.response?.data;
+    final responseMessage = _messageFromData(data);
 
-    if (data is Map<String, dynamic>) {
-      final message = data['message'];
-      if (message is String && message.isNotEmpty) {
-        return message;
-      }
+    if (responseMessage != null) {
+      return responseMessage;
     }
 
     if (error.message case final message? when message.isNotEmpty) {
@@ -80,5 +78,79 @@ final class ApiExceptionMapper {
     }
 
     return 'Request failed';
+  }
+
+  String? _messageFromData(Object? data) {
+    if (data is String && data.isNotEmpty) {
+      return data;
+    }
+
+    if (data is! Map) {
+      return null;
+    }
+
+    final directMessage = _firstStringValue(data, const [
+      'message',
+      'error',
+      'detail',
+    ]);
+    if (directMessage != null) {
+      return directMessage;
+    }
+
+    return _validationMessage(data['errors']);
+  }
+
+  String? _firstStringValue(Map<dynamic, dynamic> data, List<String> keys) {
+    for (final key in keys) {
+      final value = data[key];
+      if (value is String && value.isNotEmpty) {
+        return value;
+      }
+    }
+
+    return null;
+  }
+
+  String? _validationMessage(Object? errors) {
+    if (errors is! Map) {
+      return null;
+    }
+
+    final parts = <String>[];
+
+    for (final entry in errors.entries) {
+      final field = entry.key.toString();
+      final message = _validationValueMessage(entry.value);
+
+      if (field.isNotEmpty && message != null) {
+        parts.add('$field: $message');
+      }
+    }
+
+    if (parts.isEmpty) {
+      return null;
+    }
+
+    return parts.join('; ');
+  }
+
+  String? _validationValueMessage(Object? value) {
+    if (value is String && value.isNotEmpty) {
+      return value;
+    }
+
+    if (value is Iterable) {
+      final messages = value
+          .whereType<String>()
+          .where((message) => message.isNotEmpty)
+          .toList();
+
+      if (messages.isNotEmpty) {
+        return messages.join(', ');
+      }
+    }
+
+    return null;
   }
 }

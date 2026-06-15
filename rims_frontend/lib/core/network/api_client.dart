@@ -1,5 +1,3 @@
-// ignore_for_file: prefer_initializing_formals
-
 import 'package:dio/dio.dart';
 
 import '../result/result.dart';
@@ -10,8 +8,9 @@ final class ApiClient {
   ApiClient({
     Dio? dio,
     ApiExceptionMapper exceptionMapper = const ApiExceptionMapper(),
-  }) : _dio = dio ?? Dio(),
-       _exceptionMapper = exceptionMapper {
+  }) : this._(dio ?? Dio(), exceptionMapper);
+
+  ApiClient._(this._dio, this._exceptionMapper) {
     _dio.options = BaseOptions(
       baseUrl: ApiEndpoints.baseUrl,
       connectTimeout: const Duration(seconds: 15),

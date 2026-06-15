@@ -10,13 +10,13 @@ void main() {
     mapper = const ApiExceptionMapper();
   });
 
-  DioException exceptionForStatus(int statusCode) {
+  DioException exceptionForStatus(int statusCode, {Object? data}) {
     return DioException(
       requestOptions: RequestOptions(path: '/test'),
       response: Response<dynamic>(
         requestOptions: RequestOptions(path: '/test'),
         statusCode: statusCode,
-        data: {'message': 'Mapped message'},
+        data: data ?? {'message': 'Mapped message'},
       ),
     );
   }
@@ -62,5 +62,50 @@ void main() {
     final failure = mapper.map(exceptionForStatus(500));
 
     expect(failure, isA<ServerFailure>());
+  });
+
+  test('maps string response body to failure message', () {
+    final failure = mapper.map(exceptionForStatus(400, data: 'Plain error'));
+
+    expect(failure.message, 'Plain error');
+  });
+
+  test('maps loose message field to failure message', () {
+    final data = <Object?, Object?>{'message': 'Mapped message'};
+    final failure = mapper.map(exceptionForStatus(400, data: data));
+
+    expect(failure.message, 'Mapped message');
+  });
+
+  test('maps error field to failure message', () {
+    final failure = mapper.map(
+      exceptionForStatus(400, data: {'error': 'Error message'}),
+    );
+
+    expect(failure.message, 'Error message');
+  });
+
+  test('maps detail field to failure message', () {
+    final failure = mapper.map(
+      exceptionForStatus(400, data: {'detail': 'Detailed message'}),
+    );
+
+    expect(failure.message, 'Detailed message');
+  });
+
+  test('maps validation errors to useful failure message', () {
+    final failure = mapper.map(
+      exceptionForStatus(
+        422,
+        data: {
+          'errors': {
+            'name': ['Required'],
+          },
+        },
+      ),
+    );
+
+    expect(failure.message, contains('name'));
+    expect(failure.message, contains('Required'));
   });
 }
