@@ -3,14 +3,28 @@ import 'package:dio/dio.dart';
 import '../result/result.dart';
 import 'api_endpoints.dart';
 import 'api_exception_mapper.dart';
+import 'interceptors/auth_interceptor.dart';
+import 'interceptors/logging_interceptor.dart';
 
 final class ApiClient {
   ApiClient({
     Dio? dio,
     ApiExceptionMapper exceptionMapper = const ApiExceptionMapper(),
-  }) : this._(dio ?? Dio(), exceptionMapper);
+    TokenReader? tokenReader,
+    bool enableLogging = true,
+  }) : this._(
+         dio: dio ?? Dio(),
+         exceptionMapper: exceptionMapper,
+         tokenReader: tokenReader,
+         enableLogging: enableLogging,
+       );
 
-  ApiClient._(this._dio, this._exceptionMapper) {
+  ApiClient._({
+    required this._dio,
+    required this._exceptionMapper,
+    required TokenReader? tokenReader,
+    required bool enableLogging,
+  }) {
     _dio.options = BaseOptions(
       baseUrl: ApiEndpoints.baseUrl,
       connectTimeout: const Duration(seconds: 15),
@@ -21,6 +35,14 @@ final class ApiClient {
         'Content-Type': 'application/json',
       },
     );
+
+    if (enableLogging) {
+      _dio.interceptors.add(buildLoggingInterceptor());
+    }
+
+    if (tokenReader != null) {
+      _dio.interceptors.add(AuthInterceptor(tokenReader: tokenReader));
+    }
   }
 
   final Dio _dio;
