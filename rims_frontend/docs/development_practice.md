@@ -31,6 +31,13 @@ For simple CRUD, `Page -> ViewModel -> Repository` is acceptable.
 - `ApiClient` owns Dio configuration and request helpers.
 - App-wide events use `AppEventBus` only for cross-module events.
 
+## Resources
+
+- Asset files live under `assets/images/` and `assets/icons/`.
+- Resource constants live under `lib/core/resources/`.
+- Screens should use `AppImages`, `AppIcons`, and `AppStrings` instead of raw paths or strings where practical.
+- `pubspec.yaml` must register new asset directories or files before use.
+
 ## Testing
 
 Prioritize tests for:
