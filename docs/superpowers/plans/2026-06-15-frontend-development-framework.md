@@ -94,6 +94,85 @@ test/
     route_paths_test.dart
 ```
 
+## Task 0: Dependency Baseline
+
+**Files:**
+- Modify: `rims_frontend/pubspec.yaml`
+- Modify: `rims_frontend/pubspec.lock`
+
+- [ ] **Step 1: Add framework dependencies**
+
+Modify `rims_frontend/pubspec.yaml`:
+
+```yaml
+name: rims_frontend
+description: "A RIMS project."
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.12.1
+
+dependencies:
+  connectivity_plus: ^7.1.1
+  dio: ^5.9.2
+  file_picker: ^11.0.2
+  fl_chart: ^1.2.0
+  flutter:
+    sdk: flutter
+  flutter_secure_storage: ^10.3.1
+  go_router: ^17.3.0
+  image_picker: ^1.2.2
+  intl: ^0.20.2
+  json_annotation: ^4.12.0
+  mobile_scanner: ^7.2.0
+  path_provider: ^2.1.5
+  provider: ^6.1.5+1
+  share_plus: ^12.0.0
+  shared_preferences: ^2.5.5
+  uuid: ^4.5.3
+
+dev_dependencies:
+  build_runner: ^2.15.0
+  flutter_lints: ^6.0.0
+  flutter_test:
+    sdk: flutter
+  json_serializable: ^6.14.0
+
+flutter:
+  uses-material-design: true
+```
+
+- [ ] **Step 2: Resolve dependencies**
+
+Run:
+
+```powershell
+flutter pub get
+```
+
+Expected: dependencies resolve and `pubspec.lock` updates.
+
+- [ ] **Step 3: Run baseline verification**
+
+Run:
+
+```powershell
+flutter analyze
+flutter test
+```
+
+Expected: analyzer PASS and generated Flutter test PASS before architecture files are added.
+
+- [ ] **Step 4: Commit**
+
+Run:
+
+```powershell
+git add pubspec.yaml pubspec.lock
+git commit -m "chore: add frontend framework dependencies"
+```
+
 ## Task 1: Result And Failure Foundation
 
 **Files:**
