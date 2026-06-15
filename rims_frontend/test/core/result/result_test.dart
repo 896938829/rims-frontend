@@ -10,12 +10,50 @@ void main() {
       expect(result.data, 42);
     });
 
+    test('Success identifies as success', () {
+      const result = Success<int>(1);
+
+      expect(result.isSuccess, isTrue);
+      expect(result.isFailure, isFalse);
+    });
+
     test('FailureResult exposes failure', () {
       const failure = NetworkFailure(message: 'No connection');
       const result = FailureResult<int>(failure);
 
       expect(result.failure, failure);
       expect(result.failure.message, 'No connection');
+    });
+
+    test('FailureResult identifies as failure', () {
+      const failure = NetworkFailure(message: 'No connection');
+      const result = FailureResult<int>(failure);
+
+      expect(result.isFailure, isTrue);
+      expect(result.isSuccess, isFalse);
+    });
+
+    test('when returns success callback result for Success', () {
+      const result = Success<int>(1);
+
+      final value = result.when(
+        success: (data) => data + 1,
+        failure: (_) => 0,
+      );
+
+      expect(value, 2);
+    });
+
+    test('when returns failure callback result for FailureResult', () {
+      const failure = NetworkFailure(message: 'No connection');
+      const result = FailureResult<int>(failure);
+
+      final value = result.when(
+        success: (_) => 'success',
+        failure: (failure) => failure.message,
+      );
+
+      expect(value, 'No connection');
     });
   });
 
