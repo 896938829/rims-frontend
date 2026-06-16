@@ -175,6 +175,65 @@ abstract final class AppImages {
 
 Register assets in `rims_frontend/pubspec.yaml` when adding new files.
 
+Generated blue-style UI assets based on
+`garden-gpt-image-2/image/rims-frontend-design-overview-blue-style-20260611.png`
+live under:
+
+```text
+rims_frontend/assets/images/home_warehouse_hero.png
+rims_frontend/assets/images/illustrations/api_backend_modules.png
+rims_frontend/assets/images/illustrations/empty_inventory.png
+rims_frontend/assets/images/illustrations/scan_inventory.png
+rims_frontend/assets/images/illustrations/security_permission.png
+rims_frontend/assets/images/products/product_dark_bottle.png
+rims_frontend/assets/images/products/product_laundry_detergent.png
+rims_frontend/assets/images/products/product_tissue_pack.png
+rims_frontend/assets/images/products/product_water_bottle.png
+rims_frontend/assets/icons/actions/action_filter.png
+rims_frontend/assets/icons/actions/action_inbound.png
+rims_frontend/assets/icons/actions/action_report.png
+rims_frontend/assets/icons/actions/action_return.png
+rims_frontend/assets/icons/actions/action_scan.png
+rims_frontend/assets/icons/actions/action_search.png
+rims_frontend/assets/icons/actions/action_stocktake.png
+rims_frontend/assets/icons/actions/action_transfer.png
+rims_frontend/assets/icons/hints/badge_new_marker.png
+rims_frontend/assets/icons/hints/bottom_home_indicator.png
+rims_frontend/assets/icons/hints/bottom_nav_active_pill.png
+rims_frontend/assets/icons/hints/hint_scan_frame.png
+rims_frontend/assets/icons/hints/hint_tip_bulb.png
+rims_frontend/assets/icons/hints/status_online_dot.png
+rims_frontend/assets/icons/modules/module_api.png
+rims_frontend/assets/icons/modules/module_backend.png
+rims_frontend/assets/icons/modules/module_permission.png
+rims_frontend/assets/icons/modules/module_role.png
+rims_frontend/assets/icons/modules/module_warehouse.png
+rims_frontend/assets/icons/nav/nav_documents_active.png
+rims_frontend/assets/icons/nav/nav_documents_inactive.png
+rims_frontend/assets/icons/nav/nav_home_active.png
+rims_frontend/assets/icons/nav/nav_home_inactive.png
+rims_frontend/assets/icons/nav/nav_inventory_active.png
+rims_frontend/assets/icons/nav/nav_inventory_inactive.png
+rims_frontend/assets/icons/nav/nav_profile_active.png
+rims_frontend/assets/icons/nav/nav_profile_inactive.png
+rims_frontend/assets/icons/nav/nav_reports_active.png
+rims_frontend/assets/icons/nav/nav_reports_inactive.png
+rims_frontend/assets/icons/status/status_error.png
+rims_frontend/assets/icons/status/status_info.png
+rims_frontend/assets/icons/status/status_pending.png
+rims_frontend/assets/icons/status/status_success.png
+rims_frontend/assets/icons/status/status_warning.png
+```
+
+Expose those paths through `AppImages` in
+`rims_frontend/lib/core/resources/app_images.dart` and `AppIcons` in
+`rims_frontend/lib/core/resources/app_icons.dart`. Use generated raster assets
+for reusable illustrations, empty states, hero artwork, demo product thumbnails,
+button pictograms, bottom navigation symbols, status marks, hint marks, and
+module identifiers. Keep actual app screens, cards, charts, buttons, tabs,
+workflow steps, labels, status chip text, and route text as Flutter widgets so
+the interface stays responsive, localizable, and data-driven.
+
 ## Routing
 
 Keep routing centralized under `lib/routes`.
