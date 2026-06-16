@@ -1,0 +1,51 @@
+rims_frontend/pubspec.yaml
+  31addd5748d92649 37-45
+AGENTS.md
+  31addd5748d92649 178-236
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.22",
+  "base_commit_sha": "0a88954818253601bb9e95ad169cddc1425549bc",
+  "prompts": {
+    "31addd5748d92649": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ece74-4709-7782-b4d5-2a89a5e9dc3a",
+        "model": "gpt-5.5"
+      },
+      "human_author": "p-Wangsb",
+      "messages": [],
+      "total_additions": 164,
+      "total_deletions": 28,
+      "accepted_lines": 68,
+      "overriden_lines": 0
+    },
+    "5e241860b32e30ef": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ece77-5f4c-7c30-b279-21e4d43dd804",
+        "model": "unknown"
+      },
+      "human_author": "p-Wangsb",
+      "messages": [],
+      "total_additions": 68,
+      "total_deletions": 68,
+      "accepted_lines": 30,
+      "overriden_lines": 0
+    },
+    "93c965716166fa6b": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ec913-837e-7c01-b560-bbcb6a236920",
+        "model": "unknown"
+      },
+      "human_author": "p-Wangsb",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 4522,
+      "overriden_lines": 0
+    }
+  }
+}
