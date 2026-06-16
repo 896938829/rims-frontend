@@ -14,11 +14,11 @@ final class _AppShellPageState extends State<AppShellPage> {
   AppTab _currentTab = AppTab.home;
 
   static const Map<AppTab, Widget> _tabBodies = {
-    AppTab.home: Center(child: Text('首页')),
-    AppTab.inventory: Center(child: Text('库存')),
-    AppTab.documents: Center(child: Text('单据')),
-    AppTab.reports: Center(child: Text('报表')),
-    AppTab.profile: Center(child: Text('我的')),
+    AppTab.home: Center(key: Key('tab-body-home'), child: Text('首页')),
+    AppTab.inventory: Center(key: Key('tab-body-inventory'), child: Text('库存')),
+    AppTab.documents: Center(key: Key('tab-body-documents'), child: Text('单据')),
+    AppTab.reports: Center(key: Key('tab-body-reports'), child: Text('报表')),
+    AppTab.profile: Center(key: Key('tab-body-profile'), child: Text('我的')),
   };
 
   @override

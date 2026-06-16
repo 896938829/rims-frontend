@@ -1,6 +1,6 @@
 import 'package:flutter/material.dart';
 
-import '../../features/shell/presentation/view_models/app_tab.dart';
+import '../navigation/app_tab.dart';
 import '../theme/app_colors.dart';
 import '../theme/app_text_styles.dart';
 
