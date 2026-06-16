@@ -24,7 +24,7 @@ final class RimsQuickActionButton extends StatelessWidget {
         borderRadius: BorderRadius.circular(12),
         onTap: onPressed,
         child: RimsCard(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 10),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -34,8 +34,8 @@ final class RimsQuickActionButton extends StatelessWidget {
                   borderRadius: BorderRadius.circular(10),
                 ),
                 child: Padding(
-                  padding: const EdgeInsets.all(8),
-                  child: Image.asset(iconPath, width: 26, height: 26),
+                  padding: const EdgeInsets.all(7),
+                  child: Image.asset(iconPath, width: 24, height: 24),
                 ),
               ),
               const SizedBox(height: 8),

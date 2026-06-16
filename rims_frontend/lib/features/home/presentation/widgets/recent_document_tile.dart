@@ -35,9 +35,19 @@ final class RecentDocumentTile extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text(document.title, style: AppTextStyles.bodyMedium),
+                Text(
+                  document.title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: AppTextStyles.bodyMedium,
+                ),
                 const SizedBox(height: 4),
-                Text(document.number, style: AppTextStyles.bodySmall),
+                Text(
+                  document.number,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: AppTextStyles.bodySmall,
+                ),
               ],
             ),
           ),

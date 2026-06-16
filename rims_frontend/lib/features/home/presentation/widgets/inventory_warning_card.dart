@@ -57,8 +57,16 @@ final class _InventoryWarningRow extends StatelessWidget {
           ),
         ),
         const SizedBox(width: 10),
-        RimsStatusChip(label: warning.level, kind: kind),
+        RimsStatusChip(label: _levelLabel, kind: kind),
       ],
     );
+  }
+
+  String get _levelLabel {
+    return switch (warning.level) {
+      'warning' => '需关注',
+      'info' => '提醒',
+      _ => '待处理',
+    };
   }
 }

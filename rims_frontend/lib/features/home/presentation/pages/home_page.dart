@@ -46,7 +46,7 @@ final class HomePage extends StatelessWidget {
             crossAxisCount: 4,
             crossAxisSpacing: 8,
             mainAxisSpacing: 8,
-            childAspectRatio: 0.88,
+            mainAxisExtent: 92,
             physics: const NeverScrollableScrollPhysics(),
             shrinkWrap: true,
             children: [
@@ -54,7 +54,6 @@ final class HomePage extends StatelessWidget {
                 RimsQuickActionButton(
                   label: action.label,
                   iconPath: action.icon,
-                  onPressed: () {},
                 ),
             ],
           ),
