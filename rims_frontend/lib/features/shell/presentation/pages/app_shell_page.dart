@@ -4,6 +4,7 @@ import '../../../../core/widgets/rims_bottom_navigation.dart';
 import '../../../documents/presentation/pages/documents_page.dart';
 import '../../../home/presentation/pages/home_page.dart';
 import '../../../inventory/presentation/pages/inventory_page.dart';
+import '../../../profile/presentation/pages/profile_page.dart';
 import '../../../reports/presentation/pages/reports_page.dart';
 import '../view_models/app_tab.dart';
 
@@ -22,7 +23,7 @@ final class _AppShellPageState extends State<AppShellPage> {
     AppTab.inventory: InventoryPage(),
     AppTab.documents: DocumentsPage(),
     AppTab.reports: ReportsPage(),
-    AppTab.profile: Center(key: Key('tab-body-profile'), child: Text('我的')),
+    AppTab.profile: ProfilePage(),
   };
 
   @override
