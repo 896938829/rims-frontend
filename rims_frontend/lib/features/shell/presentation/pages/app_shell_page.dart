@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../../../core/widgets/rims_bottom_navigation.dart';
+import '../../../documents/presentation/pages/documents_page.dart';
 import '../../../home/presentation/pages/home_page.dart';
 import '../../../inventory/presentation/pages/inventory_page.dart';
 import '../view_models/app_tab.dart';
@@ -18,7 +19,7 @@ final class _AppShellPageState extends State<AppShellPage> {
   static const Map<AppTab, Widget> _tabBodies = {
     AppTab.home: HomePage(),
     AppTab.inventory: InventoryPage(),
-    AppTab.documents: Center(key: Key('tab-body-documents'), child: Text('单据')),
+    AppTab.documents: DocumentsPage(),
     AppTab.reports: Center(key: Key('tab-body-reports'), child: Text('报表')),
     AppTab.profile: Center(key: Key('tab-body-profile'), child: Text('我的')),
   };
