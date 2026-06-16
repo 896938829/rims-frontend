@@ -24,6 +24,8 @@ void main() {
     expect(find.text('单据'), findsWidgets);
     expect(find.text('报表'), findsWidgets);
     expect(find.text('我的'), findsWidgets);
+    expect(find.text('Good morning, 张三'), findsOneWidget);
+    expect(find.text('库存预警'), findsOneWidget);
   });
 
   testWidgets('shell bottom navigation switches tab body', (tester) async {

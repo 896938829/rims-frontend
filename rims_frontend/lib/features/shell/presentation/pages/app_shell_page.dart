@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../../../core/widgets/rims_bottom_navigation.dart';
+import '../../../home/presentation/pages/home_page.dart';
 import '../view_models/app_tab.dart';
 
 final class AppShellPage extends StatefulWidget {
@@ -14,7 +15,7 @@ final class _AppShellPageState extends State<AppShellPage> {
   AppTab _currentTab = AppTab.home;
 
   static const Map<AppTab, Widget> _tabBodies = {
-    AppTab.home: Center(key: Key('tab-body-home'), child: Text('首页')),
+    AppTab.home: HomePage(),
     AppTab.inventory: Center(key: Key('tab-body-inventory'), child: Text('库存')),
     AppTab.documents: Center(key: Key('tab-body-documents'), child: Text('单据')),
     AppTab.reports: Center(key: Key('tab-body-reports'), child: Text('报表')),
