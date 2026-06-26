@@ -1,0 +1,76 @@
+rims_frontend/lib/features/home/presentation/pages/home_page.dart
+  d62471ca1be881de 45
+rims_frontend/lib/features/shell/presentation/pages/app_shell_page.dart
+  8025723970a3efec 4,13-15,27,36-38,42-47,49-51
+  d62471ca1be881de 52
+rims_frontend/lib/features/auth/presentation/pages/login_page.dart
+  8025723970a3efec 10-11,14,16-18,21-50,54-56,87-93,96-111,113-114,117-119,133,137-138,141-147
+  d62471ca1be881de 15,19,57-73,75-86,95,112,115-116,120-127,129-130,132,135,148
+rims_frontend/test/features/profile/profile_view_model_test.dart
+  8025723970a3efec 8,11,13-15,17,19,21,23
+rims_frontend/test/app_static_ui_test.dart
+  d62471ca1be881de 30,71
+  8025723970a3efec 1,9-11,32,53-54,56,58-60,62,64-69,80-82,86-88,93-98
+  dce5c36ee8586404 28-29,40
+rims_frontend/lib/routes/app_router.dart
+  8025723970a3efec 3,5,9-13,15-30,35-36,42
+  d62471ca1be881de 34,37,41
+rims_frontend/lib/app.dart
+  d62471ca1be881de 43
+  8025723970a3efec 2,9,12,15-20,24-28,39-42,44-51,57
+rims_frontend/lib/features/profile/presentation/pages/profile_page.dart
+  8025723970a3efec 17,20,26-27,32,40-41,44,47-48,51-53,58-59,69,76,92,121,197-198,207-226,231
+  d62471ca1be881de 57,70,103,118-120,196,199,227-230
+rims_frontend/lib/features/auth/presentation/view_models/login_view_model.dart
+  8025723970a3efec 1-18,23-42,45,47-55,59-62,74-75
+rims_frontend/lib/features/profile/presentation/view_models/profile_view_model.dart
+  8025723970a3efec 3,6,10,13
+rims_frontend/test/features/home/home_view_model_test.dart
+  d62471ca1be881de 29-30,33
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.23",
+  "base_commit_sha": "6b5b3f0cf70a745d96051540e843ac37135ae370",
+  "prompts": {
+    "8025723970a3efec": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ef7ae-2c2a-7772-bb39-46020da89e9f",
+        "model": "gpt-5.5"
+      },
+      "human_author": "p-Wangsb",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 977,
+      "overriden_lines": 63
+    },
+    "d62471ca1be881de": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ecf1e-8d4d-72b3-a8e5-7ffe1cc708a8",
+        "model": "gpt-5.5"
+      },
+      "human_author": "p-Wangsb",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 6851,
+      "overriden_lines": 35
+    },
+    "dce5c36ee8586404": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f0299-249c-7ff2-8a1c-498d24e3a4dc",
+        "model": "gpt-5.5"
+      },
+      "human_author": "p-Wangsb",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 3,
+      "overriden_lines": 0
+    }
+  }
+}
