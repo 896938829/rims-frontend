@@ -1,0 +1,46 @@
+rims_frontend/lib/features/documents/presentation/pages/documents_page.dart
+  d62471ca1be881de 52,57-72,76-78,82-87,115-116,178
+  8025723970a3efec 17,19-20,22-35,41-51,53-56,73-75,79,81,117-127,135-137,139,141-146,149-158,160-177,180-182,186-192,194,208-211,241
+rims_frontend/lib/features/documents/presentation/widgets/document_action_card.dart
+  8025723970a3efec 11-13,17-18,22-25,31,46,51-52
+  d62471ca1be881de 9-10,14,26-30,32-37,39-45,47-48
+rims_frontend/lib/features/documents/presentation/view_models/documents_view_model.dart
+  8025723970a3efec 1-2,19,21,24,55-58,62-63,67-70,75-98,129-131,133-137,145-148,157-160,177,179
+  d62471ca1be881de 8-9,12,25-26,29-30,34-35,39-40,44-46,49
+rims_frontend/test/features/documents/documents_view_model_test.dart
+  8025723970a3efec 21-22,24,26-27,32-33,37-38,54,56,61-63,67-68,73
+  d62471ca1be881de 117
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.23",
+  "base_commit_sha": "8209dcbcfc6dd6fc41fceb9edbc3d331a1471d5c",
+  "prompts": {
+    "8025723970a3efec": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ef7ae-2c2a-7772-bb39-46020da89e9f",
+        "model": "gpt-5.5"
+      },
+      "human_author": "p-Wangsb",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 221,
+      "overriden_lines": 49
+    },
+    "d62471ca1be881de": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019ecf1e-8d4d-72b3-a8e5-7ffe1cc708a8",
+        "model": "gpt-5.5"
+      },
+      "human_author": "p-Wangsb",
+      "messages": [],
+      "total_additions": 0,
+      "total_deletions": 0,
+      "accepted_lines": 5714,
+      "overriden_lines": 20
+    }
+  }
+}
