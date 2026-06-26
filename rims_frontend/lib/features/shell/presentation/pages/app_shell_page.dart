@@ -7,6 +7,7 @@ import '../../../home/presentation/pages/home_page.dart';
 import '../../../inventory/domain/repositories/inventory_repository.dart';
 import '../../../inventory/presentation/pages/inventory_page.dart';
 import '../../../profile/presentation/pages/profile_page.dart';
+import '../../../reports/domain/repositories/reports_repository.dart';
 import '../../../reports/presentation/pages/reports_page.dart';
 import '../view_models/app_tab.dart';
 
@@ -14,11 +15,13 @@ final class AppShellPage extends StatefulWidget {
   const AppShellPage({
     required this.sessionController,
     this.inventoryRepository,
+    this.reportsRepository,
     super.key,
   });
 
   final AuthSessionController sessionController;
   final InventoryRepository? inventoryRepository;
+  final ReportsRepository? reportsRepository;
 
   @override
   State<AppShellPage> createState() => _AppShellPageState();
@@ -52,7 +55,7 @@ final class _AppShellPageState extends State<AppShellPage> {
             widget.sessionController.currentWarehouse?.name ?? '未选择仓库',
       ),
       AppTab.documents => const DocumentsPage(),
-      AppTab.reports => const ReportsPage(),
+      AppTab.reports => ReportsPage(repository: widget.reportsRepository),
       AppTab.profile => ProfilePage(
         user: widget.sessionController.currentUser,
         warehouse: widget.sessionController.currentWarehouse,

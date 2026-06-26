@@ -9,6 +9,8 @@ import 'features/auth/data/repositories/auth_repository_impl.dart';
 import 'features/auth/presentation/view_models/auth_session_controller.dart';
 import 'features/inventory/data/datasources/inventory_remote_datasource.dart';
 import 'features/inventory/data/repositories/inventory_repository_impl.dart';
+import 'features/reports/data/datasources/reports_remote_datasource.dart';
+import 'features/reports/data/repositories/reports_repository_impl.dart';
 import 'routes/app_router.dart';
 
 class MainApp extends StatefulWidget {
@@ -24,6 +26,7 @@ final class _MainAppState extends State<MainApp> {
   late final ApiClient _apiClient;
   late final AuthRepositoryImpl _authRepository;
   late final InventoryRepositoryImpl _inventoryRepository;
+  late final ReportsRepositoryImpl _reportsRepository;
   late final GoRouter _router;
 
   @override
@@ -42,9 +45,13 @@ final class _MainAppState extends State<MainApp> {
     _inventoryRepository = InventoryRepositoryImpl(
       remoteDataSource: ApiInventoryRemoteDataSource(_apiClient),
     );
+    _reportsRepository = ReportsRepositoryImpl(
+      remoteDataSource: ApiReportsRemoteDataSource(_apiClient),
+    );
     _router = createAppRouter(
       authRepository: _authRepository,
       inventoryRepository: _inventoryRepository,
+      reportsRepository: _reportsRepository,
       sessionController: _sessionController,
     );
   }
