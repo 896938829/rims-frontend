@@ -51,6 +51,8 @@ final class _AppShellPageState extends State<AppShellPage> {
       AppTab.home => HomePage(
         user: widget.sessionController.currentUser,
         warehouse: widget.sessionController.currentWarehouse,
+        documentsRepository: widget.documentsRepository,
+        inventoryRepository: widget.inventoryRepository,
       ),
       AppTab.inventory => InventoryPage(
         repository: widget.inventoryRepository,

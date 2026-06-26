@@ -1,17 +1,20 @@
+import 'package:flutter/foundation.dart';
+
+import '../../../../core/result/failure.dart';
 import '../../../../core/resources/app_icons.dart';
 import '../../../auth/domain/entities/app_user.dart';
 import '../../../auth/domain/entities/warehouse.dart';
+import '../../../documents/domain/entities/document_data.dart';
+import '../../../documents/domain/repositories/documents_repository.dart';
+import '../../../inventory/domain/entities/inventory_item.dart';
+import '../../../inventory/domain/repositories/inventory_repository.dart';
 
 final class HomeMetric {
-  const HomeMetric({
-    required this.label,
-    required this.value,
-    required this.delta,
-  });
+  const HomeMetric({required this.label, required this.value, this.delta});
 
   final String label;
   final String value;
-  final String delta;
+  final String? delta;
 }
 
 final class HomeQuickAction {
@@ -33,23 +36,22 @@ final class InventoryWarning {
   final String level;
 }
 
-final class RecentDocument {
-  const RecentDocument({
-    required this.title,
-    required this.number,
-    required this.status,
+final class HomeViewModel extends ChangeNotifier {
+  HomeViewModel({
+    this.user,
+    this.warehouse,
+    this.inventoryRepository,
+    this.documentsRepository,
   });
-
-  final String title;
-  final String number;
-  final String status;
-}
-
-final class HomeViewModel {
-  const HomeViewModel({this.user, this.warehouse});
 
   final AppUser? user;
   final Warehouse? warehouse;
+  final InventoryRepository? inventoryRepository;
+  final DocumentsRepository? documentsRepository;
+  List<InventoryItem> _inventoryItems = const [];
+  List<DocumentRecord> _recentDocuments = const [];
+  bool _isLoading = false;
+  String? _errorMessage;
 
   String get warehouseName => warehouse?.name ?? '未选择仓库';
   String get greeting {
@@ -59,10 +61,18 @@ final class HomeViewModel {
     return 'Good morning, $name';
   }
 
-  List<HomeMetric> get metrics => const [
-    HomeMetric(label: '商品数', value: '1,268', delta: '+12%'),
-    HomeMetric(label: '库存总量', value: '18,732', delta: '+8%'),
-    HomeMetric(label: '预警数量', value: '23', delta: '+15%'),
+  bool get isLoading => _isLoading;
+  String? get errorMessage => _errorMessage;
+
+  List<HomeMetric> get metrics => [
+    HomeMetric(label: '商品数', value: _formatInt(_inventoryItems.length)),
+    HomeMetric(
+      label: '库存总量',
+      value: _formatInt(
+        _inventoryItems.fold<int>(0, (sum, item) => sum + item.stockQuantity),
+      ),
+    ),
+    HomeMetric(label: '预警数量', value: _formatInt(_lowStockCount)),
   ];
 
   List<HomeQuickAction> get quickActions => const [
@@ -72,15 +82,76 @@ final class HomeViewModel {
     HomeQuickAction(label: '调拨', icon: AppIcons.actionTransfer),
   ];
 
-  List<InventoryWarning> get warnings => const [
-    InventoryWarning(label: '低库存', count: 23, level: 'warning'),
-    InventoryWarning(label: '超储商品', count: 15, level: 'warning'),
-    InventoryWarning(label: '滞销预警', count: 18, level: 'info'),
+  List<InventoryWarning> get warnings => [
+    if (_lowStockCount > 0)
+      InventoryWarning(label: '低库存', count: _lowStockCount, level: 'warning'),
+    if (_nonStandardCount > 0)
+      InventoryWarning(label: '非标库存', count: _nonStandardCount, level: 'info'),
   ];
 
-  List<RecentDocument> get recentDocuments => const [
-    RecentDocument(title: '销售出库单', number: 'SO-20240518-0012', status: '已完成'),
-    RecentDocument(title: '采购入库单', number: 'PO-20240518-0008', status: '待确认'),
-    RecentDocument(title: '库存盘点单', number: 'ST-20240517-0003', status: '待结转'),
-  ];
+  List<DocumentRecord> get recentDocuments => _recentDocuments;
+
+  Future<void> load() async {
+    _isLoading = true;
+    _errorMessage = null;
+    notifyListeners();
+
+    Failure? failure;
+    final inventoryRepository = this.inventoryRepository;
+    if (inventoryRepository == null) {
+      _inventoryItems = const [];
+    } else {
+      final inventoryResult = await inventoryRepository.listInventory();
+      inventoryResult.when(
+        success: (items) => _inventoryItems = items,
+        failure: (value) {
+          _inventoryItems = const [];
+          failure ??= value;
+        },
+      );
+    }
+
+    final documentsRepository = this.documentsRepository;
+    if (documentsRepository == null) {
+      _recentDocuments = const [];
+    } else {
+      final documentsResult = await documentsRepository.listRecentDocuments();
+      documentsResult.when(
+        success: (documents) => _recentDocuments = documents,
+        failure: (value) {
+          _recentDocuments = const [];
+          failure ??= value;
+        },
+      );
+    }
+
+    _isLoading = false;
+    _errorMessage = failure?.message;
+    notifyListeners();
+  }
+
+  int get _lowStockCount {
+    return _inventoryItems
+        .where(
+          (item) => item.statusLabel == '低库存' || item.availableQuantity <= 5,
+        )
+        .length;
+  }
+
+  int get _nonStandardCount {
+    return _inventoryItems.where((item) => item.statusLabel == '非标').length;
+  }
+
+  String _formatInt(int value) {
+    final text = value.toString();
+    final buffer = StringBuffer();
+    for (var index = 0; index < text.length; index += 1) {
+      if (index > 0 && (text.length - index) % 3 == 0) {
+        buffer.write(',');
+      }
+      buffer.write(text[index]);
+    }
+
+    return buffer.toString();
+  }
 }
