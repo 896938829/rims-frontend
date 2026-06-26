@@ -5,10 +5,9 @@ import 'package:dio/dio.dart';
 typedef WarehouseIdReader = Future<int?> Function();
 
 final class WarehouseInterceptor extends Interceptor {
-  const WarehouseInterceptor({required WarehouseIdReader warehouseIdReader})
-    : _warehouseIdReader = warehouseIdReader;
+  const WarehouseInterceptor({required this.warehouseIdReader});
 
-  final WarehouseIdReader _warehouseIdReader;
+  final WarehouseIdReader warehouseIdReader;
 
   @override
   void onRequest(RequestOptions options, RequestInterceptorHandler handler) {
@@ -20,7 +19,7 @@ final class WarehouseInterceptor extends Interceptor {
     RequestInterceptorHandler handler,
   ) async {
     try {
-      final warehouseId = await _warehouseIdReader();
+      final warehouseId = await warehouseIdReader();
       if (warehouseId != null) {
         options.headers['X-Warehouse-ID'] = warehouseId.toString();
       }

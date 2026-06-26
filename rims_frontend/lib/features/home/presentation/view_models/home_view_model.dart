@@ -1,4 +1,6 @@
 import '../../../../core/resources/app_icons.dart';
+import '../../../auth/domain/entities/app_user.dart';
+import '../../../auth/domain/entities/warehouse.dart';
 
 final class HomeMetric {
   const HomeMetric({
@@ -13,10 +15,7 @@ final class HomeMetric {
 }
 
 final class HomeQuickAction {
-  const HomeQuickAction({
-    required this.label,
-    required this.icon,
-  });
+  const HomeQuickAction({required this.label, required this.icon});
 
   final String label;
   final String icon;
@@ -47,10 +46,18 @@ final class RecentDocument {
 }
 
 final class HomeViewModel {
-  const HomeViewModel();
+  const HomeViewModel({this.user, this.warehouse});
 
-  String get warehouseName => '上海仓';
-  String get greeting => 'Good morning, 张三';
+  final AppUser? user;
+  final Warehouse? warehouse;
+
+  String get warehouseName => warehouse?.name ?? '未选择仓库';
+  String get greeting {
+    final name = user?.realName.isNotEmpty == true
+        ? user!.realName
+        : user?.username ?? '未登录用户';
+    return 'Good morning, $name';
+  }
 
   List<HomeMetric> get metrics => const [
     HomeMetric(label: '商品数', value: '1,268', delta: '+12%'),

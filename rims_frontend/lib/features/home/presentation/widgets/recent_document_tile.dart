@@ -7,10 +7,7 @@ import '../../../../core/widgets/rims_status_chip.dart';
 import '../view_models/home_view_model.dart';
 
 final class RecentDocumentTile extends StatelessWidget {
-  const RecentDocumentTile({
-    required this.document,
-    super.key,
-  });
+  const RecentDocumentTile({required this.document, super.key});
 
   final RecentDocument document;
 

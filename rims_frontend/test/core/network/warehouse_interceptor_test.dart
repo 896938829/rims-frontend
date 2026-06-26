@@ -19,18 +19,21 @@ void main() {
     expect(adapter.lastOptions?.headers['X-Warehouse-ID'], '12');
   });
 
-  test('continues without X-Warehouse-ID when no warehouse is selected', () async {
-    final adapter = _CapturingAdapter();
-    final dio = Dio()
-      ..httpClientAdapter = adapter
-      ..interceptors.add(
-        WarehouseInterceptor(warehouseIdReader: () async => null),
-      );
+  test(
+    'continues without X-Warehouse-ID when no warehouse is selected',
+    () async {
+      final adapter = _CapturingAdapter();
+      final dio = Dio()
+        ..httpClientAdapter = adapter
+        ..interceptors.add(
+          WarehouseInterceptor(warehouseIdReader: () async => null),
+        );
 
-    await dio.get<dynamic>('/products');
+      await dio.get<dynamic>('/products');
 
-    expect(adapter.lastOptions?.headers, isNot(contains('X-Warehouse-ID')));
-  });
+      expect(adapter.lastOptions?.headers, isNot(contains('X-Warehouse-ID')));
+    },
+  );
 }
 
 final class _CapturingAdapter implements HttpClientAdapter {

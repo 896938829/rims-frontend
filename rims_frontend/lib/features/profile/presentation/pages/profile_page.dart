@@ -6,50 +6,115 @@ import '../../../../core/widgets/rims_card.dart';
 import '../../../../core/widgets/rims_page_scaffold.dart';
 import '../../../../core/widgets/rims_section_header.dart';
 import '../../../../core/widgets/rims_status_chip.dart';
+import '../../../auth/domain/entities/app_user.dart';
+import '../../../auth/domain/entities/warehouse.dart';
 import '../view_models/profile_view_model.dart';
 import '../widgets/api_guard_chip_group.dart';
 import '../widgets/permission_group_card.dart';
 
 final class ProfilePage extends StatelessWidget {
   const ProfilePage({
-    this.viewModel = const ProfileViewModel(),
+    this.user,
+    this.warehouse,
+    this.onLogout,
+    this.viewModel,
     super.key,
   });
 
-  final ProfileViewModel viewModel;
+  final AppUser? user;
+  final Warehouse? warehouse;
+  final VoidCallback? onLogout;
+  final ProfileViewModel? viewModel;
 
   @override
   Widget build(BuildContext context) {
+    final effectiveViewModel = viewModel;
+
     return RimsPageScaffold(
       key: const Key('tab-body-profile'),
       child: ListView(
         children: [
-          _UserIdentityCard(viewModel: viewModel),
+          if (effectiveViewModel == null && user == null)
+            const _MissingSessionCard()
+          else
+            _UserIdentityCard(
+              viewModel:
+                  effectiveViewModel ??
+                  ProfileViewModel(user: user!, warehouse: warehouse),
+            ),
           const SizedBox(height: 14),
-          _SettingsCard(viewModel: viewModel),
+          if (effectiveViewModel != null || user != null)
+            _SettingsCard(
+              viewModel:
+                  effectiveViewModel ??
+                  ProfileViewModel(user: user!, warehouse: warehouse),
+            ),
+          const SizedBox(height: 14),
+          _LogoutCard(onLogout: onLogout),
           const SizedBox(height: 20),
           const RimsSectionHeader(title: 'API 守卫'),
           const SizedBox(height: 10),
-          RimsCard(child: ApiGuardChipGroup(guards: viewModel.apiGuards)),
+          RimsCard(
+            child: ApiGuardChipGroup(
+              guards:
+                  (effectiveViewModel ??
+                          (user == null
+                              ? null
+                              : ProfileViewModel(
+                                  user: user!,
+                                  warehouse: warehouse,
+                                )))
+                      ?.apiGuards ??
+                  const [],
+            ),
+          ),
           const SizedBox(height: 20),
           const RimsSectionHeader(title: '后端模块'),
           const SizedBox(height: 10),
           RimsCard(
             child: ApiGuardChipGroup(
-              guards: viewModel.backendModules,
+              guards:
+                  (effectiveViewModel ??
+                          (user == null
+                              ? null
+                              : ProfileViewModel(
+                                  user: user!,
+                                  warehouse: warehouse,
+                                )))
+                      ?.backendModules ??
+                  const [],
               kind: RimsStatusKind.pending,
             ),
           ),
           const SizedBox(height: 20),
           const RimsSectionHeader(title: '角色与权限'),
           const SizedBox(height: 10),
-          for (final group in viewModel.permissionGroups) ...[
+          for (final group
+              in (effectiveViewModel ??
+                          (user == null
+                              ? null
+                              : ProfileViewModel(
+                                  user: user!,
+                                  warehouse: warehouse,
+                                )))
+                      ?.permissionGroups ??
+                  const <PermissionGroup>[]) ...[
             PermissionGroupCard(group: group),
-            if (group != viewModel.permissionGroups.last)
-              const SizedBox(height: 10),
+            const SizedBox(height: 10),
           ],
         ],
       ),
+    );
+  }
+}
+
+final class _MissingSessionCard extends StatelessWidget {
+  const _MissingSessionCard();
+
+  @override
+  Widget build(BuildContext context) {
+    return const RimsCard(
+      child: Text('未加载账号信息', style: AppTextStyles.bodyMedium),
     );
   }
 }
@@ -128,9 +193,37 @@ final class _SettingsCard extends StatelessWidget {
         children: [
           _SettingRow(label: '个人信息', value: viewModel.userName),
           _SettingRow(label: '当前角色', value: viewModel.roleName),
-          _SettingRow(label: '切换仓库', value: viewModel.warehouseName),
+          _SettingRow(
+            label: viewModel.canSwitchWarehouse ? '切换仓库' : '当前仓库',
+            value: viewModel.warehouseName,
+          ),
           const _SettingRow(label: '通知设置', value: '已开启'),
         ],
+      ),
+    );
+  }
+}
+
+final class _LogoutCard extends StatelessWidget {
+  const _LogoutCard({required this.onLogout});
+
+  final VoidCallback? onLogout;
+
+  @override
+  Widget build(BuildContext context) {
+    return RimsCard(
+      padding: const EdgeInsets.all(10),
+      child: TextButton.icon(
+        key: const Key('profile-logout-button'),
+        onPressed: onLogout,
+        icon: const Icon(Icons.logout, color: AppColors.error),
+        label: Text(
+          '退出登录',
+          style: AppTextStyles.bodyMedium.copyWith(
+            color: AppColors.error,
+            fontWeight: FontWeight.w800,
+          ),
+        ),
       ),
     );
   }

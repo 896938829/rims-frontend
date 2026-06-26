@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../../../../core/widgets/rims_bottom_navigation.dart';
+import '../../../auth/presentation/view_models/auth_session_controller.dart';
 import '../../../documents/presentation/pages/documents_page.dart';
 import '../../../home/presentation/pages/home_page.dart';
 import '../../../inventory/presentation/pages/inventory_page.dart';
@@ -9,7 +10,9 @@ import '../../../reports/presentation/pages/reports_page.dart';
 import '../view_models/app_tab.dart';
 
 final class AppShellPage extends StatefulWidget {
-  const AppShellPage({super.key});
+  const AppShellPage({required this.sessionController, super.key});
+
+  final AuthSessionController sessionController;
 
   @override
   State<AppShellPage> createState() => _AppShellPageState();
@@ -18,18 +21,10 @@ final class AppShellPage extends StatefulWidget {
 final class _AppShellPageState extends State<AppShellPage> {
   AppTab _currentTab = AppTab.home;
 
-  static const Map<AppTab, Widget> _tabBodies = {
-    AppTab.home: HomePage(),
-    AppTab.inventory: InventoryPage(),
-    AppTab.documents: DocumentsPage(),
-    AppTab.reports: ReportsPage(),
-    AppTab.profile: ProfilePage(),
-  };
-
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: _tabBodies[_currentTab]!,
+      body: _tabBody,
       bottomNavigationBar: RimsBottomNavigation(
         currentTab: _currentTab,
         onTabSelected: (tab) {
@@ -37,5 +32,22 @@ final class _AppShellPageState extends State<AppShellPage> {
         },
       ),
     );
+  }
+
+  Widget get _tabBody {
+    return switch (_currentTab) {
+      AppTab.home => HomePage(
+        user: widget.sessionController.currentUser,
+        warehouse: widget.sessionController.currentWarehouse,
+      ),
+      AppTab.inventory => const InventoryPage(),
+      AppTab.documents => const DocumentsPage(),
+      AppTab.reports => const ReportsPage(),
+      AppTab.profile => ProfilePage(
+        user: widget.sessionController.currentUser,
+        warehouse: widget.sessionController.currentWarehouse,
+        onLogout: widget.sessionController.logout,
+      ),
+    };
   }
 }

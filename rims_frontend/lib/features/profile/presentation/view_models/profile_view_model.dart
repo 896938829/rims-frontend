@@ -1,10 +1,18 @@
-final class ProfileViewModel {
-  const ProfileViewModel();
+import '../../../auth/domain/entities/app_user.dart';
+import '../../../auth/domain/entities/warehouse.dart';
 
-  String get userName => '张三';
-  String get workId => 'U10086';
-  String get roleName => '普通用户';
-  String get warehouseName => '上海仓';
+final class ProfileViewModel {
+  const ProfileViewModel({required this.user, required this.warehouse});
+
+  final AppUser user;
+  final Warehouse? warehouse;
+
+  String get userName =>
+      user.realName.isNotEmpty ? user.realName : user.username;
+  String get workId => 'ID ${user.id}';
+  String get roleName => user.roleName;
+  String get warehouseName => warehouse?.name ?? '未选择仓库';
+  bool get canSwitchWarehouse => user.isAdmin;
 
   List<String> get apiGuards => const [
     'JWT',

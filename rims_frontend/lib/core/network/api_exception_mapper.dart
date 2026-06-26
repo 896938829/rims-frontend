@@ -37,11 +37,7 @@ final class ApiExceptionMapper {
       );
     }
 
-    return _failureFromStatusCode(
-      statusCode,
-      message: message,
-      cause: error,
-    );
+    return _failureFromStatusCode(statusCode, message: message, cause: error);
   }
 
   Failure _failureFromBusinessCode(

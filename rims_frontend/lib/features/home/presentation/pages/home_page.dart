@@ -4,32 +4,36 @@ import '../../../../core/widgets/rims_metric_card.dart';
 import '../../../../core/widgets/rims_page_scaffold.dart';
 import '../../../../core/widgets/rims_quick_action_button.dart';
 import '../../../../core/widgets/rims_section_header.dart';
+import '../../../auth/domain/entities/app_user.dart';
+import '../../../auth/domain/entities/warehouse.dart';
 import '../view_models/home_view_model.dart';
 import '../widgets/home_hero_card.dart';
 import '../widgets/inventory_warning_card.dart';
 import '../widgets/recent_document_tile.dart';
 
 final class HomePage extends StatelessWidget {
-  const HomePage({
-    this.viewModel = const HomeViewModel(),
-    super.key,
-  });
+  const HomePage({this.user, this.warehouse, this.viewModel, super.key});
 
-  final HomeViewModel viewModel;
+  final AppUser? user;
+  final Warehouse? warehouse;
+  final HomeViewModel? viewModel;
 
   @override
   Widget build(BuildContext context) {
+    final effectiveViewModel =
+        viewModel ?? HomeViewModel(user: user, warehouse: warehouse);
+
     return RimsPageScaffold(
       child: ListView(
         children: [
           HomeHeroCard(
-            warehouseName: viewModel.warehouseName,
-            greeting: viewModel.greeting,
+            warehouseName: effectiveViewModel.warehouseName,
+            greeting: effectiveViewModel.greeting,
           ),
           const SizedBox(height: 14),
           Row(
             children: [
-              for (final metric in viewModel.metrics) ...[
+              for (final metric in effectiveViewModel.metrics) ...[
                 Expanded(
                   child: RimsMetricCard(
                     label: metric.label,
@@ -37,7 +41,8 @@ final class HomePage extends StatelessWidget {
                     delta: metric.delta,
                   ),
                 ),
-                if (metric != viewModel.metrics.last) const SizedBox(width: 8),
+                if (metric != effectiveViewModel.metrics.last)
+                  const SizedBox(width: 8),
               ],
             ],
           ),
@@ -50,7 +55,7 @@ final class HomePage extends StatelessWidget {
             physics: const NeverScrollableScrollPhysics(),
             shrinkWrap: true,
             children: [
-              for (final action in viewModel.quickActions)
+              for (final action in effectiveViewModel.quickActions)
                 RimsQuickActionButton(
                   label: action.label,
                   iconPath: action.icon,
@@ -60,13 +65,13 @@ final class HomePage extends StatelessWidget {
           const SizedBox(height: 20),
           const RimsSectionHeader(title: '库存预警'),
           const SizedBox(height: 10),
-          InventoryWarningCard(warnings: viewModel.warnings),
+          InventoryWarningCard(warnings: effectiveViewModel.warnings),
           const SizedBox(height: 20),
           const RimsSectionHeader(title: '最近单据'),
           const SizedBox(height: 10),
-          for (final document in viewModel.recentDocuments) ...[
+          for (final document in effectiveViewModel.recentDocuments) ...[
             RecentDocumentTile(document: document),
-            if (document != viewModel.recentDocuments.last)
+            if (document != effectiveViewModel.recentDocuments.last)
               const SizedBox(height: 10),
           ],
         ],

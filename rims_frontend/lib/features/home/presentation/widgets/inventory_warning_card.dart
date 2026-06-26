@@ -7,10 +7,7 @@ import '../../../../core/widgets/rims_status_chip.dart';
 import '../view_models/home_view_model.dart';
 
 final class InventoryWarningCard extends StatelessWidget {
-  const InventoryWarningCard({
-    required this.warnings,
-    super.key,
-  });
+  const InventoryWarningCard({required this.warnings, super.key});
 
   final List<InventoryWarning> warnings;
 
@@ -45,9 +42,7 @@ final class _InventoryWarningRow extends StatelessWidget {
 
     return Row(
       children: [
-        Expanded(
-          child: Text(warning.label, style: AppTextStyles.bodyMedium),
-        ),
+        Expanded(child: Text(warning.label, style: AppTextStyles.bodyMedium)),
         Text(
           '${warning.count}',
           style: AppTextStyles.headingMedium.copyWith(

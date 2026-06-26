@@ -62,21 +62,23 @@ void main() {
     },
   );
 
-  test('sends warehouse header through requests when reader is provided',
-      () async {
-    final adapter = _CapturingAdapter();
-    final dio = Dio()..httpClientAdapter = adapter;
-    final client = ApiClient(
-      dio: dio,
-      warehouseIdReader: () async => 12,
-      enableLogging: false,
-    );
+  test(
+    'sends warehouse header through requests when reader is provided',
+    () async {
+      final adapter = _CapturingAdapter();
+      final dio = Dio()..httpClientAdapter = adapter;
+      final client = ApiClient(
+        dio: dio,
+        warehouseIdReader: () async => 12,
+        enableLogging: false,
+      );
 
-    final result = await client.get<dynamic>('/inventory');
+      final result = await client.get<dynamic>('/inventory');
 
-    expect(result.isSuccess, isTrue);
-    expect(adapter.lastOptions?.headers['X-Warehouse-ID'], '12');
-  });
+      expect(result.isSuccess, isTrue);
+      expect(adapter.lastOptions?.headers['X-Warehouse-ID'], '12');
+    },
+  );
 }
 
 final class _CapturingAdapter implements HttpClientAdapter {

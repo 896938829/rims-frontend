@@ -20,11 +20,7 @@ void main() {
       final failure = const ApiExceptionMapper().map(
         exceptionForStatus(
           401,
-          data: {
-            'code': 10001,
-            'message': '认证失败',
-            'traceId': 'trace-auth',
-          },
+          data: {'code': 10001, 'message': '认证失败', 'traceId': 'trace-auth'},
         ),
       );
 
@@ -56,11 +52,7 @@ void main() {
       final failure = const ApiExceptionMapper().map(
         exceptionForStatus(
           422,
-          data: {
-            'code': 20002,
-            'message': '状态不允许',
-            'traceId': 'trace-state',
-          },
+          data: {'code': 20002, 'message': '状态不允许', 'traceId': 'trace-state'},
         ),
       );
 
