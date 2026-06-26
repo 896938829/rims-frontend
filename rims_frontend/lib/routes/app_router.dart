@@ -3,12 +3,14 @@ import 'package:go_router/go_router.dart';
 import '../features/auth/domain/repositories/auth_repository.dart';
 import '../features/auth/presentation/pages/login_page.dart';
 import '../features/auth/presentation/view_models/auth_session_controller.dart';
+import '../features/inventory/domain/repositories/inventory_repository.dart';
 import '../features/shell/presentation/pages/app_shell_page.dart';
 import 'route_paths.dart';
 
 GoRouter createAppRouter({
   required AuthRepository authRepository,
   required AuthSessionController sessionController,
+  InventoryRepository? inventoryRepository,
   String initialLocation = RoutePaths.login,
 }) {
   return GoRouter(
@@ -38,8 +40,10 @@ GoRouter createAppRouter({
       ),
       GoRoute(
         path: RoutePaths.shell,
-        builder: (context, state) =>
-            AppShellPage(sessionController: sessionController),
+        builder: (context, state) => AppShellPage(
+          inventoryRepository: inventoryRepository,
+          sessionController: sessionController,
+        ),
       ),
     ],
   );

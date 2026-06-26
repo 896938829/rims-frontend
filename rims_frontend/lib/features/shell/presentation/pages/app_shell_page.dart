@@ -4,15 +4,21 @@ import '../../../../core/widgets/rims_bottom_navigation.dart';
 import '../../../auth/presentation/view_models/auth_session_controller.dart';
 import '../../../documents/presentation/pages/documents_page.dart';
 import '../../../home/presentation/pages/home_page.dart';
+import '../../../inventory/domain/repositories/inventory_repository.dart';
 import '../../../inventory/presentation/pages/inventory_page.dart';
 import '../../../profile/presentation/pages/profile_page.dart';
 import '../../../reports/presentation/pages/reports_page.dart';
 import '../view_models/app_tab.dart';
 
 final class AppShellPage extends StatefulWidget {
-  const AppShellPage({required this.sessionController, super.key});
+  const AppShellPage({
+    required this.sessionController,
+    this.inventoryRepository,
+    super.key,
+  });
 
   final AuthSessionController sessionController;
+  final InventoryRepository? inventoryRepository;
 
   @override
   State<AppShellPage> createState() => _AppShellPageState();
@@ -40,7 +46,11 @@ final class _AppShellPageState extends State<AppShellPage> {
         user: widget.sessionController.currentUser,
         warehouse: widget.sessionController.currentWarehouse,
       ),
-      AppTab.inventory => const InventoryPage(),
+      AppTab.inventory => InventoryPage(
+        repository: widget.inventoryRepository,
+        warehouseName:
+            widget.sessionController.currentWarehouse?.name ?? '未选择仓库',
+      ),
       AppTab.documents => const DocumentsPage(),
       AppTab.reports => const ReportsPage(),
       AppTab.profile => ProfilePage(

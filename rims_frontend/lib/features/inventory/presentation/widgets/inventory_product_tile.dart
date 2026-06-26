@@ -1,15 +1,16 @@
 import 'package:flutter/material.dart';
 
+import '../../../../core/resources/app_images.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/theme/app_text_styles.dart';
 import '../../../../core/widgets/rims_card.dart';
 import '../../../../core/widgets/rims_status_chip.dart';
-import '../view_models/inventory_view_model.dart';
+import '../../domain/entities/inventory_item.dart';
 
 final class InventoryProductTile extends StatelessWidget {
   const InventoryProductTile({required this.product, super.key});
 
-  final InventoryProduct product;
+  final InventoryItem product;
 
   @override
   Widget build(BuildContext context) {
@@ -21,12 +22,7 @@ final class InventoryProductTile extends StatelessWidget {
             borderRadius: BorderRadius.circular(10),
             child: ColoredBox(
               color: AppColors.primaryLight,
-              child: Image.asset(
-                product.imagePath,
-                width: 58,
-                height: 58,
-                fit: BoxFit.cover,
-              ),
+              child: _InventoryProductImage(imageUrl: product.imageUrl),
             ),
           ),
           const SizedBox(width: 12),
@@ -38,7 +34,7 @@ final class InventoryProductTile extends StatelessWidget {
                   children: [
                     Expanded(
                       child: Text(
-                        product.name,
+                        product.productName,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: AppTextStyles.titleMedium,
@@ -46,8 +42,8 @@ final class InventoryProductTile extends StatelessWidget {
                     ),
                     const SizedBox(width: 8),
                     RimsStatusChip(
-                      label: product.status,
-                      kind: _statusKind(product.status),
+                      label: product.statusLabel,
+                      kind: _statusKind(product.statusLabel),
                     ),
                   ],
                 ),
@@ -61,9 +57,12 @@ final class InventoryProductTile extends StatelessWidget {
                 const SizedBox(height: 10),
                 Row(
                   children: [
-                    _InventoryCount(label: '可用', value: product.available),
+                    _InventoryCount(
+                      label: '可用',
+                      value: product.availableQuantity,
+                    ),
                     const SizedBox(width: 16),
-                    _InventoryCount(label: '库存', value: product.stock),
+                    _InventoryCount(label: '库存', value: product.stockQuantity),
                   ],
                 ),
               ],
@@ -81,6 +80,41 @@ final class InventoryProductTile extends StatelessWidget {
       '非标' => RimsStatusKind.info,
       _ => RimsStatusKind.pending,
     };
+  }
+}
+
+final class _InventoryProductImage extends StatelessWidget {
+  const _InventoryProductImage({required this.imageUrl});
+
+  final String imageUrl;
+
+  @override
+  Widget build(BuildContext context) {
+    if (imageUrl.startsWith('http://') || imageUrl.startsWith('https://')) {
+      return Image.network(
+        imageUrl,
+        width: 58,
+        height: 58,
+        fit: BoxFit.cover,
+        errorBuilder: (context, error, stackTrace) => const _FallbackImage(),
+      );
+    }
+
+    return const _FallbackImage();
+  }
+}
+
+final class _FallbackImage extends StatelessWidget {
+  const _FallbackImage();
+
+  @override
+  Widget build(BuildContext context) {
+    return Image.asset(
+      AppImages.productWaterBottle,
+      width: 58,
+      height: 58,
+      fit: BoxFit.cover,
+    );
   }
 }
 
