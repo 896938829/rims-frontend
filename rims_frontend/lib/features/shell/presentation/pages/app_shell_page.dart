@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 
 import '../../../../core/widgets/rims_bottom_navigation.dart';
 import '../../../auth/presentation/view_models/auth_session_controller.dart';
+import '../../../documents/domain/repositories/documents_repository.dart';
 import '../../../documents/presentation/pages/documents_page.dart';
 import '../../../home/presentation/pages/home_page.dart';
 import '../../../inventory/domain/repositories/inventory_repository.dart';
@@ -14,12 +15,14 @@ import '../view_models/app_tab.dart';
 final class AppShellPage extends StatefulWidget {
   const AppShellPage({
     required this.sessionController,
+    this.documentsRepository,
     this.inventoryRepository,
     this.reportsRepository,
     super.key,
   });
 
   final AuthSessionController sessionController;
+  final DocumentsRepository? documentsRepository;
   final InventoryRepository? inventoryRepository;
   final ReportsRepository? reportsRepository;
 
@@ -54,7 +57,7 @@ final class _AppShellPageState extends State<AppShellPage> {
         warehouseName:
             widget.sessionController.currentWarehouse?.name ?? '未选择仓库',
       ),
-      AppTab.documents => const DocumentsPage(),
+      AppTab.documents => DocumentsPage(repository: widget.documentsRepository),
       AppTab.reports => ReportsPage(repository: widget.reportsRepository),
       AppTab.profile => ProfilePage(
         user: widget.sessionController.currentUser,

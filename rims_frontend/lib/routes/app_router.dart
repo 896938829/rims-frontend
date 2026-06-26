@@ -3,6 +3,7 @@ import 'package:go_router/go_router.dart';
 import '../features/auth/domain/repositories/auth_repository.dart';
 import '../features/auth/presentation/pages/login_page.dart';
 import '../features/auth/presentation/view_models/auth_session_controller.dart';
+import '../features/documents/domain/repositories/documents_repository.dart';
 import '../features/inventory/domain/repositories/inventory_repository.dart';
 import '../features/reports/domain/repositories/reports_repository.dart';
 import '../features/shell/presentation/pages/app_shell_page.dart';
@@ -11,6 +12,7 @@ import 'route_paths.dart';
 GoRouter createAppRouter({
   required AuthRepository authRepository,
   required AuthSessionController sessionController,
+  DocumentsRepository? documentsRepository,
   InventoryRepository? inventoryRepository,
   ReportsRepository? reportsRepository,
   String initialLocation = RoutePaths.login,
@@ -43,6 +45,7 @@ GoRouter createAppRouter({
       GoRoute(
         path: RoutePaths.shell,
         builder: (context, state) => AppShellPage(
+          documentsRepository: documentsRepository,
           inventoryRepository: inventoryRepository,
           reportsRepository: reportsRepository,
           sessionController: sessionController,

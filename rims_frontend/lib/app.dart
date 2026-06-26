@@ -7,6 +7,8 @@ import 'core/theme/app_theme.dart';
 import 'features/auth/data/datasources/auth_remote_datasource.dart';
 import 'features/auth/data/repositories/auth_repository_impl.dart';
 import 'features/auth/presentation/view_models/auth_session_controller.dart';
+import 'features/documents/data/datasources/documents_remote_datasource.dart';
+import 'features/documents/data/repositories/documents_repository_impl.dart';
 import 'features/inventory/data/datasources/inventory_remote_datasource.dart';
 import 'features/inventory/data/repositories/inventory_repository_impl.dart';
 import 'features/reports/data/datasources/reports_remote_datasource.dart';
@@ -25,6 +27,7 @@ final class _MainAppState extends State<MainApp> {
   final AppSecureStorage _secureStorage = const AppSecureStorage();
   late final ApiClient _apiClient;
   late final AuthRepositoryImpl _authRepository;
+  late final DocumentsRepositoryImpl _documentsRepository;
   late final InventoryRepositoryImpl _inventoryRepository;
   late final ReportsRepositoryImpl _reportsRepository;
   late final GoRouter _router;
@@ -42,6 +45,9 @@ final class _MainAppState extends State<MainApp> {
       remoteDataSource: ApiAuthRemoteDataSource(_apiClient),
       secureStorage: _secureStorage,
     );
+    _documentsRepository = DocumentsRepositoryImpl(
+      remoteDataSource: ApiDocumentsRemoteDataSource(_apiClient),
+    );
     _inventoryRepository = InventoryRepositoryImpl(
       remoteDataSource: ApiInventoryRemoteDataSource(_apiClient),
     );
@@ -50,6 +56,7 @@ final class _MainAppState extends State<MainApp> {
     );
     _router = createAppRouter(
       authRepository: _authRepository,
+      documentsRepository: _documentsRepository,
       inventoryRepository: _inventoryRepository,
       reportsRepository: _reportsRepository,
       sessionController: _sessionController,
