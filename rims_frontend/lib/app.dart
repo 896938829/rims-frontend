@@ -1,9 +1,15 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
+import 'core/events/app_event.dart';
+import 'core/events/app_event_bus.dart';
 import 'core/network/api_client.dart';
 import 'core/storage/app_secure_storage.dart';
 import 'core/theme/app_theme.dart';
+import 'features/admin/data/datasources/admin_remote_datasource.dart';
+import 'features/admin/data/repositories/admin_repository_impl.dart';
 import 'features/auth/data/datasources/auth_remote_datasource.dart';
 import 'features/auth/data/repositories/auth_repository_impl.dart';
 import 'features/auth/presentation/view_models/auth_session_controller.dart';
@@ -25,11 +31,14 @@ class MainApp extends StatefulWidget {
 final class _MainAppState extends State<MainApp> {
   final AuthSessionController _sessionController = AuthSessionController();
   final AppSecureStorage _secureStorage = const AppSecureStorage();
+  final AppEventBus _eventBus = AppEventBus();
+  StreamSubscription<TokenExpiredEvent>? _tokenExpiredSubscription;
   late final ApiClient _apiClient;
   late final AuthRepositoryImpl _authRepository;
   late final DocumentsRepositoryImpl _documentsRepository;
   late final InventoryRepositoryImpl _inventoryRepository;
   late final ReportsRepositoryImpl _reportsRepository;
+  late final AdminRepositoryImpl _adminRepository;
   late final GoRouter _router;
 
   @override
@@ -40,6 +49,7 @@ final class _MainAppState extends State<MainApp> {
           _sessionController.accessToken ??
           await _secureStorage.readAccessToken(),
       warehouseIdReader: () async => _sessionController.currentWarehouse?.id,
+      eventBus: _eventBus,
     );
     _authRepository = AuthRepositoryImpl(
       remoteDataSource: ApiAuthRemoteDataSource(_apiClient),
@@ -54,17 +64,29 @@ final class _MainAppState extends State<MainApp> {
     _reportsRepository = ReportsRepositoryImpl(
       remoteDataSource: ApiReportsRemoteDataSource(_apiClient),
     );
+    _adminRepository = AdminRepositoryImpl(
+      remoteDataSource: ApiAdminRemoteDataSource(_apiClient),
+    );
     _router = createAppRouter(
       authRepository: _authRepository,
       documentsRepository: _documentsRepository,
       inventoryRepository: _inventoryRepository,
       reportsRepository: _reportsRepository,
+      adminRepository: _adminRepository,
+      eventBus: _eventBus,
       sessionController: _sessionController,
     );
+    _tokenExpiredSubscription = _eventBus.on<TokenExpiredEvent>().listen((_) {
+      unawaited(_authRepository.logout());
+      _sessionController.expireSession();
+    });
+    unawaited(_sessionController.restoreSession(_authRepository));
   }
 
   @override
   void dispose() {
+    unawaited(_tokenExpiredSubscription?.cancel());
+    unawaited(_eventBus.dispose());
     _router.dispose();
     _sessionController.dispose();
     super.dispose();

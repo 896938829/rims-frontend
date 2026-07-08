@@ -13,5 +13,5 @@ final class AppUser {
   final String roleCode;
   final String roleName;
 
-  bool get isAdmin => roleCode == 'admin';
+  bool get isAdmin => roleCode.trim().toLowerCase() == 'admin';
 }

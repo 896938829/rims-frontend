@@ -5,6 +5,13 @@ import '../../../../core/theme/app_colors.dart';
 import '../../domain/entities/report_data.dart';
 import '../../domain/repositories/reports_repository.dart';
 
+final class ReportSummaryMetric {
+  const ReportSummaryMetric({required this.label, required this.value});
+
+  final String label;
+  final String value;
+}
+
 final class ReportRanking {
   const ReportRanking({
     required this.name,
@@ -29,41 +36,84 @@ final class InventoryBucket {
   final Color color;
 }
 
+final class ReportTurnoverItem {
+  const ReportTurnoverItem({
+    required this.name,
+    required this.rateLabel,
+    required this.detailLabel,
+  });
+
+  final String name;
+  final String rateLabel;
+  final String detailLabel;
+}
+
+final class ReportSlowMovingItem {
+  const ReportSlowMovingItem({
+    required this.name,
+    required this.detailLabel,
+    required this.lastSaleLabel,
+  });
+
+  final String name;
+  final String detailLabel;
+  final String lastSaleLabel;
+}
+
 final class ReportsViewModel extends ChangeNotifier {
-  ReportsViewModel({this.repository, DateTime? today})
-    : today = _dateOnly(today ?? DateTime.now());
+  ReportsViewModel({
+    this.repository,
+    this.canViewFinancialMetrics = true,
+    DateTime? today,
+  }) : today = _dateOnly(today ?? DateTime.now());
 
   String _selectedPeriodLabel = '近7天';
+  List<ReportSummaryMetric> _summaryMetrics = const [];
   List<double> _trendPoints = const [];
   List<ReportRanking> _rankings = const [];
   List<InventoryBucket> _inventoryBuckets = const [];
+  List<ReportTurnoverItem> _turnoverItems = const [];
+  List<ReportSlowMovingItem> _slowMovingItems = const [];
   bool _isLoading = false;
   String? _errorMessage;
+  String? _inventoryReportErrorMessage;
 
   final ReportsRepository? repository;
+  final bool canViewFinancialMetrics;
   final DateTime today;
 
   List<String> get periodLabels => const ['近7天', '近30天', '本月'];
   String get selectedPeriodLabel => _selectedPeriodLabel;
   bool get isLoading => _isLoading;
   String? get errorMessage => _errorMessage;
+  String? get inventoryReportErrorMessage => _inventoryReportErrorMessage;
   bool get isEmpty =>
+      _summaryMetrics.isEmpty &&
       _trendPoints.isEmpty &&
       _rankings.isEmpty &&
       _inventoryBuckets.isEmpty &&
+      _turnoverItems.isEmpty &&
+      _slowMovingItems.isEmpty &&
       !_isLoading &&
-      _errorMessage == null;
+      _errorMessage == null &&
+      _inventoryReportErrorMessage == null;
 
   String get dateRangeLabel {
     final range = _currentRange;
     return '${_formatDate(range.start)} ~ ${_formatDate(range.end)}';
   }
 
+  List<ReportSummaryMetric> get summaryMetrics => _summaryMetrics;
+
   List<double> get trendPoints => _trendPoints;
 
   List<ReportRanking> get rankings => _rankings;
 
   List<InventoryBucket> get inventoryBuckets => _inventoryBuckets;
+
+  List<ReportTurnoverItem> get turnoverItems => _turnoverItems;
+
+  List<ReportSlowMovingItem> get slowMovingItems => _slowMovingItems;
 
   Future<void> load() async {
     final repository = this.repository;
@@ -75,61 +125,115 @@ final class ReportsViewModel extends ChangeNotifier {
 
     _isLoading = true;
     _errorMessage = null;
+    _inventoryReportErrorMessage = null;
     notifyListeners();
 
     final range = _currentRange;
-    final trendResult = await repository.loadSalesTrend(
-      startDate: range.start,
-      endDate: range.end,
-    );
     Failure? failure;
-    List<SalesTrendPoint> trendPoints = const [];
-    trendResult.when(
-      success: (data) => trendPoints = data,
-      failure: (value) => failure = value,
-    );
-    if (failure != null) {
-      _finishFailure(failure!);
-      return;
+    Failure? inventoryReportFailure;
+    SalesStats? salesStats;
+    if (canViewFinancialMetrics) {
+      final statsResult = await repository.loadSalesStats(
+        startDate: range.start,
+        endDate: range.end,
+      );
+      statsResult.when(
+        success: (data) => salesStats = data,
+        failure: (value) => failure = value,
+      );
+      if (failure != null) {
+        _finishFailure(failure!);
+        return;
+      }
     }
 
-    final rankingResult = await repository.loadSalesRanking(
-      startDate: range.start,
-      endDate: range.end,
-    );
+    List<SalesTrendPoint> trendPoints = const [];
     List<SalesRankingItem> rankingItems = const [];
-    rankingResult.when(
-      success: (data) => rankingItems = data,
-      failure: (value) => failure = value,
-    );
-    if (failure != null) {
-      _finishFailure(failure!);
-      return;
+    if (canViewFinancialMetrics) {
+      final trendResult = await repository.loadSalesTrend(
+        startDate: range.start,
+        endDate: range.end,
+      );
+      trendResult.when(
+        success: (data) => trendPoints = data,
+        failure: (value) => failure = value,
+      );
+      if (failure != null) {
+        _finishFailure(failure!);
+        return;
+      }
+
+      final rankingResult = await repository.loadSalesRanking(
+        startDate: range.start,
+        endDate: range.end,
+      );
+      rankingResult.when(
+        success: (data) => rankingItems = data,
+        failure: (value) => failure = value,
+      );
+      if (failure != null) {
+        _finishFailure(failure!);
+        return;
+      }
     }
 
     final overviewResult = await repository.loadInventoryOverview();
     List<InventoryOverviewItem> overviewItems = const [];
     overviewResult.when(
       success: (data) => overviewItems = data,
-      failure: (value) => failure = value,
+      failure: (value) => inventoryReportFailure ??= value,
     );
-    if (failure != null) {
-      _finishFailure(failure!);
-      return;
-    }
 
-    _trendPoints = trendPoints
-        .map((point) => point.amount)
-        .toList(growable: false);
-    _rankings = rankingItems
-        .map(
-          (item) => ReportRanking(
-            name: item.productName,
-            value: item.amount,
-            amountLabel: _formatCurrency(item.amount),
-          ),
-        )
-        .toList(growable: false);
+    final turnoverResult = await repository.loadInventoryTurnover(
+      startDate: range.start,
+      endDate: range.end,
+    );
+    List<InventoryTurnoverItem> turnoverItems = const [];
+    turnoverResult.when(
+      success: (data) => turnoverItems = data,
+      failure: (value) => inventoryReportFailure ??= value,
+    );
+
+    final slowMovingResult = await repository.loadSlowMovingInventory(
+      startDate: range.start,
+      endDate: range.end,
+    );
+    List<SlowMovingInventoryItem> slowMovingItems = const [];
+    slowMovingResult.when(
+      success: (data) => slowMovingItems = data,
+      failure: (value) => inventoryReportFailure ??= value,
+    );
+
+    _summaryMetrics = salesStats == null
+        ? const []
+        : [
+            ReportSummaryMetric(
+              label: '销售额',
+              value: _formatCurrency(salesStats?.revenue ?? 0),
+            ),
+            ReportSummaryMetric(
+              label: '订单数',
+              value: _formatInt(salesStats?.orderCount ?? 0),
+            ),
+            ReportSummaryMetric(
+              label: '销量',
+              value: _formatInt(salesStats?.quantity ?? 0),
+            ),
+          ];
+    _trendPoints = canViewFinancialMetrics
+        ? trendPoints.map((point) => point.amount).toList(growable: false)
+        : const [];
+    _rankings = canViewFinancialMetrics
+        ? rankingItems
+              .map(
+                (item) => ReportRanking(
+                  name: item.productName,
+                  value: item.amount,
+                  amountLabel: _formatCurrency(item.amount),
+                ),
+              )
+              .toList(growable: false)
+        : const [];
     _inventoryBuckets = overviewItems
         .map(
           (item) => InventoryBucket(
@@ -139,8 +243,31 @@ final class ReportsViewModel extends ChangeNotifier {
           ),
         )
         .toList(growable: false);
+    _turnoverItems = turnoverItems
+        .map(
+          (item) => ReportTurnoverItem(
+            name: item.productName,
+            rateLabel: '${item.turnoverRate.toStringAsFixed(2)} 次',
+            detailLabel:
+                '售出 ${_formatInt(item.soldQuantity)} / 均库 ${_formatInt(item.averageStockQuantity.round())}',
+          ),
+        )
+        .toList(growable: false);
+    _slowMovingItems = slowMovingItems
+        .map(
+          (item) => ReportSlowMovingItem(
+            name: item.productName,
+            detailLabel:
+                '销量 ${_formatInt(item.salesQuantity)} / 库存 ${_formatInt(item.stockQuantity)}',
+            lastSaleLabel: item.lastSaleAt == null || item.lastSaleAt!.isEmpty
+                ? '暂无销售记录'
+                : '最近销售 ${item.lastSaleAt}',
+          ),
+        )
+        .toList(growable: false);
     _isLoading = false;
     _errorMessage = null;
+    _inventoryReportErrorMessage = inventoryReportFailure?.message;
     notifyListeners();
   }
 
@@ -178,9 +305,13 @@ final class ReportsViewModel extends ChangeNotifier {
   }
 
   void _clearData() {
+    _summaryMetrics = const [];
     _trendPoints = const [];
     _rankings = const [];
     _inventoryBuckets = const [];
+    _turnoverItems = const [];
+    _slowMovingItems = const [];
+    _inventoryReportErrorMessage = null;
   }
 
   Color _bucketColor(String label) {

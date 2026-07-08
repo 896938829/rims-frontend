@@ -8,6 +8,9 @@ final class InventoryItem {
     required this.stockQuantity,
     required this.statusLabel,
     required this.imageUrl,
+    this.alertThreshold,
+    this.status,
+    this.retailPrice,
   });
 
   final int id;
@@ -18,4 +21,7 @@ final class InventoryItem {
   final int stockQuantity;
   final String statusLabel;
   final String imageUrl;
+  final int? alertThreshold;
+  final int? status;
+  final double? retailPrice;
 }

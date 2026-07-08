@@ -37,7 +37,13 @@ final class ApiExceptionMapper {
       );
     }
 
-    return _failureFromStatusCode(statusCode, message: message, cause: error);
+    return _failureFromStatusCode(
+      statusCode,
+      message: message,
+      businessCode: businessCode == 0 ? null : businessCode,
+      traceId: traceId,
+      cause: error,
+    );
   }
 
   Failure _failureFromBusinessCode(
@@ -117,42 +123,58 @@ final class ApiExceptionMapper {
   Failure _failureFromStatusCode(
     int? statusCode, {
     required String message,
+    required int? businessCode,
+    required String? traceId,
     required Object cause,
   }) {
     return switch (statusCode) {
       400 || 422 => ValidationFailure(
         message: message,
         statusCode: statusCode,
+        businessCode: businessCode,
+        traceId: traceId,
         cause: cause,
       ),
       401 => AuthenticationFailure(
         message: message,
         statusCode: statusCode,
+        businessCode: businessCode,
+        traceId: traceId,
         cause: cause,
       ),
       403 => AuthorizationFailure(
         message: message,
         statusCode: statusCode,
+        businessCode: businessCode,
+        traceId: traceId,
         cause: cause,
       ),
       404 => NotFoundFailure(
         message: message,
         statusCode: statusCode,
+        businessCode: businessCode,
+        traceId: traceId,
         cause: cause,
       ),
       409 => ConflictFailure(
         message: message,
         statusCode: statusCode,
+        businessCode: businessCode,
+        traceId: traceId,
         cause: cause,
       ),
       int code when code >= 500 && code < 600 => ServerFailure(
         message: message,
         statusCode: statusCode,
+        businessCode: businessCode,
+        traceId: traceId,
         cause: cause,
       ),
       _ => UnknownFailure(
         message: message,
         statusCode: statusCode,
+        businessCode: businessCode,
+        traceId: traceId,
         cause: cause,
       ),
     };

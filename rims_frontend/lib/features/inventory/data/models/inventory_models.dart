@@ -1,4 +1,5 @@
 import '../../domain/entities/inventory_item.dart';
+import '../../domain/entities/non_standard_inventory_item.dart';
 
 final class InventoryItemModel {
   const InventoryItemModel({
@@ -10,6 +11,9 @@ final class InventoryItemModel {
     required this.stockQuantity,
     required this.statusLabel,
     required this.imageUrl,
+    this.alertThreshold,
+    this.status,
+    this.retailPrice,
   });
 
   factory InventoryItemModel.fromJson(Map<dynamic, dynamic> json) {
@@ -65,6 +69,45 @@ final class InventoryItemModel {
           _readString(json, const ['imageUrl', 'image', 'thumbnailUrl']) ??
           _readString(product, const ['imageUrl', 'image', 'thumbnailUrl']) ??
           '',
+      retailPrice:
+          _readDouble(json, const [
+            'retailPrice',
+            'salePrice',
+            'sellingPrice',
+            'price',
+          ]) ??
+          _readDouble(product, const [
+            'retailPrice',
+            'salePrice',
+            'sellingPrice',
+            'price',
+          ]),
+      alertThreshold: _readInt(json, const [
+        'alertThreshold',
+        'threshold',
+        'warningThreshold',
+      ]),
+      status: _readInt(json, const ['status', 'state', 'inventoryStatus']),
+    );
+  }
+
+  factory InventoryItemModel.fromProductJson(Map<dynamic, dynamic> json) {
+    return InventoryItemModel(
+      id: 0,
+      productId: _readInt(json, const ['id', 'productId']) ?? 0,
+      productName:
+          _readString(json, const ['productName', 'name', 'title']) ?? '',
+      sku: _readString(json, const ['sku', 'skuCode', 'code', 'barcode']) ?? '',
+      availableQuantity: 0,
+      stockQuantity: 0,
+      statusLabel: '标准',
+      imageUrl: _readString(json, const ['imageUrl', 'image']) ?? '',
+      retailPrice: _readDouble(json, const [
+        'retailPrice',
+        'salePrice',
+        'sellingPrice',
+        'price',
+      ]),
     );
   }
 
@@ -76,6 +119,9 @@ final class InventoryItemModel {
   final int stockQuantity;
   final String statusLabel;
   final String imageUrl;
+  final int? alertThreshold;
+  final int? status;
+  final double? retailPrice;
 
   InventoryItem toEntity() {
     return InventoryItem(
@@ -87,6 +133,63 @@ final class InventoryItemModel {
       stockQuantity: stockQuantity,
       statusLabel: statusLabel,
       imageUrl: imageUrl,
+      alertThreshold: alertThreshold,
+      status: status,
+      retailPrice: retailPrice,
+    );
+  }
+}
+
+final class NonStandardInventoryItemModel {
+  const NonStandardInventoryItemModel({
+    required this.id,
+    required this.tempLabel,
+    required this.description,
+    required this.unit,
+    required this.quantity,
+    required this.convertedQuantity,
+    required this.remainingQuantity,
+    required this.status,
+  });
+
+  factory NonStandardInventoryItemModel.fromJson(Map<dynamic, dynamic> json) {
+    final quantity = _readInt(json, const ['quantity', 'qty']) ?? 0;
+    final convertedQuantity =
+        _readInt(json, const ['convertedQty', 'convertedQuantity']) ?? 0;
+
+    return NonStandardInventoryItemModel(
+      id: _readInt(json, const ['id', 'nonStdInvId']) ?? 0,
+      tempLabel: _readString(json, const ['tempLabel', 'label']) ?? '',
+      description: _readString(json, const ['description', 'desc']) ?? '',
+      unit: _readString(json, const ['unit', 'unitName']) ?? '',
+      quantity: quantity,
+      convertedQuantity: convertedQuantity,
+      remainingQuantity:
+          _readInt(json, const ['remainingQty', 'remainingQuantity']) ??
+          (quantity - convertedQuantity),
+      status: _readInt(json, const ['status', 'state']) ?? 0,
+    );
+  }
+
+  final int id;
+  final String tempLabel;
+  final String description;
+  final String unit;
+  final int quantity;
+  final int convertedQuantity;
+  final int remainingQuantity;
+  final int status;
+
+  NonStandardInventoryItem toEntity() {
+    return NonStandardInventoryItem(
+      id: id,
+      tempLabel: tempLabel,
+      description: description,
+      unit: unit,
+      quantity: quantity,
+      convertedQuantity: convertedQuantity,
+      remainingQuantity: remainingQuantity,
+      status: status,
     );
   }
 }
@@ -107,6 +210,20 @@ int? _readInt(Map<dynamic, dynamic> json, List<String> keys) {
     }
     if (value is String) {
       return int.tryParse(value) ?? double.tryParse(value)?.round();
+    }
+  }
+
+  return null;
+}
+
+double? _readDouble(Map<dynamic, dynamic> json, List<String> keys) {
+  for (final key in keys) {
+    final value = json[key];
+    if (value is num) {
+      return value.toDouble();
+    }
+    if (value is String) {
+      return double.tryParse(value.trim());
     }
   }
 

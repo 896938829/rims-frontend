@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 
+import '../../../../core/events/app_event.dart';
+import '../../../../core/events/app_event_bus.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/theme/app_text_styles.dart';
 import '../../../../core/widgets/rims_card.dart';
@@ -13,6 +15,7 @@ import '../../../auth/domain/entities/app_user.dart';
 import '../../../auth/domain/entities/warehouse.dart';
 import '../../../documents/domain/repositories/documents_repository.dart';
 import '../../../inventory/domain/repositories/inventory_repository.dart';
+import '../../../reports/domain/repositories/reports_repository.dart';
 import '../view_models/home_view_model.dart';
 import '../widgets/home_hero_card.dart';
 import '../widgets/inventory_warning_card.dart';
@@ -25,6 +28,9 @@ final class HomePage extends StatefulWidget {
     this.viewModel,
     this.inventoryRepository,
     this.documentsRepository,
+    this.reportsRepository,
+    this.eventBus,
+    this.onQuickActionSelected,
     super.key,
   });
 
@@ -33,6 +39,9 @@ final class HomePage extends StatefulWidget {
   final HomeViewModel? viewModel;
   final InventoryRepository? inventoryRepository;
   final DocumentsRepository? documentsRepository;
+  final ReportsRepository? reportsRepository;
+  final AppEventBus? eventBus;
+  final ValueChanged<HomeQuickAction>? onQuickActionSelected;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -41,6 +50,7 @@ final class HomePage extends StatefulWidget {
 final class _HomePageState extends State<HomePage> {
   late final HomeViewModel viewModel;
   late final bool _ownsViewModel;
+  StreamSubscription<GlobalRefreshRequestedEvent>? _refreshSubscription;
 
   @override
   void initState() {
@@ -53,20 +63,38 @@ final class _HomePageState extends State<HomePage> {
           warehouse: widget.warehouse,
           inventoryRepository: widget.inventoryRepository,
           documentsRepository: widget.documentsRepository,
+          reportsRepository: widget.reportsRepository,
         );
 
     if (_ownsViewModel) {
       unawaited(viewModel.load());
     }
+    _subscribeToRefreshEvents();
+  }
+
+  @override
+  void didUpdateWidget(covariant HomePage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.eventBus != oldWidget.eventBus) {
+      unawaited(_refreshSubscription?.cancel());
+      _subscribeToRefreshEvents();
+    }
   }
 
   @override
   void dispose() {
+    unawaited(_refreshSubscription?.cancel());
     if (_ownsViewModel) {
       viewModel.dispose();
     }
 
     super.dispose();
+  }
+
+  void _subscribeToRefreshEvents() {
+    _refreshSubscription = widget.eventBus
+        ?.on<GlobalRefreshRequestedEvent>()
+        .listen((_) => unawaited(viewModel.load()));
   }
 
   @override
@@ -84,12 +112,24 @@ final class _HomePageState extends State<HomePage> {
               const SizedBox(height: 14),
               if (viewModel.errorMessage != null) ...[
                 RimsCard(
-                  child: Text(
-                    viewModel.errorMessage!,
-                    textAlign: TextAlign.center,
-                    style: AppTextStyles.bodySmall.copyWith(
-                      color: AppColors.error,
-                    ),
+                  child: Column(
+                    children: [
+                      Text(
+                        viewModel.errorMessage!,
+                        textAlign: TextAlign.center,
+                        style: AppTextStyles.bodySmall.copyWith(
+                          color: AppColors.error,
+                        ),
+                      ),
+                      const SizedBox(height: 12),
+                      OutlinedButton.icon(
+                        onPressed: viewModel.isLoading
+                            ? null
+                            : () => unawaited(viewModel.load()),
+                        icon: const Icon(Icons.refresh, size: 18),
+                        label: const Text('重试'),
+                      ),
+                    ],
                   ),
                 ),
                 const SizedBox(height: 14),
@@ -122,6 +162,9 @@ final class _HomePageState extends State<HomePage> {
                     RimsQuickActionButton(
                       label: action.label,
                       iconPath: action.icon,
+                      onPressed: widget.onQuickActionSelected == null
+                          ? null
+                          : () => widget.onQuickActionSelected!(action),
                     ),
                 ],
               ),
@@ -139,6 +182,12 @@ final class _HomePageState extends State<HomePage> {
               const SizedBox(height: 10),
               if (viewModel.isLoading && viewModel.recentDocuments.isEmpty)
                 const _HomeStateCard(label: '正在加载最近单据...')
+              else if (viewModel.recentDocumentsErrorMessage != null)
+                _HomeRetryCard(
+                  message: viewModel.recentDocumentsErrorMessage!,
+                  isLoading: viewModel.isLoading,
+                  onRetry: () => unawaited(viewModel.load()),
+                )
               else if (viewModel.recentDocuments.isEmpty)
                 const _HomeStateCard(label: '暂无最近单据')
               else
@@ -151,6 +200,39 @@ final class _HomePageState extends State<HomePage> {
           ),
         );
       },
+    );
+  }
+}
+
+final class _HomeRetryCard extends StatelessWidget {
+  const _HomeRetryCard({
+    required this.message,
+    required this.isLoading,
+    required this.onRetry,
+  });
+
+  final String message;
+  final bool isLoading;
+  final VoidCallback onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    return RimsCard(
+      child: Column(
+        children: [
+          Text(
+            message,
+            textAlign: TextAlign.center,
+            style: AppTextStyles.bodySmall.copyWith(color: AppColors.error),
+          ),
+          const SizedBox(height: 12),
+          OutlinedButton.icon(
+            onPressed: isLoading ? null : onRetry,
+            icon: const Icon(Icons.refresh, size: 18),
+            label: const Text('重试'),
+          ),
+        ],
+      ),
     );
   }
 }

@@ -8,67 +8,75 @@ import '../../../../core/widgets/rims_status_chip.dart';
 import '../../domain/entities/inventory_item.dart';
 
 final class InventoryProductTile extends StatelessWidget {
-  const InventoryProductTile({required this.product, super.key});
+  const InventoryProductTile({required this.product, this.onTap, super.key});
 
   final InventoryItem product;
+  final VoidCallback? onTap;
 
   @override
   Widget build(BuildContext context) {
-    return RimsCard(
-      padding: const EdgeInsets.all(12),
-      child: Row(
-        children: [
-          ClipRRect(
-            borderRadius: BorderRadius.circular(10),
-            child: ColoredBox(
-              color: AppColors.primaryLight,
-              child: _InventoryProductImage(imageUrl: product.imageUrl),
+    return GestureDetector(
+      behavior: HitTestBehavior.opaque,
+      onTap: onTap,
+      child: RimsCard(
+        padding: const EdgeInsets.all(12),
+        child: Row(
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: ColoredBox(
+                color: AppColors.primaryLight,
+                child: _InventoryProductImage(imageUrl: product.imageUrl),
+              ),
             ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        product.productName,
-                        maxLines: 1,
-                        overflow: TextOverflow.ellipsis,
-                        style: AppTextStyles.titleMedium,
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Text(
+                          product.productName,
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: AppTextStyles.titleMedium,
+                        ),
                       ),
-                    ),
-                    const SizedBox(width: 8),
-                    RimsStatusChip(
-                      label: product.statusLabel,
-                      kind: _statusKind(product.statusLabel),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 6),
-                Text(
-                  product.sku,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: AppTextStyles.bodySmall,
-                ),
-                const SizedBox(height: 10),
-                Row(
-                  children: [
-                    _InventoryCount(
-                      label: '可用',
-                      value: product.availableQuantity,
-                    ),
-                    const SizedBox(width: 16),
-                    _InventoryCount(label: '库存', value: product.stockQuantity),
-                  ],
-                ),
-              ],
+                      const SizedBox(width: 8),
+                      RimsStatusChip(
+                        label: product.statusLabel,
+                        kind: _statusKind(product.statusLabel),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 6),
+                  Text(
+                    product.sku,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: AppTextStyles.bodySmall,
+                  ),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      _InventoryCount(
+                        label: '可用',
+                        value: product.availableQuantity,
+                      ),
+                      const SizedBox(width: 16),
+                      _InventoryCount(
+                        label: '库存',
+                        value: product.stockQuantity,
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }

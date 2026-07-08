@@ -1,10 +1,15 @@
 import 'dart:async';
 
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rims_frontend/core/result/failure.dart';
 import 'package:rims_frontend/core/result/result.dart';
+import 'package:rims_frontend/features/documents/domain/entities/document_data.dart';
+import 'package:rims_frontend/features/documents/domain/repositories/documents_repository.dart';
 import 'package:rims_frontend/features/inventory/domain/entities/inventory_item.dart';
+import 'package:rims_frontend/features/inventory/domain/entities/non_standard_inventory_item.dart';
 import 'package:rims_frontend/features/inventory/domain/repositories/inventory_repository.dart';
+import 'package:rims_frontend/features/inventory/presentation/pages/inventory_page.dart';
 import 'package:rims_frontend/features/inventory/presentation/view_models/inventory_view_model.dart';
 
 void main() {
@@ -25,6 +30,54 @@ void main() {
     expect(viewModel.errorMessage, isNull);
     expect(viewModel.items, [_standardItem]);
     expect(viewModel.visibleItems, [_standardItem]);
+  });
+
+  test(
+    'load exposes recent transactions for the selected inventory item',
+    () async {
+      final documentsRepository = _FakeDocumentsRepository(
+        transactionResult: const Success<List<TransactionRecord>>([
+          _standardTransaction,
+          _otherTransaction,
+        ]),
+      );
+      final viewModel = InventoryViewModel(
+        repository: _FakeInventoryRepository(
+          result: Future.value(
+            const Success<List<InventoryItem>>([_standardItem]),
+          ),
+        ),
+        documentsRepository: documentsRepository,
+      );
+
+      await viewModel.load();
+      viewModel.selectItem(_standardItem);
+
+      expect(documentsRepository.listTransactionsCallCount, 1);
+      expect(viewModel.transactionError, isNull);
+      expect(viewModel.transactionsFor(_standardItem), [_standardTransaction]);
+    },
+  );
+
+  test('transaction failure does not clear loaded inventory items', () async {
+    final viewModel = InventoryViewModel(
+      repository: _FakeInventoryRepository(
+        result: Future.value(
+          const Success<List<InventoryItem>>([_standardItem]),
+        ),
+      ),
+      documentsRepository: _FakeDocumentsRepository(
+        transactionResult: const FailureResult<List<TransactionRecord>>(
+          NetworkFailure(message: '流水加载失败'),
+        ),
+      ),
+    );
+
+    await viewModel.load();
+
+    expect(viewModel.items, [_standardItem]);
+    expect(viewModel.transactions, isEmpty);
+    expect(viewModel.transactionError, '流水加载失败');
   });
 
   test('updateQuery reloads inventory with keyword', () async {
@@ -57,6 +110,26 @@ void main() {
     expect(viewModel.items, isEmpty);
   });
 
+  test('reload failure keeps previously loaded inventory items', () async {
+    final repository = _SequentialInventoryRepository(
+      results: const [
+        Success<List<InventoryItem>>([_standardItem]),
+        FailureResult<List<InventoryItem>>(
+          NetworkFailure(message: '库存服务短暂不可用'),
+        ),
+      ],
+    );
+    final viewModel = InventoryViewModel(repository: repository);
+
+    await viewModel.load();
+    await viewModel.load();
+
+    expect(viewModel.isLoading, isFalse);
+    expect(viewModel.errorMessage, '库存服务短暂不可用');
+    expect(viewModel.items, [_standardItem]);
+    expect(viewModel.visibleItems, [_standardItem]);
+  });
+
   test('empty repository result exposes empty state', () async {
     final repository = _FakeInventoryRepository(
       result: Future.value(const Success<List<InventoryItem>>([])),
@@ -86,6 +159,285 @@ void main() {
 
     expect(viewModel.visibleItems, [_standardItem]);
   });
+
+  test('low stock tab filters warning inventory locally', () async {
+    final repository = _FakeInventoryRepository(
+      result: Future.value(
+        const Success<List<InventoryItem>>([_standardItem, _lowStockItem]),
+      ),
+    );
+    final viewModel = InventoryViewModel(repository: repository);
+
+    await viewModel.load();
+    viewModel.selectTab('低库存');
+
+    expect(viewModel.visibleItems, [_lowStockItem]);
+  });
+
+  test('low stock tab excludes disabled inventory', () async {
+    final repository = _FakeInventoryRepository(
+      result: Future.value(
+        const Success<List<InventoryItem>>([
+          _standardItem,
+          _lowStockItem,
+          _disabledItem,
+        ]),
+      ),
+    );
+    final viewModel = InventoryViewModel(repository: repository);
+
+    await viewModel.load();
+    viewModel.selectTab('低库存');
+
+    expect(viewModel.visibleItems, [_lowStockItem]);
+  });
+
+  test('low stock metric excludes disabled inventory', () async {
+    final repository = _FakeInventoryRepository(
+      result: Future.value(
+        const Success<List<InventoryItem>>([
+          _standardItem,
+          _lowStockItem,
+          _disabledItem,
+        ]),
+      ),
+    );
+    final viewModel = InventoryViewModel(repository: repository);
+
+    await viewModel.load();
+
+    expect(
+      viewModel.metrics.singleWhere((metric) => metric.label == '低库存').value,
+      '1',
+    );
+  });
+
+  test('disabled tab filters inactive inventory locally', () async {
+    final repository = _FakeInventoryRepository(
+      result: Future.value(
+        const Success<List<InventoryItem>>([_standardItem, _disabledItem]),
+      ),
+    );
+    final viewModel = InventoryViewModel(repository: repository);
+
+    await viewModel.load();
+    viewModel.selectTab('停用');
+
+    expect(viewModel.visibleItems, [_disabledItem]);
+  });
+
+  test('lookupBarcode selects backend product and trims input', () async {
+    final repository = _FakeInventoryRepository(
+      result: Future.value(const Success<List<InventoryItem>>([_standardItem])),
+      barcodeResult: const Success<InventoryItem>(_barcodeItem),
+    );
+    final viewModel = InventoryViewModel(repository: repository);
+
+    final item = await viewModel.lookupBarcode(' 6901234567890 ');
+
+    expect(repository.lastBarcode, '6901234567890');
+    expect(item, _barcodeItem);
+    expect(viewModel.selectedItem, _barcodeItem);
+    expect(viewModel.barcodeLookupError, isNull);
+    expect(viewModel.isLookingUpBarcode, isFalse);
+  });
+
+  test('admin updates selected inventory settings', () async {
+    final updateCompleter = Completer<Result<InventoryItem>>();
+    final repository = _FakeInventoryRepository(
+      result: Future.value(const Success<List<InventoryItem>>([_standardItem])),
+      updateResult: updateCompleter.future,
+    );
+    final viewModel = InventoryViewModel(
+      repository: repository,
+      canManageInventorySettings: true,
+    );
+    await viewModel.load();
+    viewModel.selectItem(_standardItem);
+
+    final saveFuture = viewModel.updateSelectedItemSettings(
+      alertThreshold: 12,
+      status: 1,
+    );
+
+    expect(viewModel.isSavingSettings, isTrue);
+    updateCompleter.complete(
+      const Success<InventoryItem>(_updatedStandardItem),
+    );
+    final saved = await saveFuture;
+
+    expect(saved, isTrue);
+    expect(repository.updatedInventoryId, 1);
+    expect(repository.updatedAlertThreshold, 12);
+    expect(repository.updatedStatus, 1);
+    expect(viewModel.isSavingSettings, isFalse);
+    expect(viewModel.settingsError, isNull);
+    expect(viewModel.selectedItem, _updatedStandardItem);
+    expect(viewModel.items, [_updatedStandardItem]);
+  });
+
+  test('ordinary user cannot update inventory settings', () async {
+    final repository = _FakeInventoryRepository(
+      result: Future.value(const Success<List<InventoryItem>>([_standardItem])),
+    );
+    final viewModel = InventoryViewModel(repository: repository);
+
+    viewModel.selectItem(_standardItem);
+    final saved = await viewModel.updateSelectedItemSettings(
+      alertThreshold: 12,
+      status: 1,
+    );
+
+    expect(saved, isFalse);
+    expect(repository.updatedInventoryId, isNull);
+    expect(viewModel.settingsError, '无权限调整库存设置');
+  });
+
+  testWidgets('InventoryPage opens detail sheet when product is tapped', (
+    tester,
+  ) async {
+    final viewModel = InventoryViewModel(
+      repository: _FakeInventoryRepository(
+        result: Future.value(
+          const Success<List<InventoryItem>>([_standardItem]),
+        ),
+      ),
+    );
+    await viewModel.load();
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: InventoryPage(viewModel: viewModel)),
+      ),
+    );
+
+    await tester.tap(find.text('矿泉水 550ml'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('库存详情'), findsOneWidget);
+    expect(find.text('SKU-WA-550'), findsWidgets);
+    expect(find.text('可用库存'), findsOneWidget);
+    expect(find.text('128'), findsWidgets);
+  });
+
+  testWidgets('InventoryPage detail shows recent stock transactions', (
+    tester,
+  ) async {
+    final viewModel = InventoryViewModel(
+      repository: _FakeInventoryRepository(
+        result: Future.value(
+          const Success<List<InventoryItem>>([_standardItem]),
+        ),
+      ),
+      documentsRepository: _FakeDocumentsRepository(
+        transactionResult: const Success<List<TransactionRecord>>([
+          _standardTransaction,
+        ]),
+      ),
+    );
+    await viewModel.load();
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: InventoryPage(viewModel: viewModel)),
+      ),
+    );
+
+    await tester.tap(find.text('矿泉水 550ml'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('最近库存流水'), findsOneWidget);
+    expect(find.text('销售单 · XS20260627001'), findsOneWidget);
+    expect(find.text('150 -> 128'), findsOneWidget);
+    expect(find.text('出库'), findsOneWidget);
+  });
+
+  testWidgets('InventoryPage retries loading after an error', (tester) async {
+    final repository = _RetryInventoryRepository();
+    final viewModel = InventoryViewModel(repository: repository);
+    await viewModel.load();
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: InventoryPage(viewModel: viewModel)),
+      ),
+    );
+    await tester.pump();
+
+    expect(find.text('库存服务不可用'), findsOneWidget);
+    expect(find.text('重试'), findsOneWidget);
+
+    await tester.tap(find.text('重试'));
+    await tester.pump();
+
+    expect(find.text('正在加载库存...'), findsOneWidget);
+
+    repository.completeRetryInventory();
+    await tester.pumpAndSettle();
+
+    expect(repository.listInventoryCallCount, 2);
+    expect(find.text('库存服务不可用'), findsNothing);
+    expect(find.text('矿泉水 550ml'), findsOneWidget);
+  });
+
+  testWidgets('InventoryPage shows settings form for admin detail', (
+    tester,
+  ) async {
+    final viewModel = InventoryViewModel(
+      repository: _FakeInventoryRepository(
+        result: Future.value(
+          const Success<List<InventoryItem>>([_standardItem]),
+        ),
+      ),
+      canManageInventorySettings: true,
+    );
+    await viewModel.load();
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: InventoryPage(viewModel: viewModel)),
+      ),
+    );
+
+    await tester.tap(find.text('矿泉水 550ml'));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('inventory-alert-threshold-field')), findsOne);
+    expect(find.byKey(const Key('inventory-status-field')), findsOneWidget);
+    expect(find.byKey(const Key('inventory-save-settings-button')), findsOne);
+  });
+
+  testWidgets('InventoryPage hides settings form for ordinary user detail', (
+    tester,
+  ) async {
+    final viewModel = InventoryViewModel(
+      repository: _FakeInventoryRepository(
+        result: Future.value(
+          const Success<List<InventoryItem>>([_standardItem]),
+        ),
+      ),
+    );
+    await viewModel.load();
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: InventoryPage(viewModel: viewModel)),
+      ),
+    );
+
+    await tester.tap(find.text('矿泉水 550ml'));
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const Key('inventory-alert-threshold-field')),
+      findsNothing,
+    );
+    expect(find.byKey(const Key('inventory-status-field')), findsNothing);
+    expect(
+      find.byKey(const Key('inventory-save-settings-button')),
+      findsNothing,
+    );
+  });
 }
 
 const _standardItem = InventoryItem(
@@ -99,6 +451,19 @@ const _standardItem = InventoryItem(
   imageUrl: '',
 );
 
+const _updatedStandardItem = InventoryItem(
+  id: 1,
+  productId: 10,
+  productName: '矿泉水 550ml',
+  sku: 'SKU-WA-550',
+  availableQuantity: 128,
+  stockQuantity: 150,
+  statusLabel: '标准',
+  imageUrl: '',
+  alertThreshold: 12,
+  status: 1,
+);
+
 const _lowStockItem = InventoryItem(
   id: 2,
   productId: 20,
@@ -107,6 +472,29 @@ const _lowStockItem = InventoryItem(
   availableQuantity: 2,
   stockQuantity: 3,
   statusLabel: '低库存',
+  imageUrl: '',
+);
+
+const _disabledItem = InventoryItem(
+  id: 4,
+  productId: 40,
+  productName: '停用商品',
+  sku: 'SKU-DISABLED',
+  availableQuantity: 0,
+  stockQuantity: 0,
+  statusLabel: '停用',
+  imageUrl: '',
+  status: 0,
+);
+
+const _barcodeItem = InventoryItem(
+  id: 0,
+  productId: 10,
+  productName: '矿泉水 550ml',
+  sku: 'SKU-WA-550',
+  availableQuantity: 0,
+  stockQuantity: 0,
+  statusLabel: '标准',
   imageUrl: '',
 );
 
@@ -121,11 +509,55 @@ const _nonStandardItem = InventoryItem(
   imageUrl: '',
 );
 
+const _standardTransaction = TransactionRecord(
+  id: 21,
+  warehouseId: 1,
+  productId: 10,
+  docId: 7,
+  docNo: 'XS20260627001',
+  docType: 2,
+  docTypeName: '销售单',
+  direction: -1,
+  quantity: 22,
+  beforeQty: 150,
+  afterQty: 128,
+  operatorId: 5,
+  operatedAt: '2026-06-27T10:30:00Z',
+  createdAt: '2026-06-27T10:30:00Z',
+);
+
+const _otherTransaction = TransactionRecord(
+  id: 22,
+  warehouseId: 1,
+  productId: 20,
+  docId: 8,
+  docNo: 'RK20260627001',
+  docType: 1,
+  docTypeName: '采购单',
+  direction: 1,
+  quantity: 3,
+  beforeQty: 0,
+  afterQty: 3,
+  operatorId: 5,
+  operatedAt: '2026-06-27T11:30:00Z',
+  createdAt: '2026-06-27T11:30:00Z',
+);
+
 final class _FakeInventoryRepository implements InventoryRepository {
-  _FakeInventoryRepository({required this.result});
+  _FakeInventoryRepository({
+    required this.result,
+    this.barcodeResult = const Success<InventoryItem>(_barcodeItem),
+    this.updateResult,
+  });
 
   final Future<Result<List<InventoryItem>>> result;
+  final Result<InventoryItem> barcodeResult;
+  final Future<Result<InventoryItem>>? updateResult;
   String? lastKeyword;
+  String? lastBarcode;
+  int? updatedInventoryId;
+  int? updatedAlertThreshold;
+  int? updatedStatus;
 
   @override
   Future<Result<List<InventoryItem>>> listInventory({
@@ -134,5 +566,195 @@ final class _FakeInventoryRepository implements InventoryRepository {
   }) {
     lastKeyword = keyword;
     return result;
+  }
+
+  @override
+  Future<Result<List<InventoryItem>>> listInventoryAlerts({
+    int page = 1,
+  }) async {
+    return const Success<List<InventoryItem>>([]);
+  }
+
+  @override
+  Future<Result<InventoryItem>> findProductByBarcode(String barcode) async {
+    lastBarcode = barcode;
+    return barcodeResult;
+  }
+
+  @override
+  Future<Result<InventoryItem>> updateInventorySettings({
+    required int inventoryId,
+    int? alertThreshold,
+    int? status,
+  }) async {
+    updatedInventoryId = inventoryId;
+    updatedAlertThreshold = alertThreshold;
+    updatedStatus = status;
+    return updateResult ?? const Success<InventoryItem>(_updatedStandardItem);
+  }
+
+  @override
+  Future<Result<List<NonStandardInventoryItem>>> listNonStandardInventory({
+    int page = 1,
+  }) async {
+    return const Success<List<NonStandardInventoryItem>>([]);
+  }
+}
+
+final class _SequentialInventoryRepository implements InventoryRepository {
+  _SequentialInventoryRepository({required this.results});
+
+  final List<Result<List<InventoryItem>>> results;
+  int listInventoryCallCount = 0;
+
+  @override
+  Future<Result<List<InventoryItem>>> listInventory({
+    String keyword = '',
+    int page = 1,
+  }) async {
+    final callIndex = listInventoryCallCount;
+    listInventoryCallCount += 1;
+    if (callIndex < results.length) {
+      return results[callIndex];
+    }
+
+    return results.last;
+  }
+
+  @override
+  Future<Result<List<InventoryItem>>> listInventoryAlerts({
+    int page = 1,
+  }) async {
+    return const Success<List<InventoryItem>>([]);
+  }
+
+  @override
+  Future<Result<InventoryItem>> findProductByBarcode(String barcode) async {
+    return const Success<InventoryItem>(_barcodeItem);
+  }
+
+  @override
+  Future<Result<InventoryItem>> updateInventorySettings({
+    required int inventoryId,
+    int? alertThreshold,
+    int? status,
+  }) async {
+    return const Success<InventoryItem>(_updatedStandardItem);
+  }
+
+  @override
+  Future<Result<List<NonStandardInventoryItem>>> listNonStandardInventory({
+    int page = 1,
+  }) async {
+    return const Success<List<NonStandardInventoryItem>>([]);
+  }
+}
+
+final class _FakeDocumentsRepository implements DocumentsRepository {
+  _FakeDocumentsRepository({
+    this.transactionResult = const Success<List<TransactionRecord>>([]),
+  });
+
+  final Result<List<TransactionRecord>> transactionResult;
+  int listTransactionsCallCount = 0;
+
+  @override
+  Future<Result<List<DocumentRecord>>> listRecentDocuments({
+    int? docType,
+    int page = 1,
+  }) async {
+    return const Success<List<DocumentRecord>>([]);
+  }
+
+  @override
+  Future<Result<List<TransactionRecord>>> listTransactions({
+    String keyword = '',
+    int page = 1,
+  }) async {
+    listTransactionsCallCount += 1;
+    return transactionResult;
+  }
+
+  @override
+  Future<Result<DocumentRecord>> createDocument(
+    CreateDocumentRequest request,
+  ) async {
+    return const Success<DocumentRecord>(
+      DocumentRecord(
+        id: 1,
+        docType: 1,
+        title: '采购单',
+        number: 'RK-1',
+        status: '草稿',
+      ),
+    );
+  }
+
+  @override
+  Future<Result<void>> completeDocument(int id) async {
+    return const Success<void>(null);
+  }
+
+  @override
+  Future<Result<void>> confirmDocument(int id) async {
+    return const Success<void>(null);
+  }
+
+  @override
+  Future<Result<void>> settleDocument(int id) async {
+    return const Success<void>(null);
+  }
+}
+
+final class _RetryInventoryRepository implements InventoryRepository {
+  int listInventoryCallCount = 0;
+  Completer<List<InventoryItem>>? _retryInventoryCompleter;
+
+  void completeRetryInventory() {
+    _retryInventoryCompleter?.complete([_standardItem]);
+  }
+
+  @override
+  Future<Result<List<InventoryItem>>> listInventory({
+    String keyword = '',
+    int page = 1,
+  }) async {
+    listInventoryCallCount += 1;
+    if (listInventoryCallCount == 1) {
+      return const FailureResult<List<InventoryItem>>(
+        NetworkFailure(message: '库存服务不可用'),
+      );
+    }
+
+    _retryInventoryCompleter = Completer<List<InventoryItem>>();
+    return Success<List<InventoryItem>>(await _retryInventoryCompleter!.future);
+  }
+
+  @override
+  Future<Result<List<InventoryItem>>> listInventoryAlerts({
+    int page = 1,
+  }) async {
+    return const Success<List<InventoryItem>>([]);
+  }
+
+  @override
+  Future<Result<InventoryItem>> findProductByBarcode(String barcode) async {
+    return const Success<InventoryItem>(_barcodeItem);
+  }
+
+  @override
+  Future<Result<InventoryItem>> updateInventorySettings({
+    required int inventoryId,
+    int? alertThreshold,
+    int? status,
+  }) async {
+    return const Success<InventoryItem>(_updatedStandardItem);
+  }
+
+  @override
+  Future<Result<List<NonStandardInventoryItem>>> listNonStandardInventory({
+    int page = 1,
+  }) async {
+    return const Success<List<NonStandardInventoryItem>>([]);
   }
 }

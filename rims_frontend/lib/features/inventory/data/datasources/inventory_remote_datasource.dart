@@ -7,9 +7,25 @@ import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
 import '../models/inventory_models.dart';
 
+const int _inventoryListPageSize = 20;
+
 abstract interface class InventoryRemoteDataSource {
   Future<Result<List<InventoryItemModel>>> listInventory({
     String keyword = '',
+    int page = 1,
+  });
+
+  Future<Result<List<InventoryItemModel>>> listInventoryAlerts({int page = 1});
+
+  Future<Result<InventoryItemModel>> findProductByBarcode(String barcode);
+
+  Future<Result<InventoryItemModel>> updateInventorySettings({
+    required int inventoryId,
+    int? alertThreshold,
+    int? status,
+  });
+
+  Future<Result<List<NonStandardInventoryItemModel>>> listNonStandardInventory({
     int page = 1,
   });
 }
@@ -30,10 +46,77 @@ final class ApiInventoryRemoteDataSource implements InventoryRemoteDataSource {
       queryParameters: {
         if (trimmedKeyword.isNotEmpty) 'keyword': trimmedKeyword,
         'page': page,
+        'pageSize': _inventoryListPageSize,
       },
     );
 
-    return _mapEnvelope(result, _parseInventoryItems);
+    return _mapEnvelope(
+      result,
+      (data) => _parseInventoryItems(data, 'inventory list'),
+    );
+  }
+
+  @override
+  Future<Result<List<InventoryItemModel>>> listInventoryAlerts({
+    int page = 1,
+  }) async {
+    final result = await _apiClient.get<dynamic>(
+      ApiEndpoints.inventoryAlerts,
+      queryParameters: {'page': page, 'pageSize': _inventoryListPageSize},
+    );
+
+    return _mapEnvelope(
+      result,
+      (data) => _parseInventoryItems(data, 'inventory alerts'),
+    );
+  }
+
+  @override
+  Future<Result<InventoryItemModel>> findProductByBarcode(
+    String barcode,
+  ) async {
+    final result = await _apiClient.get<dynamic>(
+      ApiEndpoints.productByBarcode(barcode.trim()),
+    );
+
+    return _mapEnvelope(result, _parseProductItem);
+  }
+
+  @override
+  Future<Result<InventoryItemModel>> updateInventorySettings({
+    required int inventoryId,
+    int? alertThreshold,
+    int? status,
+  }) async {
+    final data = <String, int>{};
+    if (alertThreshold != null) {
+      data['alertThreshold'] = alertThreshold;
+    }
+    if (status != null) {
+      data['status'] = status;
+    }
+
+    final result = await _apiClient.put<dynamic>(
+      ApiEndpoints.inventoryItem(inventoryId),
+      data: data,
+    );
+
+    return _mapEnvelope(result, _parseInventoryItem);
+  }
+
+  @override
+  Future<Result<List<NonStandardInventoryItemModel>>> listNonStandardInventory({
+    int page = 1,
+  }) async {
+    final result = await _apiClient.get<dynamic>(
+      ApiEndpoints.nonStandardInventory,
+      queryParameters: {'page': page, 'pageSize': _inventoryListPageSize},
+    );
+
+    return _mapEnvelope(
+      result,
+      (data) => _parseNonStandardInventoryItems(data, 'non-standard inventory'),
+    );
   }
 
   Result<T> _mapEnvelope<T>(
@@ -64,25 +147,79 @@ final class ApiInventoryRemoteDataSource implements InventoryRemoteDataSource {
           );
         }
 
-        return Success<T>(convert(envelope.data));
+        try {
+          return Success<T>(convert(envelope.data));
+        } on FormatException catch (error) {
+          return FailureResult<T>(
+            UnknownFailure(
+              message: error.message,
+              statusCode: response.statusCode,
+              businessCode: envelope.code,
+              traceId: envelope.traceId,
+              cause: error,
+            ),
+          );
+        }
       },
       failure: FailureResult<T>.new,
     );
   }
 
-  List<InventoryItemModel> _parseInventoryItems(Object? data) {
-    final rawList = switch (data) {
+  InventoryItemModel _parseProductItem(Object? data) {
+    return InventoryItemModel.fromProductJson(_requiredMap(data, 'product'));
+  }
+
+  InventoryItemModel _parseInventoryItem(Object? data) {
+    return InventoryItemModel.fromJson(_requiredMap(data, 'inventory'));
+  }
+
+  List<InventoryItemModel> _parseInventoryItems(Object? data, String name) {
+    return _requiredMapItems(
+      _requiredList(data, name),
+      name,
+    ).map((json) => InventoryItemModel.fromJson(json)).toList(growable: false);
+  }
+
+  List<NonStandardInventoryItemModel> _parseNonStandardInventoryItems(
+    Object? data,
+    String name,
+  ) {
+    return _requiredMapItems(_requiredList(data, name), name)
+        .map((json) => NonStandardInventoryItemModel.fromJson(json))
+        .toList(growable: false);
+  }
+
+  List<dynamic> _requiredList(Object? data, String name) {
+    return switch (data) {
       {'list': final List<dynamic> list} => list,
       {'items': final List<dynamic> list} => list,
       {'records': final List<dynamic> list} => list,
       {'rows': final List<dynamic> list} => list,
       final List<dynamic> list => list,
-      _ => const <dynamic>[],
+      _ => throw FormatException('Invalid $name response'),
     };
+  }
 
-    return rawList
-        .whereType<Map>()
-        .map((json) => InventoryItemModel.fromJson(json))
+  List<Map<dynamic, dynamic>> _requiredMapItems(
+    List<dynamic> list,
+    String name,
+  ) {
+    return list
+        .map((item) {
+          if (item is Map) {
+            return Map<dynamic, dynamic>.from(item);
+          }
+
+          throw FormatException('Invalid $name response');
+        })
         .toList(growable: false);
+  }
+
+  Map<dynamic, dynamic> _requiredMap(Object? data, String name) {
+    if (data is Map) {
+      return data;
+    }
+
+    throw FormatException('Invalid $name response');
   }
 }

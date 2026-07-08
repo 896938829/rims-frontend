@@ -1,5 +1,10 @@
 # rims-frontend
 
+Flutter frontend code lives in [`rims_frontend`](rims_frontend).
+
+For local APP verification, backend API configuration, and test account source,
+see [`rims_frontend/README.md`](rims_frontend/README.md).
+
 ## License
 
 SPDX-License-Identifier: AGPL-3.0-only

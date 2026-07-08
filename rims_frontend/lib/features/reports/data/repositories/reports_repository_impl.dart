@@ -9,6 +9,22 @@ final class ReportsRepositoryImpl implements ReportsRepository {
   final ReportsRemoteDataSource remoteDataSource;
 
   @override
+  Future<Result<SalesStats>> loadSalesStats({
+    required DateTime startDate,
+    required DateTime endDate,
+  }) async {
+    final result = await remoteDataSource.loadSalesStats(
+      startDate: startDate,
+      endDate: endDate,
+    );
+
+    return result.when(
+      success: (model) => Success<SalesStats>(model.toEntity()),
+      failure: FailureResult<SalesStats>.new,
+    );
+  }
+
+  @override
   Future<Result<List<SalesTrendPoint>>> loadSalesTrend({
     required DateTime startDate,
     required DateTime endDate,
@@ -30,10 +46,14 @@ final class ReportsRepositoryImpl implements ReportsRepository {
   Future<Result<List<SalesRankingItem>>> loadSalesRanking({
     required DateTime startDate,
     required DateTime endDate,
+    String metric = 'amount',
+    int limit = 5,
   }) async {
     final result = await remoteDataSource.loadSalesRanking(
       startDate: startDate,
       endDate: endDate,
+      metric: metric,
+      limit: limit,
     );
 
     return result.when(
@@ -53,6 +73,50 @@ final class ReportsRepositoryImpl implements ReportsRepository {
         models.map((model) => model.toEntity()).toList(growable: false),
       ),
       failure: FailureResult<List<InventoryOverviewItem>>.new,
+    );
+  }
+
+  @override
+  Future<Result<List<InventoryTurnoverItem>>> loadInventoryTurnover({
+    required DateTime startDate,
+    required DateTime endDate,
+    int limit = 5,
+  }) async {
+    final result = await remoteDataSource.loadInventoryTurnover(
+      startDate: startDate,
+      endDate: endDate,
+      limit: limit,
+    );
+
+    return result.when(
+      success: (models) => Success<List<InventoryTurnoverItem>>(
+        models.map((model) => model.toEntity()).toList(growable: false),
+      ),
+      failure: FailureResult<List<InventoryTurnoverItem>>.new,
+    );
+  }
+
+  @override
+  Future<Result<List<SlowMovingInventoryItem>>> loadSlowMovingInventory({
+    required DateTime startDate,
+    required DateTime endDate,
+    int maxSales = 1,
+    int page = 1,
+    int pageSize = 5,
+  }) async {
+    final result = await remoteDataSource.loadSlowMovingInventory(
+      startDate: startDate,
+      endDate: endDate,
+      maxSales: maxSales,
+      page: page,
+      pageSize: pageSize,
+    );
+
+    return result.when(
+      success: (models) => Success<List<SlowMovingInventoryItem>>(
+        models.map((model) => model.toEntity()).toList(growable: false),
+      ),
+      failure: FailureResult<List<SlowMovingInventoryItem>>.new,
     );
   }
 }

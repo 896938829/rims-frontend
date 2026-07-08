@@ -5,6 +5,7 @@ import '../../../../core/theme/app_text_styles.dart';
 import '../../../../core/widgets/rims_card.dart';
 import '../../../../core/widgets/rims_status_chip.dart';
 import '../../../documents/domain/entities/document_data.dart';
+import '../../../documents/presentation/widgets/document_status_kind.dart';
 
 final class RecentDocumentTile extends StatelessWidget {
   const RecentDocumentTile({required this.document, super.key});
@@ -49,19 +50,12 @@ final class RecentDocumentTile extends StatelessWidget {
             ),
           ),
           const SizedBox(width: 10),
-          RimsStatusChip(label: document.status, kind: _statusKind),
+          RimsStatusChip(
+            label: document.status,
+            kind: documentStatusKind(document.status),
+          ),
         ],
       ),
     );
-  }
-
-  RimsStatusKind get _statusKind {
-    return switch (document.status) {
-      '已完成' => RimsStatusKind.success,
-      '待确认' => RimsStatusKind.warning,
-      '待提交' => RimsStatusKind.warning,
-      '待结转' => RimsStatusKind.pending,
-      _ => RimsStatusKind.info,
-    };
   }
 }

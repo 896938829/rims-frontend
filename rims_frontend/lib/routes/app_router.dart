@@ -1,5 +1,7 @@
 import 'package:go_router/go_router.dart';
 
+import '../core/events/app_event_bus.dart';
+import '../features/admin/domain/repositories/admin_repository.dart';
 import '../features/auth/domain/repositories/auth_repository.dart';
 import '../features/auth/presentation/pages/login_page.dart';
 import '../features/auth/presentation/view_models/auth_session_controller.dart';
@@ -15,6 +17,8 @@ GoRouter createAppRouter({
   DocumentsRepository? documentsRepository,
   InventoryRepository? inventoryRepository,
   ReportsRepository? reportsRepository,
+  AdminRepository? adminRepository,
+  AppEventBus? eventBus,
   String initialLocation = RoutePaths.login,
 }) {
   return GoRouter(
@@ -23,6 +27,14 @@ GoRouter createAppRouter({
     redirect: (context, state) {
       final isAuthenticated = sessionController.isAuthenticated;
       final isLoginRoute = state.matchedLocation == RoutePaths.login;
+
+      if (sessionController.isRestoring) {
+        if (!isAuthenticated && !isLoginRoute) {
+          return RoutePaths.login;
+        }
+
+        return null;
+      }
 
       if (!isAuthenticated && !isLoginRoute) {
         return RoutePaths.login;
@@ -45,9 +57,12 @@ GoRouter createAppRouter({
       GoRoute(
         path: RoutePaths.shell,
         builder: (context, state) => AppShellPage(
+          authRepository: authRepository,
           documentsRepository: documentsRepository,
           inventoryRepository: inventoryRepository,
           reportsRepository: reportsRepository,
+          adminRepository: adminRepository,
+          eventBus: eventBus,
           sessionController: sessionController,
         ),
       ),

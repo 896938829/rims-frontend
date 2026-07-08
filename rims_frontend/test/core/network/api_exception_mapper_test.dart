@@ -62,6 +62,21 @@ void main() {
       expect(failure.traceId, 'trace-state');
     });
 
+    test('keeps trace id when mapping HTTP authorization failures', () {
+      final failure = const ApiExceptionMapper().map(
+        exceptionForStatus(
+          403,
+          data: {'code': 0, 'message': '权限不足', 'traceId': 'trace-forbidden'},
+        ),
+      );
+
+      expect(failure, isA<AuthorizationFailure>());
+      expect(failure.message, '权限不足');
+      expect(failure.statusCode, 403);
+      expect(failure.businessCode, isNull);
+      expect(failure.traceId, 'trace-forbidden');
+    });
+
     test('maps timeout to NetworkFailure', () {
       final failure = const ApiExceptionMapper().map(
         DioException(

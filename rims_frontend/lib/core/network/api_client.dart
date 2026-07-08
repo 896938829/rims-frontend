@@ -1,5 +1,8 @@
 import 'package:dio/dio.dart';
 
+import '../events/app_event.dart';
+import '../events/app_event_bus.dart';
+import '../result/failure.dart';
 import '../result/result.dart';
 import 'api_endpoints.dart';
 import 'api_exception_mapper.dart';
@@ -13,12 +16,14 @@ final class ApiClient {
     ApiExceptionMapper exceptionMapper = const ApiExceptionMapper(),
     TokenReader? tokenReader,
     WarehouseIdReader? warehouseIdReader,
+    AppEventBus? eventBus,
     bool enableLogging = true,
   }) : this._(
          dio: dio ?? Dio(),
          exceptionMapper: exceptionMapper,
          tokenReader: tokenReader,
          warehouseIdReader: warehouseIdReader,
+         eventBus: eventBus,
          enableLogging: enableLogging,
        );
 
@@ -27,6 +32,7 @@ final class ApiClient {
     required this._exceptionMapper,
     required TokenReader? tokenReader,
     required WarehouseIdReader? warehouseIdReader,
+    required this.eventBus,
     required bool enableLogging,
   }) {
     _dio.options = BaseOptions(
@@ -57,6 +63,7 @@ final class ApiClient {
 
   final Dio _dio;
   final ApiExceptionMapper _exceptionMapper;
+  final AppEventBus? eventBus;
 
   Dio get dio => _dio;
 
@@ -66,6 +73,7 @@ final class ApiClient {
     Options? options,
   }) {
     return _request(
+      path,
       () =>
           _dio.get<T>(path, queryParameters: queryParameters, options: options),
     );
@@ -78,6 +86,7 @@ final class ApiClient {
     Options? options,
   }) {
     return _request(
+      path,
       () => _dio.post<T>(
         path,
         data: data,
@@ -94,6 +103,7 @@ final class ApiClient {
     Options? options,
   }) {
     return _request(
+      path,
       () => _dio.put<T>(
         path,
         data: data,
@@ -110,6 +120,7 @@ final class ApiClient {
     Options? options,
   }) {
     return _request(
+      path,
       () => _dio.patch<T>(
         path,
         data: data,
@@ -126,6 +137,7 @@ final class ApiClient {
     Options? options,
   }) {
     return _request(
+      path,
       () => _dio.delete<T>(
         path,
         data: data,
@@ -136,12 +148,21 @@ final class ApiClient {
   }
 
   Future<Result<Response<T>>> _request<T>(
+    String path,
     Future<Response<T>> Function() request,
   ) async {
     try {
       return Success<Response<T>>(await request());
     } catch (error) {
-      return FailureResult<Response<T>>(_exceptionMapper.map(error));
+      final failure = _exceptionMapper.map(error);
+      if (failure is AuthenticationFailure && _publishesTokenExpired(path)) {
+        eventBus?.publish(const TokenExpiredEvent());
+      }
+      return FailureResult<Response<T>>(failure);
     }
+  }
+
+  bool _publishesTokenExpired(String path) {
+    return path != ApiEndpoints.login;
   }
 }

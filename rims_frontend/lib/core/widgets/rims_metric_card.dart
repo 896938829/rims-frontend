@@ -23,13 +23,29 @@ final class RimsMetricCard extends StatelessWidget {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(label, style: AppTextStyles.bodySmall),
-          const SizedBox(height: 8),
-          Text(value, style: AppTextStyles.metric),
+          Text(
+            label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+            style: AppTextStyles.bodySmall,
+          ),
+          const SizedBox(height: 6),
+          FittedBox(
+            alignment: Alignment.centerLeft,
+            fit: BoxFit.scaleDown,
+            child: Text(
+              value,
+              maxLines: 1,
+              overflow: TextOverflow.visible,
+              style: AppTextStyles.metric,
+            ),
+          ),
           if (delta case final delta?) ...[
-            const SizedBox(height: 6),
+            const SizedBox(height: 4),
             Text(
               delta,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
               style: AppTextStyles.bodySmall.copyWith(
                 color: AppColors.success,
                 fontWeight: FontWeight.w700,

@@ -8,18 +8,32 @@ import '../../../../core/result/result.dart';
 import '../models/auth_models.dart';
 
 abstract interface class AuthRemoteDataSource {
+  Future<Result<AppUserModel>> loadCurrentUser();
+
   Future<Result<LoginResponseModel>> login({
     required String username,
     required String password,
   });
 
   Future<Result<List<WarehouseModel>>> loadWarehouses();
+
+  Future<Result<WarehouseModel?>> switchCurrentWarehouse(int warehouseId);
 }
 
 final class ApiAuthRemoteDataSource implements AuthRemoteDataSource {
   const ApiAuthRemoteDataSource(this._apiClient);
 
   final ApiClient _apiClient;
+
+  @override
+  Future<Result<AppUserModel>> loadCurrentUser() async {
+    final result = await _apiClient.get<dynamic>(ApiEndpoints.currentUser);
+
+    return _mapEnvelope(
+      result,
+      (data) => AppUserModel.fromJson(_requiredMap(data, 'current user')),
+    );
+  }
 
   @override
   Future<Result<LoginResponseModel>> login({
@@ -33,9 +47,7 @@ final class ApiAuthRemoteDataSource implements AuthRemoteDataSource {
 
     return _mapEnvelope(
       result,
-      (data) => LoginResponseModel.fromJson(
-        data as Map<dynamic, dynamic>? ?? const {},
-      ),
+      (data) => LoginResponseModel.fromJson(_requiredMap(data, 'login')),
     );
   }
 
@@ -46,6 +58,25 @@ final class ApiAuthRemoteDataSource implements AuthRemoteDataSource {
     );
 
     return _mapEnvelope(result, _parseWarehouses);
+  }
+
+  @override
+  Future<Result<WarehouseModel?>> switchCurrentWarehouse(int warehouseId) async {
+    final result = await _apiClient.put<dynamic>(
+      ApiEndpoints.currentUserCurrentWarehouse,
+      data: {'warehouseId': warehouseId},
+    );
+
+    return _mapEnvelope<WarehouseModel?>(
+      result,
+      (data) {
+        if (data == null) {
+          return null;
+        }
+
+        return WarehouseModel.fromJson(_requiredMap(data, 'warehouse'));
+      },
+    );
   }
 
   Result<T> _mapEnvelope<T>(
@@ -76,7 +107,19 @@ final class ApiAuthRemoteDataSource implements AuthRemoteDataSource {
           );
         }
 
-        return Success<T>(convert(envelope.data));
+        try {
+          return Success<T>(convert(envelope.data));
+        } on FormatException catch (error) {
+          return FailureResult<T>(
+            UnknownFailure(
+              message: error.message,
+              statusCode: response.statusCode,
+              businessCode: envelope.code,
+              traceId: envelope.traceId,
+              cause: error,
+            ),
+          );
+        }
       },
       failure: FailureResult<T>.new,
     );
@@ -86,13 +129,29 @@ final class ApiAuthRemoteDataSource implements AuthRemoteDataSource {
     final rawList = switch (data) {
       {'list': final List<dynamic> list} => list,
       {'warehouses': final List<dynamic> list} => list,
+      {'items': final List<dynamic> list} => list,
+      {'records': final List<dynamic> list} => list,
+      {'rows': final List<dynamic> list} => list,
       final List<dynamic> list => list,
-      _ => const <dynamic>[],
+      _ => throw const FormatException('Invalid warehouses response'),
     };
 
     return rawList
-        .whereType<Map<dynamic, dynamic>>()
-        .map(WarehouseModel.fromJson)
+        .map((item) {
+          if (item is Map) {
+            return WarehouseModel.fromJson(Map<dynamic, dynamic>.from(item));
+          }
+
+          throw const FormatException('Invalid warehouses response');
+        })
         .toList(growable: false);
+  }
+
+  Map<dynamic, dynamic> _requiredMap(Object? data, String name) {
+    if (data is Map) {
+      return Map<dynamic, dynamic>.from(data);
+    }
+
+    throw FormatException('Invalid $name response');
   }
 }

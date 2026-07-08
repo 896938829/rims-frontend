@@ -51,9 +51,14 @@ final class _LoginPageState extends State<LoginPage> {
 
   @override
   Widget build(BuildContext context) {
-    return AnimatedBuilder(
-      animation: _viewModel,
+    return ListenableBuilder(
+      listenable: Listenable.merge([_viewModel, widget.sessionController]),
       builder: (context, _) {
+        final isRestoringSession = widget.sessionController.isRestoring;
+        final sessionMessage = isRestoringSession
+            ? '正在恢复登录状态...'
+            : widget.sessionController.sessionMessage;
+
         return Scaffold(
           body: RimsPageScaffold(
             child: SingleChildScrollView(
@@ -84,48 +89,23 @@ final class _LoginPageState extends State<LoginPage> {
                           _viewModel.warehouseHint,
                           style: AppTextStyles.bodySmall,
                         ),
+                        const SizedBox(height: 6),
+                        Text(
+                          '账号由管理员创建，请使用分配的账号登录',
+                          style: AppTextStyles.bodySmall.copyWith(
+                            color: AppColors.textSecondary,
+                            fontWeight: FontWeight.w700,
+                          ),
+                        ),
                         const SizedBox(height: 16),
-                        TextField(
-                          key: const Key('login-username-field'),
-                          controller: _usernameController,
-                          enabled: !_viewModel.isLoading,
-                          onChanged: _viewModel.updateUsername,
-                          decoration: const InputDecoration(labelText: '账号'),
-                        ),
-                        const SizedBox(height: 12),
-                        TextField(
-                          key: const Key('login-password-field'),
-                          controller: _passwordController,
-                          enabled: !_viewModel.isLoading,
-                          obscureText: true,
-                          onChanged: _viewModel.updatePassword,
-                          decoration: const InputDecoration(labelText: '密码'),
-                          onSubmitted: (_) => _submit(context),
-                        ),
-                        if (_viewModel.errorMessage != null) ...[
-                          const SizedBox(height: 10),
-                          Text(
-                            _viewModel.errorMessage!,
-                            style: AppTextStyles.bodySmall.copyWith(
-                              color: AppColors.error,
-                              fontWeight: FontWeight.w700,
-                            ),
-                          ),
-                        ],
-                        const SizedBox(height: 18),
-                        FilledButton(
-                          onPressed: _viewModel.isLoading
-                              ? null
-                              : () => _submit(context),
-                          style: FilledButton.styleFrom(
-                            backgroundColor: AppColors.primary,
-                            foregroundColor: Colors.white,
-                            minimumSize: const Size.fromHeight(48),
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(8),
-                            ),
-                          ),
-                          child: Text(_viewModel.isLoading ? '登录中...' : '登录'),
+                        if (sessionMessage != null)
+                          _AuthInfoMessage(message: sessionMessage),
+                        _LoginForm(
+                          viewModel: _viewModel,
+                          usernameController: _usernameController,
+                          passwordController: _passwordController,
+                          isRestoringSession: isRestoringSession,
+                          onSubmit: () => _submitLogin(context),
                         ),
                       ],
                     ),
@@ -139,11 +119,112 @@ final class _LoginPageState extends State<LoginPage> {
     );
   }
 
-  Future<void> _submit(BuildContext context) async {
+  Future<void> _submitLogin(BuildContext context) async {
     final success = await _viewModel.login();
 
     if (success && context.mounted) {
       context.go(RoutePaths.shell);
     }
   }
+}
+
+final class _LoginForm extends StatelessWidget {
+  const _LoginForm({
+    required this.viewModel,
+    required this.usernameController,
+    required this.passwordController,
+    required this.isRestoringSession,
+    required this.onSubmit,
+  });
+
+  final LoginViewModel viewModel;
+  final TextEditingController usernameController;
+  final TextEditingController passwordController;
+  final bool isRestoringSession;
+  final VoidCallback onSubmit;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        TextField(
+          key: const Key('login-username-field'),
+          controller: usernameController,
+          enabled: !viewModel.isLoading && !isRestoringSession,
+          onChanged: viewModel.updateUsername,
+          decoration: const InputDecoration(labelText: '账号'),
+        ),
+        const SizedBox(height: 12),
+        TextField(
+          key: const Key('login-password-field'),
+          controller: passwordController,
+          enabled: !viewModel.isLoading && !isRestoringSession,
+          obscureText: true,
+          onChanged: viewModel.updatePassword,
+          decoration: const InputDecoration(labelText: '密码'),
+          onSubmitted: (_) => onSubmit(),
+        ),
+        if (viewModel.errorMessage != null)
+          _AuthErrorMessage(message: viewModel.errorMessage!),
+        const SizedBox(height: 18),
+        FilledButton(
+          onPressed: viewModel.isLoading || isRestoringSession
+              ? null
+              : onSubmit,
+          style: _primaryButtonStyle,
+          child: Text(viewModel.isLoading ? '登录中...' : '登录'),
+        ),
+      ],
+    );
+  }
+}
+
+final class _AuthErrorMessage extends StatelessWidget {
+  const _AuthErrorMessage({required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(top: 10),
+      child: Text(
+        message,
+        style: AppTextStyles.bodySmall.copyWith(
+          color: AppColors.error,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    );
+  }
+}
+
+final class _AuthInfoMessage extends StatelessWidget {
+  const _AuthInfoMessage({required this.message});
+
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Text(
+        message,
+        style: AppTextStyles.bodySmall.copyWith(
+          color: AppColors.warning,
+          fontWeight: FontWeight.w700,
+        ),
+      ),
+    );
+  }
+}
+
+ButtonStyle get _primaryButtonStyle {
+  return FilledButton.styleFrom(
+    backgroundColor: AppColors.primary,
+    foregroundColor: Colors.white,
+    minimumSize: const Size.fromHeight(48),
+    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+  );
 }

@@ -1,10 +1,18 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 
+import '../../../../core/events/app_event.dart';
+import '../../../../core/events/app_event_bus.dart';
 import '../../../../core/widgets/rims_bottom_navigation.dart';
+import '../../../admin/domain/repositories/admin_repository.dart';
+import '../../../auth/domain/entities/warehouse.dart';
+import '../../../auth/domain/repositories/auth_repository.dart';
 import '../../../auth/presentation/view_models/auth_session_controller.dart';
 import '../../../documents/domain/repositories/documents_repository.dart';
 import '../../../documents/presentation/pages/documents_page.dart';
 import '../../../home/presentation/pages/home_page.dart';
+import '../../../home/presentation/view_models/home_view_model.dart';
 import '../../../inventory/domain/repositories/inventory_repository.dart';
 import '../../../inventory/presentation/pages/inventory_page.dart';
 import '../../../profile/presentation/pages/profile_page.dart';
@@ -14,17 +22,23 @@ import '../view_models/app_tab.dart';
 
 final class AppShellPage extends StatefulWidget {
   const AppShellPage({
+    required this.authRepository,
     required this.sessionController,
     this.documentsRepository,
     this.inventoryRepository,
     this.reportsRepository,
+    this.adminRepository,
+    this.eventBus,
     super.key,
   });
 
+  final AuthRepository authRepository;
   final AuthSessionController sessionController;
   final DocumentsRepository? documentsRepository;
   final InventoryRepository? inventoryRepository;
   final ReportsRepository? reportsRepository;
+  final AdminRepository? adminRepository;
+  final AppEventBus? eventBus;
 
   @override
   State<AppShellPage> createState() => _AppShellPageState();
@@ -32,16 +46,40 @@ final class AppShellPage extends StatefulWidget {
 
 final class _AppShellPageState extends State<AppShellPage> {
   AppTab _currentTab = AppTab.home;
+  String? _pendingDocumentActionLabel;
+  StreamSubscription<GlobalRefreshRequestedEvent>? _refreshSubscription;
+
+  @override
+  void initState() {
+    super.initState();
+    _subscribeToRefreshEvents();
+  }
+
+  @override
+  void didUpdateWidget(covariant AppShellPage oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.eventBus != oldWidget.eventBus) {
+      unawaited(_refreshSubscription?.cancel());
+      _subscribeToRefreshEvents();
+    }
+  }
+
+  @override
+  void dispose() {
+    unawaited(_refreshSubscription?.cancel());
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: _tabBody,
+      body: ListenableBuilder(
+        listenable: widget.sessionController,
+        builder: (context, child) => _tabBody,
+      ),
       bottomNavigationBar: RimsBottomNavigation(
         currentTab: _currentTab,
-        onTabSelected: (tab) {
-          setState(() => _currentTab = tab);
-        },
+        onTabSelected: _selectTab,
       ),
     );
   }
@@ -53,19 +91,97 @@ final class _AppShellPageState extends State<AppShellPage> {
         warehouse: widget.sessionController.currentWarehouse,
         documentsRepository: widget.documentsRepository,
         inventoryRepository: widget.inventoryRepository,
+        reportsRepository: widget.reportsRepository,
+        eventBus: widget.eventBus,
+        onQuickActionSelected: _handleHomeQuickAction,
       ),
       AppTab.inventory => InventoryPage(
         repository: widget.inventoryRepository,
+        documentsRepository: widget.documentsRepository,
         warehouseName:
             widget.sessionController.currentWarehouse?.name ?? '未选择仓库',
+        canManageInventorySettings:
+            widget.sessionController.currentUser?.isAdmin == true,
+        eventBus: widget.eventBus,
       ),
-      AppTab.documents => DocumentsPage(repository: widget.documentsRepository),
-      AppTab.reports => ReportsPage(repository: widget.reportsRepository),
+      AppTab.documents => DocumentsPage(
+        repository: widget.documentsRepository,
+        inventoryRepository: widget.inventoryRepository,
+        currentWarehouse: widget.sessionController.currentWarehouse,
+        warehouses: widget.sessionController.warehouses,
+        canManageAdminDocumentActions:
+            widget.sessionController.currentUser?.isAdmin == true,
+        initialActionLabel: _pendingDocumentActionLabel,
+        eventBus: widget.eventBus,
+      ),
+      AppTab.reports => ReportsPage(
+        repository: widget.reportsRepository,
+        canViewFinancialMetrics:
+            widget.sessionController.currentUser?.isAdmin == true,
+        eventBus: widget.eventBus,
+      ),
       AppTab.profile => ProfilePage(
         user: widget.sessionController.currentUser,
         warehouse: widget.sessionController.currentWarehouse,
-        onLogout: widget.sessionController.logout,
+        warehouses: widget.sessionController.warehouses,
+        isSwitchingWarehouse: widget.sessionController.isSwitchingWarehouse,
+        warehouseSwitchMessage:
+            widget.sessionController.switchWarehouseFailure?.message,
+        onWarehouseSelected: (warehouse) {
+          unawaited(_switchWarehouse(warehouse));
+        },
+        onLogout: () {
+          unawaited(_logout());
+        },
+        adminRepository: widget.adminRepository,
+        eventBus: widget.eventBus,
       ),
     };
+  }
+
+  void _selectTab(AppTab tab) {
+    setState(() {
+      _currentTab = tab;
+      if (tab != AppTab.documents) {
+        _pendingDocumentActionLabel = null;
+      }
+    });
+  }
+
+  void _handleHomeQuickAction(HomeQuickAction action) {
+    setState(() {
+      _currentTab = action.targetTab;
+      _pendingDocumentActionLabel = action.documentActionLabel;
+    });
+  }
+
+  Future<void> _switchWarehouse(Warehouse warehouse) async {
+    final switched = await widget.sessionController.switchWarehouse(
+      authRepository: widget.authRepository,
+      warehouse: warehouse,
+    );
+
+    if (switched) {
+      widget.eventBus?.publish(const GlobalRefreshRequestedEvent());
+    }
+  }
+
+  Future<void> _logout() async {
+    await widget.authRepository.logout();
+    if (!mounted) {
+      return;
+    }
+
+    widget.sessionController.logout();
+  }
+
+  void _subscribeToRefreshEvents() {
+    _refreshSubscription = widget.eventBus
+        ?.on<GlobalRefreshRequestedEvent>()
+        .listen((_) {
+          unawaited(
+            widget.sessionController.refreshSession(widget.authRepository),
+          );
+        });
   }
 }
