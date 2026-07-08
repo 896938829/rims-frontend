@@ -1,0 +1,23 @@
+docs/superpowers/plans/2026-07-08-rims-m8-integration-session-2.md
+  1abba5784c80e907 1-159
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.2.24",
+  "base_commit_sha": "cb1054e30140489354105dd4fd1835577118ee35",
+  "prompts": {
+    "1abba5784c80e907": {
+      "agent_id": {
+        "tool": "codex",
+        "id": "019f3f6f-aa29-7a03-ad44-d36080c9f26d",
+        "model": "gpt-5.5"
+      },
+      "human_author": "p-Wangsb",
+      "messages": [],
+      "total_additions": 159,
+      "total_deletions": 0,
+      "accepted_lines": 159,
+      "overriden_lines": 0
+    }
+  }
+}
