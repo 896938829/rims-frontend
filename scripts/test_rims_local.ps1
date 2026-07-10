@@ -388,6 +388,7 @@ function Get-TestAndroidChoice {
 function New-TestRuntimeState {
   param(
     [Parameter(Mandatory = $true)]
+    [AllowNull()]
     [Diagnostics.Process]$Process,
     [Parameter(Mandatory = $true)]
     [psobject]$RuntimePaths,
@@ -395,11 +396,13 @@ function New-TestRuntimeState {
     [int]$BackendPort,
     [AllowNull()]
     [AllowEmptyString()]
-    [string]$ProcessStartTimeUtc
+    [string]$ProcessStartTimeUtc,
+    [bool]$ComposeStartedByController = $false,
+    [bool]$CleanupPending = $false
   )
 
   $startTime = $ProcessStartTimeUtc
-  if ([string]::IsNullOrWhiteSpace($startTime)) {
+  if ($null -ne $Process -and [string]::IsNullOrWhiteSpace($startTime)) {
     $startTime = $Process.StartTime.ToUniversalTime().ToString(
       'o',
       [Globalization.CultureInfo]::InvariantCulture
@@ -417,7 +420,10 @@ function New-TestRuntimeState {
     frontendPort = 8091
     startedAt = Get-RimsLocalTimestamp
     healthUrl = "http://localhost:$BackendPort/healthz"
-    windowsPid = $Process.Id
+    healthy = $false
+    cleanupPending = $CleanupPending
+    failureContext = ''
+    windowsPid = if ($null -ne $Process) { $Process.Id } else { $null }
     windowsProcessStartTimeUtc = $startTime
     linuxProcessGroupId = $null
     runtimeRoot = $RuntimePaths.root
@@ -426,8 +432,11 @@ function New-TestRuntimeState {
     stderrLogPath = $RuntimePaths.stderrLog
     commandSummary = 'test managed PowerShell child'
     dependencyOwnership = [pscustomobject][ordered]@{
-      postgresWasRunning = $true
-      composeStartedByController = $false
+      postgresExisted = -not $ComposeStartedByController
+      postgresWasRunning = -not $ComposeStartedByController
+      composeStartedByController = $ComposeStartedByController
+      cleanupPending = $CleanupPending
+      cleanupFailureDetail = ''
     }
   }
 }
@@ -872,81 +881,171 @@ try {
     -Value (Test-Path -LiteralPath $runtimePaths.state) `
     -Message 'Down left managed state behind.'
 
-  $cleanupSuccessPort = Get-TestEphemeralPort
-  $cleanupSuccessChild = Start-TestSleepProcess `
-    -TrackedProcesses $trackedLifecycleProcesses
-  $cleanupSuccessState = New-TestRuntimeState `
-    -Process $cleanupSuccessChild `
-    -RuntimePaths $runtimePaths `
-    -BackendPort $cleanupSuccessPort
-  $cleanupSuccess = Resolve-RimsFailedBackendStart `
-    -Paths $runtimePaths `
-    -State $cleanupSuccessState `
-    -FailureContext 'Readiness failed DB_PASSWORD=cleanup-success-secret' `
-    -CleanupAction {
-      param([psobject]$State)
-      return Stop-RimsOwnedBackendProcess -State $State
+  $failedStartStages = @(
+    [pscustomobject]@{ name = 'compose-up'; backendStarted = $false },
+    [pscustomobject]@{ name = 'postgres-readiness'; backendStarted = $false },
+    [pscustomobject]@{ name = 'migration'; backendStarted = $false },
+    [pscustomobject]@{ name = 'backend-start'; backendStarted = $true },
+    [pscustomobject]@{ name = 'state-persistence'; backendStarted = $true }
+  )
+  foreach ($failedStartStage in $failedStartStages) {
+    $stagePort = Get-TestEphemeralPort
+    $stageChild = if ($failedStartStage.backendStarted) {
+      Start-TestSleepProcess -TrackedProcesses $trackedLifecycleProcesses
+    } else {
+      $null
     }
-  Assert-True `
-    -Value $cleanupSuccess.cleanupSucceeded `
-    -Message 'Successful failed-start cleanup was not recorded.'
-  Assert-False `
-    -Value $cleanupSuccess.managed `
-    -Message 'Successful failed-start cleanup still reported managed ownership.'
-  Assert-False `
-    -Value $cleanupSuccess.stateRetained `
-    -Message 'Successful failed-start cleanup retained partial state.'
-  Assert-False `
-    -Value (Test-Path -LiteralPath $runtimePaths.state) `
-    -Message 'Successful failed-start cleanup left state.json behind.'
-  Assert-True `
-    -Value (Wait-TestProcessExit -ProcessId $cleanupSuccessChild.Id) `
-    -Message 'Successful failed-start cleanup left its child alive.'
+    $stageState = New-TestRuntimeState `
+      -Process $stageChild `
+      -RuntimePaths $runtimePaths `
+      -BackendPort $stagePort `
+      -ComposeStartedByController $true
+    $stageCleanup = Resolve-RimsFailedLifecycleCleanup `
+      -Paths $runtimePaths `
+      -State $stageState `
+      -BackendWorkspaceRoot 'C:\test-backend-runtime' `
+      -FailureContext "$($failedStartStage.name) failed DB_PASSWORD=stage-secret" `
+      -BackendCleanupAction {
+        param([psobject]$State)
+        return Stop-RimsOwnedBackendProcess -State $State
+      } `
+      -ComposeCleanupAction {
+        param([string]$BackendWorkspaceRoot)
+        $inFlightState = Read-RimsRuntimeState -Paths $runtimePaths
+        if ($null -eq $inFlightState -or
+            -not $inFlightState.cleanupPending -or
+            -not $inFlightState.dependencyOwnership.cleanupPending) {
+          throw 'Compose cleanup began before pending ownership was persisted.'
+        }
+        return [pscustomobject]@{
+          ok = $true
+          detail = 'Controller-owned Compose cleanup completed.'
+        }
+      }
+    Assert-True `
+      -Value $stageCleanup.ok `
+      -Message "Failed-start cleanup did not complete for $($failedStartStage.name)."
+    Assert-True `
+      -Value $stageCleanup.backendCleanup.ok `
+      -Message "Backend cleanup outcome failed for $($failedStartStage.name)."
+    Assert-True `
+      -Value $stageCleanup.dependencyCleanup.ok `
+      -Message "Dependency cleanup outcome failed for $($failedStartStage.name)."
+    Assert-False `
+      -Value (Test-Path -LiteralPath $runtimePaths.state) `
+      -Message "Successful cleanup retained state for $($failedStartStage.name)."
+    if ($null -ne $stageChild) {
+      Assert-True `
+        -Value (Wait-TestProcessExit -ProcessId $stageChild.Id) `
+        -Message "Successful cleanup left a child for $($failedStartStage.name)."
+    }
+  }
 
-  $cleanupFailurePort = Get-TestEphemeralPort
-  $cleanupFailureChild = Start-TestSleepProcess `
+  $deferredComposePort = Get-TestEphemeralPort
+  $deferredComposeChild = Start-TestSleepProcess `
     -TrackedProcesses $trackedLifecycleProcesses
-  $cleanupFailureState = New-TestRuntimeState `
-    -Process $cleanupFailureChild `
+  $deferredComposeState = New-TestRuntimeState `
+    -Process $deferredComposeChild `
     -RuntimePaths $runtimePaths `
-    -BackendPort $cleanupFailurePort
-  $cleanupFailure = Resolve-RimsFailedBackendStart `
+    -BackendPort $deferredComposePort `
+    -ComposeStartedByController $true
+  $composeCallCounter = [pscustomobject]@{ count = 0 }
+  $deferredCleanup = Resolve-RimsFailedLifecycleCleanup `
     -Paths $runtimePaths `
-    -State $cleanupFailureState `
-    -FailureContext 'Readiness failed DB_PASSWORD=partial-state-secret' `
-    -CleanupAction {
+    -State $deferredComposeState `
+    -BackendWorkspaceRoot 'C:\test-backend-runtime' `
+    -FailureContext 'Backend cleanup failed DB_PASSWORD=deferred-secret' `
+    -BackendCleanupAction {
       param([psobject]$State)
       return $false
+    } `
+    -ComposeCleanupAction {
+      param([string]$BackendWorkspaceRoot)
+      $composeCallCounter.count++
+      return [pscustomobject]@{ ok = $true; detail = 'Must not run.' }
     }
   Assert-False `
-    -Value $cleanupFailure.cleanupSucceeded `
-    -Message 'Failed cleanup unexpectedly reported success.'
+    -Value $deferredCleanup.ok `
+    -Message 'Backend cleanup failure unexpectedly completed lifecycle cleanup.'
+  Assert-Equal `
+    -Actual $composeCallCounter.count `
+    -Expected 0 `
+    -Message 'Compose cleanup ran before backend ownership was released.'
+  $deferredState = Read-RimsRuntimeState -Paths $runtimePaths
   Assert-True `
-    -Value $cleanupFailure.managed `
-    -Message 'Failed cleanup did not retain managed ownership.'
+    -Value (Test-RimsStateOwnsProcess -State $deferredState) `
+    -Message 'Backend cleanup failure lost the backend ownership tuple.'
   Assert-True `
-    -Value $cleanupFailure.stateRetained `
-    -Message 'Failed cleanup did not retain partial state.'
-  if (-not $cleanupFailure.remediation.Contains('down')) {
-    throw 'Failed cleanup did not direct the caller to run down.'
-  }
-  $retainedCleanupState = Read-RimsRuntimeState -Paths $runtimePaths
+    -Value $deferredState.dependencyOwnership.composeStartedByController `
+    -Message 'Backend cleanup failure lost dependency ownership.'
+  $finishDeferred = Resolve-RimsFailedLifecycleCleanup `
+    -Paths $runtimePaths `
+    -State $deferredState `
+    -BackendWorkspaceRoot 'C:\test-backend-runtime' `
+    -FailureContext 'Retry deferred cleanup' `
+    -BackendCleanupAction {
+      param([psobject]$State)
+      return Stop-RimsOwnedBackendProcess -State $State
+    } `
+    -ComposeCleanupAction {
+      param([string]$BackendWorkspaceRoot)
+      return [pscustomobject]@{ ok = $true; detail = 'Compose cleanup completed.' }
+    }
   Assert-True `
-    -Value (Test-RimsStateOwnsProcess -State $retainedCleanupState) `
-    -Message 'Retained failed-start state lost exact process ownership.'
+    -Value $finishDeferred.ok `
+    -Message 'Deferred backend and dependency cleanup could not complete.'
+
+  $pendingPort = Get-TestEphemeralPort
+  $pendingState = New-TestRuntimeState `
+    -Process $null `
+    -RuntimePaths $runtimePaths `
+    -BackendPort $pendingPort `
+    -ComposeStartedByController $true
+  $pendingCleanup = Resolve-RimsFailedLifecycleCleanup `
+    -Paths $runtimePaths `
+    -State $pendingState `
+    -BackendWorkspaceRoot 'C:\test-backend-runtime' `
+    -FailureContext 'Migration failed DB_PASSWORD=pending-context-secret' `
+    -ComposeCleanupAction {
+      param([string]$BackendWorkspaceRoot)
+      return [pscustomobject]@{
+        ok = $false
+        detail = 'Compose down failed POSTGRES_PASSWORD=compose-cleanup-secret'
+      }
+    }
   Assert-False `
-    -Value $retainedCleanupState.healthy `
-    -Message 'Retained failed-start state reported healthy.'
-  if (-not $retainedCleanupState.failureContext.Contains('Readiness failed') -or
-      $retainedCleanupState.failureContext.Contains('partial-state-secret')) {
-    throw 'Retained failed-start state omitted context or leaked a secret.'
+    -Value $pendingCleanup.ok `
+    -Message 'Failed Compose cleanup unexpectedly completed lifecycle cleanup.'
+  Assert-True `
+    -Value $pendingCleanup.cleanupPending `
+    -Message 'Failed Compose cleanup omitted cleanupPending.'
+  Assert-False `
+    -Value $pendingCleanup.managed `
+    -Message 'Dependency-only cleanup state reported a managed backend.'
+  $retainedPendingState = Read-RimsRuntimeState -Paths $runtimePaths
+  Assert-True `
+    -Value $retainedPendingState.cleanupPending `
+    -Message 'Dependency-only pending state omitted top-level cleanupPending.'
+  Assert-True `
+    -Value $retainedPendingState.dependencyOwnership.cleanupPending `
+    -Message 'Dependency-only pending state omitted dependency cleanupPending.'
+  Assert-True `
+    -Value $retainedPendingState.dependencyOwnership.composeStartedByController `
+    -Message 'Dependency-only pending state lost Compose ownership.'
+  Assert-Equal `
+    -Actual $retainedPendingState.windowsPid `
+    -Expected $null `
+    -Message 'Dependency-only pending state retained a backend PID.'
+  $serializedPendingState = $retainedPendingState | ConvertTo-Json -Depth 10
+  foreach ($pendingSecret in @('pending-context-secret', 'compose-cleanup-secret')) {
+    if ($serializedPendingState.Contains($pendingSecret)) {
+      throw "Cleanup-pending state leaked '$pendingSecret'."
+    }
   }
 
-  $retryCleanupDown = Invoke-LocalCli -Arguments @(
+  $pendingStatus = Invoke-LocalCli -Arguments @(
     '-Command',
-    'down',
-    '-Target',
-    'none',
+    'status',
     '-Output',
     'Json',
     '-BackendDir',
@@ -954,18 +1053,77 @@ try {
     '-BackendWorkspaceRoot',
     'C:\test-backend-runtime',
     '-BackendPort',
-    [string]$cleanupFailurePort
+    [string]$pendingPort
   )
-  Assert-Equal `
-    -Actual $retryCleanupDown.ExitCode `
+  Assert-NotEqual `
+    -Actual $pendingStatus.ExitCode `
     -Expected 0 `
-    -Message 'Down could not retry a retained failed-start cleanup.'
+    -Message 'Status reported cleanup-pending state as healthy.'
+  $pendingStatusResult = ConvertFrom-SingleJson `
+    -Text $pendingStatus.StandardOutput `
+    -Context 'Cleanup-pending status'
+  $pendingBackendComponent = @($pendingStatusResult.components | Where-Object {
+      $_.name -eq 'backend'
+    })[0]
   Assert-True `
-    -Value (Wait-TestProcessExit -ProcessId $cleanupFailureChild.Id) `
-    -Message 'Retried failed-start cleanup left its child alive.'
+    -Value $pendingBackendComponent.cleanupPending `
+    -Message 'Status omitted cleanupPending from its backend component.'
   Assert-False `
+    -Value $pendingBackendComponent.managed `
+    -Message 'Status reported dependency-only cleanup as a managed backend.'
+  Assert-True `
     -Value (Test-Path -LiteralPath $runtimePaths.state) `
-    -Message 'Retried failed-start cleanup left state.json behind.'
+    -Message 'Status deleted dependency-only cleanup-pending state.'
+
+  $composeDownFunction = Get-Item -LiteralPath 'Function:\Invoke-RimsComposeDown'
+  $originalComposeDown = $composeDownFunction.ScriptBlock
+  try {
+    Set-Item `
+      -LiteralPath 'Function:\Invoke-RimsComposeDown' `
+      -Value {
+        param([string]$BackendWorkspaceRoot)
+        return [pscustomobject]@{
+          ok = $false
+          detail = 'Injected Compose retry failure API_KEY=retry-secret'
+        }
+      }
+    $failedPendingDown = Invoke-RimsLocalDown `
+      -ScriptDirectory $scriptDir `
+      -BackendDir 'C:\test-backend-source' `
+      -BackendWorkspaceRoot 'C:\test-backend-runtime' `
+      -BackendPort $pendingPort
+    Assert-False `
+      -Value $failedPendingDown.ok `
+      -Message 'Down reported success when pending Compose cleanup failed.'
+    Assert-True `
+      -Value (Test-Path -LiteralPath $runtimePaths.state) `
+      -Message 'Down removed state after failed pending Compose cleanup.'
+
+    Set-Item `
+      -LiteralPath 'Function:\Invoke-RimsComposeDown' `
+      -Value {
+        param([string]$BackendWorkspaceRoot)
+        return [pscustomobject]@{
+          ok = $true
+          detail = 'Injected Compose retry completed.'
+        }
+      }
+    $successfulPendingDown = Invoke-RimsLocalDown `
+      -ScriptDirectory $scriptDir `
+      -BackendDir 'C:\test-backend-source' `
+      -BackendWorkspaceRoot 'C:\test-backend-runtime' `
+      -BackendPort $pendingPort
+    Assert-True `
+      -Value $successfulPendingDown.ok `
+      -Message 'Down could not complete pending dependency cleanup.'
+    Assert-False `
+      -Value (Test-Path -LiteralPath $runtimePaths.state) `
+      -Message 'Down retained state after successful pending cleanup.'
+  } finally {
+    Set-Item `
+      -LiteralPath 'Function:\Invoke-RimsComposeDown' `
+      -Value $originalComposeDown
+  }
 
   $listener = New-Object Net.Sockets.TcpListener(
     [Net.IPAddress]::Loopback,
@@ -1783,6 +1941,35 @@ Assert-Equal `
   -Actual @($localParseErrors).Count `
   -Expected 0 `
   -Message 'Local runtime script contains parse errors.'
+
+$commonTokens = $null
+$commonParseErrors = $null
+$commonAst = [Management.Automation.Language.Parser]::ParseFile(
+  $commonScript,
+  [ref]$commonTokens,
+  [ref]$commonParseErrors
+)
+Assert-Equal `
+  -Actual @($commonParseErrors).Count `
+  -Expected 0 `
+  -Message 'Local runtime common script contains parse errors.'
+$upFunctionAst = @($commonAst.FindAll({
+      param($node)
+      $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+        $node.Name -eq 'Invoke-RimsLocalUp'
+    }, $true))[0]
+if ($null -eq $upFunctionAst) {
+  throw 'Invoke-RimsLocalUp is missing from the common lifecycle script.'
+}
+$failedUpCleanupCalls = @($upFunctionAst.FindAll({
+      param($node)
+      $node -is [Management.Automation.Language.CommandAst] -and
+        $node.GetCommandName() -eq 'Complete-RimsFailedUpResult'
+    }, $true))
+Assert-Equal `
+  -Actual $failedUpCleanupCalls.Count `
+  -Expected 5 `
+  -Message 'All five post-dependency up failure branches must use centralized cleanup.'
 
 $validateSetCommands = @(Get-ValidateSetValues `
   -Ast $localAst `

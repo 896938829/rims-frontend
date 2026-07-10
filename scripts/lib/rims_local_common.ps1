@@ -1594,7 +1594,8 @@ function New-RimsBackendLifecycleComponent {
     [Parameter(Mandatory = $true)]
     [int]$Port,
     [AllowNull()]
-    [object]$ProcessId = $null
+    [object]$ProcessId = $null,
+    [bool]$CleanupPending = $false
   )
 
   return [pscustomobject][ordered]@{
@@ -1606,9 +1607,31 @@ function New-RimsBackendLifecycleComponent {
     managed = $Managed
     healthy = $Healthy
     stale = $Stale
+    cleanupPending = $CleanupPending
     port = $Port
     windowsPid = $ProcessId
   }
+}
+
+function Test-RimsRuntimeCleanupPending {
+  param(
+    [AllowNull()]
+    [object]$State
+  )
+
+  $dependencyOwnership = Get-RimsObjectPropertyValue `
+    -Value $State `
+    -Name 'dependencyOwnership'
+  return (
+    [bool](Get-RimsObjectPropertyValue `
+        -Value $State `
+        -Name 'cleanupPending' `
+        -DefaultValue $false) -or
+    [bool](Get-RimsObjectPropertyValue `
+        -Value $dependencyOwnership `
+        -Name 'cleanupPending' `
+        -DefaultValue $false)
+  )
 }
 
 function New-RimsRuntimePathsComponent {
@@ -1860,6 +1883,58 @@ function Invoke-RimsLocalStatus {
     -BackendWorkspaceRoot $resolved.workspacePath `
     -BackendPort $BackendPort
   $owned = Test-RimsStateOwnsProcess -State $state
+  $cleanupPending = Test-RimsRuntimeCleanupPending -State $state
+  if (-not $matches) {
+    $result.components += New-RimsBackendLifecycleComponent `
+      -Ok $false `
+      -Detail 'Managed state belongs to different backend paths or port; controller-owned resources were left untouched.' `
+      -Remediation 'Repeat the command with the paths and port recorded in state.json.' `
+      -Managed $owned `
+      -Healthy $false `
+      -Stale $false `
+      -Port $BackendPort `
+      -ProcessId (Get-RimsObjectPropertyValue -Value $state -Name 'windowsPid') `
+      -CleanupPending $cleanupPending
+    return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+  }
+
+  if ($cleanupPending) {
+    $dependencyOwnership = Get-RimsObjectPropertyValue `
+      -Value $state `
+      -Name 'dependencyOwnership'
+    $dependencyDetail = [string](Get-RimsObjectPropertyValue `
+        -Value $dependencyOwnership `
+        -Name 'cleanupFailureDetail' `
+        -DefaultValue 'Controller-owned dependency cleanup remains pending.')
+    $result.components += New-RimsBackendLifecycleComponent `
+      -Ok $false `
+      -Detail $(if ($owned) {
+          'Backend and dependency cleanup remain pending; exact backend ownership was preserved.'
+        } else {
+          'Dependency cleanup remains pending; no managed backend process is present.'
+        }) `
+      -Remediation 'Run down with the same backend paths and port to retry bounded cleanup.' `
+      -Managed $owned `
+      -Healthy $false `
+      -Stale $false `
+      -Port $BackendPort `
+      -ProcessId $(if ($owned) {
+          Get-RimsObjectPropertyValue -Value $state -Name 'windowsPid'
+        } else {
+          $null
+        }) `
+      -CleanupPending $true
+    $result.components += New-RimsLocalComponent `
+      -Name 'dependencyCleanup' `
+      -Ok $false `
+      -Required $true `
+      -Detail (ConvertTo-RimsDiagnosticSummary `
+        -StandardOutput $dependencyDetail `
+        -StandardError '') `
+      -Remediation 'Restore WSL and Docker, then run down with the same parameters.'
+    return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+  }
+
   if (-not $owned) {
     Remove-RimsRuntimeState -Paths $paths
     $result.components += New-RimsBackendLifecycleComponent `
@@ -1869,18 +1944,6 @@ function Invoke-RimsLocalStatus {
       -Managed $false `
       -Healthy $false `
       -Stale $true `
-      -Port $BackendPort `
-      -ProcessId (Get-RimsObjectPropertyValue -Value $state -Name 'windowsPid')
-    return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
-  }
-  if (-not $matches) {
-    $result.components += New-RimsBackendLifecycleComponent `
-      -Ok $false `
-      -Detail 'Managed state belongs to different backend paths or port; the owned process was left untouched.' `
-      -Remediation 'Repeat the command with the paths and port recorded in state.json.' `
-      -Managed $true `
-      -Healthy $false `
-      -Stale $false `
       -Port $BackendPort `
       -ProcessId (Get-RimsObjectPropertyValue -Value $state -Name 'windowsPid')
     return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
@@ -2050,17 +2113,85 @@ function Stop-RimsOwnedBackendProcess {
   return Wait-RimsOwnedProcessExit -State $State -TimeoutSeconds 5
 }
 
-function Resolve-RimsFailedBackendStart {
+function Invoke-RimsDependencyCleanup {
+  param(
+    [Parameter(Mandatory = $true)]
+    [psobject]$State,
+    [Parameter(Mandatory = $true)]
+    [string]$BackendWorkspaceRoot,
+    [AllowNull()]
+    [scriptblock]$ComposeCleanupAction
+  )
+
+  $dependencyOwnership = Get-RimsObjectPropertyValue `
+    -Value $State `
+    -Name 'dependencyOwnership'
+  $composeOwned = [bool](Get-RimsObjectPropertyValue `
+      -Value $dependencyOwnership `
+      -Name 'composeStartedByController' `
+      -DefaultValue $false)
+  if (-not $composeOwned) {
+    return [pscustomobject][ordered]@{
+      required = $false
+      attempted = $false
+      ok = $true
+      detail = 'PostgreSQL was not started by this controller and was left untouched.'
+    }
+  }
+
+  try {
+    $rawResult = if ($null -eq $ComposeCleanupAction) {
+      Invoke-RimsComposeDown -BackendWorkspaceRoot $BackendWorkspaceRoot
+    } else {
+      & $ComposeCleanupAction $BackendWorkspaceRoot
+    }
+    $ok = [bool](Get-RimsObjectPropertyValue `
+        -Value $rawResult `
+        -Name 'ok' `
+        -DefaultValue $false)
+    $rawDetail = [string](Get-RimsObjectPropertyValue `
+        -Value $rawResult `
+        -Name 'detail' `
+        -DefaultValue $(if ($ok) {
+            'Controller-owned dependency cleanup completed.'
+          } else {
+            'Controller-owned dependency cleanup failed without detail.'
+          }))
+    return [pscustomobject][ordered]@{
+      required = $true
+      attempted = $true
+      ok = $ok
+      detail = ConvertTo-RimsDiagnosticSummary `
+        -StandardOutput $rawDetail `
+        -StandardError ''
+    }
+  } catch {
+    return [pscustomobject][ordered]@{
+      required = $true
+      attempted = $true
+      ok = $false
+      detail = ConvertTo-RimsDiagnosticSummary `
+        -StandardOutput '' `
+        -StandardError $_.Exception.Message
+    }
+  }
+}
+
+function Resolve-RimsFailedLifecycleCleanup {
   param(
     [Parameter(Mandatory = $true)]
     [psobject]$Paths,
     [Parameter(Mandatory = $true)]
     [psobject]$State,
     [Parameter(Mandatory = $true)]
+    [string]$BackendWorkspaceRoot,
+    [Parameter(Mandatory = $true)]
     [AllowEmptyString()]
     [string]$FailureContext,
     [AllowNull()]
-    [scriptblock]$CleanupAction
+    [scriptblock]$BackendCleanupAction,
+    [AllowNull()]
+    [scriptblock]$ComposeCleanupAction
   )
 
   $sanitizedFailure = ConvertTo-RimsDiagnosticSummary `
@@ -2077,59 +2208,207 @@ function Resolve-RimsFailedBackendStart {
     -Value $sanitizedFailure `
     -Force
 
+  $dependencyOwnership = Get-RimsObjectPropertyValue `
+    -Value $State `
+    -Name 'dependencyOwnership'
+  if ($null -eq $dependencyOwnership) {
+    $dependencyOwnership = [pscustomobject][ordered]@{
+      postgresExisted = $true
+      postgresWasRunning = $true
+      composeStartedByController = $false
+      cleanupPending = $false
+      cleanupFailureDetail = ''
+    }
+    $State | Add-Member `
+      -MemberType NoteProperty `
+      -Name dependencyOwnership `
+      -Value $dependencyOwnership `
+      -Force
+  }
+  $composeOwned = [bool](Get-RimsObjectPropertyValue `
+      -Value $dependencyOwnership `
+      -Name 'composeStartedByController' `
+      -DefaultValue $false)
+  $State | Add-Member `
+    -MemberType NoteProperty `
+    -Name cleanupPending `
+    -Value $true `
+    -Force
+  $dependencyOwnership | Add-Member `
+    -MemberType NoteProperty `
+    -Name cleanupPending `
+    -Value $composeOwned `
+    -Force
+
+  try {
+    Write-RimsRuntimeState -Paths $Paths -State $State
+  } catch {
+    # Cleanup still proceeds; pending ownership is persisted again if needed.
+  }
+
+  $backendWasOwned = Test-RimsStateOwnsProcess -State $State
+  $backendCleanupOk = $true
+  $backendCleanupDetail = 'No owned backend process required cleanup.'
+  $backendCleanupAttempted = $false
+  if ($backendWasOwned) {
+    $backendCleanupAttempted = $true
+    $reportedBackendCleanup = $false
+    $backendActionDetail = ''
+    try {
+      $rawBackendCleanup = if ($null -eq $BackendCleanupAction) {
+        Stop-RimsOwnedBackendProcess -State $State
+      } else {
+        & $BackendCleanupAction $State
+      }
+      $reportedBackendCleanup = [bool](Get-RimsObjectPropertyValue `
+          -Value $rawBackendCleanup `
+          -Name 'ok' `
+          -DefaultValue $rawBackendCleanup)
+      $backendActionDetail = [string](Get-RimsObjectPropertyValue `
+          -Value $rawBackendCleanup `
+          -Name 'detail' `
+          -DefaultValue '')
+    } catch {
+      $reportedBackendCleanup = $false
+      $backendActionDetail = $_.Exception.Message
+    }
+    $backendCleanupOk = -not (Test-RimsStateOwnsProcess -State $State)
+    $backendCleanupDetail = if ($backendCleanupOk) {
+      'The exactly owned backend process was confirmed stopped.'
+    } elseif ($reportedBackendCleanup) {
+      'Backend cleanup reported success, but exact process ownership remains.'
+    } elseif ([string]::IsNullOrWhiteSpace($backendActionDetail)) {
+      'The exactly owned backend process did not stop within the bounded cleanup.'
+    } else {
+      ConvertTo-RimsDiagnosticSummary `
+        -StandardOutput $backendActionDetail `
+        -StandardError ''
+    }
+  }
+
+  if ($backendCleanupOk) {
+    foreach ($propertyName in @(
+        'windowsPid',
+        'windowsProcessStartTimeUtc',
+        'linuxProcessGroupId'
+      )) {
+      $State | Add-Member `
+        -MemberType NoteProperty `
+        -Name $propertyName `
+        -Value $null `
+        -Force
+    }
+  }
+
+  $dependencyCleanup = if ($backendCleanupOk) {
+    Invoke-RimsDependencyCleanup `
+      -State $State `
+      -BackendWorkspaceRoot $BackendWorkspaceRoot `
+      -ComposeCleanupAction $ComposeCleanupAction
+  } else {
+    [pscustomobject][ordered]@{
+      required = $composeOwned
+      attempted = $false
+      ok = -not $composeOwned
+      detail = if ($composeOwned) {
+        'Dependency cleanup is deferred until the owned backend is confirmed stopped.'
+      } else {
+        'No controller-owned dependency requires cleanup.'
+      }
+    }
+  }
+  $backendCleanup = [pscustomobject][ordered]@{
+    required = $backendWasOwned
+    attempted = $backendCleanupAttempted
+    ok = $backendCleanupOk
+    detail = ConvertTo-RimsDiagnosticSummary `
+      -StandardOutput $backendCleanupDetail `
+      -StandardError ''
+  }
+
+  if ($backendCleanup.ok -and $dependencyCleanup.ok) {
+    if ($composeOwned) {
+      $dependencyOwnership | Add-Member `
+        -MemberType NoteProperty `
+        -Name composeStartedByController `
+        -Value $false `
+        -Force
+    }
+    try {
+      Remove-RimsRuntimeState -Paths $Paths
+      return [pscustomobject][ordered]@{
+        ok = $true
+        backendCleanup = $backendCleanup
+        dependencyCleanup = $dependencyCleanup
+        cleanupPending = $false
+        managed = $false
+        healthy = $false
+        stateRetained = $false
+        detail = 'All controller-owned runtime resources were cleaned up and state was removed.'
+        remediation = ''
+      }
+    } catch {
+      $sanitizedFailure = ConvertTo-RimsDiagnosticSummary `
+        -StandardOutput "Cleanup completed, but runtime state removal failed: $($_.Exception.Message)" `
+        -StandardError ''
+    }
+  }
+
+  $dependencyStillPending = -not $dependencyCleanup.ok -and $composeOwned
+  $State | Add-Member `
+    -MemberType NoteProperty `
+    -Name cleanupPending `
+    -Value $true `
+    -Force
+  $State | Add-Member `
+    -MemberType NoteProperty `
+    -Name healthy `
+    -Value $false `
+    -Force
+  $State | Add-Member `
+    -MemberType NoteProperty `
+    -Name failureContext `
+    -Value $sanitizedFailure `
+    -Force
+  $dependencyOwnership | Add-Member `
+    -MemberType NoteProperty `
+    -Name cleanupPending `
+    -Value $dependencyStillPending `
+    -Force
+  $dependencyOwnership | Add-Member `
+    -MemberType NoteProperty `
+    -Name cleanupFailureDetail `
+    -Value $(if ($dependencyStillPending) {
+        ConvertTo-RimsDiagnosticSummary `
+          -StandardOutput $dependencyCleanup.detail `
+          -StandardError ''
+      } else {
+        ''
+      }) `
+    -Force
+
   $statePersisted = $false
-  $stateError = ''
+  $stateWriteDetail = ''
   try {
     Write-RimsRuntimeState -Paths $Paths -State $State
     $statePersisted = $true
   } catch {
-    $stateError = ConvertTo-RimsDiagnosticSummary `
+    $stateWriteDetail = ConvertTo-RimsDiagnosticSummary `
       -StandardOutput '' `
       -StandardError $_.Exception.Message
   }
-
-  $cleanupSucceeded = $false
-  try {
-    $cleanupSucceeded = if ($null -eq $CleanupAction) {
-      Stop-RimsOwnedBackendProcess -State $State
-    } else {
-      [bool](& $CleanupAction $State)
-    }
-  } catch {
-    $cleanupSucceeded = $false
-  }
-
-  if ($cleanupSucceeded) {
-    Remove-RimsRuntimeState -Paths $Paths
-    return [pscustomobject][ordered]@{
-      cleanupSucceeded = $true
-      managed = $false
-      healthy = $false
-      stateRetained = $false
-      detail = 'Failed backend startup was cleaned up and partial state was removed.'
-      remediation = ''
-    }
-  }
-
-  if (-not $statePersisted) {
-    try {
-      Write-RimsRuntimeState -Paths $Paths -State $State
-      $statePersisted = $true
-      $stateError = ''
-    } catch {
-      $stateError = ConvertTo-RimsDiagnosticSummary `
-        -StandardOutput '' `
-        -StandardError $_.Exception.Message
-    }
-  }
+  $managed = Test-RimsStateOwnsProcess -State $State
   $detail = if ($statePersisted) {
-    'Failed backend startup cleanup was inconclusive; managed ownership state was retained.'
+    'Cleanup remains pending; controller ownership state was retained for a bounded down retry.'
   } else {
-    "Failed backend startup cleanup was inconclusive and state could not be persisted: $stateError"
+    "Cleanup remains pending and ownership state could not be persisted: $stateWriteDetail"
   }
   return [pscustomobject][ordered]@{
-    cleanupSucceeded = $false
-    managed = $true
+    ok = $false
+    backendCleanup = $backendCleanup
+    dependencyCleanup = $dependencyCleanup
+    cleanupPending = $true
+    managed = $managed
     healthy = $false
     stateRetained = $statePersisted
     detail = $detail
@@ -2281,64 +2560,46 @@ function Invoke-RimsLocalDown {
   }
 
   $wasOwned = Test-RimsStateOwnsProcess -State $state
-  if ($wasOwned -and -not (Stop-RimsOwnedBackendProcess -State $state)) {
-    $result.components += New-RimsBackendLifecycleComponent `
-      -Ok $false `
-      -Detail 'The exactly owned backend process did not stop within the bounded timeout.' `
-      -Remediation 'Inspect status and logs, then retry down with the same parameters.' `
-      -Managed $true `
-      -Healthy $false `
-      -Stale $false `
-      -Port $BackendPort `
-      -ProcessId (Get-RimsObjectPropertyValue -Value $state -Name 'windowsPid')
-    return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
-  }
-
-  $dependencyOwnership = Get-RimsObjectPropertyValue `
-    -Value $state `
-    -Name 'dependencyOwnership'
-  $composeStarted = [bool](Get-RimsObjectPropertyValue `
-      -Value $dependencyOwnership `
-      -Name 'composeStartedByController' `
-      -DefaultValue $false)
-  if ($composeStarted) {
-    $composeDown = Invoke-RimsComposeDown `
-      -BackendWorkspaceRoot $resolved.workspacePath
-    $result.components += New-RimsLocalComponent `
-      -Name 'postgres' `
-      -Ok $composeDown.ok `
-      -Required $false `
-      -Detail $composeDown.detail `
-      -Remediation $(if ($composeDown.ok) { '' } else {
-          'Restore WSL and Docker, then retry down with the same parameters.'
-        })
-    if (-not $composeDown.ok) {
-      return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
-    }
-  } else {
-    $result.components += New-RimsLocalComponent `
-      -Name 'postgres' `
-      -Ok $true `
-      -Required $false `
-      -Detail 'PostgreSQL was not started by this controller and was left untouched.' `
-      -Remediation ''
-  }
-
-  Remove-RimsRuntimeState -Paths $paths
+  $wasCleanupPending = Test-RimsRuntimeCleanupPending -State $state
+  $cleanupOutcome = Resolve-RimsFailedLifecycleCleanup `
+    -Paths $paths `
+    -State $state `
+    -BackendWorkspaceRoot $resolved.workspacePath `
+    -FailureContext 'The down command is completing controller-owned runtime cleanup.'
+  $result.components += New-RimsLocalComponent `
+    -Name 'dependencyCleanup' `
+    -Ok $cleanupOutcome.dependencyCleanup.ok `
+    -Required $cleanupOutcome.dependencyCleanup.required `
+    -Detail $cleanupOutcome.dependencyCleanup.detail `
+    -Remediation $(if ($cleanupOutcome.dependencyCleanup.ok) { '' } else {
+        'Restore WSL and Docker, then retry down with the same parameters.'
+      })
   $result.components += New-RimsBackendLifecycleComponent `
-    -Ok $true `
-    -Detail $(if ($wasOwned) {
-        'Stopped the exactly owned managed backend and removed runtime state.'
+    -Ok $cleanupOutcome.backendCleanup.ok `
+    -Detail $(if ($cleanupOutcome.ok -and $wasOwned) {
+        'Stopped the exactly owned managed backend and completed runtime cleanup.'
+      } elseif ($cleanupOutcome.ok -and $wasCleanupPending) {
+        'Completed pending controller-owned runtime cleanup.'
+      } elseif ($cleanupOutcome.ok) {
+        'Removed stale runtime state without terminating any unrelated process.'
       } else {
-        'Removed stale runtime state without terminating any process.'
+        "$($cleanupOutcome.backendCleanup.detail) $($cleanupOutcome.detail)"
       }) `
-    -Remediation '' `
-    -Managed $false `
+    -Remediation $cleanupOutcome.remediation `
+    -Managed $cleanupOutcome.managed `
     -Healthy $false `
-    -Stale (-not $wasOwned) `
+    -Stale (-not $wasOwned -and -not $wasCleanupPending) `
     -Port $BackendPort `
-    -ProcessId (Get-RimsObjectPropertyValue -Value $state -Name 'windowsPid')
-  return Complete-RimsLocalResult -Result $result -Ok $true -ExitCode 0
+    -ProcessId $(if ($cleanupOutcome.managed) {
+        Get-RimsObjectPropertyValue -Value $state -Name 'windowsPid'
+      } else {
+        $null
+      }) `
+    -CleanupPending $cleanupOutcome.cleanupPending
+  return Complete-RimsLocalResult `
+    -Result $result `
+    -Ok $cleanupOutcome.ok `
+    -ExitCode $(if ($cleanupOutcome.ok) { 0 } else { 1 })
 }
 
 function Get-RimsWslLifecycleContext {
@@ -2869,6 +3130,7 @@ function New-RimsManagedRuntimeState {
     startedAt = Get-RimsLocalTimestamp
     healthUrl = $StartedBackend.healthUrl
     healthy = $Healthy
+    cleanupPending = $false
     failureContext = if ([string]::IsNullOrWhiteSpace($FailureContext)) {
       ''
     } else {
@@ -2888,8 +3150,67 @@ function New-RimsManagedRuntimeState {
       postgresExisted = $PostgresExisted
       postgresWasRunning = $PostgresWasRunning
       composeStartedByController = $ComposeStartedByController
+      cleanupPending = $false
+      cleanupFailureDetail = ''
     }
   }
+}
+
+function Complete-RimsFailedUpResult {
+  param(
+    [Parameter(Mandatory = $true)]
+    [psobject]$Result,
+    [Parameter(Mandatory = $true)]
+    [psobject]$Paths,
+    [Parameter(Mandatory = $true)]
+    [psobject]$State,
+    [Parameter(Mandatory = $true)]
+    [string]$BackendWorkspaceRoot,
+    [Parameter(Mandatory = $true)]
+    [AllowEmptyString()]
+    [string]$FailureContext,
+    [Parameter(Mandatory = $true)]
+    [int]$BackendPort,
+    [Parameter(Mandatory = $true)]
+    [AllowEmptyString()]
+    [string]$Remediation
+  )
+
+  $cleanupOutcome = Resolve-RimsFailedLifecycleCleanup `
+    -Paths $Paths `
+    -State $State `
+    -BackendWorkspaceRoot $BackendWorkspaceRoot `
+    -FailureContext $FailureContext
+  $sanitizedFailure = ConvertTo-RimsDiagnosticSummary `
+    -StandardOutput $FailureContext `
+    -StandardError ''
+  $Result.components += New-RimsLocalComponent `
+    -Name 'dependencyCleanup' `
+    -Ok $cleanupOutcome.dependencyCleanup.ok `
+    -Required $cleanupOutcome.dependencyCleanup.required `
+    -Detail $cleanupOutcome.dependencyCleanup.detail `
+    -Remediation $(if ($cleanupOutcome.dependencyCleanup.ok) { '' } else {
+        'Restore WSL and Docker, then run down with the same parameters.'
+      })
+  $Result.components += New-RimsBackendLifecycleComponent `
+    -Ok $false `
+    -Detail "$sanitizedFailure $($cleanupOutcome.detail)" `
+    -Remediation $(if ($cleanupOutcome.cleanupPending) {
+        $cleanupOutcome.remediation
+      } else {
+        $Remediation
+      }) `
+    -Managed $cleanupOutcome.managed `
+    -Healthy $false `
+    -Stale $false `
+    -Port $BackendPort `
+    -ProcessId $(if ($cleanupOutcome.managed) {
+        Get-RimsObjectPropertyValue -Value $State -Name 'windowsPid'
+      } else {
+        $null
+      }) `
+    -CleanupPending $cleanupOutcome.cleanupPending
+  return Complete-RimsLocalResult -Result $Result -Ok $false -ExitCode 1
 }
 
 function Invoke-RimsLocalUp {
@@ -2940,7 +3261,24 @@ function Invoke-RimsLocalUp {
   $state = Read-RimsRuntimeState -Paths $paths
   if ($null -ne $state) {
     $owned = Test-RimsStateOwnsProcess -State $state
-    if (-not $owned) {
+    $cleanupPending = Test-RimsRuntimeCleanupPending -State $state
+    if ($cleanupPending) {
+      $result.components += New-RimsBackendLifecycleComponent `
+        -Ok $false `
+        -Detail 'Controller-owned cleanup is pending; up will not discard or replace its ownership state.' `
+        -Remediation 'Run down with the paths and port recorded in state.json before retrying up.' `
+        -Managed $owned `
+        -Healthy $false `
+        -Stale $false `
+        -Port $BackendPort `
+        -ProcessId $(if ($owned) {
+            Get-RimsObjectPropertyValue -Value $state -Name 'windowsPid'
+          } else {
+            $null
+          }) `
+        -CleanupPending $true
+      return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+    } elseif (-not $owned) {
       Remove-RimsRuntimeState -Paths $paths
       $state = $null
     } elseif (-not (Test-RimsRuntimeRequestMatchesState `
@@ -3000,6 +3338,9 @@ function Invoke-RimsLocalUp {
     -Detail "Port $BackendPort is available for the managed backend." `
     -Remediation ''
 
+  $frontendPath = [IO.Path]::GetFullPath(
+    (Split-Path -Parent $ScriptDirectory)
+  )
   Initialize-RimsRuntimeDirectories -Paths $paths
   $context = Get-RimsWslLifecycleContext `
     -BackendDir $resolved.backendPath `
@@ -3025,6 +3366,26 @@ function Invoke-RimsLocalUp {
   $postgresExisted = $postgresOwnership.postgresExisted
   $postgresWasRunning = $postgresOwnership.postgresWasRunning
   $composeStarted = $postgresOwnership.composeStartedByController
+  $notStartedBackend = [pscustomobject][ordered]@{
+    healthUrl = "http://localhost:$BackendPort/healthz"
+    windowsPid = $null
+    windowsProcessStartTimeUtc = $null
+    linuxProcessGroupId = $null
+  }
+  $failedLifecycleState = New-RimsManagedRuntimeState `
+    -FrontendPath $frontendPath `
+    -BackendPath $resolved.backendPath `
+    -BackendWorkspaceRoot $resolved.workspacePath `
+    -Target $Target `
+    -BackendPort $BackendPort `
+    -FrontendPort $FrontendPort `
+    -RuntimePaths $paths `
+    -StartedBackend $notStartedBackend `
+    -PostgresExisted $postgresExisted `
+    -PostgresWasRunning $postgresWasRunning `
+    -ComposeStartedByController $composeStarted `
+    -Healthy $false `
+    -FailureContext 'Backend startup did not complete.'
   if (-not $postgresBefore.healthy) {
     if (-not $IncludeDependencies) {
       $result.components += New-RimsLocalComponent `
@@ -3037,35 +3398,42 @@ function Invoke-RimsLocalUp {
     }
     $composeUp = Invoke-RimsComposeUpPostgres -Context $context
     if (-not $composeUp.ok) {
-      if ($composeStarted) {
-        [void](Invoke-RimsComposeDown `
-            -BackendWorkspaceRoot $resolved.workspacePath)
-      }
       $result.components += New-RimsLocalComponent `
         -Name 'postgres' `
         -Ok $false `
         -Required $true `
         -Detail $composeUp.detail `
         -Remediation 'Repair Docker Compose, then retry up with -IncludeDependencies.'
-      return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+      return Complete-RimsFailedUpResult `
+        -Result $result `
+        -Paths $paths `
+        -State $failedLifecycleState `
+        -BackendWorkspaceRoot $resolved.workspacePath `
+        -FailureContext $composeUp.detail `
+        -BackendPort $BackendPort `
+        -Remediation 'Repair Docker Compose, then retry up with -IncludeDependencies.'
     }
     $postgresReady = Wait-RimsPostgresHealthy -Context $context
     if ($null -eq $postgresReady -or -not $postgresReady.healthy) {
-      if ($composeStarted) {
-        [void](Invoke-RimsComposeDown `
-            -BackendWorkspaceRoot $resolved.workspacePath)
+      $readinessFailure = if ($composeStarted) {
+        'Controller-started PostgreSQL did not become healthy within 90 seconds.'
+      } else {
+        'Pre-existing PostgreSQL did not become healthy within 90 seconds and remains user-managed.'
       }
       $result.components += New-RimsLocalComponent `
         -Name 'postgres' `
         -Ok $false `
         -Required $true `
-        -Detail $(if ($composeStarted) {
-            'Controller-started PostgreSQL did not become healthy within 90 seconds.'
-          } else {
-            'Pre-existing PostgreSQL did not become healthy within 90 seconds and remains user-managed.'
-          }) `
+        -Detail $readinessFailure `
         -Remediation 'Inspect Docker Compose logs and retry after PostgreSQL is healthy.'
-      return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+      return Complete-RimsFailedUpResult `
+        -Result $result `
+        -Paths $paths `
+        -State $failedLifecycleState `
+        -BackendWorkspaceRoot $resolved.workspacePath `
+        -FailureContext $readinessFailure `
+        -BackendPort $BackendPort `
+        -Remediation 'Inspect Docker Compose logs and retry after PostgreSQL is healthy.'
     }
   }
   $result.components += New-RimsLocalComponent `
@@ -3091,31 +3459,23 @@ function Invoke-RimsLocalUp {
         'Inspect the sanitized migration error and verify database configuration.'
       })
   if (-not $migration.ok) {
-    if ($composeStarted) {
-      [void](Invoke-RimsComposeDown `
-          -BackendWorkspaceRoot $resolved.workspacePath)
-    }
-    return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+    return Complete-RimsFailedUpResult `
+      -Result $result `
+      -Paths $paths `
+      -State $failedLifecycleState `
+      -BackendWorkspaceRoot $resolved.workspacePath `
+      -FailureContext $migration.detail `
+      -BackendPort $BackendPort `
+      -Remediation 'Inspect the sanitized migration error and verify database configuration.'
   }
 
   $started = Start-RimsManagedBackend `
     -Context $context `
     -RuntimePaths $paths `
     -BackendPort $BackendPort
-  $frontendPath = [IO.Path]::GetFullPath(
-    (Split-Path -Parent $ScriptDirectory)
-  )
   if (-not $started.ok) {
-    $cleanupOutcome = [pscustomobject][ordered]@{
-      cleanupSucceeded = $true
-      managed = $false
-      healthy = $false
-      stateRetained = $false
-      detail = 'No backend process ownership was established.'
-      remediation = ''
-    }
-    if ($started.processStarted) {
-      $failedState = New-RimsManagedRuntimeState `
+    $failedState = if ($started.processStarted) {
+      New-RimsManagedRuntimeState `
         -FrontendPath $frontendPath `
         -BackendPath $resolved.backendPath `
         -BackendWorkspaceRoot $resolved.workspacePath `
@@ -3129,29 +3489,17 @@ function Invoke-RimsLocalUp {
         -ComposeStartedByController $composeStarted `
         -Healthy $false `
         -FailureContext $started.detail
-      $cleanupOutcome = Resolve-RimsFailedBackendStart `
-        -Paths $paths `
-        -State $failedState `
-        -FailureContext $started.detail
+    } else {
+      $failedLifecycleState
     }
-    if ($cleanupOutcome.cleanupSucceeded -and $composeStarted) {
-      [void](Invoke-RimsComposeDown `
-          -BackendWorkspaceRoot $resolved.workspacePath)
-    }
-    $result.components += New-RimsBackendLifecycleComponent `
-      -Ok $false `
-      -Detail "$($started.detail) $($cleanupOutcome.detail)" `
-      -Remediation $(if ($cleanupOutcome.managed) {
-          $cleanupOutcome.remediation
-        } else {
-          'Inspect the sanitized backend stderr tail, correct the failure, and retry up.'
-        }) `
-      -Managed $cleanupOutcome.managed `
-      -Healthy $false `
-      -Stale $false `
-      -Port $BackendPort `
-      -ProcessId $started.windowsPid
-    return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+    return Complete-RimsFailedUpResult `
+      -Result $result `
+      -Paths $paths `
+      -State $failedState `
+      -BackendWorkspaceRoot $resolved.workspacePath `
+      -FailureContext $started.detail `
+      -BackendPort $BackendPort `
+      -Remediation 'Inspect the sanitized backend stderr tail, correct the failure, and retry up.'
   }
 
   $newState = New-RimsManagedRuntimeState `
@@ -3173,25 +3521,15 @@ function Invoke-RimsLocalUp {
     $summary = ConvertTo-RimsDiagnosticSummary `
       -StandardOutput '' `
       -StandardError $_.Exception.Message
-    $cleanupOutcome = Resolve-RimsFailedBackendStart `
+    $result.errors = @("Could not persist managed ownership state: $summary")
+    return Complete-RimsFailedUpResult `
+      -Result $result `
       -Paths $paths `
       -State $newState `
-      -FailureContext "Could not persist managed ownership state: $summary"
-    if ($cleanupOutcome.cleanupSucceeded -and $composeStarted) {
-      [void](Invoke-RimsComposeDown `
-          -BackendWorkspaceRoot $resolved.workspacePath)
-    }
-    $result.errors = @("Could not persist managed ownership state: $summary")
-    $result.components += New-RimsBackendLifecycleComponent `
-      -Ok $false `
-      -Detail $cleanupOutcome.detail `
-      -Remediation $cleanupOutcome.remediation `
-      -Managed $cleanupOutcome.managed `
-      -Healthy $false `
-      -Stale $false `
-      -Port $BackendPort `
-      -ProcessId $started.windowsPid
-    return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+      -BackendWorkspaceRoot $resolved.workspacePath `
+      -FailureContext "Could not persist managed ownership state: $summary" `
+      -BackendPort $BackendPort `
+      -Remediation 'Restore runtime directory write access, then retry up.'
   }
 
   $result.components += New-RimsBackendLifecycleComponent `
@@ -3244,9 +3582,11 @@ function Invoke-RimsLocalRestart {
         -BackendWorkspaceRoot $resolved.workspacePath `
         -BackendPort $BackendPort)) {
     if ($null -ne $state -and
-        -not (Test-RimsStateOwnsProcess -State $state)) {
+        -not (Test-RimsStateOwnsProcess -State $state) -and
+        -not (Test-RimsRuntimeCleanupPending -State $state)) {
       Remove-RimsRuntimeState -Paths $paths
     }
+    $cleanupPending = Test-RimsRuntimeCleanupPending -State $state
     $result.components = @(
       (New-RimsRuntimePathsComponent -Paths $paths),
       (New-RimsBackendLifecycleComponent `
@@ -3256,7 +3596,8 @@ function Invoke-RimsLocalRestart {
         -Managed $false `
         -Healthy $false `
         -Stale ($null -ne $state) `
-        -Port $BackendPort)
+        -Port $BackendPort `
+        -CleanupPending $cleanupPending)
     )
     return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
   }
