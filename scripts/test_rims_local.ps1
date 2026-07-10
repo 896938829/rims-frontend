@@ -1,0 +1,228 @@
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$localScript = Join-Path $scriptDir 'rims_local.ps1'
+
+function Assert-Equal {
+  param(
+    [Parameter(Mandatory = $true)]
+    [object]$Actual,
+    [Parameter(Mandatory = $true)]
+    [object]$Expected,
+    [Parameter(Mandatory = $true)]
+    [string]$Message
+  )
+
+  if ($Actual -ne $Expected) {
+    throw "$Message Expected: '$Expected'. Actual: '$Actual'."
+  }
+}
+
+function Assert-Contains {
+  param(
+    [Parameter(Mandatory = $true)]
+    [object[]]$Collection,
+    [Parameter(Mandatory = $true)]
+    [object]$Expected,
+    [Parameter(Mandatory = $true)]
+    [string]$Message
+  )
+
+  if ($Collection -notcontains $Expected) {
+    throw "$Message Expected collection to contain: '$Expected'."
+  }
+}
+
+function Assert-HasProperty {
+  param(
+    [Parameter(Mandatory = $true)]
+    [object]$Value,
+    [Parameter(Mandatory = $true)]
+    [string]$PropertyName
+  )
+
+  if ($Value.PSObject.Properties.Name -notcontains $PropertyName) {
+    throw "Expected JSON result to contain property: '$PropertyName'."
+  }
+}
+
+function Invoke-LocalCli {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string[]]$Arguments
+  )
+
+  $powerShellExecutable = (Get-Process -Id $PID).Path
+  $argumentList = @(
+    '-NoProfile',
+    '-ExecutionPolicy',
+    'Bypass',
+    '-File',
+    ('"{0}"' -f $localScript)
+  ) + $Arguments
+
+  $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+  $startInfo.FileName = $powerShellExecutable
+  $startInfo.Arguments = $argumentList -join ' '
+  $startInfo.UseShellExecute = $false
+  $startInfo.CreateNoWindow = $true
+  $startInfo.RedirectStandardOutput = $true
+  $startInfo.RedirectStandardError = $true
+
+  $process = New-Object System.Diagnostics.Process
+  $process.StartInfo = $startInfo
+  [void]$process.Start()
+  $standardOutput = $process.StandardOutput.ReadToEnd()
+  $standardError = $process.StandardError.ReadToEnd()
+  $process.WaitForExit()
+
+  return [pscustomobject]@{
+    ExitCode = $process.ExitCode
+    StandardOutput = $standardOutput
+    StandardError = $standardError
+  }
+}
+
+function ConvertFrom-SingleJson {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Text,
+    [Parameter(Mandatory = $true)]
+    [string]$Context
+  )
+
+  try {
+    return $Text | ConvertFrom-Json -ErrorAction Stop
+  } catch {
+    throw "$Context must write exactly one JSON document to stdout. $($_.Exception.Message)"
+  }
+}
+
+if (-not (Test-Path -LiteralPath $localScript)) {
+  throw "Missing local runtime script: $localScript"
+}
+
+$help = Invoke-LocalCli -Arguments @('-Command', 'help', '-Output', 'Json')
+Assert-Equal -Actual $help.ExitCode -Expected 0 -Message 'Help command failed.'
+Assert-Equal `
+  -Actual $help.StandardError `
+  -Expected '' `
+  -Message 'JSON help wrote diagnostics to stderr.'
+
+$result = ConvertFrom-SingleJson -Text $help.StandardOutput -Context 'JSON help'
+
+$stableResultFields = @(
+  'schemaVersion',
+  'command',
+  'ok',
+  'exitCode',
+  'startedAt',
+  'finishedAt',
+  'components',
+  'errors'
+)
+$stableResultFields | ForEach-Object {
+  Assert-HasProperty -Value $result -PropertyName $_
+}
+
+Assert-Equal -Actual $result.schemaVersion -Expected 1 -Message 'Unexpected schema version.'
+Assert-Equal -Actual $result.command -Expected 'help' -Message 'Unexpected result command.'
+Assert-Equal -Actual $result.ok -Expected $true -Message 'Help result was not successful.'
+Assert-Equal -Actual $result.exitCode -Expected 0 -Message 'Unexpected result exit code.'
+
+$expectedCommands = @(
+  'help',
+  'doctor',
+  'up',
+  'status',
+  'logs',
+  'restart',
+  'reset',
+  'smoke',
+  'down'
+)
+$expectedTargets = @('none', 'web', 'android')
+
+Assert-Equal `
+  -Actual @($result.commands).Count `
+  -Expected $expectedCommands.Count `
+  -Message 'Help returned the wrong number of commands.'
+foreach ($command in $expectedCommands) {
+  Assert-Contains `
+    -Collection $result.commands `
+    -Expected $command `
+    -Message 'Help omitted a command.'
+}
+
+Assert-Equal `
+  -Actual @($result.targets).Count `
+  -Expected $expectedTargets.Count `
+  -Message 'Help returned the wrong number of targets.'
+foreach ($target in $expectedTargets) {
+  Assert-Contains `
+    -Collection $result.targets `
+    -Expected $target `
+    -Message 'Help omitted a target.'
+}
+
+$textHelp = Invoke-LocalCli -Arguments @('-Command', 'help', '-Output', 'Text')
+Assert-Equal -Actual $textHelp.ExitCode -Expected 0 -Message 'Text help command failed.'
+foreach ($command in $expectedCommands) {
+  if (-not $textHelp.StandardOutput.Contains($command)) {
+    throw "Text help omitted command: '$command'."
+  }
+}
+foreach ($target in $expectedTargets) {
+  if (-not $textHelp.StandardOutput.Contains($target)) {
+    throw "Text help omitted target: '$target'."
+  }
+}
+
+foreach ($command in ($expectedCommands | Where-Object { $_ -ne 'help' })) {
+  $failure = Invoke-LocalCli -Arguments @('-Command', $command, '-Output', 'Json')
+  if ($failure.ExitCode -eq 0) {
+    throw "Expected '$command' to fail until it is implemented."
+  }
+  Assert-Equal `
+    -Actual $failure.StandardError `
+    -Expected '' `
+    -Message "JSON $command wrote diagnostics to stderr."
+
+  $failureResult = ConvertFrom-SingleJson `
+    -Text $failure.StandardOutput `
+    -Context "JSON $command"
+  $stableResultFields | ForEach-Object {
+    Assert-HasProperty -Value $failureResult -PropertyName $_
+  }
+  Assert-Equal `
+    -Actual $failureResult.command `
+    -Expected $command `
+    -Message 'Unexpected failure result command.'
+  Assert-Equal `
+    -Actual $failureResult.ok `
+    -Expected $false `
+    -Message 'Unimplemented command reported success.'
+  Assert-Equal `
+    -Actual $failureResult.exitCode `
+    -Expected $failure.ExitCode `
+    -Message 'Process and result exit codes differ.'
+  Assert-Contains `
+    -Collection $failureResult.errors `
+    -Expected "Command '$command' is not implemented yet." `
+    -Message 'Unimplemented command returned an unclear error.'
+}
+
+$textFailure = Invoke-LocalCli -Arguments @('-Command', 'status', '-Output', 'Text')
+if ($textFailure.ExitCode -eq 0) {
+  throw 'Expected text status to fail until it is implemented.'
+}
+Assert-Equal `
+  -Actual $textFailure.StandardOutput `
+  -Expected '' `
+  -Message 'Text failure wrote to stdout.'
+if (-not $textFailure.StandardError.Contains('not implemented yet')) {
+  throw 'Text failure did not explain that the command is not implemented yet.'
+}
+
+Write-Host 'Local runtime CLI contract test passed.'
