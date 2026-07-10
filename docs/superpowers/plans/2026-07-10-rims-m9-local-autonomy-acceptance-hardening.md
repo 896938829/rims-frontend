@@ -121,6 +121,7 @@ param(
   [ValidateSet('Text', 'Json')]
   [string]$Output = 'Text',
   [string]$BackendDir = $env:RIMS_BACKEND_DIR,
+  [string]$BackendWorkspaceRoot = $env:RIMS_BACKEND_WORKSPACE_ROOT,
   [int]$BackendPort = 8080,
   [int]$FrontendPort = 8091,
   [string]$AndroidDevice = $env:RIMS_ANDROID_DEVICE,
@@ -196,13 +197,22 @@ Expected: FAIL because `doctor` has no component checks.
 
 - [ ] **Step 3: Implement path resolution and dependency checks**
 
-Resolve defaults in this order:
+Resolve the backend source directory in this order:
 
 1. Explicit `-BackendDir`.
 2. `RIMS_BACKEND_DIR`.
 3. `E:\My Work\RIMS\rims-goProgect`.
 
-Derive the backend workspace root as the parent containing `deploy` and `.env`.
+Resolve the backend runtime workspace root independently in this order:
+
+1. Explicit `-BackendWorkspaceRoot`.
+2. `RIMS_BACKEND_WORKSPACE_ROOT`.
+3. The nearest ancestor of `BackendDir` containing both `deploy` and `.env`.
+4. `E:\My Work\RIMS` when it contains both required entries.
+
+This separation is required for Git worktrees: Go source may run from an
+isolated worktree while Compose and the ignored local `.env` remain in the main
+backend workspace. Record both resolved paths in state and reports.
 Run Go and Docker checks through WSL, including the configured Go binary:
 
 ```powershell
