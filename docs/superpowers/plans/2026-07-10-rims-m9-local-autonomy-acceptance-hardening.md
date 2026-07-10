@@ -268,6 +268,12 @@ Use harmless long-running PowerShell child processes in the self-test to prove:
 - malformed `state.json` is quarantined with the filename pattern
   `state.invalid.20260710T153000Z.json`.
 
+Tests set `RIMS_RUNTIME_DIR` to a unique temporary directory and restore the
+previous value in `finally`; production defaults remain `.runtime/rims-local`.
+Allocate test ports from an ephemeral listener instead of assuming 8080 is
+free. Every spawned test process is tracked and stopped in `finally`, even when
+an assertion fails.
+
 - [ ] **Step 2: Run the self-test and observe the ownership failure**
 
 ```powershell
