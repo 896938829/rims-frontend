@@ -292,6 +292,14 @@ healthy, then run:
 ~/local/go/bin/go run ./cmd/migrate up
 ```
 
+Run Compose with the resolved runtime workspace `.env`. For Go migrations and
+server startup, export that `.env` into the WSL child environment, change to the
+resolved backend source worktree, and set `MIGRATIONS_DIR` to that source
+worktree's `migrations` directory. Pass runtime/source WSL paths as process
+arguments or safely quoted literals; never embed an unescaped Windows path or
+secret value into Bash source. This ensures the executed Go code comes from the
+M9 branch while local secrets and Compose remain outside Git.
+
 Do not mark the Docker daemon or a pre-existing healthy PostgreSQL container as
 controller-owned. Record whether Compose was already running so `down` leaves
 pre-existing dependencies intact.
@@ -320,10 +328,12 @@ waits, then force-stops only the still-matching owned process.
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test_rims_local.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rims_local.ps1 -Command up -Target none -IncludeDependencies
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rims_local.ps1 -Command status -Output Json | ConvertFrom-Json | Format-List
-Invoke-RestMethod http://localhost:8080/healthz
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rims_local.ps1 -Command down -Target none
+$backendSource = 'E:\My Work\rims-frontend\.worktrees\m9-backend-local-autonomy-acceptance\rims-goProgect'
+$backendRuntime = 'E:\My Work\RIMS'
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rims_local.ps1 -Command up -Target none -IncludeDependencies -BackendDir $backendSource -BackendWorkspaceRoot $backendRuntime -BackendPort 18080
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rims_local.ps1 -Command status -BackendPort 18080 -Output Json | ConvertFrom-Json | Format-List
+Invoke-RestMethod http://localhost:18080/healthz
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rims_local.ps1 -Command down -Target none -BackendPort 18080
 ```
 
 Expected: API reaches healthy state, status reports a matching owned backend,
