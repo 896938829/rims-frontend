@@ -94,30 +94,244 @@ function Resolve-RimsCommandPath {
   return $command.Source
 }
 
+function ConvertTo-RimsWindowsCommandLineArgument {
+  param(
+    [Parameter(Mandatory = $true)]
+    [AllowEmptyString()]
+    [string]$Value
+  )
+
+  if ($Value.Length -gt 0 -and $Value -notmatch '[\s"]') {
+    return $Value
+  }
+
+  $builder = New-Object Text.StringBuilder
+  [void]$builder.Append('"')
+  $backslashCount = 0
+  foreach ($character in $Value.ToCharArray()) {
+    if ($character -eq '\') {
+      $backslashCount++
+      continue
+    }
+
+    if ($character -eq '"') {
+      [void]$builder.Append(('\' * (($backslashCount * 2) + 1)) -join '')
+      [void]$builder.Append('"')
+    } else {
+      [void]$builder.Append(('\' * $backslashCount) -join '')
+      [void]$builder.Append($character)
+    }
+    $backslashCount = 0
+  }
+
+  [void]$builder.Append(('\' * ($backslashCount * 2)) -join '')
+  [void]$builder.Append('"')
+  return $builder.ToString()
+}
+
+function Receive-RimsAsyncText {
+  param(
+    [AllowNull()]
+    [object]$Task,
+    [int]$TimeoutMilliseconds = 3000
+  )
+
+  if ($null -eq $Task) {
+    return ''
+  }
+  try {
+    if ($Task.Wait($TimeoutMilliseconds)) {
+      return [string]$Task.Result
+    }
+  } catch {
+    return ''
+  }
+  return ''
+}
+
+function Stop-RimsProcessTree {
+  param(
+    [Parameter(Mandatory = $true)]
+    [Diagnostics.Process]$Process
+  )
+
+  try {
+    if ($Process.HasExited) {
+      return
+    }
+  } catch {
+    return
+  }
+
+  $taskkillPath = Join-Path $env:SystemRoot 'System32\taskkill.exe'
+  if (Test-Path -LiteralPath $taskkillPath -PathType Leaf) {
+    $taskkill = $null
+    try {
+      $taskkillArguments = @(
+        '/PID',
+        [string]$Process.Id,
+        '/T',
+        '/F'
+      ) | ForEach-Object {
+        ConvertTo-RimsWindowsCommandLineArgument -Value $_
+      }
+      $taskkillStartInfo = New-Object Diagnostics.ProcessStartInfo
+      $taskkillStartInfo.FileName = $taskkillPath
+      $taskkillStartInfo.Arguments = $taskkillArguments -join ' '
+      $taskkillStartInfo.UseShellExecute = $false
+      $taskkillStartInfo.CreateNoWindow = $true
+      $taskkillStartInfo.RedirectStandardOutput = $true
+      $taskkillStartInfo.RedirectStandardError = $true
+
+      $taskkill = New-Object Diagnostics.Process
+      $taskkill.StartInfo = $taskkillStartInfo
+      [void]$taskkill.Start()
+      $taskkillOutput = $taskkill.StandardOutput.ReadToEndAsync()
+      $taskkillError = $taskkill.StandardError.ReadToEndAsync()
+      if (-not $taskkill.WaitForExit(5000)) {
+        try { $taskkill.Kill() } catch {}
+        [void]$taskkill.WaitForExit(1000)
+      }
+      [void](Receive-RimsAsyncText -Task $taskkillOutput -TimeoutMilliseconds 1000)
+      [void](Receive-RimsAsyncText -Task $taskkillError -TimeoutMilliseconds 1000)
+    } catch {
+      # Fall back to killing the direct process below.
+    } finally {
+      if ($null -ne $taskkill) {
+        $taskkill.Dispose()
+      }
+    }
+  }
+
+  try {
+    if (-not $Process.WaitForExit(3000)) {
+      $Process.Kill()
+      [void]$Process.WaitForExit(2000)
+    }
+  } catch {
+    try { $Process.Kill() } catch {}
+  }
+}
+
 function Invoke-RimsExternalCommand {
   param(
     [Parameter(Mandatory = $true)]
     [string]$FilePath,
     [Parameter(Mandatory = $true)]
     [AllowEmptyCollection()]
-    [string[]]$Arguments
+    [string[]]$Arguments,
+    [ValidateRange(1, 3600)]
+    [int]$TimeoutSeconds = 30
   )
 
+  $process = $null
+  $standardOutputTask = $null
+  $standardErrorTask = $null
+  $processId = $null
   try {
-    $captured = @(& $FilePath @Arguments 2>&1)
-    $exitCode = $LASTEXITCODE
-    $output = ($captured | ForEach-Object { [string]$_ }) -join `
-      [Environment]::NewLine
-    return [pscustomobject]@{
+    $quotedArguments = $Arguments | ForEach-Object {
+      ConvertTo-RimsWindowsCommandLineArgument -Value $_
+    }
+    $startInfo = New-Object Diagnostics.ProcessStartInfo
+    $startInfo.FileName = $FilePath
+    $startInfo.Arguments = $quotedArguments -join ' '
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+
+    $process = New-Object Diagnostics.Process
+    $process.StartInfo = $startInfo
+    [void]$process.Start()
+    $processId = $process.Id
+    $standardOutputTask = $process.StandardOutput.ReadToEndAsync()
+    $standardErrorTask = $process.StandardError.ReadToEndAsync()
+
+    $waitMilliseconds = $TimeoutSeconds * 1000
+    $timedOut = -not $process.WaitForExit($waitMilliseconds)
+    if ($timedOut) {
+      Stop-RimsProcessTree -Process $process
+    }
+
+    $standardOutput = Receive-RimsAsyncText `
+      -Task $standardOutputTask `
+      -TimeoutMilliseconds 3000
+    $standardError = Receive-RimsAsyncText `
+      -Task $standardErrorTask `
+      -TimeoutMilliseconds 3000
+    $exitCode = if ($timedOut) {
+      124
+    } elseif ($process.HasExited) {
+      $process.ExitCode
+    } else {
+      -1
+    }
+    return [pscustomobject][ordered]@{
       ExitCode = $exitCode
-      Output = $output.Trim()
+      TimedOut = $timedOut
+      ProcessId = $processId
+      StandardOutput = $standardOutput
+      StandardError = $standardError
     }
   } catch {
-    return [pscustomobject]@{
+    if ($null -ne $process) {
+      Stop-RimsProcessTree -Process $process
+    }
+    return [pscustomobject][ordered]@{
       ExitCode = -1
-      Output = $_.Exception.Message
+      TimedOut = $false
+      ProcessId = $processId
+      StandardOutput = ''
+      StandardError = $_.Exception.Message
+    }
+  } finally {
+    if ($null -ne $process) {
+      $process.Dispose()
     }
   }
+}
+
+function ConvertTo-RimsDiagnosticSummary {
+  param(
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$StandardOutput,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$StandardError,
+    [ValidateRange(1, 4096)]
+    [int]$MaximumLength = 512
+  )
+
+  $line = @($StandardOutput, $StandardError) |
+    ForEach-Object { $_ -split '\r?\n' } |
+    ForEach-Object { $_.Trim() } |
+    Where-Object { $_.Length -gt 0 } |
+    Select-Object -First 1
+  if ($null -eq $line) {
+    return 'No output returned.'
+  }
+
+  $summary = $line -replace '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', ''
+  $summary = [regex]::Replace(
+    $summary,
+    '(?i)\b([a-z][a-z0-9+.-]*://)[^/\s@]+@',
+    '$1[REDACTED]@'
+  )
+  $summary = [regex]::Replace(
+    $summary,
+    '(?i)\b(authorization)\s*([=:])\s*(?:(?:bearer|basic)\s+)?[^,;\s]+',
+    '$1$2[REDACTED]'
+  )
+  $summary = [regex]::Replace(
+    $summary,
+    '(?i)\b(password|token|secret)\s*([=:])\s*(?:"[^"]*"|''[^'']*''|[^,;\s]+)',
+    '$1$2[REDACTED]'
+  )
+  if ($summary.Length -gt $MaximumLength) {
+    return $summary.Substring(0, $MaximumLength)
+  }
+  return $summary
 }
 
 function Get-RimsFirstOutputLine {
@@ -127,17 +341,58 @@ function Get-RimsFirstOutputLine {
     [string]$Output
   )
 
-  $line = $Output -split '\r?\n' |
-    ForEach-Object { $_.Trim() } |
-    Where-Object { $_.Length -gt 0 } |
-    Select-Object -First 1
-  if ($null -eq $line) {
-    return 'No output returned.'
-  }
-  return $line
+  return ConvertTo-RimsDiagnosticSummary `
+    -StandardOutput $Output `
+    -StandardError ''
 }
 
-function Resolve-RimsBackendDirectory {
+function Get-RimsExternalCommandSummary {
+  param(
+    [Parameter(Mandatory = $true)]
+    [psobject]$Result
+  )
+
+  return ConvertTo-RimsDiagnosticSummary `
+    -StandardOutput $Result.StandardOutput `
+    -StandardError $Result.StandardError
+}
+
+function Resolve-RimsNormalizedPath {
+  param(
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$Path
+  )
+
+  if ([string]::IsNullOrWhiteSpace($Path)) {
+    return [pscustomobject][ordered]@{
+      success = $false
+      path = $null
+      error = 'Path is empty.'
+    }
+  }
+  try {
+    if ($Path.IndexOf([char]0) -ge 0) {
+      throw 'Path contains a NUL character.'
+    }
+    return [pscustomobject][ordered]@{
+      success = $true
+      path = [IO.Path]::GetFullPath($Path)
+      error = ''
+    }
+  } catch {
+    $summary = ConvertTo-RimsDiagnosticSummary `
+      -StandardOutput '' `
+      -StandardError $_.Exception.Message
+    return [pscustomobject][ordered]@{
+      success = $false
+      path = $null
+      error = $summary
+    }
+  }
+}
+
+function Resolve-RimsBackendDirectoryState {
   param(
     [AllowNull()]
     [AllowEmptyString()]
@@ -151,7 +406,18 @@ function Resolve-RimsBackendDirectory {
   if ([string]::IsNullOrWhiteSpace($candidate)) {
     $candidate = 'E:\My Work\RIMS\rims-goProgect'
   }
-  return [IO.Path]::GetFullPath($candidate)
+  return Resolve-RimsNormalizedPath -Path $candidate
+}
+
+function Resolve-RimsBackendDirectory {
+  param(
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$BackendDir
+  )
+
+  $resolution = Resolve-RimsBackendDirectoryState -BackendDir $BackendDir
+  return $resolution.path
 }
 
 function Test-RimsWorkspaceEnvironmentPath {
@@ -168,7 +434,7 @@ function Test-RimsWorkspaceEnvironmentPath {
   )
 }
 
-function Resolve-RimsBackendWorkspaceRoot {
+function Resolve-RimsBackendWorkspaceRootState {
   param(
     [AllowNull()]
     [AllowEmptyString()]
@@ -182,20 +448,37 @@ function Resolve-RimsBackendWorkspaceRoot {
     $candidate = $env:RIMS_BACKEND_WORKSPACE_ROOT
   }
   if (-not [string]::IsNullOrWhiteSpace($candidate)) {
-    return [IO.Path]::GetFullPath($candidate)
+    return Resolve-RimsNormalizedPath -Path $candidate
   }
 
-  $current = New-Object IO.DirectoryInfo -ArgumentList `
-    ([IO.Path]::GetFullPath($BackendDir))
-  while ($null -ne $current) {
-    if (Test-RimsWorkspaceEnvironmentPath -Path $current.FullName) {
-      return $current.FullName
+  $backendResolution = Resolve-RimsNormalizedPath -Path $BackendDir
+  if ($backendResolution.success) {
+    $current = New-Object IO.DirectoryInfo -ArgumentList `
+      $backendResolution.path
+    while ($null -ne $current) {
+      if (Test-RimsWorkspaceEnvironmentPath -Path $current.FullName) {
+        return Resolve-RimsNormalizedPath -Path $current.FullName
+      }
+      $current = $current.Parent
     }
-    $current = $current.Parent
   }
 
-  $defaultRoot = 'E:\My Work\RIMS'
-  return [IO.Path]::GetFullPath($defaultRoot)
+  return Resolve-RimsNormalizedPath -Path 'E:\My Work\RIMS'
+}
+
+function Resolve-RimsBackendWorkspaceRoot {
+  param(
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$BackendWorkspaceRoot,
+    [Parameter(Mandatory = $true)]
+    [string]$BackendDir
+  )
+
+  $resolution = Resolve-RimsBackendWorkspaceRootState `
+    -BackendWorkspaceRoot $BackendWorkspaceRoot `
+    -BackendDir $BackendDir
+  return $resolution.path
 }
 
 function ConvertTo-RimsWslPath {
@@ -219,10 +502,13 @@ function ConvertTo-RimsWslPath {
     -FilePath $wslPath `
     -Arguments @('-e', 'wslpath', '-a', '--', $WindowsPath)
   if ($conversion.ExitCode -ne 0 -or
-      [string]::IsNullOrWhiteSpace($conversion.Output)) {
-    throw "wslpath failed for '$WindowsPath': $($conversion.Output)"
+      [string]::IsNullOrWhiteSpace($conversion.StandardOutput)) {
+    $summary = Get-RimsExternalCommandSummary -Result $conversion
+    throw "wslpath failed for '$WindowsPath': $summary"
   }
-  return Get-RimsFirstOutputLine -Output $conversion.Output
+  return ConvertTo-RimsDiagnosticSummary `
+    -StandardOutput $conversion.StandardOutput `
+    -StandardError ''
 }
 
 function Get-RimsWslPathSuffix {
@@ -287,11 +573,12 @@ function Test-RimsWslComponent {
   $check = Invoke-RimsExternalCommand `
     -FilePath $WslExecutable `
     -Arguments @('-e', 'bash', '-lc', 'printf RIMS_WSL_OK')
-  $ok = $check.ExitCode -eq 0 -and $check.Output.Contains('RIMS_WSL_OK')
+  $ok = $check.ExitCode -eq 0 -and
+    $check.StandardOutput.Contains('RIMS_WSL_OK')
   $detail = if ($ok) {
     "bash is available through $WslExecutable."
   } else {
-    "wsl.exe could not run bash: $($check.Output)"
+    "wsl.exe could not run bash: $(Get-RimsExternalCommandSummary -Result $check)"
   }
   $remediation = if ($ok) {
     ''
@@ -330,10 +617,11 @@ function Test-RimsVersionedCommandComponent {
 
   $check = Invoke-RimsExternalCommand -FilePath $FilePath -Arguments $Arguments
   $ok = $check.ExitCode -eq 0
+  $summary = Get-RimsExternalCommandSummary -Result $check
   $detail = if ($ok) {
-    "$(Get-RimsFirstOutputLine -Output $check.Output) Path: $FilePath"
+    "$summary Path: $FilePath"
   } else {
-    "$Name command failed: $($check.Output)"
+    "$Name command failed: $summary"
   }
   $remediation = if ($ok) { '' } else { $MissingRemediation }
   return New-RimsLocalComponent `
@@ -372,13 +660,25 @@ function Test-RimsFrontendWorkspaceComponent {
 
 function Test-RimsBackendWorkspaceComponent {
   param(
-    [Parameter(Mandatory = $true)]
+    [AllowNull()]
+    [AllowEmptyString()]
     [string]$BackendDir,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$PathError,
     [AllowNull()]
     [AllowEmptyString()]
     [string]$WslExecutable
   )
 
+  if (-not [string]::IsNullOrWhiteSpace($PathError)) {
+    return New-RimsLocalComponent `
+      -Name 'backendWorkspace' `
+      -Ok $false `
+      -Required $true `
+      -Detail "Backend source path is invalid: $PathError" `
+      -Remediation 'Set -BackendDir or RIMS_BACKEND_DIR to a valid rims-goProgect source path.'
+  }
   $exists = Test-Path -LiteralPath $BackendDir -PathType Container
   $goModule = Join-Path $BackendDir 'go.mod'
   $ok = $exists -and (Test-Path -LiteralPath $goModule -PathType Leaf)
@@ -412,9 +712,20 @@ function Test-RimsWorkspaceEnvComponent {
     [string]$BackendWorkspaceRoot,
     [AllowNull()]
     [AllowEmptyString()]
+    [string]$PathError,
+    [AllowNull()]
+    [AllowEmptyString()]
     [string]$WslExecutable
   )
 
+  if (-not [string]::IsNullOrWhiteSpace($PathError)) {
+    return New-RimsLocalComponent `
+      -Name 'workspaceEnv' `
+      -Ok $false `
+      -Required $true `
+      -Detail "Backend runtime root path is invalid: $PathError" `
+      -Remediation 'Set -BackendWorkspaceRoot or RIMS_BACKEND_WORKSPACE_ROOT to a valid runtime workspace path.'
+  }
   if ([string]::IsNullOrWhiteSpace($BackendWorkspaceRoot)) {
     return New-RimsLocalComponent `
       -Name 'workspaceEnv' `
@@ -482,10 +793,11 @@ function Test-RimsWslCommandComponent {
     -FilePath $WslExecutable `
     -Arguments @('-e', 'bash', '-lc', $BashCommand)
   $ok = $check.ExitCode -eq 0
+  $summary = Get-RimsExternalCommandSummary -Result $check
   $detail = if ($ok) {
-    Get-RimsFirstOutputLine -Output $check.Output
+    $summary
   } else {
-    "$Name check failed through WSL: $($check.Output)"
+    "$Name check failed through WSL: $summary"
   }
   return New-RimsLocalComponent `
     -Name $Name `
@@ -520,10 +832,13 @@ function Test-RimsWebDeviceComponent {
   $parseError = $null
   if ($check.ExitCode -eq 0) {
     try {
-      $parsedDevices = $check.Output | ConvertFrom-Json -ErrorAction Stop
+      $parsedDevices = $check.StandardOutput |
+        ConvertFrom-Json -ErrorAction Stop
       $devices = @($parsedDevices | ForEach-Object { $_ })
     } catch {
-      $parseError = $_.Exception.Message
+      $parseError = ConvertTo-RimsDiagnosticSummary `
+        -StandardOutput '' `
+        -StandardError $_.Exception.Message
     }
   }
   $webDevices = @($devices | Where-Object {
@@ -537,7 +852,8 @@ function Test-RimsWebDeviceComponent {
   } elseif ($null -ne $parseError) {
     $detail = "Could not parse flutter devices --machine: $parseError"
   } else {
-    $detail = "No web-javascript Flutter device was found. $($check.Output)".Trim()
+    $summary = Get-RimsExternalCommandSummary -Result $check
+    $detail = "No web-javascript Flutter device was found. $summary".Trim()
   }
   return New-RimsLocalComponent `
     -Name 'webDevice' `
@@ -559,11 +875,71 @@ function Get-RimsAndroidSdkRoots {
     if ([string]::IsNullOrWhiteSpace($candidate)) {
       continue
     }
-    $fullPath = [IO.Path]::GetFullPath($candidate)
-    if (-not $seen.ContainsKey($fullPath)) {
-      $seen[$fullPath] = $true
-      $fullPath
+    $resolution = Resolve-RimsNormalizedPath -Path $candidate
+    if ($resolution.success -and -not $seen.ContainsKey($resolution.path)) {
+      $seen[$resolution.path] = $true
+      $resolution.path
     }
+  }
+}
+
+function Resolve-RimsAndroidToolState {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$CommandName,
+    [Parameter(Mandatory = $true)]
+    [string]$SdkRelativePath
+  )
+
+  $fromPath = Resolve-RimsCommandPath -Name $CommandName
+  if (-not [string]::IsNullOrWhiteSpace($fromPath)) {
+    return Resolve-RimsNormalizedPath -Path $fromPath
+  }
+
+  $sdkRoots = @($env:ANDROID_SDK_ROOT, $env:ANDROID_HOME)
+  if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+    $sdkRoots += Join-Path $env:LOCALAPPDATA 'Android\Sdk'
+  }
+  foreach ($sdkRoot in $sdkRoots) {
+    if ([string]::IsNullOrWhiteSpace($sdkRoot)) {
+      continue
+    }
+    $rootResolution = Resolve-RimsNormalizedPath -Path $sdkRoot
+    if (-not $rootResolution.success) {
+      return [pscustomobject][ordered]@{
+        success = $false
+        path = $null
+        error = "Android SDK root is invalid: $($rootResolution.error)"
+      }
+    }
+    try {
+      $candidate = Join-Path $rootResolution.path $SdkRelativePath
+    } catch {
+      $summary = ConvertTo-RimsDiagnosticSummary `
+        -StandardOutput '' `
+        -StandardError $_.Exception.Message
+      return [pscustomobject][ordered]@{
+        success = $false
+        path = $null
+        error = "Android tool path is invalid: $summary"
+      }
+    }
+    $candidateResolution = Resolve-RimsNormalizedPath -Path $candidate
+    if (-not $candidateResolution.success) {
+      return [pscustomobject][ordered]@{
+        success = $false
+        path = $null
+        error = "Android tool path is invalid: $($candidateResolution.error)"
+      }
+    }
+    if (Test-Path -LiteralPath $candidateResolution.path -PathType Leaf) {
+      return $candidateResolution
+    }
+  }
+  return [pscustomobject][ordered]@{
+    success = $false
+    path = $null
+    error = "$CommandName was not found in PATH or an Android SDK root."
   }
 }
 
@@ -575,17 +951,10 @@ function Resolve-RimsAndroidTool {
     [string]$SdkRelativePath
   )
 
-  $fromPath = Resolve-RimsCommandPath -Name $CommandName
-  if (-not [string]::IsNullOrWhiteSpace($fromPath)) {
-    return $fromPath
-  }
-  foreach ($sdkRoot in @(Get-RimsAndroidSdkRoots)) {
-    $candidate = Join-Path $sdkRoot $SdkRelativePath
-    if (Test-Path -LiteralPath $candidate -PathType Leaf) {
-      return $candidate
-    }
-  }
-  return $null
+  $resolution = Resolve-RimsAndroidToolState `
+    -CommandName $CommandName `
+    -SdkRelativePath $SdkRelativePath
+  return $resolution.path
 }
 
 function Get-RimsOnlineAndroidDevices {
@@ -604,10 +973,34 @@ function Get-RimsOnlineAndroidDevices {
   if ($check.ExitCode -ne 0) {
     return
   }
-  foreach ($line in ($check.Output -split '\r?\n')) {
+  foreach ($line in ($check.StandardOutput -split '\r?\n')) {
     if ($line -match '^([^\s]+)\s+device$') {
       $Matches[1]
     }
+  }
+}
+
+function ConvertFrom-RimsAndroidAvdOutput {
+  param(
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$StandardOutput,
+    [Parameter(Mandatory = $true)]
+    [int]$ExitCode
+  )
+
+  if ($ExitCode -ne 0) {
+    return
+  }
+  foreach ($line in ($StandardOutput -split '\r?\n')) {
+    $avd = $line.Trim()
+    if ($avd.Length -eq 0) {
+      continue
+    }
+    if ($avd -match '^(?:\[(?:INFO|WARNING|ERROR)\]|(?:INFO|WARNING|ERROR)(?:\s|:|$))') {
+      continue
+    }
+    $avd
   }
 }
 
@@ -624,15 +1017,9 @@ function Get-RimsInstalledAndroidAvds {
   $check = Invoke-RimsExternalCommand `
     -FilePath $EmulatorExecutable `
     -Arguments @('-list-avds')
-  if ($check.ExitCode -ne 0) {
-    return
-  }
-  foreach ($line in ($check.Output -split '\r?\n')) {
-    $avd = $line.Trim()
-    if ($avd.Length -gt 0 -and $avd -notmatch '^(INFO|WARNING|ERROR)\s') {
-      $avd
-    }
-  }
+  ConvertFrom-RimsAndroidAvdOutput `
+    -StandardOutput $check.StandardOutput `
+    -ExitCode $check.ExitCode
 }
 
 function Test-RimsAndroidToolComponent {
@@ -642,6 +1029,9 @@ function Test-RimsAndroidToolComponent {
     [AllowNull()]
     [AllowEmptyString()]
     [string]$FilePath,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$PathError,
     [Parameter(Mandatory = $true)]
     [string[]]$Arguments,
     [Parameter(Mandatory = $true)]
@@ -649,19 +1039,25 @@ function Test-RimsAndroidToolComponent {
   )
 
   if ([string]::IsNullOrWhiteSpace($FilePath)) {
+    $detail = if ([string]::IsNullOrWhiteSpace($PathError)) {
+      "$Name executable was not found in PATH or an Android SDK root."
+    } else {
+      $PathError
+    }
     return New-RimsLocalComponent `
       -Name $Name `
       -Ok $false `
       -Required $true `
-      -Detail "$Name executable was not found in PATH or an Android SDK root." `
+      -Detail $detail `
       -Remediation $Remediation
   }
   $check = Invoke-RimsExternalCommand -FilePath $FilePath -Arguments $Arguments
   $ok = $check.ExitCode -eq 0
+  $summary = Get-RimsExternalCommandSummary -Result $check
   $detail = if ($ok) {
-    "Path: $FilePath. $(Get-RimsFirstOutputLine -Output $check.Output)"
+    "Path: $FilePath. $summary"
   } else {
-    "$name failed: $($check.Output)"
+    "$name failed: $summary"
   }
   return New-RimsLocalComponent `
     -Name $Name `
@@ -742,10 +1138,15 @@ function Invoke-RimsLocalDoctor {
     [string]$ScriptDirectory
   )
 
-  $resolvedBackendDir = Resolve-RimsBackendDirectory -BackendDir $BackendDir
-  $resolvedWorkspaceRoot = Resolve-RimsBackendWorkspaceRoot `
+  $backendPathState = Resolve-RimsBackendDirectoryState `
+    -BackendDir $BackendDir
+  $workspacePathState = Resolve-RimsBackendWorkspaceRootState `
     -BackendWorkspaceRoot $BackendWorkspaceRoot `
-    -BackendDir $resolvedBackendDir
+    -BackendDir $(if ($backendPathState.success) {
+        $backendPathState.path
+      } else {
+        $BackendDir
+      })
   $wslExecutable = Resolve-RimsCommandPath -Name 'wsl.exe'
   $gitExecutable = Resolve-RimsCommandPath -Name 'git.exe'
   if ([string]::IsNullOrWhiteSpace($gitExecutable)) {
@@ -772,10 +1173,12 @@ function Invoke-RimsLocalDoctor {
   [void]$components.Add((Test-RimsFrontendWorkspaceComponent `
         -ScriptDirectory $ScriptDirectory))
   [void]$components.Add((Test-RimsBackendWorkspaceComponent `
-        -BackendDir $resolvedBackendDir `
+        -BackendDir $backendPathState.path `
+        -PathError $backendPathState.error `
         -WslExecutable $wslExecutable))
   [void]$components.Add((Test-RimsWorkspaceEnvComponent `
-        -BackendWorkspaceRoot $resolvedWorkspaceRoot `
+        -BackendWorkspaceRoot $workspacePathState.path `
+        -PathError $workspacePathState.error `
         -WslExecutable $wslExecutable))
   [void]$components.Add((Test-RimsWslCommandComponent `
         -Name 'go' `
@@ -797,26 +1200,28 @@ function Invoke-RimsLocalDoctor {
         -Required ($Target -in @('web', 'android'))))
 
   if ($Target -eq 'android') {
-    $adbExecutable = Resolve-RimsAndroidTool `
+    $adbPathState = Resolve-RimsAndroidToolState `
       -CommandName 'adb.exe' `
       -SdkRelativePath 'platform-tools\adb.exe'
-    $emulatorExecutable = Resolve-RimsAndroidTool `
+    $emulatorPathState = Resolve-RimsAndroidToolState `
       -CommandName 'emulator.exe' `
       -SdkRelativePath 'emulator\emulator.exe'
     [void]$components.Add((Test-RimsAndroidToolComponent `
           -Name 'adb' `
-          -FilePath $adbExecutable `
+          -FilePath $adbPathState.path `
+          -PathError $adbPathState.error `
           -Arguments @('version') `
           -Remediation 'Install Android SDK Platform-Tools and set ANDROID_SDK_ROOT or ANDROID_HOME.'))
     [void]$components.Add((Test-RimsAndroidToolComponent `
           -Name 'emulator' `
-          -FilePath $emulatorExecutable `
+          -FilePath $emulatorPathState.path `
+          -PathError $emulatorPathState.error `
           -Arguments @('-list-avds') `
           -Remediation 'Install the Android Emulator package and set ANDROID_SDK_ROOT or ANDROID_HOME.'))
     $onlineDevices = @(Get-RimsOnlineAndroidDevices `
-        -AdbExecutable $adbExecutable)
+        -AdbExecutable $adbPathState.path)
     $installedAvds = @(Get-RimsInstalledAndroidAvds `
-        -EmulatorExecutable $emulatorExecutable)
+        -EmulatorExecutable $emulatorPathState.path)
     [void]$components.Add((Test-RimsAndroidDeviceComponent `
           -AndroidDevice $AndroidDevice `
           -OnlineDevices $onlineDevices `
