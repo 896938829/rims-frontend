@@ -302,7 +302,7 @@ and stderr redirects. Start WSL in the backend project path and run:
 APP_PORT=8080 ~/local/go/bin/go run ./cmd/server
 ```
 
-Poll `http://127.0.0.1:8080/healthz` with a bounded timeout and include the tail
+Poll `http://localhost:8080/healthz` with a bounded timeout and include the tail
 of backend stderr when readiness fails. Record PID, process start time, command,
 backend commit, health URL, and log paths only after readiness succeeds.
 
@@ -319,7 +319,7 @@ waits, then force-stops only the still-matching owned process.
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test_rims_local.ps1
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rims_local.ps1 -Command up -Target none -IncludeDependencies
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rims_local.ps1 -Command status -Output Json | ConvertFrom-Json | Format-List
-Invoke-RestMethod http://127.0.0.1:8080/healthz
+Invoke-RestMethod http://localhost:8080/healthz
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rims_local.ps1 -Command down -Target none
 ```
 
@@ -347,7 +347,7 @@ Assert the exact target-specific API origins:
 ```powershell
 $web = New-FlutterLaunchSpec -Target web -FrontendPort 8091 -BackendPort 8080
 Assert-Contains $web.Arguments '--web-hostname=127.0.0.1' 'web hostname'
-Assert-Contains $web.Arguments '--dart-define=API_BASE_URL=http://127.0.0.1:8080/api/v1' 'web API URL'
+Assert-Contains $web.Arguments '--dart-define=API_BASE_URL=http://localhost:8080/api/v1' 'web API URL'
 
 $android = New-FlutterLaunchSpec -Target android -AndroidDevice 'rims_api_35' -BackendPort 8080
 Assert-Contains $android.Arguments '--dart-define=API_BASE_URL=http://10.0.2.2:8080/api/v1' 'emulator API URL'
@@ -371,7 +371,7 @@ Launch from `rims_frontend` as a hidden managed process:
 ```text
 flutter run --no-pub -d web-server --web-hostname=127.0.0.1
   --web-port=$FrontendPort
-  --dart-define=API_BASE_URL=http://127.0.0.1:$BackendPort/api/v1
+  --dart-define=API_BASE_URL=http://localhost:$BackendPort/api/v1
 ```
 
 Preserve arguments as an array until `Start-Process`. Poll the frontend URL for
@@ -1256,7 +1256,7 @@ event bus while retaining the platform secure-storage implementation.
 From `rims_frontend`:
 
 ```powershell
-flutter test --no-pub integration_test/app_e2e_test.dart -d chrome --dart-define=API_BASE_URL=http://127.0.0.1:8080/api/v1
+flutter test --no-pub integration_test/app_e2e_test.dart -d chrome --dart-define=API_BASE_URL=http://localhost:8080/api/v1
 ```
 
 Expected before completing the test: FAIL at the first missing paging,
@@ -1304,9 +1304,9 @@ integration binding report data.
 - [ ] **Step 7: Run the complete Web journey twice**
 
 ```powershell
-flutter test --no-pub integration_test/app_e2e_test.dart -d chrome --dart-define=API_BASE_URL=http://127.0.0.1:8080/api/v1
+flutter test --no-pub integration_test/app_e2e_test.dart -d chrome --dart-define=API_BASE_URL=http://localhost:8080/api/v1
 powershell -NoProfile -ExecutionPolicy Bypass -File ..\scripts\rims_local.ps1 -Command reset -Target none
-flutter test --no-pub integration_test/app_e2e_test.dart -d chrome --dart-define=API_BASE_URL=http://127.0.0.1:8080/api/v1
+flutter test --no-pub integration_test/app_e2e_test.dart -d chrome --dart-define=API_BASE_URL=http://localhost:8080/api/v1
 ```
 
 Run these from `rims_frontend`; the reset path is relative to that directory.
