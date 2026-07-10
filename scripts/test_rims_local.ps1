@@ -478,6 +478,19 @@ function Wait-TestProcessExit {
   return -not (Test-TestProcessAlive -ProcessId $ProcessId)
 }
 
+function Get-TestEphemeralPort {
+  $listener = [Net.Sockets.TcpListener]::new(
+    [Net.IPAddress]::Loopback,
+    0
+  )
+  try {
+    $listener.Start()
+    return ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+  } finally {
+    $listener.Stop()
+  }
+}
+
 if (-not (Test-Path -LiteralPath $localScript)) {
   throw "Missing local runtime script: $localScript"
 }
@@ -532,6 +545,109 @@ try {
     -Actual ($composeArguments -join '|') `
     -Expected '-e|docker|compose|--project-directory|/mnt/e/My Work/RIMS|--env-file|/mnt/e/My Work/RIMS/.env|-f|/mnt/e/My Work/RIMS/deploy/docker-compose.yml|ps|-q|postgres' `
     -Message 'Compose commands did not preserve the runtime-root project identity.'
+  $postgresDiscoveryArguments = @(Get-RimsPostgresDiscoveryArguments `
+      -Context $composeContext)
+  Assert-Equal `
+    -Actual ($postgresDiscoveryArguments[-4..-1] -join '|') `
+    -Expected 'ps|-a|-q|postgres' `
+    -Message 'PostgreSQL discovery omitted stopped Compose containers.'
+  $postgresCases = @(
+    [pscustomobject]@{
+      name = 'absent'
+      containerId = ''
+      stateStatus = ''
+      running = $false
+      healthStatus = ''
+      expectedStatus = 'absent'
+      expectedExists = $false
+      expectedOwned = $true
+    },
+    [pscustomobject]@{
+      name = 'existing-stopped'
+      containerId = 'pg-stopped'
+      stateStatus = 'exited'
+      running = $false
+      healthStatus = ''
+      expectedStatus = 'exited'
+      expectedExists = $true
+      expectedOwned = $false
+    },
+    [pscustomobject]@{
+      name = 'existing-starting'
+      containerId = 'pg-starting'
+      stateStatus = 'running'
+      running = $true
+      healthStatus = 'starting'
+      expectedStatus = 'starting'
+      expectedExists = $true
+      expectedOwned = $false
+    },
+    [pscustomobject]@{
+      name = 'existing-unhealthy'
+      containerId = 'pg-unhealthy'
+      stateStatus = 'running'
+      running = $true
+      healthStatus = 'unhealthy'
+      expectedStatus = 'unhealthy'
+      expectedExists = $true
+      expectedOwned = $false
+    },
+    [pscustomobject]@{
+      name = 'existing-healthy'
+      containerId = 'pg-healthy'
+      stateStatus = 'running'
+      running = $true
+      healthStatus = 'healthy'
+      expectedStatus = 'healthy'
+      expectedExists = $true
+      expectedOwned = $false
+    }
+  )
+  foreach ($postgresCase in $postgresCases) {
+    $postgresStatus = ConvertTo-RimsPostgresStatus `
+      -ContainerId $postgresCase.containerId `
+      -StateStatus $postgresCase.stateStatus `
+      -Running $postgresCase.running `
+      -HealthStatus $postgresCase.healthStatus
+    Assert-Equal `
+      -Actual $postgresStatus.exists `
+      -Expected $postgresCase.expectedExists `
+      -Message "PostgreSQL existence was wrong for $($postgresCase.name)."
+    Assert-Equal `
+      -Actual $postgresStatus.running `
+      -Expected $postgresCase.running `
+      -Message "PostgreSQL running state was wrong for $($postgresCase.name)."
+    Assert-Equal `
+      -Actual $postgresStatus.healthy `
+      -Expected ($postgresCase.healthStatus -eq 'healthy') `
+      -Message "PostgreSQL health was wrong for $($postgresCase.name)."
+    Assert-Equal `
+      -Actual $postgresStatus.containerId `
+      -Expected $(if ($postgresCase.expectedExists) {
+          $postgresCase.containerId
+        } else {
+          $null
+        }) `
+      -Message "PostgreSQL container id was wrong for $($postgresCase.name)."
+    Assert-Equal `
+      -Actual $postgresStatus.status `
+      -Expected $postgresCase.expectedStatus `
+      -Message "PostgreSQL status was wrong for $($postgresCase.name)."
+
+    $ownership = Get-RimsPostgresDependencyOwnership -Status $postgresStatus
+    Assert-Equal `
+      -Actual $ownership.composeStartedByController `
+      -Expected $postgresCase.expectedOwned `
+      -Message "Compose ownership was wrong for $($postgresCase.name)."
+    Assert-Equal `
+      -Actual $ownership.cleanupComposeOnFailure `
+      -Expected $postgresCase.expectedOwned `
+      -Message "Failed-start cleanup decision was wrong for $($postgresCase.name)."
+    Assert-Equal `
+      -Actual $ownership.stopComposeOnDown `
+      -Expected $postgresCase.expectedOwned `
+      -Message "Down decision was wrong for $($postgresCase.name)."
+  }
   $migrationScript = Get-RimsMigrationLaunchScript
   foreach ($requiredMigrationFragment in @(
       'sed ''s/\r$//''',
@@ -556,7 +672,9 @@ try {
       [IO.FileShare]::Read
     )
     $liveLogBytes = [Text.Encoding]::UTF8.GetBytes(
-      "live log PASSWORD=do-not-leak`n"
+      'live log PASSWORD=do-not-leak DB_PASSWORD=db-log-secret ' +
+      'POSTGRES_PASSWORD=postgres-log-secret ACCESS_TOKEN=access-log-secret ' +
+      'JWT_SECRET=jwt-log-secret API_KEY=api-log-secret' + "`n"
     )
     $liveLogWriter.Write($liveLogBytes, 0, $liveLogBytes.Length)
     $liveLogWriter.Flush()
@@ -567,9 +685,21 @@ try {
       -Actual $liveLogTail.Count `
       -Expected 1 `
       -Message 'Live backend log tail returned the wrong number of lines.'
-    if (-not $liveLogTail[0].Contains('live log') -or
-        $liveLogTail[0].Contains('do-not-leak')) {
+    $liveLogText = $liveLogTail -join "`n"
+    if (-not $liveLogText.Contains('live log')) {
       throw 'Live backend log tail was unavailable or leaked a secret.'
+    }
+    foreach ($liveSecret in @(
+        'do-not-leak',
+        'db-log-secret',
+        'postgres-log-secret',
+        'access-log-secret',
+        'jwt-log-secret',
+        'api-log-secret'
+      )) {
+      if ($liveLogText.Contains($liveSecret)) {
+        throw "Live backend log tail leaked '$liveSecret'."
+      }
     }
   } finally {
     if ($null -ne $liveLogWriter) {
@@ -602,16 +732,27 @@ try {
   Assert-JsonArrayProperty `
     -Value $jsonLogComponent `
     -PropertyName 'stderrTail'
-  if (($jsonLogComponent.stderrTail -join "`n").Contains('do-not-leak')) {
-    throw 'JSON logs leaked a secret from the backend stderr tail.'
+  $jsonLogText = $jsonLogComponent.stderrTail -join "`n"
+  foreach ($jsonLogSecret in @(
+      'do-not-leak',
+      'db-log-secret',
+      'postgres-log-secret',
+      'access-log-secret',
+      'jwt-log-secret',
+      'api-log-secret'
+    )) {
+    if ($jsonLogText.Contains($jsonLogSecret)) {
+      throw "JSON logs leaked '$jsonLogSecret' from backend stderr."
+    }
   }
 
+  $ownedPort = Get-TestEphemeralPort
   $ownedChild = Start-TestSleepProcess `
     -TrackedProcesses $trackedLifecycleProcesses
   $ownedState = New-TestRuntimeState `
     -Process $ownedChild `
     -RuntimePaths $runtimePaths `
-    -BackendPort 45101
+    -BackendPort $ownedPort
   Write-RimsRuntimeState -Paths $runtimePaths -State $ownedState
   Assert-True `
     -Value (Test-Path -LiteralPath $runtimePaths.state -PathType Leaf) `
@@ -631,7 +772,7 @@ try {
   $mismatchedState = New-TestRuntimeState `
     -Process $ownedChild `
     -RuntimePaths $runtimePaths `
-    -BackendPort 45101 `
+    -BackendPort $ownedPort `
     -ProcessStartTimeUtc ([DateTime]::UtcNow.AddDays(-1).ToString('o'))
   Assert-False `
     -Value (Test-RimsStateOwnsProcess -State $mismatchedState) `
@@ -648,7 +789,7 @@ try {
     '-BackendWorkspaceRoot',
     'C:\test-backend-runtime',
     '-BackendPort',
-    '45101'
+    [string]$ownedPort
   )
   Assert-NotEqual `
     -Actual $staleStatus.ExitCode `
@@ -695,12 +836,13 @@ try {
     -Expected 1 `
     -Message 'Malformed state was not quarantined with a UTC timestamp.'
 
+  $managedPort = Get-TestEphemeralPort
   $managedChild = Start-TestSleepProcess `
     -TrackedProcesses $trackedLifecycleProcesses
   $managedState = New-TestRuntimeState `
     -Process $managedChild `
     -RuntimePaths $runtimePaths `
-    -BackendPort 45102
+    -BackendPort $managedPort
   Write-RimsRuntimeState -Paths $runtimePaths -State $managedState
   $managedDown = Invoke-LocalCli -Arguments @(
     '-Command',
@@ -714,7 +856,7 @@ try {
     '-BackendWorkspaceRoot',
     'C:\test-backend-runtime',
     '-BackendPort',
-    '45102'
+    [string]$managedPort
   )
   Assert-Equal `
     -Actual $managedDown.ExitCode `
@@ -729,6 +871,101 @@ try {
   Assert-False `
     -Value (Test-Path -LiteralPath $runtimePaths.state) `
     -Message 'Down left managed state behind.'
+
+  $cleanupSuccessPort = Get-TestEphemeralPort
+  $cleanupSuccessChild = Start-TestSleepProcess `
+    -TrackedProcesses $trackedLifecycleProcesses
+  $cleanupSuccessState = New-TestRuntimeState `
+    -Process $cleanupSuccessChild `
+    -RuntimePaths $runtimePaths `
+    -BackendPort $cleanupSuccessPort
+  $cleanupSuccess = Resolve-RimsFailedBackendStart `
+    -Paths $runtimePaths `
+    -State $cleanupSuccessState `
+    -FailureContext 'Readiness failed DB_PASSWORD=cleanup-success-secret' `
+    -CleanupAction {
+      param([psobject]$State)
+      return Stop-RimsOwnedBackendProcess -State $State
+    }
+  Assert-True `
+    -Value $cleanupSuccess.cleanupSucceeded `
+    -Message 'Successful failed-start cleanup was not recorded.'
+  Assert-False `
+    -Value $cleanupSuccess.managed `
+    -Message 'Successful failed-start cleanup still reported managed ownership.'
+  Assert-False `
+    -Value $cleanupSuccess.stateRetained `
+    -Message 'Successful failed-start cleanup retained partial state.'
+  Assert-False `
+    -Value (Test-Path -LiteralPath $runtimePaths.state) `
+    -Message 'Successful failed-start cleanup left state.json behind.'
+  Assert-True `
+    -Value (Wait-TestProcessExit -ProcessId $cleanupSuccessChild.Id) `
+    -Message 'Successful failed-start cleanup left its child alive.'
+
+  $cleanupFailurePort = Get-TestEphemeralPort
+  $cleanupFailureChild = Start-TestSleepProcess `
+    -TrackedProcesses $trackedLifecycleProcesses
+  $cleanupFailureState = New-TestRuntimeState `
+    -Process $cleanupFailureChild `
+    -RuntimePaths $runtimePaths `
+    -BackendPort $cleanupFailurePort
+  $cleanupFailure = Resolve-RimsFailedBackendStart `
+    -Paths $runtimePaths `
+    -State $cleanupFailureState `
+    -FailureContext 'Readiness failed DB_PASSWORD=partial-state-secret' `
+    -CleanupAction {
+      param([psobject]$State)
+      return $false
+    }
+  Assert-False `
+    -Value $cleanupFailure.cleanupSucceeded `
+    -Message 'Failed cleanup unexpectedly reported success.'
+  Assert-True `
+    -Value $cleanupFailure.managed `
+    -Message 'Failed cleanup did not retain managed ownership.'
+  Assert-True `
+    -Value $cleanupFailure.stateRetained `
+    -Message 'Failed cleanup did not retain partial state.'
+  if (-not $cleanupFailure.remediation.Contains('down')) {
+    throw 'Failed cleanup did not direct the caller to run down.'
+  }
+  $retainedCleanupState = Read-RimsRuntimeState -Paths $runtimePaths
+  Assert-True `
+    -Value (Test-RimsStateOwnsProcess -State $retainedCleanupState) `
+    -Message 'Retained failed-start state lost exact process ownership.'
+  Assert-False `
+    -Value $retainedCleanupState.healthy `
+    -Message 'Retained failed-start state reported healthy.'
+  if (-not $retainedCleanupState.failureContext.Contains('Readiness failed') -or
+      $retainedCleanupState.failureContext.Contains('partial-state-secret')) {
+    throw 'Retained failed-start state omitted context or leaked a secret.'
+  }
+
+  $retryCleanupDown = Invoke-LocalCli -Arguments @(
+    '-Command',
+    'down',
+    '-Target',
+    'none',
+    '-Output',
+    'Json',
+    '-BackendDir',
+    'C:\test-backend-source',
+    '-BackendWorkspaceRoot',
+    'C:\test-backend-runtime',
+    '-BackendPort',
+    [string]$cleanupFailurePort
+  )
+  Assert-Equal `
+    -Actual $retryCleanupDown.ExitCode `
+    -Expected 0 `
+    -Message 'Down could not retry a retained failed-start cleanup.'
+  Assert-True `
+    -Value (Wait-TestProcessExit -ProcessId $cleanupFailureChild.Id) `
+    -Message 'Retried failed-start cleanup left its child alive.'
+  Assert-False `
+    -Value (Test-Path -LiteralPath $runtimePaths.state) `
+    -Message 'Retried failed-start cleanup left state.json behind.'
 
   $listener = New-Object Net.Sockets.TcpListener(
     [Net.IPAddress]::Loopback,
@@ -948,7 +1185,7 @@ param([string]$Value)
 
 $sensitiveDiagnostic = @"
 
-Connection failed $([char]1) PASSWORD=hunter2 token=eyJhbGciOiJIUzI1NiJ9.payload.signature SECRET: super-secret Authorization: Bearer auth-value https://uri-user:uri-password@example.com/path
+Connection failed $([char]1) PASSWORD=hunter2 token=eyJhbGciOiJIUzI1NiJ9.payload.signature SECRET: super-secret Authorization: Bearer auth-value DB_PASSWORD=db-password-value POSTGRES_PASSWORD=postgres-password-value ACCESS_TOKEN=access-token-value JWT_SECRET=jwt-secret-value API_KEY=api-key-value SERVICE_AUTHORIZATION=Bearer service-auth-value https://uri-user:uri-password@example.com/path
 SECOND-LINE-MUST-NOT-APPEAR
 "@
 $sanitizedDiagnostic = ConvertTo-RimsDiagnosticSummary `
@@ -965,6 +1202,12 @@ foreach ($sensitiveValue in @(
     'eyJhbGciOiJIUzI1NiJ9.payload.signature',
     'super-secret',
     'auth-value',
+    'db-password-value',
+    'postgres-password-value',
+    'access-token-value',
+    'jwt-secret-value',
+    'api-key-value',
+    'service-auth-value',
     'uri-user',
     'uri-password',
     'stderr-secret',

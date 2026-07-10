@@ -320,12 +320,7 @@ function ConvertTo-RimsDiagnosticSummary {
   )
   $summary = [regex]::Replace(
     $summary,
-    '(?i)\b(authorization)\s*([=:])\s*(?:(?:bearer|basic)\s+)?[^,;\s]+',
-    '$1$2[REDACTED]'
-  )
-  $summary = [regex]::Replace(
-    $summary,
-    '(?i)\b(password|token|secret)\s*([=:])\s*(?:"[^"]*"|''[^'']*''|[^,;\s]+)',
+    '(?i)\b([a-z0-9_.-]*(?:password|token|secret|authorization|api[_-]?key|(?:access|private|client|secret)[_-]?key|credential(?:s)?)[a-z0-9_.-]*)\s*([=:])\s*(?:(?:bearer|basic)\s+)?(?:"[^"]*"|''[^'']*''|[^,;\s]+)',
     '$1$2[REDACTED]'
   )
   if ($summary.Length -gt $MaximumLength) {
@@ -2055,6 +2050,93 @@ function Stop-RimsOwnedBackendProcess {
   return Wait-RimsOwnedProcessExit -State $State -TimeoutSeconds 5
 }
 
+function Resolve-RimsFailedBackendStart {
+  param(
+    [Parameter(Mandatory = $true)]
+    [psobject]$Paths,
+    [Parameter(Mandatory = $true)]
+    [psobject]$State,
+    [Parameter(Mandatory = $true)]
+    [AllowEmptyString()]
+    [string]$FailureContext,
+    [AllowNull()]
+    [scriptblock]$CleanupAction
+  )
+
+  $sanitizedFailure = ConvertTo-RimsDiagnosticSummary `
+    -StandardOutput $FailureContext `
+    -StandardError ''
+  $State | Add-Member `
+    -MemberType NoteProperty `
+    -Name healthy `
+    -Value $false `
+    -Force
+  $State | Add-Member `
+    -MemberType NoteProperty `
+    -Name failureContext `
+    -Value $sanitizedFailure `
+    -Force
+
+  $statePersisted = $false
+  $stateError = ''
+  try {
+    Write-RimsRuntimeState -Paths $Paths -State $State
+    $statePersisted = $true
+  } catch {
+    $stateError = ConvertTo-RimsDiagnosticSummary `
+      -StandardOutput '' `
+      -StandardError $_.Exception.Message
+  }
+
+  $cleanupSucceeded = $false
+  try {
+    $cleanupSucceeded = if ($null -eq $CleanupAction) {
+      Stop-RimsOwnedBackendProcess -State $State
+    } else {
+      [bool](& $CleanupAction $State)
+    }
+  } catch {
+    $cleanupSucceeded = $false
+  }
+
+  if ($cleanupSucceeded) {
+    Remove-RimsRuntimeState -Paths $Paths
+    return [pscustomobject][ordered]@{
+      cleanupSucceeded = $true
+      managed = $false
+      healthy = $false
+      stateRetained = $false
+      detail = 'Failed backend startup was cleaned up and partial state was removed.'
+      remediation = ''
+    }
+  }
+
+  if (-not $statePersisted) {
+    try {
+      Write-RimsRuntimeState -Paths $Paths -State $State
+      $statePersisted = $true
+      $stateError = ''
+    } catch {
+      $stateError = ConvertTo-RimsDiagnosticSummary `
+        -StandardOutput '' `
+        -StandardError $_.Exception.Message
+    }
+  }
+  $detail = if ($statePersisted) {
+    'Failed backend startup cleanup was inconclusive; managed ownership state was retained.'
+  } else {
+    "Failed backend startup cleanup was inconclusive and state could not be persisted: $stateError"
+  }
+  return [pscustomobject][ordered]@{
+    cleanupSucceeded = $false
+    managed = $true
+    healthy = $false
+    stateRetained = $statePersisted
+    detail = $detail
+    remediation = 'Run down with the same backend paths and port to retry bounded cleanup.'
+  }
+}
+
 function Get-RimsComposeArguments {
   param(
     [Parameter(Mandatory = $true)]
@@ -2075,6 +2157,17 @@ function Get-RimsComposeArguments {
     '-f',
     [string]$Context.compose
   ) + $Arguments
+}
+
+function Get-RimsPostgresDiscoveryArguments {
+  param(
+    [Parameter(Mandatory = $true)]
+    [psobject]$Context
+  )
+
+  return @(Get-RimsComposeArguments `
+      -Context $Context `
+      -Arguments @('ps', '-a', '-q', 'postgres'))
 }
 
 function Invoke-RimsComposeDown {
@@ -2302,6 +2395,63 @@ function Get-RimsWslLifecycleContext {
   }
 }
 
+function ConvertTo-RimsPostgresStatus {
+  param(
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$ContainerId,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$StateStatus,
+    [Parameter(Mandatory = $true)]
+    [bool]$Running,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$HealthStatus
+  )
+
+  $exists = -not [string]::IsNullOrWhiteSpace($ContainerId)
+  $normalizedState = ([string]$StateStatus).Trim().ToLowerInvariant()
+  $normalizedHealth = ([string]$HealthStatus).Trim().ToLowerInvariant()
+  $status = if (-not $exists) {
+    'absent'
+  } elseif (-not $Running -and $normalizedState.Length -gt 0) {
+    $normalizedState
+  } elseif ($normalizedHealth.Length -gt 0) {
+    $normalizedHealth
+  } elseif ($normalizedState.Length -gt 0) {
+    $normalizedState
+  } else {
+    'unknown'
+  }
+  $healthy = $exists -and $Running -and $normalizedHealth -eq 'healthy'
+  return [pscustomobject][ordered]@{
+    ok = $true
+    exists = $exists
+    running = $exists -and $Running
+    healthy = $healthy
+    containerId = if ($exists) { $ContainerId.Trim() } else { $null }
+    status = $status
+    detail = "PostgreSQL container status: $status."
+  }
+}
+
+function Get-RimsPostgresDependencyOwnership {
+  param(
+    [Parameter(Mandatory = $true)]
+    [psobject]$Status
+  )
+
+  $controllerOwned = -not [bool]$Status.exists
+  return [pscustomobject][ordered]@{
+    postgresExisted = [bool]$Status.exists
+    postgresWasRunning = [bool]$Status.running
+    composeStartedByController = $controllerOwned
+    cleanupComposeOnFailure = $controllerOwned
+    stopComposeOnDown = $controllerOwned
+  }
+}
+
 function Get-RimsPostgresStatus {
   param(
     [Parameter(Mandatory = $true)]
@@ -2310,26 +2460,26 @@ function Get-RimsPostgresStatus {
 
   $check = Invoke-RimsExternalCommand `
     -FilePath $Context.wsl `
-    -Arguments @(Get-RimsComposeArguments `
-      -Context $Context `
-      -Arguments @('ps', '-q', 'postgres')) `
+    -Arguments @(Get-RimsPostgresDiscoveryArguments -Context $Context) `
     -TimeoutSeconds 20
   if ($check.ExitCode -ne 0) {
     return [pscustomobject][ordered]@{
       ok = $false
-      status = 'unknown'
+      exists = $false
+      running = $false
       healthy = $false
+      containerId = $null
+      status = 'unknown'
       detail = Get-RimsExternalCommandSummary -Result $check
     }
   }
   $containerId = $check.StandardOutput.Trim()
   if ([string]::IsNullOrWhiteSpace($containerId)) {
-    return [pscustomobject][ordered]@{
-      ok = $true
-      status = 'absent'
-      healthy = $false
-      detail = 'PostgreSQL container status: absent.'
-    }
+    return ConvertTo-RimsPostgresStatus `
+      -ContainerId '' `
+      -StateStatus '' `
+      -Running $false `
+      -HealthStatus ''
   }
   $inspect = Invoke-RimsExternalCommand `
     -FilePath $Context.wsl `
@@ -2338,24 +2488,51 @@ function Get-RimsPostgresStatus {
       'docker',
       'inspect',
       '--format',
-      '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}',
+      '{{json .State}}',
       $containerId
     ) `
     -TimeoutSeconds 20
   if ($inspect.ExitCode -ne 0) {
     return [pscustomobject][ordered]@{
       ok = $false
-      status = 'unknown'
+      exists = $true
+      running = $false
       healthy = $false
+      containerId = $containerId
+      status = 'unknown'
       detail = Get-RimsExternalCommandSummary -Result $inspect
     }
   }
-  $status = $inspect.StandardOutput.Trim().ToLowerInvariant()
-  return [pscustomobject][ordered]@{
-    ok = $true
-    status = $status
-    healthy = $status -eq 'healthy'
-    detail = "PostgreSQL container status: $status."
+  try {
+    $containerState = $inspect.StandardOutput |
+      ConvertFrom-Json -ErrorAction Stop
+    $health = Get-RimsObjectPropertyValue `
+      -Value $containerState `
+      -Name 'Health'
+    return ConvertTo-RimsPostgresStatus `
+      -ContainerId $containerId `
+      -StateStatus ([string](Get-RimsObjectPropertyValue `
+          -Value $containerState `
+          -Name 'Status' `
+          -DefaultValue 'unknown')) `
+      -Running ([bool](Get-RimsObjectPropertyValue `
+          -Value $containerState `
+          -Name 'Running' `
+          -DefaultValue $false)) `
+      -HealthStatus ([string](Get-RimsObjectPropertyValue `
+          -Value $health `
+          -Name 'Status' `
+          -DefaultValue ''))
+  } catch {
+    return [pscustomobject][ordered]@{
+      ok = $false
+      exists = $true
+      running = $false
+      healthy = $false
+      containerId = $containerId
+      status = 'unknown'
+      detail = 'Docker returned malformed PostgreSQL state.'
+    }
   }
 }
 
@@ -2529,6 +2706,9 @@ exec setsid --fork --wait bash -c '
       ConvertTo-RimsWindowsCommandLineArgument -Value $_
     }) -join ' '
   $process = $null
+  $processStartTime = $null
+  $processGroupId = 0
+  $healthUrl = "http://localhost:$BackendPort/healthz"
   try {
     $process = Start-Process `
       -FilePath $Context.wsl `
@@ -2541,8 +2721,6 @@ exec setsid --fork --wait bash -c '
       'o',
       [Globalization.CultureInfo]::InvariantCulture
     )
-    $healthUrl = "http://localhost:$BackendPort/healthz"
-    $processGroupId = 0
     $deadline = (Get-Date).AddSeconds(90)
     $ready = $false
     do {
@@ -2570,6 +2748,7 @@ exec setsid --fork --wait bash -c '
     if ($ready) {
       return [pscustomobject][ordered]@{
         ok = $true
+        processStarted = $true
         detail = "Managed backend is healthy at $healthUrl."
         healthUrl = $healthUrl
         windowsPid = $process.Id
@@ -2578,16 +2757,6 @@ exec setsid --fork --wait bash -c '
       }
     }
 
-    $temporaryState = [pscustomobject][ordered]@{
-      windowsPid = $process.Id
-      windowsProcessStartTimeUtc = $processStartTime
-      linuxProcessGroupId = if ($processGroupId -gt 0) {
-        $processGroupId
-      } else {
-        $null
-      }
-    }
-    [void](Stop-RimsOwnedBackendProcess -State $temporaryState)
     $stderrTail = @(Get-RimsSanitizedLogTail `
         -Path $RuntimePaths.stderrLog `
         -MaximumLines 20)
@@ -2598,6 +2767,7 @@ exec setsid --fork --wait bash -c '
     }
     return [pscustomobject][ordered]@{
       ok = $false
+      processStarted = $true
       detail = "Backend did not become ready within 90 seconds. $tailDetail"
       healthUrl = $healthUrl
       windowsPid = $process.Id
@@ -2611,23 +2781,40 @@ exec setsid --fork --wait bash -c '
   } catch {
     if ($null -ne $process) {
       try {
-        $temporaryState = [pscustomobject][ordered]@{
-          windowsPid = $process.Id
-          windowsProcessStartTimeUtc = $process.StartTime.ToUniversalTime().ToString('o')
-          linuxProcessGroupId = $null
+        if ([string]::IsNullOrWhiteSpace([string]$processStartTime)) {
+          $processStartTime = $process.StartTime.ToUniversalTime().ToString(
+            'o',
+            [Globalization.CultureInfo]::InvariantCulture
+          )
         }
-        [void](Stop-RimsOwnedBackendProcess -State $temporaryState)
+      } catch {}
+    }
+    if ($processGroupId -le 0 -and
+        (Test-Path `
+          -LiteralPath $RuntimePaths.linuxProcessGroup `
+          -PathType Leaf)) {
+      try {
+        $rawProcessGroup = [IO.File]::ReadAllText(
+          [string]$RuntimePaths.linuxProcessGroup
+        ).Trim()
+        [void][int]::TryParse($rawProcessGroup, [ref]$processGroupId)
       } catch {}
     }
     return [pscustomobject][ordered]@{
       ok = $false
+      processStarted = $null -ne $process -and
+        -not [string]::IsNullOrWhiteSpace([string]$processStartTime)
       detail = ConvertTo-RimsDiagnosticSummary `
         -StandardOutput '' `
         -StandardError $_.Exception.Message
       healthUrl = "http://localhost:$BackendPort/healthz"
-      windowsPid = $null
-      windowsProcessStartTimeUtc = $null
-      linuxProcessGroupId = $null
+      windowsPid = if ($null -ne $process) { $process.Id } else { $null }
+      windowsProcessStartTimeUtc = $processStartTime
+      linuxProcessGroupId = if ($processGroupId -gt 0) {
+        $processGroupId
+      } else {
+        $null
+      }
     }
   } finally {
     if ($null -ne $process) {
@@ -2656,9 +2843,15 @@ function New-RimsManagedRuntimeState {
     [Parameter(Mandatory = $true)]
     [psobject]$StartedBackend,
     [Parameter(Mandatory = $true)]
+    [bool]$PostgresExisted,
+    [Parameter(Mandatory = $true)]
     [bool]$PostgresWasRunning,
     [Parameter(Mandatory = $true)]
-    [bool]$ComposeStartedByController
+    [bool]$ComposeStartedByController,
+    [bool]$Healthy = $true,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$FailureContext = ''
   )
 
   $runtimeCommit = Get-RimsGitCommit -Path $FrontendPath
@@ -2675,6 +2868,14 @@ function New-RimsManagedRuntimeState {
     frontendPort = $FrontendPort
     startedAt = Get-RimsLocalTimestamp
     healthUrl = $StartedBackend.healthUrl
+    healthy = $Healthy
+    failureContext = if ([string]::IsNullOrWhiteSpace($FailureContext)) {
+      ''
+    } else {
+      ConvertTo-RimsDiagnosticSummary `
+        -StandardOutput $FailureContext `
+        -StandardError ''
+    }
     windowsPid = $StartedBackend.windowsPid
     windowsProcessStartTimeUtc = $StartedBackend.windowsProcessStartTimeUtc
     linuxProcessGroupId = $StartedBackend.linuxProcessGroupId
@@ -2684,6 +2885,7 @@ function New-RimsManagedRuntimeState {
     stderrLogPath = $RuntimePaths.stderrLog
     commandSummary = "wsl.exe managed go run ./cmd/server with APP_PORT=$BackendPort"
     dependencyOwnership = [pscustomobject][ordered]@{
+      postgresExisted = $PostgresExisted
       postgresWasRunning = $PostgresWasRunning
       composeStartedByController = $ComposeStartedByController
     }
@@ -2818,8 +3020,11 @@ function Invoke-RimsLocalUp {
       -Remediation 'Start Docker Desktop and verify the configured Compose project.'
     return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
   }
-  $postgresWasRunning = $postgresBefore.healthy
-  $composeStarted = $false
+  $postgresOwnership = Get-RimsPostgresDependencyOwnership `
+    -Status $postgresBefore
+  $postgresExisted = $postgresOwnership.postgresExisted
+  $postgresWasRunning = $postgresOwnership.postgresWasRunning
+  $composeStarted = $postgresOwnership.composeStartedByController
   if (-not $postgresBefore.healthy) {
     if (-not $IncludeDependencies) {
       $result.components += New-RimsLocalComponent `
@@ -2832,6 +3037,10 @@ function Invoke-RimsLocalUp {
     }
     $composeUp = Invoke-RimsComposeUpPostgres -Context $context
     if (-not $composeUp.ok) {
+      if ($composeStarted) {
+        [void](Invoke-RimsComposeDown `
+            -BackendWorkspaceRoot $resolved.workspacePath)
+      }
       $result.components += New-RimsLocalComponent `
         -Name 'postgres' `
         -Ok $false `
@@ -2840,16 +3049,21 @@ function Invoke-RimsLocalUp {
         -Remediation 'Repair Docker Compose, then retry up with -IncludeDependencies.'
       return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
     }
-    $composeStarted = $true
     $postgresReady = Wait-RimsPostgresHealthy -Context $context
     if ($null -eq $postgresReady -or -not $postgresReady.healthy) {
-      [void](Invoke-RimsComposeDown `
-          -BackendWorkspaceRoot $resolved.workspacePath)
+      if ($composeStarted) {
+        [void](Invoke-RimsComposeDown `
+            -BackendWorkspaceRoot $resolved.workspacePath)
+      }
       $result.components += New-RimsLocalComponent `
         -Name 'postgres' `
         -Ok $false `
         -Required $true `
-        -Detail 'Controller-started PostgreSQL did not become healthy within 90 seconds.' `
+        -Detail $(if ($composeStarted) {
+            'Controller-started PostgreSQL did not become healthy within 90 seconds.'
+          } else {
+            'Pre-existing PostgreSQL did not become healthy within 90 seconds and remains user-managed.'
+          }) `
         -Remediation 'Inspect Docker Compose logs and retry after PostgreSQL is healthy.'
       return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
     }
@@ -2858,8 +3072,10 @@ function Invoke-RimsLocalUp {
     -Name 'postgres' `
     -Ok $true `
     -Required $true `
-    -Detail $(if ($postgresWasRunning) {
+    -Detail $(if ($postgresBefore.healthy) {
         'PostgreSQL was already healthy and remains user-managed.'
+      } elseif ($postgresExisted) {
+        'Pre-existing PostgreSQL was repaired and remains user-managed.'
       } else {
         'PostgreSQL was started by this controller and is healthy.'
       }) `
@@ -2886,16 +3102,51 @@ function Invoke-RimsLocalUp {
     -Context $context `
     -RuntimePaths $paths `
     -BackendPort $BackendPort
+  $frontendPath = [IO.Path]::GetFullPath(
+    (Split-Path -Parent $ScriptDirectory)
+  )
   if (-not $started.ok) {
-    if ($composeStarted) {
+    $cleanupOutcome = [pscustomobject][ordered]@{
+      cleanupSucceeded = $true
+      managed = $false
+      healthy = $false
+      stateRetained = $false
+      detail = 'No backend process ownership was established.'
+      remediation = ''
+    }
+    if ($started.processStarted) {
+      $failedState = New-RimsManagedRuntimeState `
+        -FrontendPath $frontendPath `
+        -BackendPath $resolved.backendPath `
+        -BackendWorkspaceRoot $resolved.workspacePath `
+        -Target $Target `
+        -BackendPort $BackendPort `
+        -FrontendPort $FrontendPort `
+        -RuntimePaths $paths `
+        -StartedBackend $started `
+        -PostgresExisted $postgresExisted `
+        -PostgresWasRunning $postgresWasRunning `
+        -ComposeStartedByController $composeStarted `
+        -Healthy $false `
+        -FailureContext $started.detail
+      $cleanupOutcome = Resolve-RimsFailedBackendStart `
+        -Paths $paths `
+        -State $failedState `
+        -FailureContext $started.detail
+    }
+    if ($cleanupOutcome.cleanupSucceeded -and $composeStarted) {
       [void](Invoke-RimsComposeDown `
           -BackendWorkspaceRoot $resolved.workspacePath)
     }
     $result.components += New-RimsBackendLifecycleComponent `
       -Ok $false `
-      -Detail $started.detail `
-      -Remediation 'Inspect the sanitized backend stderr tail, correct the failure, and retry up.' `
-      -Managed $false `
+      -Detail "$($started.detail) $($cleanupOutcome.detail)" `
+      -Remediation $(if ($cleanupOutcome.managed) {
+          $cleanupOutcome.remediation
+        } else {
+          'Inspect the sanitized backend stderr tail, correct the failure, and retry up.'
+        }) `
+      -Managed $cleanupOutcome.managed `
       -Healthy $false `
       -Stale $false `
       -Port $BackendPort `
@@ -2903,9 +3154,6 @@ function Invoke-RimsLocalUp {
     return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
   }
 
-  $frontendPath = [IO.Path]::GetFullPath(
-    (Split-Path -Parent $ScriptDirectory)
-  )
   $newState = New-RimsManagedRuntimeState `
     -FrontendPath $frontendPath `
     -BackendPath $resolved.backendPath `
@@ -2915,20 +3163,34 @@ function Invoke-RimsLocalUp {
     -FrontendPort $FrontendPort `
     -RuntimePaths $paths `
     -StartedBackend $started `
+    -PostgresExisted $postgresExisted `
     -PostgresWasRunning $postgresWasRunning `
-    -ComposeStartedByController $composeStarted
+    -ComposeStartedByController $composeStarted `
+    -Healthy $true
   try {
     Write-RimsRuntimeState -Paths $paths -State $newState
   } catch {
-    [void](Stop-RimsOwnedBackendProcess -State $newState)
-    if ($composeStarted) {
-      [void](Invoke-RimsComposeDown `
-          -BackendWorkspaceRoot $resolved.workspacePath)
-    }
     $summary = ConvertTo-RimsDiagnosticSummary `
       -StandardOutput '' `
       -StandardError $_.Exception.Message
+    $cleanupOutcome = Resolve-RimsFailedBackendStart `
+      -Paths $paths `
+      -State $newState `
+      -FailureContext "Could not persist managed ownership state: $summary"
+    if ($cleanupOutcome.cleanupSucceeded -and $composeStarted) {
+      [void](Invoke-RimsComposeDown `
+          -BackendWorkspaceRoot $resolved.workspacePath)
+    }
     $result.errors = @("Could not persist managed ownership state: $summary")
+    $result.components += New-RimsBackendLifecycleComponent `
+      -Ok $false `
+      -Detail $cleanupOutcome.detail `
+      -Remediation $cleanupOutcome.remediation `
+      -Managed $cleanupOutcome.managed `
+      -Healthy $false `
+      -Stale $false `
+      -Port $BackendPort `
+      -ProcessId $started.windowsPid
     return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
   }
 
