@@ -231,7 +231,7 @@ function Invoke-RimsLocalStatusUnlocked {
     -BackendWorkspaceRoot $resolved.workspacePath `
     -BackendPort $BackendPort
   $owned = Test-RimsStateOwnsAnyBackendProcess -State $state
-  $cleanupPending = Test-RimsRuntimeCleanupPending -State $state
+  $cleanupPending = Test-RimsAnyRuntimeCleanupPending -State $state
   if (-not $matches) {
     $result.components += New-RimsBackendLifecycleComponent `
       -Ok $false `
@@ -284,6 +284,20 @@ function Invoke-RimsLocalStatusUnlocked {
   }
 
   if (-not $owned) {
+    if (Test-RimsStateOwnsAnyFrontendProcess -State $state) {
+      $state.cleanupPending = $true
+      Write-RimsRuntimeState -Paths $paths -State $state
+      $result.components += New-RimsBackendLifecycleComponent `
+        -Ok $false `
+        -Detail 'Managed backend is stale while exactly owned frontend resources remain; state was retained.' `
+        -Remediation 'Run down with the recorded paths and port to clean up exact owned resources.' `
+        -Managed $false `
+        -Healthy $false `
+        -Stale $true `
+        -Port $BackendPort `
+        -CleanupPending $true
+      return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+    }
     Remove-RimsRuntimeState -Paths $paths
     $result.components += New-RimsBackendLifecycleComponent `
       -Ok $false `
@@ -317,7 +331,21 @@ function Invoke-RimsLocalStatusUnlocked {
     -Stale $false `
     -Port $BackendPort `
     -ProcessId (Get-RimsObjectPropertyValue -Value $state -Name 'windowsPid')
-  $overallHealthy = $healthy -and $dependenciesHealthy
+  $stateFrontendPort = [int](Get-RimsObjectPropertyValue `
+      -Value $state `
+      -Name 'frontendPort' `
+      -DefaultValue 8091)
+  $frontendComponent = Get-RimsFrontendComponent `
+    -State $state `
+    -FrontendPort $stateFrontendPort
+  $result.components += $frontendComponent
+  $emulatorComponent = Get-RimsEmulatorComponent -State $state
+  if ($null -ne $emulatorComponent) {
+    $result.components += $emulatorComponent
+  }
+  $overallHealthy = $healthy -and $dependenciesHealthy -and
+    $frontendComponent.ok -and
+    ($null -eq $emulatorComponent -or $emulatorComponent.ok)
   return Complete-RimsLocalResult `
     -Result $result `
     -Ok $overallHealthy `
@@ -356,6 +384,33 @@ function Invoke-RimsLocalLogsUnlocked {
     $component,
     (New-RimsRuntimePathsComponent -Paths $paths)
   )
+  $frontendPaths = Get-RimsFrontendRuntimePaths -Paths $paths
+  foreach ($logSpec in @(
+      [pscustomobject]@{
+        name = 'frontendLogs'
+        stdout = $frontendPaths.stdoutLog
+        stderr = $frontendPaths.stderrLog
+      },
+      [pscustomobject]@{
+        name = 'emulatorLogs'
+        stdout = $frontendPaths.emulatorStdoutLog
+        stderr = $frontendPaths.emulatorStderrLog
+      }
+    )) {
+    $targetStdout = @(Get-RimsSanitizedLogTail -Path $logSpec.stdout)
+    $targetStderr = @(Get-RimsSanitizedLogTail -Path $logSpec.stderr)
+    $result.components += [pscustomobject][ordered]@{
+      name = $logSpec.name
+      ok = $true
+      required = $false
+      detail = 'Returned bounded sanitized log tails.'
+      remediation = ''
+      stdoutLogPath = $logSpec.stdout
+      stderrLogPath = $logSpec.stderr
+      stdoutTail = $targetStdout
+      stderrTail = $targetStderr
+    }
+  }
   return Complete-RimsLocalResult `
     -Result $result `
     -Ok $true `
@@ -523,6 +578,42 @@ function Resolve-RimsFailedLifecycleCleanup {
       stateRetained = Test-Path -LiteralPath $Paths.state -PathType Leaf
       detail = "Cleanup was not started because pending ownership could not be persisted: $persistenceDetail"
       remediation = 'Restore runtime state write access, then run down with the same paths and port.'
+    }
+  }
+
+  $frontendCleanup = Stop-RimsFrontendResources `
+    -State $State `
+    -Paths $Paths
+  if (-not $frontendCleanup.ok) {
+    $State.cleanupPending = $true
+    try {
+      if ($null -eq $PersistStateAction) {
+        Write-RimsRuntimeState -Paths $Paths -State $State
+      } else {
+        & $PersistStateAction $Paths $State
+      }
+    } catch {
+    }
+    return [pscustomobject][ordered]@{
+      ok = $false
+      backendCleanup = [pscustomobject]@{
+        required = Test-RimsStateOwnsAnyBackendProcess -State $State
+        attempted = $false
+        ok = $false
+        detail = 'Backend cleanup is deferred until exact frontend cleanup completes.'
+      }
+      dependencyCleanup = [pscustomobject]@{
+        required = $composeOwned
+        attempted = $false
+        ok = -not $composeOwned
+        detail = 'Dependency cleanup is deferred until exact frontend cleanup completes.'
+      }
+      cleanupPending = $true
+      managed = Test-RimsStateOwnsAnyBackendProcess -State $State
+      healthy = $false
+      stateRetained = $true
+      detail = $frontendCleanup.detail
+      remediation = 'Run down with the same parameters to retry exact frontend cleanup.'
     }
   }
 
@@ -765,7 +856,32 @@ function Invoke-RimsLocalDownUnlocked {
   }
 
   $wasOwned = Test-RimsStateOwnsAnyBackendProcess -State $state
-  $wasCleanupPending = Test-RimsRuntimeCleanupPending -State $state
+  $wasCleanupPending = Test-RimsAnyRuntimeCleanupPending -State $state
+  $frontendCleanup = Stop-RimsFrontendResources `
+    -State $state `
+    -Paths $paths
+  $result.components += New-RimsLocalComponent `
+    -Name 'frontendCleanup' `
+    -Ok $frontendCleanup.ok `
+    -Required $true `
+    -Detail $frontendCleanup.detail `
+    -Remediation $(if ($frontendCleanup.ok) { '' } else {
+        'Retry down after the exactly owned frontend resource can be inspected.'
+      })
+  if (-not $frontendCleanup.ok) {
+    $state.cleanupPending = $true
+    Write-RimsRuntimeState -Paths $paths -State $state
+    $result.components += New-RimsBackendLifecycleComponent `
+      -Ok $false `
+      -Detail 'Backend was left running because frontend cleanup remains pending.' `
+      -Remediation 'Retry down with the same parameters.' `
+      -Managed $wasOwned `
+      -Healthy $false `
+      -Stale $false `
+      -Port $BackendPort `
+      -CleanupPending $true
+    return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+  }
   $cleanupOutcome = Resolve-RimsFailedLifecycleCleanup `
     -Paths $paths `
     -State $state `
@@ -883,6 +999,8 @@ function New-RimsManagedRuntimeState {
       cleanupFailureDetail = ''
       postgresResource = $PostgresResourceIdentity
     }
+    frontend = $null
+    emulator = $null
   }
 }
 
@@ -1056,11 +1174,17 @@ function Invoke-RimsLocalUpUnlocked {
     -BackendDir $BackendDir `
     -BackendWorkspaceRoot $BackendWorkspaceRoot
 
+  $doctorAndroidDevice = if ($Target -eq 'android' -and
+      [string]::IsNullOrWhiteSpace($AndroidDevice)) {
+    'Medium_Phone_API_36.1'
+  } else {
+    $AndroidDevice
+  }
   $doctorComponents = @(Invoke-RimsLocalDoctor `
       -Target $Target `
       -BackendDir $BackendDir `
       -BackendWorkspaceRoot $BackendWorkspaceRoot `
-      -AndroidDevice $AndroidDevice `
+      -AndroidDevice $doctorAndroidDevice `
       -ScriptDirectory $ScriptDirectory)
   $result.components += $doctorComponents
   $failedDoctor = @($doctorComponents | Where-Object {
@@ -1074,7 +1198,7 @@ function Invoke-RimsLocalUpUnlocked {
   $state = Read-RimsRuntimeState -Paths $paths
   if ($null -ne $state) {
     $owned = Test-RimsStateOwnsAnyBackendProcess -State $state
-    $cleanupPending = Test-RimsRuntimeCleanupPending -State $state
+    $cleanupPending = Test-RimsAnyRuntimeCleanupPending -State $state
     if ($cleanupPending) {
       $result.components += New-RimsBackendLifecycleComponent `
         -Ok $false `
@@ -1092,6 +1216,20 @@ function Invoke-RimsLocalUpUnlocked {
         -CleanupPending $true
       return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
     } elseif (-not $owned) {
+      if (Test-RimsStateOwnsAnyFrontendProcess -State $state) {
+        $state.cleanupPending = $true
+        Write-RimsRuntimeState -Paths $paths -State $state
+        $result.components += New-RimsBackendLifecycleComponent `
+          -Ok $false `
+          -Detail 'Owned frontend resources remain after the backend exited; state was retained.' `
+          -Remediation 'Run down with the recorded backend paths and port before retrying up.' `
+          -Managed $false `
+          -Healthy $false `
+          -Stale $true `
+          -Port $BackendPort `
+          -CleanupPending $true
+        return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+      }
       Remove-RimsRuntimeState -Paths $paths
       $state = $null
     } elseif (-not (Test-RimsRuntimeRequestMatchesState `
@@ -1130,6 +1268,51 @@ function Invoke-RimsLocalUpUnlocked {
         -Stale $false `
         -Port $BackendPort `
         -ProcessId (Get-RimsObjectPropertyValue -Value $state -Name 'windowsPid')
+      if ($healthy -and $Target -ne 'none') {
+        $currentTarget = [string](Get-RimsObjectPropertyValue `
+            -Value $state `
+            -Name 'target' `
+            -DefaultValue 'none')
+        if ($currentTarget -ne 'none' -and $currentTarget -ne $Target) {
+          $result.components += New-RimsLocalComponent `
+            -Name 'frontend' `
+            -Ok $false `
+            -Required $true `
+            -Detail "Managed frontend target '$currentTarget' differs from requested '$Target'." `
+            -Remediation 'Run restart or down before changing frontend targets.'
+          return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+        }
+        $existingFrontend = Get-RimsFrontendComponent `
+          -State $state `
+          -FrontendPort $FrontendPort
+        if ($currentTarget -eq $Target -and $existingFrontend.ok) {
+          $result.components += $existingFrontend
+        } elseif ($currentTarget -eq 'none') {
+          $frontendStarted = Start-RimsManagedFrontend `
+            -State $state `
+            -Paths $paths `
+            -Target $Target `
+            -BackendPort $BackendPort `
+            -FrontendPort $FrontendPort `
+            -AndroidDevice $AndroidDevice
+          $result.components += New-RimsLocalComponent `
+            -Name 'frontend' `
+            -Ok $frontendStarted.ok `
+            -Required $true `
+            -Detail $frontendStarted.detail `
+            -Remediation $(if ($frontendStarted.ok) { '' } else {
+                'Inspect frontend logs and retry up; the pre-existing managed backend was left running.'
+              })
+          $healthy = $frontendStarted.ok
+        } else {
+          $result.components += $existingFrontend
+          $healthy = $false
+        }
+      } elseif ($healthy) {
+        $result.components += Get-RimsFrontendComponent `
+          -State $state `
+          -FrontendPort $FrontendPort
+      }
       return Complete-RimsLocalResult `
         -Result $result `
         -Ok $healthy `
@@ -1401,6 +1584,42 @@ function Invoke-RimsLocalUpUnlocked {
       -Remediation 'Restore runtime directory write access, then retry up.'
   }
 
+  if ($Target -ne 'none') {
+    $frontendStarted = Start-RimsManagedFrontend `
+      -State $newState `
+      -Paths $paths `
+      -Target $Target `
+      -BackendPort $BackendPort `
+      -FrontendPort $FrontendPort `
+      -AndroidDevice $AndroidDevice
+    $result.components += New-RimsLocalComponent `
+      -Name 'frontend' `
+      -Ok $frontendStarted.ok `
+      -Required $true `
+      -Detail $frontendStarted.detail `
+      -Remediation $(if ($frontendStarted.ok) { '' } else {
+          'Inspect sanitized frontend logs and correct the launch failure.'
+        })
+    if (-not $frontendStarted.ok) {
+      return Complete-RimsFailedUpResult `
+        -Result $result `
+        -Paths $paths `
+        -State $newState `
+        -BackendWorkspaceRoot $resolved.workspacePath `
+        -FailureContext $frontendStarted.detail `
+        -BackendPort $BackendPort `
+        -Remediation 'Correct the frontend launch failure and retry up.'
+    }
+    $emulatorComponent = Get-RimsEmulatorComponent -State $newState
+    if ($null -ne $emulatorComponent) {
+      $result.components += $emulatorComponent
+    }
+  } else {
+    $result.components += Get-RimsFrontendComponent `
+      -State $newState `
+      -FrontendPort $FrontendPort
+  }
+
   $result.components += New-RimsBackendLifecycleComponent `
     -Ok $true `
     -Detail $started.detail `
@@ -1452,10 +1671,11 @@ function Invoke-RimsLocalRestartUnlocked {
         -BackendPort $BackendPort)) {
     if ($null -ne $state -and
         -not (Test-RimsStateOwnsAnyBackendProcess -State $state) -and
-        -not (Test-RimsRuntimeCleanupPending -State $state)) {
+        -not (Test-RimsAnyRuntimeCleanupPending -State $state) -and
+        -not (Test-RimsStateOwnsAnyFrontendProcess -State $state)) {
       Remove-RimsRuntimeState -Paths $paths
     }
-    $cleanupPending = Test-RimsRuntimeCleanupPending -State $state
+    $cleanupPending = Test-RimsAnyRuntimeCleanupPending -State $state
     $result.components = @(
       (New-RimsRuntimePathsComponent -Paths $paths),
       (New-RimsBackendLifecycleComponent `
@@ -1581,6 +1801,26 @@ function Invoke-RimsLocalStatus {
   } finally {
     Exit-RimsLifecycleLock -Lock $lock
   }
+}
+
+function Invoke-RimsLocalHealth {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$ScriptDirectory,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$BackendDir,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$BackendWorkspaceRoot,
+    [Parameter(Mandatory = $true)]
+    [int]$BackendPort,
+    [switch]$IncludeDependencies
+  )
+
+  $result = Invoke-RimsLocalStatus @PSBoundParameters
+  $result.command = 'health'
+  return $result
 }
 
 function Invoke-RimsLocalLogs {
@@ -1751,18 +1991,25 @@ function Write-RimsLogsText {
   )
 
   $logs = @($Result.components | Where-Object {
-      $_.name -eq 'backendLogs'
-    }) | Select-Object -First 1
-  if ($null -eq $logs) {
+      $_.name -in @('backendLogs', 'frontendLogs', 'emulatorLogs')
+    })
+  if ($logs.Count -eq 0) {
     Write-RimsLifecycleText -Result $Result
     return
   }
-  [Console]::Out.WriteLine("Backend stdout ($($logs.stdoutLogPath)):")
-  foreach ($line in @($logs.stdoutTail)) {
-    [Console]::Out.WriteLine($line)
-  }
-  [Console]::Out.WriteLine("Backend stderr ($($logs.stderrLogPath)):")
-  foreach ($line in @($logs.stderrTail)) {
-    [Console]::Out.WriteLine($line)
+  foreach ($log in $logs) {
+    $label = switch ($log.name) {
+      'frontendLogs' { 'Frontend' }
+      'emulatorLogs' { 'Emulator' }
+      default { 'Backend' }
+    }
+    [Console]::Out.WriteLine("$label stdout ($($log.stdoutLogPath)):")
+    foreach ($line in @($log.stdoutTail)) {
+      [Console]::Out.WriteLine($line)
+    }
+    [Console]::Out.WriteLine("$label stderr ($($log.stderrLogPath)):")
+    foreach ($line in @($log.stderrTail)) {
+      [Console]::Out.WriteLine($line)
+    }
   }
 }

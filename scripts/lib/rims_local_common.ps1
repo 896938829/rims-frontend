@@ -9,6 +9,7 @@ $rimsLocalModules = @(
   'rims_local_wsl_execution.ps1',
   'rims_local_doctor.ps1',
   'rims_local_compose_resources.ps1',
+  'rims_local_frontend.ps1',
   'rims_local_lifecycle.ps1'
 )
 

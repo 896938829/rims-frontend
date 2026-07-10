@@ -1,5 +1,5 @@
 param(
-  [ValidateSet('help', 'doctor', 'up', 'status', 'logs', 'restart',
+  [ValidateSet('help', 'doctor', 'up', 'status', 'health', 'logs', 'restart',
     'reset', 'smoke', 'down')]
   [string]$Command = 'status',
   [ValidateSet('none', 'web', 'android')]
@@ -89,7 +89,7 @@ if ($Command -eq 'doctor') {
   exit $result.exitCode
 }
 
-if ($Command -in @('up', 'status', 'logs', 'restart', 'down')) {
+if ($Command -in @('up', 'status', 'health', 'logs', 'restart', 'down')) {
   try {
     $result = switch ($Command) {
       'up' {
@@ -106,6 +106,15 @@ if ($Command -in @('up', 'status', 'logs', 'restart', 'down')) {
       }
       'status' {
         Invoke-RimsLocalStatus `
+          -ScriptDirectory $scriptDir `
+          -BackendDir $BackendDir `
+          -BackendWorkspaceRoot $BackendWorkspaceRoot `
+          -BackendPort $BackendPort `
+          -IncludeDependencies:$IncludeDependencies
+        break
+      }
+      'health' {
+        Invoke-RimsLocalHealth `
           -ScriptDirectory $scriptDir `
           -BackendDir $BackendDir `
           -BackendWorkspaceRoot $BackendWorkspaceRoot `
