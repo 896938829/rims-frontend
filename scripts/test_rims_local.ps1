@@ -440,6 +440,17 @@ try {
     -Actual (Resolve-RimsBackendDirectory -BackendDir $explicitBackendDir) `
     -Expected ([IO.Path]::GetFullPath($explicitBackendDir)) `
     -Message 'Explicit backend source did not win over RIMS_BACKEND_DIR.'
+  [Environment]::SetEnvironmentVariable(
+    'RIMS_BACKEND_DIR',
+    $null,
+    'Process'
+  )
+  Assert-Equal `
+    -Actual (Resolve-RimsBackendDirectory) `
+    -Expected ([IO.Path]::GetFullPath(
+      'E:\My Work\RIMS\rims-goProgect'
+    )) `
+    -Message 'Backend source resolver did not use its final fallback.'
 } finally {
   [Environment]::SetEnvironmentVariable(
     'RIMS_BACKEND_DIR',
