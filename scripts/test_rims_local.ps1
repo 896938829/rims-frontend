@@ -3,6 +3,7 @@ Set-StrictMode -Version Latest
 
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $localScript = Join-Path $scriptDir 'rims_local.ps1'
+$commonScript = Join-Path $scriptDir 'lib\rims_local_common.ps1'
 
 function Assert-Equal {
   param(
@@ -409,6 +410,238 @@ function Get-TestAndroidChoice {
 
 if (-not (Test-Path -LiteralPath $localScript)) {
   throw "Missing local runtime script: $localScript"
+}
+if (-not (Test-Path -LiteralPath $commonScript)) {
+  throw "Missing local runtime common script: $commonScript"
+}
+. $commonScript
+
+$originalBackendDirEnvironment = [Environment]::GetEnvironmentVariable(
+  'RIMS_BACKEND_DIR',
+  'Process'
+)
+$environmentBackendDir = Join-Path `
+  ([IO.Path]::GetTempPath()) `
+  ('rims-source-env-' + [guid]::NewGuid().ToString('N'))
+$explicitBackendDir = Join-Path `
+  ([IO.Path]::GetTempPath()) `
+  ('rims-source-explicit-' + [guid]::NewGuid().ToString('N'))
+try {
+  [Environment]::SetEnvironmentVariable(
+    'RIMS_BACKEND_DIR',
+    $environmentBackendDir,
+    'Process'
+  )
+  Assert-Equal `
+    -Actual (Resolve-RimsBackendDirectory -BackendDir '') `
+    -Expected ([IO.Path]::GetFullPath($environmentBackendDir)) `
+    -Message 'Backend source resolver ignored RIMS_BACKEND_DIR.'
+  Assert-Equal `
+    -Actual (Resolve-RimsBackendDirectory -BackendDir $explicitBackendDir) `
+    -Expected ([IO.Path]::GetFullPath($explicitBackendDir)) `
+    -Message 'Explicit backend source did not win over RIMS_BACKEND_DIR.'
+} finally {
+  [Environment]::SetEnvironmentVariable(
+    'RIMS_BACKEND_DIR',
+    $originalBackendDirEnvironment,
+    'Process'
+  )
+}
+
+$originalBackendWorkspaceEnvironment = `
+  [Environment]::GetEnvironmentVariable(
+    'RIMS_BACKEND_WORKSPACE_ROOT',
+    'Process'
+  )
+$environmentBackendWorkspace = Join-Path `
+  ([IO.Path]::GetTempPath()) `
+  ('rims-runtime-env-' + [guid]::NewGuid().ToString('N'))
+$explicitBackendWorkspace = Join-Path `
+  ([IO.Path]::GetTempPath()) `
+  ('rims-runtime-explicit-' + [guid]::NewGuid().ToString('N'))
+$isolatedBackendSource = Join-Path `
+  ([IO.Path]::GetTempPath()) `
+  ('rims-runtime-source-' + [guid]::NewGuid().ToString('N'))
+try {
+  [Environment]::SetEnvironmentVariable(
+    'RIMS_BACKEND_WORKSPACE_ROOT',
+    $environmentBackendWorkspace,
+    'Process'
+  )
+  Assert-Equal `
+    -Actual (Resolve-RimsBackendWorkspaceRoot `
+      -BackendWorkspaceRoot '' `
+      -BackendDir $isolatedBackendSource) `
+    -Expected ([IO.Path]::GetFullPath($environmentBackendWorkspace)) `
+    -Message 'Runtime resolver ignored RIMS_BACKEND_WORKSPACE_ROOT.'
+  Assert-Equal `
+    -Actual (Resolve-RimsBackendWorkspaceRoot `
+      -BackendWorkspaceRoot $explicitBackendWorkspace `
+      -BackendDir $isolatedBackendSource) `
+    -Expected ([IO.Path]::GetFullPath($explicitBackendWorkspace)) `
+    -Message 'Explicit runtime root did not win over its environment variable.'
+} finally {
+  [Environment]::SetEnvironmentVariable(
+    'RIMS_BACKEND_WORKSPACE_ROOT',
+    $originalBackendWorkspaceEnvironment,
+    'Process'
+  )
+}
+
+$validEnvironmentBackendDir = 'E:\My Work\rims-frontend\.worktrees\m9-backend-local-autonomy-acceptance\rims-goProgect'
+$validEnvironmentWorkspaceRoot = 'E:\My Work\RIMS'
+$originalCliBackendDirEnvironment = [Environment]::GetEnvironmentVariable(
+  'RIMS_BACKEND_DIR',
+  'Process'
+)
+$originalCliWorkspaceEnvironment = [Environment]::GetEnvironmentVariable(
+  'RIMS_BACKEND_WORKSPACE_ROOT',
+  'Process'
+)
+try {
+  [Environment]::SetEnvironmentVariable(
+    'RIMS_BACKEND_DIR',
+    $validEnvironmentBackendDir,
+    'Process'
+  )
+  [Environment]::SetEnvironmentVariable(
+    'RIMS_BACKEND_WORKSPACE_ROOT',
+    $validEnvironmentWorkspaceRoot,
+    'Process'
+  )
+  $environmentDoctor = Invoke-LocalCli -Arguments @(
+    '-Command',
+    'doctor',
+    '-Target',
+    'web',
+    '-Output',
+    'Json'
+  )
+  Assert-Equal `
+    -Actual $environmentDoctor.ExitCode `
+    -Expected 0 `
+    -Message 'Doctor rejected valid environment-selected backend paths.'
+  $environmentDoctorResult = ConvertFrom-SingleJson `
+    -Text $environmentDoctor.StandardOutput `
+    -Context 'Environment-selected JSON doctor'
+  $environmentBackendComponent = @(
+    $environmentDoctorResult.components | Where-Object {
+      $_.name -eq 'backendWorkspace'
+    }
+  )[0]
+  $environmentRuntimeComponent = @(
+    $environmentDoctorResult.components | Where-Object {
+      $_.name -eq 'workspaceEnv'
+    }
+  )[0]
+  if (-not $environmentBackendComponent.detail.Contains(
+      $validEnvironmentBackendDir)) {
+    throw 'Doctor did not select RIMS_BACKEND_DIR.'
+  }
+  if (-not $environmentRuntimeComponent.detail.Contains(
+      $validEnvironmentWorkspaceRoot)) {
+    throw 'Doctor did not select RIMS_BACKEND_WORKSPACE_ROOT.'
+  }
+
+  [Environment]::SetEnvironmentVariable(
+    'RIMS_BACKEND_DIR',
+    $environmentBackendDir,
+    'Process'
+  )
+  [Environment]::SetEnvironmentVariable(
+    'RIMS_BACKEND_WORKSPACE_ROOT',
+    $environmentBackendWorkspace,
+    'Process'
+  )
+  $explicitDoctor = Invoke-LocalCli -Arguments @(
+    '-Command',
+    'doctor',
+    '-Target',
+    'web',
+    '-Output',
+    'Json',
+    '-BackendDir',
+    $validEnvironmentBackendDir,
+    '-BackendWorkspaceRoot',
+    $validEnvironmentWorkspaceRoot
+  )
+  Assert-Equal `
+    -Actual $explicitDoctor.ExitCode `
+    -Expected 0 `
+    -Message 'Explicit backend paths did not win over invalid environment paths.'
+  $explicitDoctorResult = ConvertFrom-SingleJson `
+    -Text $explicitDoctor.StandardOutput `
+    -Context 'Explicit-over-environment JSON doctor'
+  $explicitBackendComponent = @(
+    $explicitDoctorResult.components | Where-Object {
+      $_.name -eq 'backendWorkspace'
+    }
+  )[0]
+  $explicitRuntimeComponent = @(
+    $explicitDoctorResult.components | Where-Object {
+      $_.name -eq 'workspaceEnv'
+    }
+  )[0]
+  if (-not $explicitBackendComponent.detail.Contains(
+      $validEnvironmentBackendDir)) {
+    throw 'Doctor did not prefer explicit BackendDir over its environment value.'
+  }
+  if (-not $explicitRuntimeComponent.detail.Contains(
+      $validEnvironmentWorkspaceRoot)) {
+    throw 'Doctor did not prefer explicit runtime root over its environment value.'
+  }
+} finally {
+  [Environment]::SetEnvironmentVariable(
+    'RIMS_BACKEND_DIR',
+    $originalCliBackendDirEnvironment,
+    'Process'
+  )
+  [Environment]::SetEnvironmentVariable(
+    'RIMS_BACKEND_WORKSPACE_ROOT',
+    $originalCliWorkspaceEnvironment,
+    'Process'
+  )
+}
+
+$originalFallbackWorkspaceEnvironment = `
+  [Environment]::GetEnvironmentVariable(
+    'RIMS_BACKEND_WORKSPACE_ROOT',
+    'Process'
+  )
+$workspacePathTestFunction = Get-Item `
+  -LiteralPath 'Function:\Test-RimsWorkspaceEnvironmentPath'
+$originalWorkspacePathTest = $workspacePathTestFunction.ScriptBlock
+$fallbackBackendSource = Join-Path `
+  ([IO.Path]::GetTempPath()) `
+  ('rims-runtime-fallback-' + [guid]::NewGuid().ToString('N'))
+$expectedFallbackWorkspace = [IO.Path]::GetFullPath('E:\My Work\RIMS')
+try {
+  [Environment]::SetEnvironmentVariable(
+    'RIMS_BACKEND_WORKSPACE_ROOT',
+    $null,
+    'Process'
+  )
+  Set-Item `
+    -LiteralPath 'Function:\Test-RimsWorkspaceEnvironmentPath' `
+    -Value {
+      param([string]$Path)
+      return $false
+    }
+  $resolvedFallbackWorkspace = Resolve-RimsBackendWorkspaceRoot `
+    -BackendWorkspaceRoot '' `
+    -BackendDir $fallbackBackendSource
+  if ($resolvedFallbackWorkspace -ne $expectedFallbackWorkspace) {
+    throw "Runtime resolver did not retain the final fallback path. Expected: '$expectedFallbackWorkspace'. Actual: '$resolvedFallbackWorkspace'."
+  }
+} finally {
+  Set-Item `
+    -LiteralPath 'Function:\Test-RimsWorkspaceEnvironmentPath' `
+    -Value $originalWorkspacePathTest
+  [Environment]::SetEnvironmentVariable(
+    'RIMS_BACKEND_WORKSPACE_ROOT',
+    $originalFallbackWorkspaceEnvironment,
+    'Process'
+  )
 }
 
 $testTokens = $null

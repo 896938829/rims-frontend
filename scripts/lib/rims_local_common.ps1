@@ -146,6 +146,9 @@ function Resolve-RimsBackendDirectory {
 
   $candidate = $BackendDir
   if ([string]::IsNullOrWhiteSpace($candidate)) {
+    $candidate = $env:RIMS_BACKEND_DIR
+  }
+  if ([string]::IsNullOrWhiteSpace($candidate)) {
     $candidate = 'E:\My Work\RIMS\rims-goProgect'
   }
   return [IO.Path]::GetFullPath($candidate)
@@ -174,8 +177,12 @@ function Resolve-RimsBackendWorkspaceRoot {
     [string]$BackendDir
   )
 
-  if (-not [string]::IsNullOrWhiteSpace($BackendWorkspaceRoot)) {
-    return [IO.Path]::GetFullPath($BackendWorkspaceRoot)
+  $candidate = $BackendWorkspaceRoot
+  if ([string]::IsNullOrWhiteSpace($candidate)) {
+    $candidate = $env:RIMS_BACKEND_WORKSPACE_ROOT
+  }
+  if (-not [string]::IsNullOrWhiteSpace($candidate)) {
+    return [IO.Path]::GetFullPath($candidate)
   }
 
   $current = New-Object IO.DirectoryInfo -ArgumentList `
@@ -188,10 +195,7 @@ function Resolve-RimsBackendWorkspaceRoot {
   }
 
   $defaultRoot = 'E:\My Work\RIMS'
-  if (Test-RimsWorkspaceEnvironmentPath -Path $defaultRoot) {
-    return [IO.Path]::GetFullPath($defaultRoot)
-  }
-  return $null
+  return [IO.Path]::GetFullPath($defaultRoot)
 }
 
 function ConvertTo-RimsWslPath {
