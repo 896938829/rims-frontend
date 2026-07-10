@@ -173,9 +173,12 @@ Cover both a valid environment and an invalid backend override. Parse JSON and
 assert component names, not human-readable prose:
 
 ```powershell
+$invalidBackendDir = Join-Path `
+  ([IO.Path]::GetTempPath()) `
+  ('rims-local-missing-' + [guid]::NewGuid().ToString('N'))
 $bad = & powershell.exe -NoProfile -ExecutionPolicy Bypass -File `
   "$PSScriptRoot\rims_local.ps1" -Command doctor -Target web -Output Json `
-  -BackendDir "$TestDrive\missing" 2>&1
+  -BackendDir $invalidBackendDir 2>&1
 Assert-NotEqual 0 $LASTEXITCODE 'invalid backend directory exit code'
 $badResult = $bad | ConvertFrom-Json
 Assert-False $badResult.ok 'invalid backend directory result'
