@@ -8,8 +8,10 @@ $commonScript = Join-Path $scriptDir 'lib\rims_local_common.ps1'
 function Assert-Equal {
   param(
     [Parameter(Mandatory = $true)]
+    [AllowNull()]
     [object]$Actual,
     [Parameter(Mandatory = $true)]
+    [AllowNull()]
     [object]$Expected,
     [Parameter(Mandatory = $true)]
     [string]$Message
@@ -45,6 +47,19 @@ function Assert-False {
 
   if ($Value -ne $false) {
     throw "$Message Expected: 'False'. Actual: '$Value'."
+  }
+}
+
+function Assert-True {
+  param(
+    [Parameter(Mandatory = $true)]
+    [object]$Value,
+    [Parameter(Mandatory = $true)]
+    [string]$Message
+  )
+
+  if ($Value -ne $true) {
+    throw "$Message Expected: 'True'. Actual: '$Value'."
   }
 }
 
@@ -370,6 +385,99 @@ function Get-TestAndroidChoice {
   return $null
 }
 
+function New-TestRuntimeState {
+  param(
+    [Parameter(Mandatory = $true)]
+    [Diagnostics.Process]$Process,
+    [Parameter(Mandatory = $true)]
+    [psobject]$RuntimePaths,
+    [Parameter(Mandatory = $true)]
+    [int]$BackendPort,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$ProcessStartTimeUtc
+  )
+
+  $startTime = $ProcessStartTimeUtc
+  if ([string]::IsNullOrWhiteSpace($startTime)) {
+    $startTime = $Process.StartTime.ToUniversalTime().ToString(
+      'o',
+      [Globalization.CultureInfo]::InvariantCulture
+    )
+  }
+  return [pscustomobject][ordered]@{
+    schemaVersion = 1
+    frontendPath = [IO.Path]::GetFullPath((Split-Path -Parent $scriptDir))
+    backendPath = 'C:\test-backend-source'
+    backendWorkspaceRoot = 'C:\test-backend-runtime'
+    frontendCommit = $null
+    backendCommit = $null
+    target = 'none'
+    backendPort = $BackendPort
+    frontendPort = 8091
+    startedAt = Get-RimsLocalTimestamp
+    healthUrl = "http://localhost:$BackendPort/healthz"
+    windowsPid = $Process.Id
+    windowsProcessStartTimeUtc = $startTime
+    linuxProcessGroupId = $null
+    runtimeRoot = $RuntimePaths.root
+    statePath = $RuntimePaths.state
+    stdoutLogPath = $RuntimePaths.stdoutLog
+    stderrLogPath = $RuntimePaths.stderrLog
+    commandSummary = 'test managed PowerShell child'
+    dependencyOwnership = [pscustomobject][ordered]@{
+      postgresWasRunning = $true
+      composeStartedByController = $false
+    }
+  }
+}
+
+function Start-TestSleepProcess {
+  param(
+    [Parameter(Mandatory = $true)]
+    [AllowEmptyCollection()]
+    [Collections.Generic.List[Diagnostics.Process]]$TrackedProcesses
+  )
+
+  $process = Start-Process `
+    -FilePath (Join-Path $PSHOME 'powershell.exe') `
+    -ArgumentList @(
+      '-NoProfile',
+      '-Command',
+      'Start-Sleep -Seconds 120'
+    ) `
+    -WindowStyle Hidden `
+    -PassThru
+  [void]$TrackedProcesses.Add($process)
+  return $process
+}
+
+function Test-TestProcessAlive {
+  param(
+    [Parameter(Mandatory = $true)]
+    [int]$ProcessId
+  )
+
+  return $null -ne (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)
+}
+
+function Wait-TestProcessExit {
+  param(
+    [Parameter(Mandatory = $true)]
+    [int]$ProcessId,
+    [int]$TimeoutSeconds = 5
+  )
+
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  do {
+    if (-not (Test-TestProcessAlive -ProcessId $ProcessId)) {
+      return $true
+    }
+    Start-Sleep -Milliseconds 100
+  } while ((Get-Date) -lt $deadline)
+  return -not (Test-TestProcessAlive -ProcessId $ProcessId)
+}
+
 if (-not (Test-Path -LiteralPath $localScript)) {
   throw "Missing local runtime script: $localScript"
 }
@@ -377,6 +485,343 @@ if (-not (Test-Path -LiteralPath $commonScript)) {
   throw "Missing local runtime common script: $commonScript"
 }
 . $commonScript
+
+$originalRuntimeDirectory = [Environment]::GetEnvironmentVariable(
+  'RIMS_RUNTIME_DIR',
+  'Process'
+)
+$testRuntimeDirectory = Join-Path `
+  ([IO.Path]::GetTempPath()) `
+  ('rims-local-runtime-' + [guid]::NewGuid().ToString('N'))
+$trackedLifecycleProcesses = `
+  New-Object 'Collections.Generic.List[Diagnostics.Process]'
+$trackedListeners = New-Object 'Collections.Generic.List[object]'
+try {
+  [Environment]::SetEnvironmentVariable(
+    'RIMS_RUNTIME_DIR',
+    $testRuntimeDirectory,
+    'Process'
+  )
+  $runtimePaths = Get-RimsRuntimePaths -ScriptDirectory $scriptDir
+  Assert-Equal `
+    -Actual $runtimePaths.root `
+    -Expected ([IO.Path]::GetFullPath($testRuntimeDirectory)) `
+    -Message 'RIMS_RUNTIME_DIR was not treated as the complete runtime root.'
+  Assert-Equal `
+    -Actual $runtimePaths.state `
+    -Expected (Join-Path $testRuntimeDirectory 'state.json') `
+    -Message 'Runtime state path does not use the override root.'
+  Assert-Equal `
+    -Actual $runtimePaths.stdoutLog `
+    -Expected (Join-Path $testRuntimeDirectory 'logs\backend.stdout.log') `
+    -Message 'Runtime stdout log path is incorrect.'
+  Assert-Equal `
+    -Actual $runtimePaths.stderrLog `
+    -Expected (Join-Path $testRuntimeDirectory 'logs\backend.stderr.log') `
+    -Message 'Runtime stderr log path is incorrect.'
+
+  $composeContext = [pscustomobject]@{
+    workspace = '/mnt/e/My Work/RIMS'
+    environment = '/mnt/e/My Work/RIMS/.env'
+    compose = '/mnt/e/My Work/RIMS/deploy/docker-compose.yml'
+  }
+  $composeArguments = @(Get-RimsComposeArguments `
+      -Context $composeContext `
+      -Arguments @('ps', '-q', 'postgres'))
+  Assert-Equal `
+    -Actual ($composeArguments -join '|') `
+    -Expected '-e|docker|compose|--project-directory|/mnt/e/My Work/RIMS|--env-file|/mnt/e/My Work/RIMS/.env|-f|/mnt/e/My Work/RIMS/deploy/docker-compose.yml|ps|-q|postgres' `
+    -Message 'Compose commands did not preserve the runtime-root project identity.'
+  $migrationScript = Get-RimsMigrationLaunchScript
+  foreach ($requiredMigrationFragment in @(
+      'sed ''s/\r$//''',
+      'unshare --user --map-root-user --mount',
+      'mount --bind "$stage_dir" "$source_dir/migrations"',
+      'export MIGRATIONS_DIR="$source_dir/migrations"',
+      'cd "$source_dir"',
+      'exec "$HOME/local/go/bin/go" run ./cmd/migrate up'
+    )) {
+    if (-not $migrationScript.Contains($requiredMigrationFragment)) {
+      throw "Migration launcher omitted safe source normalization fragment: $requiredMigrationFragment"
+    }
+  }
+
+  Initialize-RimsRuntimeDirectories -Paths $runtimePaths
+  $liveLogWriter = $null
+  try {
+    $liveLogWriter = New-Object IO.FileStream(
+      $runtimePaths.stderrLog,
+      [IO.FileMode]::Create,
+      [IO.FileAccess]::Write,
+      [IO.FileShare]::Read
+    )
+    $liveLogBytes = [Text.Encoding]::UTF8.GetBytes(
+      "live log PASSWORD=do-not-leak`n"
+    )
+    $liveLogWriter.Write($liveLogBytes, 0, $liveLogBytes.Length)
+    $liveLogWriter.Flush()
+    $liveLogTail = @(Get-RimsSanitizedLogTail `
+        -Path $runtimePaths.stderrLog `
+        -MaximumLines 5)
+    Assert-Equal `
+      -Actual $liveLogTail.Count `
+      -Expected 1 `
+      -Message 'Live backend log tail returned the wrong number of lines.'
+    if (-not $liveLogTail[0].Contains('live log') -or
+        $liveLogTail[0].Contains('do-not-leak')) {
+      throw 'Live backend log tail was unavailable or leaked a secret.'
+    }
+  } finally {
+    if ($null -ne $liveLogWriter) {
+      $liveLogWriter.Dispose()
+    }
+  }
+  $jsonLogs = Invoke-LocalCli -Arguments @(
+    '-Command',
+    'logs',
+    '-Output',
+    'Json'
+  )
+  Assert-Equal `
+    -Actual $jsonLogs.ExitCode `
+    -Expected 0 `
+    -Message 'JSON logs command failed.'
+  Assert-Equal `
+    -Actual $jsonLogs.StandardError `
+    -Expected '' `
+    -Message 'JSON logs command wrote diagnostics to stderr.'
+  $jsonLogsResult = ConvertFrom-SingleJson `
+    -Text $jsonLogs.StandardOutput `
+    -Context 'JSON logs'
+  $jsonLogComponent = @($jsonLogsResult.components | Where-Object {
+      $_.name -eq 'backendLogs'
+    })[0]
+  Assert-JsonArrayProperty `
+    -Value $jsonLogComponent `
+    -PropertyName 'stdoutTail'
+  Assert-JsonArrayProperty `
+    -Value $jsonLogComponent `
+    -PropertyName 'stderrTail'
+  if (($jsonLogComponent.stderrTail -join "`n").Contains('do-not-leak')) {
+    throw 'JSON logs leaked a secret from the backend stderr tail.'
+  }
+
+  $ownedChild = Start-TestSleepProcess `
+    -TrackedProcesses $trackedLifecycleProcesses
+  $ownedState = New-TestRuntimeState `
+    -Process $ownedChild `
+    -RuntimePaths $runtimePaths `
+    -BackendPort 45101
+  Write-RimsRuntimeState -Paths $runtimePaths -State $ownedState
+  Assert-True `
+    -Value (Test-Path -LiteralPath $runtimePaths.state -PathType Leaf) `
+    -Message 'Atomic state writer did not create state.json.'
+  Assert-False `
+    -Value (Test-Path -LiteralPath ($runtimePaths.state + '.tmp')) `
+    -Message 'Atomic state writer left state.json.tmp behind.'
+  $readState = Read-RimsRuntimeState -Paths $runtimePaths
+  Assert-Equal `
+    -Actual $readState.schemaVersion `
+    -Expected 1 `
+    -Message 'Runtime state schema version changed.'
+  Assert-True `
+    -Value (Test-RimsStateOwnsProcess -State $readState) `
+    -Message 'Matching PID and process start time were not treated as owned.'
+
+  $mismatchedState = New-TestRuntimeState `
+    -Process $ownedChild `
+    -RuntimePaths $runtimePaths `
+    -BackendPort 45101 `
+    -ProcessStartTimeUtc ([DateTime]::UtcNow.AddDays(-1).ToString('o'))
+  Assert-False `
+    -Value (Test-RimsStateOwnsProcess -State $mismatchedState) `
+    -Message 'A stale PID with a mismatched start time was treated as owned.'
+
+  Write-RimsRuntimeState -Paths $runtimePaths -State $mismatchedState
+  $staleStatus = Invoke-LocalCli -Arguments @(
+    '-Command',
+    'status',
+    '-Output',
+    'Json',
+    '-BackendDir',
+    'C:\test-backend-source',
+    '-BackendWorkspaceRoot',
+    'C:\test-backend-runtime',
+    '-BackendPort',
+    '45101'
+  )
+  Assert-NotEqual `
+    -Actual $staleStatus.ExitCode `
+    -Expected 0 `
+    -Message 'Status reported stale state as healthy.'
+  $staleStatusResult = ConvertFrom-SingleJson `
+    -Text $staleStatus.StandardOutput `
+    -Context 'Stale runtime status'
+  $staleBackendComponents = @($staleStatusResult.components | Where-Object {
+      $_.name -eq 'backend'
+    })
+  Assert-Equal `
+    -Actual $staleBackendComponents.Count `
+    -Expected 1 `
+    -Message 'Status omitted its structured backend component.'
+  $staleBackend = $staleBackendComponents[0]
+  Assert-Equal `
+    -Actual $staleBackend.stale `
+    -Expected $true `
+    -Message 'Status did not report stale runtime state.'
+  Assert-False `
+    -Value (Test-Path -LiteralPath $runtimePaths.state) `
+    -Message 'Status did not clean stale runtime state.'
+  Assert-True `
+    -Value (Test-TestProcessAlive -ProcessId $ownedChild.Id) `
+    -Message 'Stale state reconciliation terminated an unrelated process.'
+
+  [IO.Directory]::CreateDirectory($runtimePaths.root) | Out-Null
+  [IO.File]::WriteAllText($runtimePaths.state, '{not-json')
+  $malformedRead = Read-RimsRuntimeState -Paths $runtimePaths
+  Assert-Equal `
+    -Actual $null `
+    -Expected $malformedRead `
+    -Message 'Malformed runtime state did not return a clean state.'
+  Assert-False `
+    -Value (Test-Path -LiteralPath $runtimePaths.state) `
+    -Message 'Malformed state remained at state.json.'
+  $quarantinedState = @(Get-ChildItem `
+      -LiteralPath $runtimePaths.root `
+      -Filter 'state.invalid.*Z.json' `
+      -File)
+  Assert-Equal `
+    -Actual $quarantinedState.Count `
+    -Expected 1 `
+    -Message 'Malformed state was not quarantined with a UTC timestamp.'
+
+  $managedChild = Start-TestSleepProcess `
+    -TrackedProcesses $trackedLifecycleProcesses
+  $managedState = New-TestRuntimeState `
+    -Process $managedChild `
+    -RuntimePaths $runtimePaths `
+    -BackendPort 45102
+  Write-RimsRuntimeState -Paths $runtimePaths -State $managedState
+  $managedDown = Invoke-LocalCli -Arguments @(
+    '-Command',
+    'down',
+    '-Target',
+    'none',
+    '-Output',
+    'Json',
+    '-BackendDir',
+    'C:\test-backend-source',
+    '-BackendWorkspaceRoot',
+    'C:\test-backend-runtime',
+    '-BackendPort',
+    '45102'
+  )
+  Assert-Equal `
+    -Actual $managedDown.ExitCode `
+    -Expected 0 `
+    -Message 'Down failed to terminate an exactly owned process.'
+  Assert-True `
+    -Value (Wait-TestProcessExit -ProcessId $managedChild.Id) `
+    -Message 'Down left an exactly owned process alive.'
+  Assert-True `
+    -Value (Test-TestProcessAlive -ProcessId $ownedChild.Id) `
+    -Message 'Down terminated a process not identified by state ownership.'
+  Assert-False `
+    -Value (Test-Path -LiteralPath $runtimePaths.state) `
+    -Message 'Down left managed state behind.'
+
+  $listener = New-Object Net.Sockets.TcpListener(
+    [Net.IPAddress]::Loopback,
+    0
+  )
+  $listener.Start()
+  [void]$trackedListeners.Add($listener)
+  $occupiedPort = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+  $occupiedUp = Invoke-LocalCli -Arguments @(
+    '-Command',
+    'up',
+    '-Target',
+    'none',
+    '-Output',
+    'Json',
+    '-BackendDir',
+    'E:\My Work\rims-frontend\.worktrees\m9-backend-local-autonomy-acceptance\rims-goProgect',
+    '-BackendWorkspaceRoot',
+    'E:\My Work\RIMS',
+    '-BackendPort',
+    [string]$occupiedPort
+  )
+  Assert-NotEqual `
+    -Actual $occupiedUp.ExitCode `
+    -Expected 0 `
+    -Message 'Up accepted an unmanaged occupied backend port.'
+  $occupiedUpResult = ConvertFrom-SingleJson `
+    -Text $occupiedUp.StandardOutput `
+    -Context 'Unmanaged occupied-port up'
+  $occupiedPortComponents = @($occupiedUpResult.components | Where-Object {
+      $_.name -eq 'backendPort'
+    })
+  Assert-Equal `
+    -Actual $occupiedPortComponents.Count `
+    -Expected 1 `
+    -Message 'Up omitted its structured backend-port component.'
+  $occupiedPortComponent = $occupiedPortComponents[0]
+  Assert-False `
+    -Value $occupiedPortComponent.ok `
+    -Message 'Occupied backend port component reported success.'
+  Assert-True `
+    -Value $listener.Server.IsBound `
+    -Message 'Up terminated the unmanaged listener.'
+  Assert-False `
+    -Value (Test-Path -LiteralPath $runtimePaths.state) `
+    -Message 'Up recorded ownership for an unmanaged listener.'
+
+  $unmanagedDown = Invoke-LocalCli -Arguments @(
+    '-Command',
+    'down',
+    '-Target',
+    'none',
+    '-Output',
+    'Json',
+    '-BackendPort',
+    [string]$occupiedPort
+  )
+  Assert-Equal `
+    -Actual $unmanagedDown.ExitCode `
+    -Expected 0 `
+    -Message 'Down was not idempotent without managed state.'
+  Assert-True `
+    -Value $listener.Server.IsBound `
+    -Message 'A port number alone granted permission to stop a listener.'
+} finally {
+  foreach ($listener in $trackedListeners) {
+    try { $listener.Stop() } catch {}
+  }
+  foreach ($process in $trackedLifecycleProcesses) {
+    if (Test-TestProcessAlive -ProcessId $process.Id) {
+      Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+    }
+    $process.Dispose()
+  }
+  [Environment]::SetEnvironmentVariable(
+    'RIMS_RUNTIME_DIR',
+    $originalRuntimeDirectory,
+    'Process'
+  )
+  $tempRoot = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+  $resolvedTestRuntime = [IO.Path]::GetFullPath($testRuntimeDirectory)
+  if ($resolvedTestRuntime.StartsWith(
+      $tempRoot,
+      [StringComparison]::OrdinalIgnoreCase
+    ) -and
+      (Split-Path -Leaf $resolvedTestRuntime).StartsWith('rims-local-runtime-')) {
+    Remove-Item `
+      -LiteralPath $resolvedTestRuntime `
+      -Recurse `
+      -Force `
+      -ErrorAction SilentlyContinue
+  }
+}
 
 $testPowerShellExecutable = (Get-Process -Id $PID).Path
 $timeoutScript = Join-Path `
@@ -1449,7 +1894,15 @@ if ($textDoctor.StandardOutput -match 'CategoryInfo|ScriptStackTrace|at <ScriptB
 }
 
 foreach ($command in ($expectedCommands | Where-Object {
-      $_ -notin @('help', 'doctor')
+      $_ -notin @(
+        'help',
+        'doctor',
+        'up',
+        'status',
+        'logs',
+        'restart',
+        'down'
+      )
     })) {
   $failure = Invoke-LocalCli -Arguments @('-Command', $command, '-Output', 'Json')
   if ($failure.ExitCode -eq 0) {
@@ -1484,9 +1937,9 @@ foreach ($command in ($expectedCommands | Where-Object {
     -Message 'Unimplemented command returned an unclear error.'
 }
 
-$textFailure = Invoke-LocalCli -Arguments @('-Command', 'status', '-Output', 'Text')
+$textFailure = Invoke-LocalCli -Arguments @('-Command', 'reset', '-Output', 'Text')
 if ($textFailure.ExitCode -eq 0) {
-  throw 'Expected text status to fail until it is implemented.'
+  throw 'Expected text reset to fail until it is implemented.'
 }
 Assert-Equal `
   -Actual $textFailure.StandardOutput `

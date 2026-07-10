@@ -392,6 +392,214 @@ function Resolve-RimsNormalizedPath {
   }
 }
 
+function Get-RimsRuntimePaths {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$ScriptDirectory
+  )
+
+  $repositoryRoot = [IO.Path]::GetFullPath(
+    (Split-Path -Parent $ScriptDirectory)
+  )
+  $runtimeRoot = $env:RIMS_RUNTIME_DIR
+  if ([string]::IsNullOrWhiteSpace($runtimeRoot)) {
+    $runtimeRoot = Join-Path $repositoryRoot '.runtime\rims-local'
+  }
+  $rootResolution = Resolve-RimsNormalizedPath -Path $runtimeRoot
+  if (-not $rootResolution.success) {
+    throw "Runtime root is invalid: $($rootResolution.error)"
+  }
+
+  $logDirectory = Join-Path $rootResolution.path 'logs'
+  return [pscustomobject][ordered]@{
+    root = $rootResolution.path
+    state = Join-Path $rootResolution.path 'state.json'
+    logs = $logDirectory
+    stdoutLog = Join-Path $logDirectory 'backend.stdout.log'
+    stderrLog = Join-Path $logDirectory 'backend.stderr.log'
+    linuxProcessGroup = Join-Path $rootResolution.path 'backend.pgid'
+  }
+}
+
+function Initialize-RimsRuntimeDirectories {
+  param(
+    [Parameter(Mandatory = $true)]
+    [psobject]$Paths
+  )
+
+  [void][IO.Directory]::CreateDirectory([string]$Paths.root)
+  [void][IO.Directory]::CreateDirectory([string]$Paths.logs)
+}
+
+function Get-RimsObjectPropertyValue {
+  param(
+    [AllowNull()]
+    [object]$Value,
+    [Parameter(Mandatory = $true)]
+    [string]$Name,
+    [AllowNull()]
+    [object]$DefaultValue = $null
+  )
+
+  if ($null -eq $Value) {
+    return $DefaultValue
+  }
+  $property = $Value.PSObject.Properties[$Name]
+  if ($null -eq $property) {
+    return $DefaultValue
+  }
+  return $property.Value
+}
+
+function Write-RimsRuntimeState {
+  param(
+    [Parameter(Mandatory = $true)]
+    [psobject]$Paths,
+    [Parameter(Mandatory = $true)]
+    [psobject]$State
+  )
+
+  Initialize-RimsRuntimeDirectories -Paths $Paths
+  $temporaryPath = ([string]$Paths.state) + '.tmp'
+  $backupPath = ([string]$Paths.state) + '.previous'
+  $json = $State | ConvertTo-Json -Depth 10
+  try {
+    [IO.File]::WriteAllText(
+      $temporaryPath,
+      $json,
+      (New-Object Text.UTF8Encoding($false))
+    )
+    if (Test-Path -LiteralPath $Paths.state -PathType Leaf) {
+      [IO.File]::Replace(
+        $temporaryPath,
+        [string]$Paths.state,
+        $backupPath,
+        $true
+      )
+      [IO.File]::Delete($backupPath)
+    } else {
+      [IO.File]::Move($temporaryPath, [string]$Paths.state)
+    }
+  } finally {
+    if (Test-Path -LiteralPath $temporaryPath -PathType Leaf) {
+      [IO.File]::Delete($temporaryPath)
+    }
+    if (Test-Path -LiteralPath $backupPath -PathType Leaf) {
+      [IO.File]::Delete($backupPath)
+    }
+  }
+}
+
+function Move-RimsInvalidRuntimeState {
+  param(
+    [Parameter(Mandatory = $true)]
+    [psobject]$Paths
+  )
+
+  if (-not (Test-Path -LiteralPath $Paths.state -PathType Leaf)) {
+    return $null
+  }
+  for ($offset = 0; $offset -lt 60; $offset++) {
+    $timestamp = [DateTime]::UtcNow.AddSeconds($offset).ToString(
+      'yyyyMMddTHHmmssZ',
+      [Globalization.CultureInfo]::InvariantCulture
+    )
+    $destination = Join-Path $Paths.root "state.invalid.$timestamp.json"
+    if (-not (Test-Path -LiteralPath $destination)) {
+      [IO.File]::Move([string]$Paths.state, $destination)
+      return $destination
+    }
+  }
+  throw 'Could not allocate a quarantine path for invalid runtime state.'
+}
+
+function Read-RimsRuntimeState {
+  param(
+    [Parameter(Mandatory = $true)]
+    [psobject]$Paths
+  )
+
+  if (-not (Test-Path -LiteralPath $Paths.state -PathType Leaf)) {
+    return $null
+  }
+  try {
+    $state = [IO.File]::ReadAllText([string]$Paths.state) |
+      ConvertFrom-Json -ErrorAction Stop
+    if ($null -eq $state -or
+        (Get-RimsObjectPropertyValue `
+          -Value $state `
+          -Name 'schemaVersion') -ne 1) {
+      throw 'Unsupported or missing runtime state schemaVersion.'
+    }
+    return $state
+  } catch {
+    [void](Move-RimsInvalidRuntimeState -Paths $Paths)
+    return $null
+  }
+}
+
+function Get-RimsOwnedProcess {
+  param(
+    [AllowNull()]
+    [object]$State
+  )
+
+  $rawProcessId = Get-RimsObjectPropertyValue `
+    -Value $State `
+    -Name 'windowsPid'
+  $rawStartTime = [string](Get-RimsObjectPropertyValue `
+      -Value $State `
+      -Name 'windowsProcessStartTimeUtc' `
+      -DefaultValue '')
+  $processId = 0
+  if (-not [int]::TryParse([string]$rawProcessId, [ref]$processId) -or
+      $processId -le 0 -or
+      [string]::IsNullOrWhiteSpace($rawStartTime)) {
+    return $null
+  }
+
+  $expectedStartTime = [DateTime]::MinValue
+  if (-not [DateTime]::TryParse(
+      $rawStartTime,
+      [Globalization.CultureInfo]::InvariantCulture,
+      [Globalization.DateTimeStyles]::RoundtripKind,
+      [ref]$expectedStartTime
+    )) {
+    return $null
+  }
+
+  $process = Get-Process -Id $processId -ErrorAction SilentlyContinue
+  if ($null -eq $process) {
+    return $null
+  }
+  try {
+    $actualStartTime = $process.StartTime.ToUniversalTime()
+    $expectedUtc = $expectedStartTime.ToUniversalTime()
+    if ($actualStartTime.Ticks -ne $expectedUtc.Ticks) {
+      $process.Dispose()
+      return $null
+    }
+    return $process
+  } catch {
+    $process.Dispose()
+    return $null
+  }
+}
+
+function Test-RimsStateOwnsProcess {
+  param(
+    [AllowNull()]
+    [object]$State
+  )
+
+  $process = Get-RimsOwnedProcess -State $State
+  if ($null -eq $process) {
+    return $false
+  }
+  $process.Dispose()
+  return $true
+}
+
 function Resolve-RimsBackendDirectoryState {
   param(
     [AllowNull()]
@@ -1253,5 +1461,1615 @@ function Write-RimsDoctorText {
   }
   foreach ($errorMessage in @($Result.errors)) {
     [Console]::Out.WriteLine("[FAIL] doctor - $errorMessage")
+  }
+}
+
+function Remove-RimsRuntimeState {
+  param(
+    [Parameter(Mandatory = $true)]
+    [psobject]$Paths
+  )
+
+  foreach ($path in @(
+      [string]$Paths.state,
+      ([string]$Paths.state) + '.tmp',
+      ([string]$Paths.state) + '.previous',
+      [string]$Paths.linuxProcessGroup
+    )) {
+    if (Test-Path -LiteralPath $path -PathType Leaf) {
+      [IO.File]::Delete($path)
+    }
+  }
+}
+
+function Test-RimsTcpPortListening {
+  param(
+    [Parameter(Mandatory = $true)]
+    [ValidateRange(1, 65535)]
+    [int]$Port,
+    [ValidateRange(50, 5000)]
+    [int]$TimeoutMilliseconds = 5000
+  )
+
+  $client = New-Object Net.Sockets.TcpClient
+  try {
+    $connectTask = $client.ConnectAsync('127.0.0.1', $Port)
+    if (-not $connectTask.Wait($TimeoutMilliseconds)) {
+      return $false
+    }
+    return $client.Connected
+  } catch {
+    return $false
+  } finally {
+    $client.Close()
+  }
+}
+
+function Test-RimsHealthEndpoint {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Url,
+    [ValidateRange(1, 30)]
+    [int]$TimeoutSeconds = 2
+  )
+
+  try {
+    $response = Invoke-WebRequest `
+      -Uri $Url `
+      -UseBasicParsing `
+      -TimeoutSec $TimeoutSeconds `
+      -ErrorAction Stop
+    return $response.StatusCode -ge 200 -and $response.StatusCode -lt 300
+  } catch {
+    return $false
+  }
+}
+
+function Get-RimsSanitizedLogTail {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Path,
+    [ValidateRange(1, 500)]
+    [int]$MaximumLines = 80,
+    [ValidateRange(1024, 1048576)]
+    [int]$MaximumBytes = 65536
+  )
+
+  if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+    return @()
+  }
+  $lines = New-Object 'Collections.Generic.Queue[string]'
+  $stream = $null
+  $reader = $null
+  try {
+    $stream = [IO.FileStream]::new(
+      $Path,
+      [IO.FileMode]::Open,
+      [IO.FileAccess]::Read,
+      ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
+    )
+    $offset = [Math]::Max(0, $stream.Length - $MaximumBytes)
+    if ($offset -gt 0) {
+      [void]$stream.Seek($offset, [IO.SeekOrigin]::Begin)
+    }
+    $reader = [IO.StreamReader]::new($stream, $true)
+    if ($offset -gt 0) {
+      [void]$reader.ReadLine()
+    }
+    while (-not $reader.EndOfStream) {
+      $line = $reader.ReadLine()
+      if ($lines.Count -eq $MaximumLines) {
+        [void]$lines.Dequeue()
+      }
+      $sanitized = ConvertTo-RimsDiagnosticSummary `
+        -StandardOutput ([string]$line) `
+        -StandardError ''
+      $lines.Enqueue($sanitized)
+    }
+  } catch {
+    return @('Unable to read log tail safely.')
+  } finally {
+    if ($null -ne $reader) {
+      $reader.Dispose()
+      $stream = $null
+    }
+    if ($null -ne $stream) {
+      $stream.Dispose()
+    }
+  }
+  return @($lines.ToArray())
+}
+
+function New-RimsBackendLifecycleComponent {
+  param(
+    [Parameter(Mandatory = $true)]
+    [bool]$Ok,
+    [Parameter(Mandatory = $true)]
+    [AllowEmptyString()]
+    [string]$Detail,
+    [Parameter(Mandatory = $true)]
+    [AllowEmptyString()]
+    [string]$Remediation,
+    [Parameter(Mandatory = $true)]
+    [bool]$Managed,
+    [Parameter(Mandatory = $true)]
+    [bool]$Healthy,
+    [Parameter(Mandatory = $true)]
+    [bool]$Stale,
+    [Parameter(Mandatory = $true)]
+    [int]$Port,
+    [AllowNull()]
+    [object]$ProcessId = $null
+  )
+
+  return [pscustomobject][ordered]@{
+    name = 'backend'
+    ok = $Ok
+    required = $true
+    detail = $Detail
+    remediation = $Remediation
+    managed = $Managed
+    healthy = $Healthy
+    stale = $Stale
+    port = $Port
+    windowsPid = $ProcessId
+  }
+}
+
+function New-RimsRuntimePathsComponent {
+  param(
+    [Parameter(Mandatory = $true)]
+    [psobject]$Paths
+  )
+
+  return [pscustomobject][ordered]@{
+    name = 'runtimePaths'
+    ok = $true
+    required = $false
+    detail = "State: $($Paths.state); logs: $($Paths.logs)."
+    remediation = ''
+    runtimeRoot = $Paths.root
+    statePath = $Paths.state
+    stdoutLogPath = $Paths.stdoutLog
+    stderrLogPath = $Paths.stderrLog
+  }
+}
+
+function New-RimsBackendPortComponent {
+  param(
+    [Parameter(Mandatory = $true)]
+    [bool]$Ok,
+    [Parameter(Mandatory = $true)]
+    [int]$Port,
+    [Parameter(Mandatory = $true)]
+    [AllowEmptyString()]
+    [string]$Detail,
+    [Parameter(Mandatory = $true)]
+    [AllowEmptyString()]
+    [string]$Remediation
+  )
+
+  return [pscustomobject][ordered]@{
+    name = 'backendPort'
+    ok = $Ok
+    required = $true
+    detail = $Detail
+    remediation = $Remediation
+    port = $Port
+  }
+}
+
+function Get-RimsGitCommit {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Path
+  )
+
+  $git = Resolve-RimsCommandPath -Name 'git.exe'
+  if ([string]::IsNullOrWhiteSpace($git)) {
+    $git = Resolve-RimsCommandPath -Name 'git'
+  }
+  if ([string]::IsNullOrWhiteSpace($git) -or
+      -not (Test-Path -LiteralPath $Path -PathType Container)) {
+    return $null
+  }
+  $result = Invoke-RimsExternalCommand `
+    -FilePath $git `
+    -Arguments @('-C', $Path, 'rev-parse', 'HEAD') `
+    -TimeoutSeconds 10
+  if ($result.ExitCode -ne 0) {
+    return $null
+  }
+  $commit = $result.StandardOutput.Trim()
+  if ($commit -notmatch '^[0-9a-fA-F]{40}$') {
+    return $null
+  }
+  return $commit.ToLowerInvariant()
+}
+
+function Compare-RimsPath {
+  param(
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$Left,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$Right
+  )
+
+  if ([string]::IsNullOrWhiteSpace($Left) -or
+      [string]::IsNullOrWhiteSpace($Right)) {
+    return $false
+  }
+  try {
+    $leftPath = [IO.Path]::GetFullPath($Left).TrimEnd('\')
+    $rightPath = [IO.Path]::GetFullPath($Right).TrimEnd('\')
+    return $leftPath.Equals(
+      $rightPath,
+      [StringComparison]::OrdinalIgnoreCase
+    )
+  } catch {
+    return $false
+  }
+}
+
+function Test-RimsRuntimeRequestMatchesState {
+  param(
+    [Parameter(Mandatory = $true)]
+    [psobject]$State,
+    [Parameter(Mandatory = $true)]
+    [string]$BackendDir,
+    [Parameter(Mandatory = $true)]
+    [string]$BackendWorkspaceRoot,
+    [Parameter(Mandatory = $true)]
+    [int]$BackendPort
+  )
+
+  $stateBackend = [string](Get-RimsObjectPropertyValue `
+      -Value $State `
+      -Name 'backendPath' `
+      -DefaultValue '')
+  $stateWorkspace = [string](Get-RimsObjectPropertyValue `
+      -Value $State `
+      -Name 'backendWorkspaceRoot' `
+      -DefaultValue '')
+  $statePort = [int](Get-RimsObjectPropertyValue `
+      -Value $State `
+      -Name 'backendPort' `
+      -DefaultValue 0)
+  return (
+    (Compare-RimsPath -Left $stateBackend -Right $BackendDir) -and
+    (Compare-RimsPath -Left $stateWorkspace -Right $BackendWorkspaceRoot) -and
+    $statePort -eq $BackendPort
+  )
+}
+
+function Resolve-RimsLifecyclePaths {
+  param(
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$BackendDir,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$BackendWorkspaceRoot
+  )
+
+  $backendState = Resolve-RimsBackendDirectoryState -BackendDir $BackendDir
+  $workspaceState = Resolve-RimsBackendWorkspaceRootState `
+    -BackendWorkspaceRoot $BackendWorkspaceRoot `
+    -BackendDir $(if ($backendState.success) {
+        $backendState.path
+      } else {
+        $BackendDir
+      })
+  return [pscustomobject][ordered]@{
+    success = $backendState.success -and $workspaceState.success
+    backendPath = $backendState.path
+    backendError = $backendState.error
+    workspacePath = $workspaceState.path
+    workspaceError = $workspaceState.error
+  }
+}
+
+function Invoke-RimsLocalStatus {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$ScriptDirectory,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$BackendDir,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$BackendWorkspaceRoot,
+    [Parameter(Mandatory = $true)]
+    [int]$BackendPort,
+    [switch]$IncludeDependencies
+  )
+
+  $result = New-RimsLocalResult -Command 'status'
+  $paths = Get-RimsRuntimePaths -ScriptDirectory $ScriptDirectory
+  $resolved = Resolve-RimsLifecyclePaths `
+    -BackendDir $BackendDir `
+    -BackendWorkspaceRoot $BackendWorkspaceRoot
+  $result.components += New-RimsRuntimePathsComponent -Paths $paths
+  if (-not $resolved.success) {
+    $detail = "Lifecycle paths are invalid: $($resolved.backendError) $($resolved.workspaceError)".Trim()
+    $result.components += New-RimsBackendLifecycleComponent `
+      -Ok $false `
+      -Detail $detail `
+      -Remediation 'Pass valid -BackendDir and -BackendWorkspaceRoot paths.' `
+      -Managed $false `
+      -Healthy $false `
+      -Stale $false `
+      -Port $BackendPort
+    return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+  }
+
+  $dependenciesHealthy = $true
+  if ($IncludeDependencies) {
+    $context = Get-RimsWslLifecycleContext `
+      -BackendDir $resolved.backendPath `
+      -BackendWorkspaceRoot $resolved.workspacePath `
+      -RuntimePaths $paths
+    $postgresStatus = if ($context.ok) {
+      Get-RimsPostgresStatus -Context $context
+    } else {
+      [pscustomobject]@{
+        ok = $false
+        healthy = $false
+        detail = $context.detail
+      }
+    }
+    $dependenciesHealthy = $postgresStatus.ok -and $postgresStatus.healthy
+    $result.components += New-RimsLocalComponent `
+      -Name 'postgres' `
+      -Ok $dependenciesHealthy `
+      -Required $true `
+      -Detail $postgresStatus.detail `
+      -Remediation $(if ($dependenciesHealthy) { '' } else {
+          'Start PostgreSQL or run up with -IncludeDependencies.'
+        })
+  }
+
+  $state = Read-RimsRuntimeState -Paths $paths
+  if ($null -eq $state) {
+    $occupied = Test-RimsTcpPortListening -Port $BackendPort
+    $healthy = if ($occupied) {
+      Test-RimsHealthEndpoint -Url "http://localhost:$BackendPort/healthz"
+    } else {
+      $false
+    }
+    $detail = if ($occupied) {
+      "Port $BackendPort is occupied by an unmanaged process; it was left untouched."
+    } else {
+      "No managed backend state exists; port $BackendPort is not listening."
+    }
+    $result.components += New-RimsBackendLifecycleComponent `
+      -Ok $false `
+      -Detail $detail `
+      -Remediation $(if ($occupied) {
+          'Choose a free -BackendPort or stop the user-managed process yourself.'
+        } else {
+          'Run the up command to start a managed backend.'
+        }) `
+      -Managed $false `
+      -Healthy $healthy `
+      -Stale $false `
+      -Port $BackendPort
+    return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+  }
+
+  $matches = Test-RimsRuntimeRequestMatchesState `
+    -State $state `
+    -BackendDir $resolved.backendPath `
+    -BackendWorkspaceRoot $resolved.workspacePath `
+    -BackendPort $BackendPort
+  $owned = Test-RimsStateOwnsProcess -State $state
+  if (-not $owned) {
+    Remove-RimsRuntimeState -Paths $paths
+    $result.components += New-RimsBackendLifecycleComponent `
+      -Ok $false `
+      -Detail 'Stale managed state was removed; no process matched both the recorded PID and start time.' `
+      -Remediation 'Run the up command to start a fresh managed backend.' `
+      -Managed $false `
+      -Healthy $false `
+      -Stale $true `
+      -Port $BackendPort `
+      -ProcessId (Get-RimsObjectPropertyValue -Value $state -Name 'windowsPid')
+    return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+  }
+  if (-not $matches) {
+    $result.components += New-RimsBackendLifecycleComponent `
+      -Ok $false `
+      -Detail 'Managed state belongs to different backend paths or port; the owned process was left untouched.' `
+      -Remediation 'Repeat the command with the paths and port recorded in state.json.' `
+      -Managed $true `
+      -Healthy $false `
+      -Stale $false `
+      -Port $BackendPort `
+      -ProcessId (Get-RimsObjectPropertyValue -Value $state -Name 'windowsPid')
+    return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+  }
+
+  $healthUrl = [string](Get-RimsObjectPropertyValue `
+      -Value $state `
+      -Name 'healthUrl' `
+      -DefaultValue "http://localhost:$BackendPort/healthz")
+  $healthy = Test-RimsHealthEndpoint -Url $healthUrl
+  $result.components += New-RimsBackendLifecycleComponent `
+    -Ok $healthy `
+    -Detail $(if ($healthy) {
+        "Managed backend is healthy at $healthUrl."
+      } else {
+        "Managed backend process exists but is not healthy at $healthUrl."
+      }) `
+    -Remediation $(if ($healthy) { '' } else {
+        'Inspect logs, then run restart or down without changing backend paths or port.'
+      }) `
+    -Managed $true `
+    -Healthy $healthy `
+    -Stale $false `
+    -Port $BackendPort `
+    -ProcessId (Get-RimsObjectPropertyValue -Value $state -Name 'windowsPid')
+  $overallHealthy = $healthy -and $dependenciesHealthy
+  return Complete-RimsLocalResult `
+    -Result $result `
+    -Ok $overallHealthy `
+    -ExitCode $(if ($overallHealthy) { 0 } else { 1 })
+}
+
+function Invoke-RimsLocalLogs {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$ScriptDirectory
+  )
+
+  $result = New-RimsLocalResult -Command 'logs'
+  $paths = Get-RimsRuntimePaths -ScriptDirectory $ScriptDirectory
+  $stdoutTail = @(Get-RimsSanitizedLogTail -Path $paths.stdoutLog)
+  $stderrTail = @(Get-RimsSanitizedLogTail -Path $paths.stderrLog)
+  $hasLogs = $stdoutTail.Count -gt 0 -or $stderrTail.Count -gt 0
+  $component = [pscustomobject][ordered]@{
+    name = 'backendLogs'
+    ok = $hasLogs
+    required = $false
+    detail = if ($hasLogs) {
+      'Returned bounded sanitized backend log tails.'
+    } else {
+      'No backend log output is available yet.'
+    }
+    remediation = if ($hasLogs) { '' } else {
+      'Run up to start the managed backend and create logs.'
+    }
+    stdoutLogPath = $paths.stdoutLog
+    stderrLogPath = $paths.stderrLog
+    stdoutTail = $stdoutTail
+    stderrTail = $stderrTail
+  }
+  $result.components = @(
+    $component,
+    (New-RimsRuntimePathsComponent -Paths $paths)
+  )
+  return Complete-RimsLocalResult `
+    -Result $result `
+    -Ok $true `
+    -ExitCode 0
+}
+
+function Invoke-RimsLinuxProcessGroupSignal {
+  param(
+    [Parameter(Mandatory = $true)]
+    [int]$ProcessGroupId,
+    [ValidateSet('TERM', 'KILL')]
+    [string]$Signal = 'TERM'
+  )
+
+  if ($ProcessGroupId -le 0) {
+    return $false
+  }
+  $wsl = Resolve-RimsCommandPath -Name 'wsl.exe'
+  if ([string]::IsNullOrWhiteSpace($wsl)) {
+    return $false
+  }
+  $script = @'
+set -euo pipefail
+pgid=$1
+signal=$2
+case "$pgid" in ''|*[!0-9]*) exit 2 ;; esac
+case "$signal" in TERM|KILL) ;; *) exit 2 ;; esac
+kill -s "$signal" -- "-$pgid" 2>/dev/null || true
+'@
+  $signalResult = Invoke-RimsExternalCommand `
+    -FilePath $wsl `
+    -Arguments @(
+      '-e',
+      'bash',
+      '-c',
+      $script,
+      'rims-signal',
+      [string]$ProcessGroupId,
+      $Signal
+    ) `
+    -TimeoutSeconds 10
+  return $signalResult.ExitCode -eq 0
+}
+
+function Wait-RimsOwnedProcessExit {
+  param(
+    [Parameter(Mandatory = $true)]
+    [psobject]$State,
+    [ValidateRange(1, 60)]
+    [int]$TimeoutSeconds = 10
+  )
+
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  do {
+    if (-not (Test-RimsStateOwnsProcess -State $State)) {
+      return $true
+    }
+    Start-Sleep -Milliseconds 200
+  } while ((Get-Date) -lt $deadline)
+  return -not (Test-RimsStateOwnsProcess -State $State)
+}
+
+function Stop-RimsOwnedBackendProcess {
+  param(
+    [Parameter(Mandatory = $true)]
+    [psobject]$State
+  )
+
+  $process = Get-RimsOwnedProcess -State $State
+  if ($null -eq $process) {
+    return $true
+  }
+  $process.Dispose()
+
+  $processGroupId = 0
+  $rawProcessGroupId = Get-RimsObjectPropertyValue `
+    -Value $State `
+    -Name 'linuxProcessGroupId'
+  $hasProcessGroup = [int]::TryParse(
+    [string]$rawProcessGroupId,
+    [ref]$processGroupId
+  ) -and $processGroupId -gt 0
+  if ($hasProcessGroup) {
+    [void](Invoke-RimsLinuxProcessGroupSignal `
+        -ProcessGroupId $processGroupId `
+        -Signal 'TERM')
+    if (Wait-RimsOwnedProcessExit -State $State -TimeoutSeconds 10) {
+      return $true
+    }
+    [void](Invoke-RimsLinuxProcessGroupSignal `
+        -ProcessGroupId $processGroupId `
+        -Signal 'KILL')
+    if (Wait-RimsOwnedProcessExit -State $State -TimeoutSeconds 3) {
+      return $true
+    }
+  }
+
+  $ownedProcess = Get-RimsOwnedProcess -State $State
+  if ($null -ne $ownedProcess) {
+    Stop-RimsProcessTree -Process $ownedProcess
+    $ownedProcess.Dispose()
+  }
+  return Wait-RimsOwnedProcessExit -State $State -TimeoutSeconds 5
+}
+
+function Get-RimsComposeArguments {
+  param(
+    [Parameter(Mandatory = $true)]
+    [psobject]$Context,
+    [Parameter(Mandatory = $true)]
+    [AllowEmptyCollection()]
+    [string[]]$Arguments
+  )
+
+  return @(
+    '-e',
+    'docker',
+    'compose',
+    '--project-directory',
+    [string]$Context.workspace,
+    '--env-file',
+    [string]$Context.environment,
+    '-f',
+    [string]$Context.compose
+  ) + $Arguments
+}
+
+function Invoke-RimsComposeDown {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$BackendWorkspaceRoot
+  )
+
+  $wsl = Resolve-RimsCommandPath -Name 'wsl.exe'
+  if ([string]::IsNullOrWhiteSpace($wsl)) {
+    return [pscustomobject][ordered]@{
+      ok = $false
+      detail = 'wsl.exe is unavailable, so owned Compose services could not be stopped.'
+    }
+  }
+  try {
+    $context = [pscustomobject][ordered]@{
+      workspace = ConvertTo-RimsWslPath `
+        -WindowsPath $BackendWorkspaceRoot `
+        -WslExecutable $wsl
+      environment = ConvertTo-RimsWslPath `
+        -WindowsPath (Join-Path $BackendWorkspaceRoot '.env') `
+        -WslExecutable $wsl
+      compose = ConvertTo-RimsWslPath `
+        -WindowsPath (Join-Path $BackendWorkspaceRoot 'deploy\docker-compose.yml') `
+        -WslExecutable $wsl
+    }
+  } catch {
+    return [pscustomobject][ordered]@{
+      ok = $false
+      detail = ConvertTo-RimsDiagnosticSummary `
+        -StandardOutput '' `
+        -StandardError $_.Exception.Message
+    }
+  }
+  $command = Invoke-RimsExternalCommand `
+    -FilePath $wsl `
+    -Arguments @(Get-RimsComposeArguments `
+      -Context $context `
+      -Arguments @('down')) `
+    -TimeoutSeconds 60
+  return [pscustomobject][ordered]@{
+    ok = $command.ExitCode -eq 0
+    detail = if ($command.ExitCode -eq 0) {
+      'Stopped controller-owned Compose services without deleting volumes.'
+    } else {
+      "Could not stop controller-owned Compose services: $(Get-RimsExternalCommandSummary -Result $command)"
+    }
+  }
+}
+
+function Invoke-RimsLocalDown {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$ScriptDirectory,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$BackendDir,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$BackendWorkspaceRoot,
+    [Parameter(Mandatory = $true)]
+    [int]$BackendPort,
+    [switch]$IncludeDependencies
+  )
+
+  $result = New-RimsLocalResult -Command 'down'
+  $paths = Get-RimsRuntimePaths -ScriptDirectory $ScriptDirectory
+  $result.components += New-RimsRuntimePathsComponent -Paths $paths
+  $resolved = Resolve-RimsLifecyclePaths `
+    -BackendDir $BackendDir `
+    -BackendWorkspaceRoot $BackendWorkspaceRoot
+  if (-not $resolved.success) {
+    $result.errors = @('Backend paths are invalid; no process was changed.')
+    return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+  }
+
+  $state = Read-RimsRuntimeState -Paths $paths
+  if ($null -eq $state) {
+    $occupied = Test-RimsTcpPortListening -Port $BackendPort
+    $result.components += New-RimsBackendLifecycleComponent `
+      -Ok $true `
+      -Detail $(if ($occupied) {
+          "No managed state exists. The process on port $BackendPort was left untouched."
+        } else {
+          'No managed backend state exists; the runtime is already down.'
+        }) `
+      -Remediation '' `
+      -Managed $false `
+      -Healthy $false `
+      -Stale $false `
+      -Port $BackendPort
+    return Complete-RimsLocalResult -Result $result -Ok $true -ExitCode 0
+  }
+
+  if (-not (Test-RimsRuntimeRequestMatchesState `
+      -State $state `
+      -BackendDir $resolved.backendPath `
+      -BackendWorkspaceRoot $resolved.workspacePath `
+      -BackendPort $BackendPort)) {
+    $result.components += New-RimsBackendLifecycleComponent `
+      -Ok $false `
+      -Detail 'Managed state belongs to different backend paths or port; no process was changed.' `
+      -Remediation 'Repeat down with the paths and port recorded in state.json.' `
+      -Managed (Test-RimsStateOwnsProcess -State $state) `
+      -Healthy $false `
+      -Stale $false `
+      -Port $BackendPort `
+      -ProcessId (Get-RimsObjectPropertyValue -Value $state -Name 'windowsPid')
+    return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+  }
+
+  $wasOwned = Test-RimsStateOwnsProcess -State $state
+  if ($wasOwned -and -not (Stop-RimsOwnedBackendProcess -State $state)) {
+    $result.components += New-RimsBackendLifecycleComponent `
+      -Ok $false `
+      -Detail 'The exactly owned backend process did not stop within the bounded timeout.' `
+      -Remediation 'Inspect status and logs, then retry down with the same parameters.' `
+      -Managed $true `
+      -Healthy $false `
+      -Stale $false `
+      -Port $BackendPort `
+      -ProcessId (Get-RimsObjectPropertyValue -Value $state -Name 'windowsPid')
+    return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+  }
+
+  $dependencyOwnership = Get-RimsObjectPropertyValue `
+    -Value $state `
+    -Name 'dependencyOwnership'
+  $composeStarted = [bool](Get-RimsObjectPropertyValue `
+      -Value $dependencyOwnership `
+      -Name 'composeStartedByController' `
+      -DefaultValue $false)
+  if ($composeStarted) {
+    $composeDown = Invoke-RimsComposeDown `
+      -BackendWorkspaceRoot $resolved.workspacePath
+    $result.components += New-RimsLocalComponent `
+      -Name 'postgres' `
+      -Ok $composeDown.ok `
+      -Required $false `
+      -Detail $composeDown.detail `
+      -Remediation $(if ($composeDown.ok) { '' } else {
+          'Restore WSL and Docker, then retry down with the same parameters.'
+        })
+    if (-not $composeDown.ok) {
+      return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+    }
+  } else {
+    $result.components += New-RimsLocalComponent `
+      -Name 'postgres' `
+      -Ok $true `
+      -Required $false `
+      -Detail 'PostgreSQL was not started by this controller and was left untouched.' `
+      -Remediation ''
+  }
+
+  Remove-RimsRuntimeState -Paths $paths
+  $result.components += New-RimsBackendLifecycleComponent `
+    -Ok $true `
+    -Detail $(if ($wasOwned) {
+        'Stopped the exactly owned managed backend and removed runtime state.'
+      } else {
+        'Removed stale runtime state without terminating any process.'
+      }) `
+    -Remediation '' `
+    -Managed $false `
+    -Healthy $false `
+    -Stale (-not $wasOwned) `
+    -Port $BackendPort `
+    -ProcessId (Get-RimsObjectPropertyValue -Value $state -Name 'windowsPid')
+  return Complete-RimsLocalResult -Result $result -Ok $true -ExitCode 0
+}
+
+function Get-RimsWslLifecycleContext {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$BackendDir,
+    [Parameter(Mandatory = $true)]
+    [string]$BackendWorkspaceRoot,
+    [Parameter(Mandatory = $true)]
+    [psobject]$RuntimePaths
+  )
+
+  $wsl = Resolve-RimsCommandPath -Name 'wsl.exe'
+  if ([string]::IsNullOrWhiteSpace($wsl)) {
+    return [pscustomobject][ordered]@{
+      ok = $false
+      detail = 'wsl.exe is unavailable.'
+    }
+  }
+  try {
+    return [pscustomobject][ordered]@{
+      ok = $true
+      detail = ''
+      wsl = $wsl
+      backend = ConvertTo-RimsWslPath `
+        -WindowsPath $BackendDir `
+        -WslExecutable $wsl
+      workspace = ConvertTo-RimsWslPath `
+        -WindowsPath $BackendWorkspaceRoot `
+        -WslExecutable $wsl
+      environment = ConvertTo-RimsWslPath `
+        -WindowsPath (Join-Path $BackendWorkspaceRoot '.env') `
+        -WslExecutable $wsl
+      compose = ConvertTo-RimsWslPath `
+        -WindowsPath (Join-Path $BackendWorkspaceRoot 'deploy\docker-compose.yml') `
+        -WslExecutable $wsl
+      migrations = ConvertTo-RimsWslPath `
+        -WindowsPath (Join-Path $BackendDir 'migrations') `
+        -WslExecutable $wsl
+      runtime = ConvertTo-RimsWslPath `
+        -WindowsPath $RuntimePaths.root `
+        -WslExecutable $wsl
+      processGroupFile = ConvertTo-RimsWslPath `
+        -WindowsPath $RuntimePaths.linuxProcessGroup `
+        -WslExecutable $wsl
+    }
+  } catch {
+    return [pscustomobject][ordered]@{
+      ok = $false
+      detail = ConvertTo-RimsDiagnosticSummary `
+        -StandardOutput '' `
+        -StandardError $_.Exception.Message
+    }
+  }
+}
+
+function Get-RimsPostgresStatus {
+  param(
+    [Parameter(Mandatory = $true)]
+    [psobject]$Context
+  )
+
+  $check = Invoke-RimsExternalCommand `
+    -FilePath $Context.wsl `
+    -Arguments @(Get-RimsComposeArguments `
+      -Context $Context `
+      -Arguments @('ps', '-q', 'postgres')) `
+    -TimeoutSeconds 20
+  if ($check.ExitCode -ne 0) {
+    return [pscustomobject][ordered]@{
+      ok = $false
+      status = 'unknown'
+      healthy = $false
+      detail = Get-RimsExternalCommandSummary -Result $check
+    }
+  }
+  $containerId = $check.StandardOutput.Trim()
+  if ([string]::IsNullOrWhiteSpace($containerId)) {
+    return [pscustomobject][ordered]@{
+      ok = $true
+      status = 'absent'
+      healthy = $false
+      detail = 'PostgreSQL container status: absent.'
+    }
+  }
+  $inspect = Invoke-RimsExternalCommand `
+    -FilePath $Context.wsl `
+    -Arguments @(
+      '-e',
+      'docker',
+      'inspect',
+      '--format',
+      '{{if .State.Health}}{{.State.Health.Status}}{{else}}{{.State.Status}}{{end}}',
+      $containerId
+    ) `
+    -TimeoutSeconds 20
+  if ($inspect.ExitCode -ne 0) {
+    return [pscustomobject][ordered]@{
+      ok = $false
+      status = 'unknown'
+      healthy = $false
+      detail = Get-RimsExternalCommandSummary -Result $inspect
+    }
+  }
+  $status = $inspect.StandardOutput.Trim().ToLowerInvariant()
+  return [pscustomobject][ordered]@{
+    ok = $true
+    status = $status
+    healthy = $status -eq 'healthy'
+    detail = "PostgreSQL container status: $status."
+  }
+}
+
+function Invoke-RimsComposeUpPostgres {
+  param(
+    [Parameter(Mandatory = $true)]
+    [psobject]$Context
+  )
+
+  $command = Invoke-RimsExternalCommand `
+    -FilePath $Context.wsl `
+    -Arguments @(Get-RimsComposeArguments `
+      -Context $Context `
+      -Arguments @('up', '-d', 'postgres')) `
+    -TimeoutSeconds 120
+  return [pscustomobject][ordered]@{
+    ok = $command.ExitCode -eq 0
+    detail = if ($command.ExitCode -eq 0) {
+      'Started PostgreSQL with Docker Compose.'
+    } else {
+      "Docker Compose could not start PostgreSQL: $(Get-RimsExternalCommandSummary -Result $command)"
+    }
+  }
+}
+
+function Wait-RimsPostgresHealthy {
+  param(
+    [Parameter(Mandatory = $true)]
+    [psobject]$Context,
+    [ValidateRange(1, 300)]
+    [int]$TimeoutSeconds = 90
+  )
+
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  $lastStatus = $null
+  do {
+    $lastStatus = Get-RimsPostgresStatus -Context $Context
+    if ($lastStatus.ok -and $lastStatus.healthy) {
+      return $lastStatus
+    }
+    Start-Sleep -Milliseconds 1000
+  } while ((Get-Date) -lt $deadline)
+  return $lastStatus
+}
+
+function Get-RimsMigrationLaunchScript {
+  return @'
+set -euo pipefail
+env_file=$1
+source_dir=$2
+runtime_dir=$3
+stage_dir="$runtime_dir/migrations.normalized.$$"
+cleanup() {
+  rm -rf -- "$stage_dir"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+mkdir -p "$stage_dir"
+found=0
+for file in "$source_dir"/migrations/*.sql; do
+  [ -f "$file" ] || continue
+  found=1
+  name=$(basename "$file")
+  sed 's/\r$//' "$file" > "$stage_dir/$name"
+done
+if [ "$found" -ne 1 ]; then
+  printf 'No source migration files were found.\n' >&2
+  exit 1
+fi
+set -a
+. "$env_file"
+set +a
+unshare --user --map-root-user --mount bash -c '
+  set -euo pipefail
+  stage_dir=$1
+  source_dir=$2
+  mount --bind "$stage_dir" "$source_dir/migrations"
+  export MIGRATIONS_DIR="$source_dir/migrations"
+  cd "$source_dir"
+  exec "$HOME/local/go/bin/go" run ./cmd/migrate up
+' rims-migrate-namespace "$stage_dir" "$source_dir"
+'@
+}
+
+function Invoke-RimsBackendMigrations {
+  param(
+    [Parameter(Mandatory = $true)]
+    [psobject]$Context
+  )
+
+  $script = Get-RimsMigrationLaunchScript
+  $migration = Invoke-RimsExternalCommand `
+    -FilePath $Context.wsl `
+    -Arguments @(
+      '-e',
+      'bash',
+      '-c',
+      $script,
+      'rims-migrate',
+      $Context.environment,
+      $Context.backend,
+      $Context.runtime
+    ) `
+    -TimeoutSeconds 180
+  return [pscustomobject][ordered]@{
+    ok = $migration.ExitCode -eq 0
+    detail = if ($migration.ExitCode -eq 0) {
+      'Backend migrations are up to date.'
+    } else {
+      "Backend migrations failed: $(Get-RimsExternalCommandSummary -Result $migration)"
+    }
+  }
+}
+
+function Start-RimsManagedBackend {
+  param(
+    [Parameter(Mandatory = $true)]
+    [psobject]$Context,
+    [Parameter(Mandatory = $true)]
+    [psobject]$RuntimePaths,
+    [Parameter(Mandatory = $true)]
+    [int]$BackendPort
+  )
+
+  Initialize-RimsRuntimeDirectories -Paths $RuntimePaths
+  foreach ($path in @(
+      [string]$RuntimePaths.stdoutLog,
+      [string]$RuntimePaths.stderrLog,
+      [string]$RuntimePaths.linuxProcessGroup
+    )) {
+    if (Test-Path -LiteralPath $path -PathType Leaf) {
+      [IO.File]::Delete($path)
+    }
+  }
+
+  $launchScript = @'
+set -euo pipefail
+env_file=$1
+source_dir=$2
+migrations_dir=$3
+port=$4
+pgid_file=$5
+set -a
+. "$env_file"
+set +a
+export APP_PORT="$port"
+export MIGRATIONS_DIR="$migrations_dir"
+cd "$source_dir"
+exec setsid --fork --wait bash -c '
+  set -euo pipefail
+  pgid_file=$1
+  umask 077
+  printf "%s\n" "$$" > "$pgid_file"
+  exec "$HOME/local/go/bin/go" run ./cmd/server
+' rims-server "$pgid_file"
+'@
+  $arguments = @(
+    '-e',
+    'bash',
+    '-c',
+    $launchScript,
+    'rims-backend-launch',
+    $Context.environment,
+    $Context.backend,
+    $Context.migrations,
+    [string]$BackendPort,
+    $Context.processGroupFile
+  )
+  $argumentLine = ($arguments | ForEach-Object {
+      ConvertTo-RimsWindowsCommandLineArgument -Value $_
+    }) -join ' '
+  $process = $null
+  try {
+    $process = Start-Process `
+      -FilePath $Context.wsl `
+      -ArgumentList $argumentLine `
+      -WindowStyle Hidden `
+      -PassThru `
+      -RedirectStandardOutput $RuntimePaths.stdoutLog `
+      -RedirectStandardError $RuntimePaths.stderrLog
+    $processStartTime = $process.StartTime.ToUniversalTime().ToString(
+      'o',
+      [Globalization.CultureInfo]::InvariantCulture
+    )
+    $healthUrl = "http://localhost:$BackendPort/healthz"
+    $processGroupId = 0
+    $deadline = (Get-Date).AddSeconds(90)
+    $ready = $false
+    do {
+      $process.Refresh()
+      if ($process.HasExited) {
+        break
+      }
+      if ($processGroupId -le 0 -and
+          (Test-Path `
+            -LiteralPath $RuntimePaths.linuxProcessGroup `
+            -PathType Leaf)) {
+        $rawProcessGroup = [IO.File]::ReadAllText(
+          [string]$RuntimePaths.linuxProcessGroup
+        ).Trim()
+        [void][int]::TryParse($rawProcessGroup, [ref]$processGroupId)
+      }
+      if ($processGroupId -gt 0 -and
+          (Test-RimsHealthEndpoint -Url $healthUrl -TimeoutSeconds 2)) {
+        $ready = $true
+        break
+      }
+      Start-Sleep -Milliseconds 500
+    } while ((Get-Date) -lt $deadline)
+
+    if ($ready) {
+      return [pscustomobject][ordered]@{
+        ok = $true
+        detail = "Managed backend is healthy at $healthUrl."
+        healthUrl = $healthUrl
+        windowsPid = $process.Id
+        windowsProcessStartTimeUtc = $processStartTime
+        linuxProcessGroupId = $processGroupId
+      }
+    }
+
+    $temporaryState = [pscustomobject][ordered]@{
+      windowsPid = $process.Id
+      windowsProcessStartTimeUtc = $processStartTime
+      linuxProcessGroupId = if ($processGroupId -gt 0) {
+        $processGroupId
+      } else {
+        $null
+      }
+    }
+    [void](Stop-RimsOwnedBackendProcess -State $temporaryState)
+    $stderrTail = @(Get-RimsSanitizedLogTail `
+        -Path $RuntimePaths.stderrLog `
+        -MaximumLines 20)
+    $tailDetail = if ($stderrTail.Count -gt 0) {
+      $stderrTail -join ' | '
+    } else {
+      'No backend stderr was captured.'
+    }
+    return [pscustomobject][ordered]@{
+      ok = $false
+      detail = "Backend did not become ready within 90 seconds. $tailDetail"
+      healthUrl = $healthUrl
+      windowsPid = $process.Id
+      windowsProcessStartTimeUtc = $processStartTime
+      linuxProcessGroupId = if ($processGroupId -gt 0) {
+        $processGroupId
+      } else {
+        $null
+      }
+    }
+  } catch {
+    if ($null -ne $process) {
+      try {
+        $temporaryState = [pscustomobject][ordered]@{
+          windowsPid = $process.Id
+          windowsProcessStartTimeUtc = $process.StartTime.ToUniversalTime().ToString('o')
+          linuxProcessGroupId = $null
+        }
+        [void](Stop-RimsOwnedBackendProcess -State $temporaryState)
+      } catch {}
+    }
+    return [pscustomobject][ordered]@{
+      ok = $false
+      detail = ConvertTo-RimsDiagnosticSummary `
+        -StandardOutput '' `
+        -StandardError $_.Exception.Message
+      healthUrl = "http://localhost:$BackendPort/healthz"
+      windowsPid = $null
+      windowsProcessStartTimeUtc = $null
+      linuxProcessGroupId = $null
+    }
+  } finally {
+    if ($null -ne $process) {
+      $process.Dispose()
+    }
+  }
+}
+
+function New-RimsManagedRuntimeState {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$FrontendPath,
+    [Parameter(Mandatory = $true)]
+    [string]$BackendPath,
+    [Parameter(Mandatory = $true)]
+    [string]$BackendWorkspaceRoot,
+    [Parameter(Mandatory = $true)]
+    [ValidateSet('none', 'web', 'android')]
+    [string]$Target,
+    [Parameter(Mandatory = $true)]
+    [int]$BackendPort,
+    [Parameter(Mandatory = $true)]
+    [int]$FrontendPort,
+    [Parameter(Mandatory = $true)]
+    [psobject]$RuntimePaths,
+    [Parameter(Mandatory = $true)]
+    [psobject]$StartedBackend,
+    [Parameter(Mandatory = $true)]
+    [bool]$PostgresWasRunning,
+    [Parameter(Mandatory = $true)]
+    [bool]$ComposeStartedByController
+  )
+
+  $runtimeCommit = Get-RimsGitCommit -Path $FrontendPath
+  return [pscustomobject][ordered]@{
+    schemaVersion = 1
+    frontendPath = $FrontendPath
+    backendPath = $BackendPath
+    backendWorkspaceRoot = $BackendWorkspaceRoot
+    frontendCommit = $runtimeCommit
+    runtimeCommit = $runtimeCommit
+    backendCommit = Get-RimsGitCommit -Path $BackendPath
+    target = $Target
+    backendPort = $BackendPort
+    frontendPort = $FrontendPort
+    startedAt = Get-RimsLocalTimestamp
+    healthUrl = $StartedBackend.healthUrl
+    windowsPid = $StartedBackend.windowsPid
+    windowsProcessStartTimeUtc = $StartedBackend.windowsProcessStartTimeUtc
+    linuxProcessGroupId = $StartedBackend.linuxProcessGroupId
+    runtimeRoot = $RuntimePaths.root
+    statePath = $RuntimePaths.state
+    stdoutLogPath = $RuntimePaths.stdoutLog
+    stderrLogPath = $RuntimePaths.stderrLog
+    commandSummary = "wsl.exe managed go run ./cmd/server with APP_PORT=$BackendPort"
+    dependencyOwnership = [pscustomobject][ordered]@{
+      postgresWasRunning = $PostgresWasRunning
+      composeStartedByController = $ComposeStartedByController
+    }
+  }
+}
+
+function Invoke-RimsLocalUp {
+  param(
+    [Parameter(Mandatory = $true)]
+    [ValidateSet('none', 'web', 'android')]
+    [string]$Target,
+    [Parameter(Mandatory = $true)]
+    [string]$ScriptDirectory,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$BackendDir,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$BackendWorkspaceRoot,
+    [Parameter(Mandatory = $true)]
+    [int]$BackendPort,
+    [Parameter(Mandatory = $true)]
+    [int]$FrontendPort,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$AndroidDevice,
+    [switch]$IncludeDependencies
+  )
+
+  $result = New-RimsLocalResult -Command 'up'
+  $paths = Get-RimsRuntimePaths -ScriptDirectory $ScriptDirectory
+  $result.components += New-RimsRuntimePathsComponent -Paths $paths
+  $resolved = Resolve-RimsLifecyclePaths `
+    -BackendDir $BackendDir `
+    -BackendWorkspaceRoot $BackendWorkspaceRoot
+
+  $doctorComponents = @(Invoke-RimsLocalDoctor `
+      -Target $Target `
+      -BackendDir $BackendDir `
+      -BackendWorkspaceRoot $BackendWorkspaceRoot `
+      -AndroidDevice $AndroidDevice `
+      -ScriptDirectory $ScriptDirectory)
+  $result.components += $doctorComponents
+  $failedDoctor = @($doctorComponents | Where-Object {
+      $_.required -and -not $_.ok
+    })
+  if (-not $resolved.success -or $failedDoctor.Count -gt 0) {
+    $result.errors = @('Required local runtime checks failed; no process was started.')
+    return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+  }
+
+  $state = Read-RimsRuntimeState -Paths $paths
+  if ($null -ne $state) {
+    $owned = Test-RimsStateOwnsProcess -State $state
+    if (-not $owned) {
+      Remove-RimsRuntimeState -Paths $paths
+      $state = $null
+    } elseif (-not (Test-RimsRuntimeRequestMatchesState `
+        -State $state `
+        -BackendDir $resolved.backendPath `
+        -BackendWorkspaceRoot $resolved.workspacePath `
+        -BackendPort $BackendPort)) {
+      $result.components += New-RimsBackendLifecycleComponent `
+        -Ok $false `
+        -Detail 'An owned backend is already managed with different paths or port.' `
+        -Remediation 'Run down with the values recorded in state.json before changing lifecycle parameters.' `
+        -Managed $true `
+        -Healthy $false `
+        -Stale $false `
+        -Port $BackendPort `
+        -ProcessId (Get-RimsObjectPropertyValue -Value $state -Name 'windowsPid')
+      return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+    } else {
+      $healthUrl = [string](Get-RimsObjectPropertyValue `
+          -Value $state `
+          -Name 'healthUrl' `
+          -DefaultValue "http://localhost:$BackendPort/healthz")
+      $healthy = Test-RimsHealthEndpoint -Url $healthUrl
+      $result.components += New-RimsBackendLifecycleComponent `
+        -Ok $healthy `
+        -Detail $(if ($healthy) {
+            "The already-owned backend is healthy at $healthUrl; no process was started."
+          } else {
+            'The owned backend process exists but is unhealthy; up will not replace it implicitly.'
+          }) `
+        -Remediation $(if ($healthy) { '' } else {
+            'Inspect logs and run restart or down with the same parameters.'
+          }) `
+        -Managed $true `
+        -Healthy $healthy `
+        -Stale $false `
+        -Port $BackendPort `
+        -ProcessId (Get-RimsObjectPropertyValue -Value $state -Name 'windowsPid')
+      return Complete-RimsLocalResult `
+        -Result $result `
+        -Ok $healthy `
+        -ExitCode $(if ($healthy) { 0 } else { 1 })
+    }
+  }
+
+  if (Test-RimsTcpPortListening -Port $BackendPort) {
+    $result.components += New-RimsBackendPortComponent `
+      -Ok $false `
+      -Port $BackendPort `
+      -Detail "Port $BackendPort is occupied without matching managed state; the listener was left untouched." `
+      -Remediation 'Choose a free -BackendPort or stop the user-managed process yourself.'
+    return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+  }
+  $result.components += New-RimsBackendPortComponent `
+    -Ok $true `
+    -Port $BackendPort `
+    -Detail "Port $BackendPort is available for the managed backend." `
+    -Remediation ''
+
+  Initialize-RimsRuntimeDirectories -Paths $paths
+  $context = Get-RimsWslLifecycleContext `
+    -BackendDir $resolved.backendPath `
+    -BackendWorkspaceRoot $resolved.workspacePath `
+    -RuntimePaths $paths
+  if (-not $context.ok) {
+    $result.errors = @("Could not prepare WSL lifecycle paths: $($context.detail)")
+    return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+  }
+
+  $postgresBefore = Get-RimsPostgresStatus -Context $context
+  if (-not $postgresBefore.ok) {
+    $result.components += New-RimsLocalComponent `
+      -Name 'postgres' `
+      -Ok $false `
+      -Required $true `
+      -Detail "Could not inspect PostgreSQL: $($postgresBefore.detail)" `
+      -Remediation 'Start Docker Desktop and verify the configured Compose project.'
+    return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+  }
+  $postgresWasRunning = $postgresBefore.healthy
+  $composeStarted = $false
+  if (-not $postgresBefore.healthy) {
+    if (-not $IncludeDependencies) {
+      $result.components += New-RimsLocalComponent `
+        -Name 'postgres' `
+        -Ok $false `
+        -Required $true `
+        -Detail "PostgreSQL is not healthy ($($postgresBefore.status))." `
+        -Remediation 'Run up with -IncludeDependencies or start PostgreSQL yourself.'
+      return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+    }
+    $composeUp = Invoke-RimsComposeUpPostgres -Context $context
+    if (-not $composeUp.ok) {
+      $result.components += New-RimsLocalComponent `
+        -Name 'postgres' `
+        -Ok $false `
+        -Required $true `
+        -Detail $composeUp.detail `
+        -Remediation 'Repair Docker Compose, then retry up with -IncludeDependencies.'
+      return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+    }
+    $composeStarted = $true
+    $postgresReady = Wait-RimsPostgresHealthy -Context $context
+    if ($null -eq $postgresReady -or -not $postgresReady.healthy) {
+      [void](Invoke-RimsComposeDown `
+          -BackendWorkspaceRoot $resolved.workspacePath)
+      $result.components += New-RimsLocalComponent `
+        -Name 'postgres' `
+        -Ok $false `
+        -Required $true `
+        -Detail 'Controller-started PostgreSQL did not become healthy within 90 seconds.' `
+        -Remediation 'Inspect Docker Compose logs and retry after PostgreSQL is healthy.'
+      return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+    }
+  }
+  $result.components += New-RimsLocalComponent `
+    -Name 'postgres' `
+    -Ok $true `
+    -Required $true `
+    -Detail $(if ($postgresWasRunning) {
+        'PostgreSQL was already healthy and remains user-managed.'
+      } else {
+        'PostgreSQL was started by this controller and is healthy.'
+      }) `
+    -Remediation ''
+
+  $migration = Invoke-RimsBackendMigrations -Context $context
+  $result.components += New-RimsLocalComponent `
+    -Name 'migrations' `
+    -Ok $migration.ok `
+    -Required $true `
+    -Detail $migration.detail `
+    -Remediation $(if ($migration.ok) { '' } else {
+        'Inspect the sanitized migration error and verify database configuration.'
+      })
+  if (-not $migration.ok) {
+    if ($composeStarted) {
+      [void](Invoke-RimsComposeDown `
+          -BackendWorkspaceRoot $resolved.workspacePath)
+    }
+    return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+  }
+
+  $started = Start-RimsManagedBackend `
+    -Context $context `
+    -RuntimePaths $paths `
+    -BackendPort $BackendPort
+  if (-not $started.ok) {
+    if ($composeStarted) {
+      [void](Invoke-RimsComposeDown `
+          -BackendWorkspaceRoot $resolved.workspacePath)
+    }
+    $result.components += New-RimsBackendLifecycleComponent `
+      -Ok $false `
+      -Detail $started.detail `
+      -Remediation 'Inspect the sanitized backend stderr tail, correct the failure, and retry up.' `
+      -Managed $false `
+      -Healthy $false `
+      -Stale $false `
+      -Port $BackendPort `
+      -ProcessId $started.windowsPid
+    return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+  }
+
+  $frontendPath = [IO.Path]::GetFullPath(
+    (Split-Path -Parent $ScriptDirectory)
+  )
+  $newState = New-RimsManagedRuntimeState `
+    -FrontendPath $frontendPath `
+    -BackendPath $resolved.backendPath `
+    -BackendWorkspaceRoot $resolved.workspacePath `
+    -Target $Target `
+    -BackendPort $BackendPort `
+    -FrontendPort $FrontendPort `
+    -RuntimePaths $paths `
+    -StartedBackend $started `
+    -PostgresWasRunning $postgresWasRunning `
+    -ComposeStartedByController $composeStarted
+  try {
+    Write-RimsRuntimeState -Paths $paths -State $newState
+  } catch {
+    [void](Stop-RimsOwnedBackendProcess -State $newState)
+    if ($composeStarted) {
+      [void](Invoke-RimsComposeDown `
+          -BackendWorkspaceRoot $resolved.workspacePath)
+    }
+    $summary = ConvertTo-RimsDiagnosticSummary `
+      -StandardOutput '' `
+      -StandardError $_.Exception.Message
+    $result.errors = @("Could not persist managed ownership state: $summary")
+    return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+  }
+
+  $result.components += New-RimsBackendLifecycleComponent `
+    -Ok $true `
+    -Detail $started.detail `
+    -Remediation '' `
+    -Managed $true `
+    -Healthy $true `
+    -Stale $false `
+    -Port $BackendPort `
+    -ProcessId $started.windowsPid
+  return Complete-RimsLocalResult -Result $result -Ok $true -ExitCode 0
+}
+
+function Invoke-RimsLocalRestart {
+  param(
+    [Parameter(Mandatory = $true)]
+    [ValidateSet('none', 'web', 'android')]
+    [string]$Target,
+    [Parameter(Mandatory = $true)]
+    [string]$ScriptDirectory,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$BackendDir,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$BackendWorkspaceRoot,
+    [Parameter(Mandatory = $true)]
+    [int]$BackendPort,
+    [Parameter(Mandatory = $true)]
+    [int]$FrontendPort,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$AndroidDevice,
+    [switch]$IncludeDependencies
+  )
+
+  $result = New-RimsLocalResult -Command 'restart'
+  $paths = Get-RimsRuntimePaths -ScriptDirectory $ScriptDirectory
+  $resolved = Resolve-RimsLifecyclePaths `
+    -BackendDir $BackendDir `
+    -BackendWorkspaceRoot $BackendWorkspaceRoot
+  $state = Read-RimsRuntimeState -Paths $paths
+  if ($null -eq $state -or
+      -not $resolved.success -or
+      -not (Test-RimsStateOwnsProcess -State $state) -or
+      -not (Test-RimsRuntimeRequestMatchesState `
+        -State $state `
+        -BackendDir $resolved.backendPath `
+        -BackendWorkspaceRoot $resolved.workspacePath `
+        -BackendPort $BackendPort)) {
+    if ($null -ne $state -and
+        -not (Test-RimsStateOwnsProcess -State $state)) {
+      Remove-RimsRuntimeState -Paths $paths
+    }
+    $result.components = @(
+      (New-RimsRuntimePathsComponent -Paths $paths),
+      (New-RimsBackendLifecycleComponent `
+        -Ok $false `
+        -Detail 'Restart requires an exactly owned backend matching the requested paths and port.' `
+        -Remediation 'Use status, then start with up or repeat restart using state.json values.' `
+        -Managed $false `
+        -Healthy $false `
+        -Stale ($null -ne $state) `
+        -Port $BackendPort)
+    )
+    return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+  }
+
+  $down = Invoke-RimsLocalDown `
+    -ScriptDirectory $ScriptDirectory `
+    -BackendDir $resolved.backendPath `
+    -BackendWorkspaceRoot $resolved.workspacePath `
+    -BackendPort $BackendPort `
+    -IncludeDependencies:$IncludeDependencies
+  if (-not $down.ok) {
+    $result.components = @($down.components)
+    $result.errors = @($down.errors)
+    return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode $down.exitCode
+  }
+
+  $up = Invoke-RimsLocalUp `
+    -Target $Target `
+    -ScriptDirectory $ScriptDirectory `
+    -BackendDir $resolved.backendPath `
+    -BackendWorkspaceRoot $resolved.workspacePath `
+    -BackendPort $BackendPort `
+    -FrontendPort $FrontendPort `
+    -AndroidDevice $AndroidDevice `
+    -IncludeDependencies:$IncludeDependencies
+  $result.components = @($up.components)
+  $result.errors = @($up.errors)
+  return Complete-RimsLocalResult `
+    -Result $result `
+    -Ok $up.ok `
+    -ExitCode $up.exitCode
+}
+
+function Write-RimsLifecycleText {
+  param(
+    [Parameter(Mandatory = $true)]
+    [psobject]$Result
+  )
+
+  foreach ($component in @($Result.components)) {
+    $status = if ($component.ok) { 'PASS' } else { 'FAIL' }
+    [Console]::Out.WriteLine(
+      "[$status] $($component.name) - $($component.detail)"
+    )
+    if (-not $component.ok -and
+        -not [string]::IsNullOrWhiteSpace([string]$component.remediation)) {
+      [Console]::Out.WriteLine(
+        "       Remediation: $($component.remediation)"
+      )
+    }
+  }
+  foreach ($message in @($Result.errors)) {
+    [Console]::Out.WriteLine("[FAIL] $($Result.command) - $message")
+  }
+}
+
+function Write-RimsLogsText {
+  param(
+    [Parameter(Mandatory = $true)]
+    [psobject]$Result
+  )
+
+  $logs = @($Result.components | Where-Object {
+      $_.name -eq 'backendLogs'
+    }) | Select-Object -First 1
+  if ($null -eq $logs) {
+    Write-RimsLifecycleText -Result $Result
+    return
+  }
+  [Console]::Out.WriteLine("Backend stdout ($($logs.stdoutLogPath)):")
+  foreach ($line in @($logs.stdoutTail)) {
+    [Console]::Out.WriteLine($line)
+  }
+  [Console]::Out.WriteLine("Backend stderr ($($logs.stderrLogPath)):")
+  foreach ($line in @($logs.stderrTail)) {
+    [Console]::Out.WriteLine($line)
   }
 }

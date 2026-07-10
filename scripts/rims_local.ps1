@@ -89,6 +89,78 @@ if ($Command -eq 'doctor') {
   exit $result.exitCode
 }
 
+if ($Command -in @('up', 'status', 'logs', 'restart', 'down')) {
+  try {
+    $result = switch ($Command) {
+      'up' {
+        Invoke-RimsLocalUp `
+          -Target $Target `
+          -ScriptDirectory $scriptDir `
+          -BackendDir $BackendDir `
+          -BackendWorkspaceRoot $BackendWorkspaceRoot `
+          -BackendPort $BackendPort `
+          -FrontendPort $FrontendPort `
+          -AndroidDevice $AndroidDevice `
+          -IncludeDependencies:$IncludeDependencies
+        break
+      }
+      'status' {
+        Invoke-RimsLocalStatus `
+          -ScriptDirectory $scriptDir `
+          -BackendDir $BackendDir `
+          -BackendWorkspaceRoot $BackendWorkspaceRoot `
+          -BackendPort $BackendPort `
+          -IncludeDependencies:$IncludeDependencies
+        break
+      }
+      'logs' {
+        Invoke-RimsLocalLogs -ScriptDirectory $scriptDir
+        break
+      }
+      'restart' {
+        Invoke-RimsLocalRestart `
+          -Target $Target `
+          -ScriptDirectory $scriptDir `
+          -BackendDir $BackendDir `
+          -BackendWorkspaceRoot $BackendWorkspaceRoot `
+          -BackendPort $BackendPort `
+          -FrontendPort $FrontendPort `
+          -AndroidDevice $AndroidDevice `
+          -IncludeDependencies:$IncludeDependencies
+        break
+      }
+      'down' {
+        Invoke-RimsLocalDown `
+          -ScriptDirectory $scriptDir `
+          -BackendDir $BackendDir `
+          -BackendWorkspaceRoot $BackendWorkspaceRoot `
+          -BackendPort $BackendPort `
+          -IncludeDependencies:$IncludeDependencies
+        break
+      }
+    }
+  } catch {
+    $summary = ConvertTo-RimsDiagnosticSummary `
+      -StandardOutput '' `
+      -StandardError $_.Exception.Message
+    $result = New-RimsLocalResult -Command $Command
+    $result.errors = @("Runtime command failed: $summary")
+    $result = Complete-RimsLocalResult `
+      -Result $result `
+      -Ok $false `
+      -ExitCode 2
+  }
+
+  if ($Output -eq 'Json') {
+    Write-RimsLocalJson -Result $result
+  } elseif ($Command -eq 'logs') {
+    Write-RimsLogsText -Result $result
+  } else {
+    Write-RimsLifecycleText -Result $result
+  }
+  exit $result.exitCode
+}
+
 $message = "Command '$Command' is not implemented yet."
 $result = New-RimsLocalResult -Command $Command
 $result.errors = @($message)
