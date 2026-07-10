@@ -58,6 +58,37 @@ if ($Command -eq 'help') {
   exit 0
 }
 
+if ($Command -eq 'doctor') {
+  $result = New-RimsLocalResult -Command $Command
+  try {
+    $result.components = @(Invoke-RimsLocalDoctor `
+        -Target $Target `
+        -BackendDir $BackendDir `
+        -BackendWorkspaceRoot $BackendWorkspaceRoot `
+        -AndroidDevice $AndroidDevice `
+        -ScriptDirectory $scriptDir)
+    $failedRequiredComponents = @($result.components | Where-Object {
+        $_.required -and -not $_.ok
+      })
+    $ok = $failedRequiredComponents.Count -eq 0
+    $exitCode = if ($ok) { 0 } else { 1 }
+    $result = Complete-RimsLocalResult `
+      -Result $result `
+      -Ok $ok `
+      -ExitCode $exitCode
+  } catch {
+    $result.errors = @("Internal doctor failure: $($_.Exception.Message)")
+    $result = Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 2
+  }
+
+  if ($Output -eq 'Json') {
+    Write-RimsLocalJson -Result $result
+  } else {
+    Write-RimsDoctorText -Result $result
+  }
+  exit $result.exitCode
+}
+
 $message = "Command '$Command' is not implemented yet."
 $result = New-RimsLocalResult -Command $Command
 $result.errors = @($message)

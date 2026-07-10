@@ -19,6 +19,34 @@ function Assert-Equal {
   }
 }
 
+function Assert-NotEqual {
+  param(
+    [Parameter(Mandatory = $true)]
+    [object]$Actual,
+    [Parameter(Mandatory = $true)]
+    [object]$Expected,
+    [Parameter(Mandatory = $true)]
+    [string]$Message
+  )
+
+  if ($Actual -eq $Expected) {
+    throw "$Message Expected a value different from: '$Expected'."
+  }
+}
+
+function Assert-False {
+  param(
+    [Parameter(Mandatory = $true)]
+    [object]$Value,
+    [Parameter(Mandatory = $true)]
+    [string]$Message
+  )
+
+  if ($Value -ne $false) {
+    throw "$Message Expected: 'False'. Actual: '$Value'."
+  }
+}
+
 function Assert-Contains {
   param(
     [Parameter(Mandatory = $true)]
@@ -44,6 +72,78 @@ function Assert-HasProperty {
 
   if ($Value.PSObject.Properties.Name -notcontains $PropertyName) {
     throw "Expected JSON result to contain property: '$PropertyName'."
+  }
+}
+
+function Assert-ComponentSuccess {
+  param(
+    [Parameter(Mandatory = $true)]
+    [object]$Result,
+    [Parameter(Mandatory = $true)]
+    [string]$Name
+  )
+
+  $components = @($Result.components | Where-Object { $_.name -eq $Name })
+  Assert-Equal `
+    -Actual $components.Count `
+    -Expected 1 `
+    -Message "Expected exactly one '$Name' component."
+  Assert-Equal `
+    -Actual $components[0].ok `
+    -Expected $true `
+    -Message "Component '$Name' did not pass."
+  Assert-Equal `
+    -Actual $components[0].required `
+    -Expected $true `
+    -Message "Component '$Name' was not required."
+}
+
+function Assert-ComponentFailed {
+  param(
+    [Parameter(Mandatory = $true)]
+    [object]$Result,
+    [Parameter(Mandatory = $true)]
+    [string]$Name
+  )
+
+  $components = @($Result.components | Where-Object { $_.name -eq $Name })
+  Assert-Equal `
+    -Actual $components.Count `
+    -Expected 1 `
+    -Message "Expected exactly one '$Name' component."
+  Assert-False `
+    -Value $components[0].ok `
+    -Message "Component '$Name' unexpectedly passed."
+  Assert-Equal `
+    -Actual $components[0].required `
+    -Expected $true `
+    -Message "Failed component '$Name' was not required."
+  if ([string]::IsNullOrWhiteSpace([string]$components[0].remediation)) {
+    throw "Failed component '$Name' omitted actionable remediation."
+  }
+}
+
+function Assert-DoctorResultShape {
+  param(
+    [Parameter(Mandatory = $true)]
+    [object]$Result,
+    [Parameter(Mandatory = $true)]
+    [string[]]$StableResultFields
+  )
+
+  Assert-Equal `
+    -Actual ($Result.PSObject.Properties.Name -join '|') `
+    -Expected ($StableResultFields -join '|') `
+    -Message 'Doctor result property sequence changed.'
+  Assert-JsonArrayProperty -Value $Result -PropertyName 'components'
+  Assert-JsonArrayProperty -Value $Result -PropertyName 'errors'
+
+  $componentFields = @('name', 'ok', 'required', 'detail', 'remediation')
+  foreach ($component in @($Result.components)) {
+    Assert-Equal `
+      -Actual ($component.PSObject.Properties.Name -join '|') `
+      -Expected ($componentFields -join '|') `
+      -Message "Component '$($component.name)' property sequence changed."
   }
 }
 
@@ -159,6 +259,7 @@ function ConvertTo-WindowsCommandLineArgument {
 function Invoke-LocalCli {
   param(
     [Parameter(Mandatory = $true)]
+    [AllowEmptyString()]
     [string[]]$Arguments
   )
 
@@ -244,6 +345,66 @@ function Get-TextHelpSectionEntries {
     throw "Text help omitted section: '$SectionName'."
   }
   return $entries
+}
+
+function Get-TestAndroidChoice {
+  $sdkRoots = @(
+    $env:ANDROID_SDK_ROOT,
+    $env:ANDROID_HOME,
+    (Join-Path $env:LOCALAPPDATA 'Android\Sdk')
+  ) | Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+
+  $adbCommand = Get-Command 'adb.exe' -ErrorAction SilentlyContinue |
+    Select-Object -First 1
+  $adbPath = if ($null -ne $adbCommand) { $adbCommand.Source } else { $null }
+  if ($null -eq $adbPath) {
+    foreach ($sdkRoot in $sdkRoots) {
+      $candidate = Join-Path $sdkRoot 'platform-tools\adb.exe'
+      if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+        $adbPath = $candidate
+        break
+      }
+    }
+  }
+
+  if ($null -ne $adbPath) {
+    $adbOutput = @(& $adbPath devices 2>&1)
+    foreach ($line in $adbOutput) {
+      if ([string]$line -match '^([^\s]+)\s+device$') {
+        return $Matches[1]
+      }
+    }
+  }
+
+  $emulatorCommand = Get-Command 'emulator.exe' -ErrorAction SilentlyContinue |
+    Select-Object -First 1
+  $emulatorPath = if ($null -ne $emulatorCommand) {
+    $emulatorCommand.Source
+  } else {
+    $null
+  }
+  if ($null -eq $emulatorPath) {
+    foreach ($sdkRoot in $sdkRoots) {
+      $candidate = Join-Path $sdkRoot 'emulator\emulator.exe'
+      if (Test-Path -LiteralPath $candidate -PathType Leaf) {
+        $emulatorPath = $candidate
+        break
+      }
+    }
+  }
+
+  if ($null -ne $emulatorPath) {
+    $avds = @(
+      @(& $emulatorPath -list-avds 2>&1) |
+        ForEach-Object { ([string]$_).Trim() } |
+        Where-Object { $_.Length -gt 0 }
+    )
+    if ($avds.Count -gt 0) {
+      return $avds[0]
+    }
+  }
+
+  return $null
 }
 
 if (-not (Test-Path -LiteralPath $localScript)) {
@@ -524,7 +685,228 @@ Assert-Equal `
   -Expected ($expectedTargets -join '|') `
   -Message 'Text help targets do not exactly match the target contract.'
 
-foreach ($command in ($expectedCommands | Where-Object { $_ -ne 'help' })) {
+$backendDir = 'E:\My Work\rims-frontend\.worktrees\m9-backend-local-autonomy-acceptance\rims-goProgect'
+$backendWorkspaceRoot = 'E:\My Work\RIMS'
+$invalidBackendDir = Join-Path `
+  ([IO.Path]::GetTempPath()) `
+  ('rims-local-missing-' + [guid]::NewGuid().ToString('N'))
+Assert-Equal `
+  -Actual (Test-Path -LiteralPath $invalidBackendDir) `
+  -Expected $false `
+  -Message 'Invalid backend test path unexpectedly exists.'
+
+$badDoctor = Invoke-LocalCli -Arguments @(
+  '-Command',
+  'doctor',
+  '-Target',
+  'web',
+  '-Output',
+  'Json',
+  '-BackendDir',
+  $invalidBackendDir
+)
+Assert-NotEqual `
+  -Actual $badDoctor.ExitCode `
+  -Expected 0 `
+  -Message 'Invalid backend directory doctor exit code.'
+Assert-Equal `
+  -Actual $badDoctor.StandardError `
+  -Expected '' `
+  -Message 'Invalid backend JSON doctor wrote diagnostics to stderr.'
+$badDoctorResult = ConvertFrom-SingleJson `
+  -Text $badDoctor.StandardOutput `
+  -Context 'Invalid backend JSON doctor'
+Assert-DoctorResultShape `
+  -Result $badDoctorResult `
+  -StableResultFields $stableResultFields
+Assert-False `
+  -Value $badDoctorResult.ok `
+  -Message 'Invalid backend directory doctor result.'
+Assert-ComponentFailed -Result $badDoctorResult -Name 'backendWorkspace'
+$badBackendComponent = @($badDoctorResult.components | Where-Object {
+    $_.name -eq 'backendWorkspace'
+  })[0]
+if (-not $badBackendComponent.detail.Contains($invalidBackendDir)) {
+  throw 'Backend workspace detail omitted the resolved backend source path.'
+}
+
+$webDoctor = Invoke-LocalCli -Arguments @(
+  '-Command',
+  'doctor',
+  '-Target',
+  'web',
+  '-Output',
+  'Json',
+  '-BackendDir',
+  $backendDir,
+  '-BackendWorkspaceRoot',
+  $backendWorkspaceRoot
+)
+Assert-Equal `
+  -Actual $webDoctor.ExitCode `
+  -Expected 0 `
+  -Message 'Valid Web environment doctor failed.'
+Assert-Equal `
+  -Actual $webDoctor.StandardError `
+  -Expected '' `
+  -Message 'Valid Web JSON doctor wrote diagnostics to stderr.'
+$webDoctorResult = ConvertFrom-SingleJson `
+  -Text $webDoctor.StandardOutput `
+  -Context 'Valid Web JSON doctor'
+Assert-DoctorResultShape `
+  -Result $webDoctorResult `
+  -StableResultFields $stableResultFields
+Assert-Equal `
+  -Actual $webDoctorResult.ok `
+  -Expected $true `
+  -Message 'Valid Web doctor result was not successful.'
+$webComponents = @(
+  'powershell',
+  'wsl',
+  'git',
+  'flutter',
+  'frontendWorkspace',
+  'backendWorkspace',
+  'workspaceEnv',
+  'go',
+  'docker',
+  'dockerCompose',
+  'webDevice'
+)
+foreach ($componentName in $webComponents) {
+  Assert-ComponentSuccess -Result $webDoctorResult -Name $componentName
+}
+$webDeviceComponent = @($webDoctorResult.components | Where-Object {
+    $_.name -eq 'webDevice'
+  })[0]
+if ($webDeviceComponent.detail -match '(^|[ ,:])windows([, .]|$)') {
+  throw 'Web device detail included a non-web Flutter device.'
+}
+$webBackendComponent = @($webDoctorResult.components | Where-Object {
+    $_.name -eq 'backendWorkspace'
+  })[0]
+if (-not $webBackendComponent.detail.Contains($backendDir)) {
+  throw 'Successful backend workspace detail omitted the resolved source path.'
+}
+$workspaceEnvComponent = @($webDoctorResult.components | Where-Object {
+    $_.name -eq 'workspaceEnv'
+  })[0]
+if (-not $workspaceEnvComponent.detail.Contains($backendWorkspaceRoot)) {
+  throw 'Workspace environment detail omitted the resolved runtime root.'
+}
+
+$androidDoctor = Invoke-LocalCli -Arguments @(
+  '-Command',
+  'doctor',
+  '-Target',
+  'android',
+  '-Output',
+  'Json',
+  '-BackendDir',
+  $backendDir,
+  '-BackendWorkspaceRoot',
+  $backendWorkspaceRoot,
+  '-AndroidDevice',
+  ''
+)
+Assert-NotEqual `
+  -Actual $androidDoctor.ExitCode `
+  -Expected 0 `
+  -Message 'Android doctor without a requested device exit code.'
+Assert-Equal `
+  -Actual $androidDoctor.StandardError `
+  -Expected '' `
+  -Message 'Android JSON doctor wrote diagnostics to stderr.'
+$androidDoctorResult = ConvertFrom-SingleJson `
+  -Text $androidDoctor.StandardOutput `
+  -Context 'Android JSON doctor without requested device'
+Assert-DoctorResultShape `
+  -Result $androidDoctorResult `
+  -StableResultFields $stableResultFields
+Assert-False `
+  -Value $androidDoctorResult.ok `
+  -Message 'Android doctor without a requested device result.'
+foreach ($componentName in ($webComponents + @('adb', 'emulator'))) {
+  Assert-ComponentSuccess -Result $androidDoctorResult -Name $componentName
+}
+Assert-ComponentFailed -Result $androidDoctorResult -Name 'androidDevice'
+$missingAndroidDevice = @($androidDoctorResult.components | Where-Object {
+    $_.name -eq 'androidDevice'
+  })[0]
+if (-not $missingAndroidDevice.detail.Contains('Available choices:')) {
+  throw 'Missing Android device failure did not list available choices.'
+}
+
+$androidChoice = Get-TestAndroidChoice
+if ([string]::IsNullOrWhiteSpace($androidChoice)) {
+  throw 'Confirmed test environment did not expose an online device or installed AVD.'
+}
+$configuredAndroidDoctor = Invoke-LocalCli -Arguments @(
+  '-Command',
+  'doctor',
+  '-Target',
+  'android',
+  '-Output',
+  'Json',
+  '-BackendDir',
+  $backendDir,
+  '-BackendWorkspaceRoot',
+  $backendWorkspaceRoot,
+  '-AndroidDevice',
+  $androidChoice
+)
+Assert-Equal `
+  -Actual $configuredAndroidDoctor.ExitCode `
+  -Expected 0 `
+  -Message 'Android doctor rejected an online device or installed AVD.'
+Assert-Equal `
+  -Actual $configuredAndroidDoctor.StandardError `
+  -Expected '' `
+  -Message 'Configured Android JSON doctor wrote diagnostics to stderr.'
+$configuredAndroidResult = ConvertFrom-SingleJson `
+  -Text $configuredAndroidDoctor.StandardOutput `
+  -Context 'Configured Android JSON doctor'
+Assert-DoctorResultShape `
+  -Result $configuredAndroidResult `
+  -StableResultFields $stableResultFields
+Assert-ComponentSuccess -Result $configuredAndroidResult -Name 'androidDevice'
+$configuredAndroidDevice = @($configuredAndroidResult.components | Where-Object {
+    $_.name -eq 'androidDevice'
+  })[0]
+if (-not $configuredAndroidDevice.detail.Contains($androidChoice)) {
+  throw 'Android device success detail omitted the configured choice.'
+}
+
+$textDoctor = Invoke-LocalCli -Arguments @(
+  '-Command',
+  'doctor',
+  '-Target',
+  'web',
+  '-Output',
+  'Text',
+  '-BackendDir',
+  $invalidBackendDir,
+  '-BackendWorkspaceRoot',
+  $backendWorkspaceRoot
+)
+Assert-NotEqual `
+  -Actual $textDoctor.ExitCode `
+  -Expected 0 `
+  -Message 'Invalid backend text doctor exit code.'
+Assert-Equal `
+  -Actual $textDoctor.StandardError `
+  -Expected '' `
+  -Message 'Normal text diagnosis failure wrote a stack trace to stderr.'
+if (-not $textDoctor.StandardOutput.Contains('[FAIL] backendWorkspace')) {
+  throw 'Text doctor omitted the failed backend workspace component.'
+}
+if ($textDoctor.StandardOutput -match 'CategoryInfo|ScriptStackTrace|at <ScriptBlock>') {
+  throw 'Text doctor exposed a stack trace for a normal diagnosis failure.'
+}
+
+foreach ($command in ($expectedCommands | Where-Object {
+      $_ -notin @('help', 'doctor')
+    })) {
   $failure = Invoke-LocalCli -Arguments @('-Command', $command, '-Output', 'Json')
   if ($failure.ExitCode -eq 0) {
     throw "Expected '$command' to fail until it is implemented."
