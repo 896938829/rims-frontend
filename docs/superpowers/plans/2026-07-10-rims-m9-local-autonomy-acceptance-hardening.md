@@ -357,7 +357,10 @@ git commit -m "feat: manage local backend lifecycle"
 **Files:**
 - Modify: `scripts/rims_local.ps1`
 - Modify: `scripts/lib/rims_local_common.ps1`
+- Create: `scripts/lib/rims_local_frontend.ps1`
+- Modify: `scripts/lib/rims_local_lifecycle.ps1`
 - Modify: `scripts/test_rims_local.ps1`
+- Create: `scripts/tests/test_rims_local_frontend.ps1`
 
 - [ ] **Step 1: Add failing command-builder tests**
 
@@ -412,9 +415,11 @@ For Android:
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/test_rims_local.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rims_local.ps1 -Command up -Target web -IncludeDependencies
-Invoke-WebRequest http://127.0.0.1:8091 -UseBasicParsing | Select-Object StatusCode
-powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rims_local.ps1 -Command down -Target web
+$backendSource = 'E:\My Work\rims-frontend\.worktrees\m9-backend-local-autonomy-acceptance\rims-goProgect'
+$backendRuntime = 'E:\My Work\RIMS'
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rims_local.ps1 -Command up -Target web -IncludeDependencies -BackendDir $backendSource -BackendWorkspaceRoot $backendRuntime -BackendPort 18080 -FrontendPort 18091
+Invoke-WebRequest http://127.0.0.1:18091 -UseBasicParsing | Select-Object StatusCode
+powershell -NoProfile -ExecutionPolicy Bypass -File scripts/rims_local.ps1 -Command down -Target web -BackendDir $backendSource -BackendWorkspaceRoot $backendRuntime -BackendPort 18080 -FrontendPort 18091
 ```
 
 Expected: tests PASS, frontend returns HTTP 200, and managed processes stop.
@@ -422,7 +427,7 @@ Expected: tests PASS, frontend returns HTTP 200, and managed processes stop.
 - [ ] **Step 6: Commit frontend target support**
 
 ```powershell
-git add scripts/rims_local.ps1 scripts/lib/rims_local_common.ps1 scripts/test_rims_local.ps1
+git add scripts/rims_local.ps1 scripts/lib scripts/test_rims_local.ps1 scripts/tests/test_rims_local_frontend.ps1
 git commit -m "feat: manage web and android targets"
 ```
 
