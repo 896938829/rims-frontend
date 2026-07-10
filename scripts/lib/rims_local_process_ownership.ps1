@@ -60,6 +60,56 @@ function Test-RimsStateOwnsProcess {
   return $true
 }
 
+function Test-RimsStateOwnsLinuxProcess {
+  param(
+    [AllowNull()]
+    [object]$State
+  )
+
+  $linuxIdentity = Get-RimsObjectPropertyValue `
+    -Value $State `
+    -Name 'linuxIdentity'
+  if ($null -eq $linuxIdentity) {
+    return $false
+  }
+  $current = Get-RimsCurrentLinuxProcessIdentity `
+    -StoredIdentity $linuxIdentity
+  if (-not $current.ok -or -not $current.exists) {
+    return $false
+  }
+  return (Test-RimsLinuxProcessIdentity `
+      -Stored $linuxIdentity `
+      -Current $current.identity).ok
+}
+
+function Test-RimsStateOwnsAnyBackendProcess {
+  param(
+    [AllowNull()]
+    [object]$State,
+    [AllowNull()]
+    [scriptblock]$LinuxOwnershipAction
+  )
+
+  if (Test-RimsStateOwnsProcess -State $State) {
+    return $true
+  }
+  if ($null -eq (Get-RimsObjectPropertyValue `
+      -Value $State `
+      -Name 'linuxIdentity')) {
+    return $false
+  }
+  try {
+    $owned = if ($null -eq $LinuxOwnershipAction) {
+      Test-RimsStateOwnsLinuxProcess -State $State
+    } else {
+      [bool](& $LinuxOwnershipAction $State)
+    }
+    return [bool]$owned
+  } catch {
+    return $false
+  }
+}
+
 function Test-RimsTcpPortListening {
   param(
     [Parameter(Mandatory = $true)]
@@ -196,6 +246,248 @@ kill -s "$signal" -- "-$pgid" 2>/dev/null || true
   return $signalResult.ExitCode -eq 0
 }
 
+function Test-RimsLinuxProcessIdentity {
+  param(
+    [AllowNull()]
+    [object]$Stored,
+    [AllowNull()]
+    [object]$Current
+  )
+
+  if ($null -eq $Stored -or $null -eq $Current) {
+    return [pscustomobject][ordered]@{
+      ok = $false
+      detail = 'Stored or current Linux process identity is missing.'
+    }
+  }
+  foreach ($propertyName in @(
+      'bootId',
+      'leaderPid',
+      'startTicks',
+      'processGroupId',
+      'commandMarker'
+    )) {
+    $storedValue = [string](Get-RimsObjectPropertyValue `
+        -Value $Stored `
+        -Name $propertyName `
+        -DefaultValue '')
+    $currentValue = [string](Get-RimsObjectPropertyValue `
+        -Value $Current `
+        -Name $propertyName `
+        -DefaultValue '')
+    if ([string]::IsNullOrWhiteSpace($storedValue) -or
+        -not $storedValue.Equals(
+          $currentValue,
+          [StringComparison]::Ordinal
+        )) {
+      return [pscustomobject][ordered]@{
+        ok = $false
+        detail = "Linux process identity mismatch: $propertyName."
+      }
+    }
+  }
+  return [pscustomobject][ordered]@{
+    ok = $true
+    detail = 'Linux process identity exactly matches controller state.'
+  }
+}
+
+function Get-RimsCurrentLinuxProcessIdentity {
+  param(
+    [Parameter(Mandatory = $true)]
+    [psobject]$StoredIdentity
+  )
+
+  $wsl = Resolve-RimsCommandPath -Name 'wsl.exe'
+  if ([string]::IsNullOrWhiteSpace($wsl)) {
+    return [pscustomobject][ordered]@{
+      ok = $false
+      exists = $false
+      identity = $null
+      detail = 'wsl.exe is unavailable for Linux identity verification.'
+    }
+  }
+  $leaderPid = [string](Get-RimsObjectPropertyValue `
+      -Value $StoredIdentity `
+      -Name 'leaderPid' `
+      -DefaultValue '')
+  $commandMarker = [string](Get-RimsObjectPropertyValue `
+      -Value $StoredIdentity `
+      -Name 'commandMarker' `
+      -DefaultValue '')
+  $script = @'
+set -euo pipefail
+pid=$1
+marker=$2
+case "$pid" in ''|*[!0-9]*) exit 2 ;; esac
+if [ ! -r "/proc/$pid/stat" ]; then
+  exit 3
+fi
+boot_id=$(cat /proc/sys/kernel/random/boot_id)
+stat_line=$(cat "/proc/$pid/stat")
+stat_tail=${stat_line##*) }
+set -- $stat_tail
+start_ticks=${20}
+pgid=$(ps -o pgid= -p "$pid" | tr -d '[:space:]')
+command_line=$(tr '\0' ' ' < "/proc/$pid/cmdline")
+marker_match=0
+case "$command_line" in *"$marker"*) marker_match=1 ;; esac
+printf '%s\n%s\n%s\n%s\n%s\n' \
+  "$boot_id" "$pid" "$start_ticks" "$pgid" "$marker_match"
+'@
+  $result = Invoke-RimsExternalCommand `
+    -FilePath $wsl `
+    -Arguments @(
+      '-e',
+      'bash',
+      '-c',
+      $script,
+      'rims-linux-identity',
+      $leaderPid,
+      $commandMarker
+    ) `
+    -TimeoutSeconds 10
+  if ($result.ExitCode -eq 3) {
+    return [pscustomobject][ordered]@{
+      ok = $true
+      exists = $false
+      identity = $null
+      detail = 'Recorded Linux process group leader is absent.'
+    }
+  }
+  if ($result.ExitCode -ne 0) {
+    return [pscustomobject][ordered]@{
+      ok = $false
+      exists = $false
+      identity = $null
+      detail = "Could not verify Linux process identity: $(Get-RimsExternalCommandSummary -Result $result)"
+    }
+  }
+  $lines = @($result.StandardOutput -split '\r?\n' | Where-Object {
+      $_.Length -gt 0
+    })
+  if ($lines.Count -ne 5) {
+    return [pscustomobject][ordered]@{
+      ok = $false
+      exists = $true
+      identity = $null
+      detail = 'Linux process identity probe returned malformed metadata.'
+    }
+  }
+  return [pscustomobject][ordered]@{
+    ok = $true
+    exists = $true
+    identity = [pscustomobject][ordered]@{
+      bootId = $lines[0]
+      leaderPid = [int]$lines[1]
+      startTicks = $lines[2]
+      processGroupId = [int]$lines[3]
+      commandMarker = if ($lines[4] -eq '1') { $commandMarker } else { '' }
+    }
+    detail = 'Read current Linux process identity.'
+  }
+}
+
+function Invoke-RimsOwnedLinuxGroupSignal {
+  param(
+    [Parameter(Mandatory = $true)]
+    [psobject]$StoredIdentity,
+    [ValidateSet('TERM', 'KILL')]
+    [string]$Signal = 'TERM',
+    [AllowNull()]
+    [scriptblock]$IdentityReaderAction,
+    [AllowNull()]
+    [scriptblock]$SignalAction
+  )
+
+  try {
+    $current = if ($null -eq $IdentityReaderAction) {
+      Get-RimsCurrentLinuxProcessIdentity -StoredIdentity $StoredIdentity
+    } else {
+      & $IdentityReaderAction $StoredIdentity
+    }
+  } catch {
+    return [pscustomobject][ordered]@{
+      ok = $false
+      attempted = $false
+      cleanupPending = $true
+      detail = ConvertTo-RimsDiagnosticSummary `
+        -StandardOutput '' `
+        -StandardError $_.Exception.Message
+    }
+  }
+  if (-not [bool](Get-RimsObjectPropertyValue `
+      -Value $current `
+      -Name 'ok' `
+      -DefaultValue $false)) {
+    return [pscustomobject][ordered]@{
+      ok = $false
+      attempted = $false
+      cleanupPending = $true
+      detail = ConvertTo-RimsDiagnosticSummary `
+        -StandardOutput ([string](Get-RimsObjectPropertyValue `
+            -Value $current `
+            -Name 'detail' `
+            -DefaultValue 'Could not verify Linux process identity.')) `
+        -StandardError ''
+    }
+  }
+  if (-not [bool](Get-RimsObjectPropertyValue `
+      -Value $current `
+      -Name 'exists' `
+      -DefaultValue $false)) {
+    return [pscustomobject][ordered]@{
+      ok = $true
+      attempted = $false
+      cleanupPending = $false
+      detail = 'Recorded Linux process group leader is already absent.'
+    }
+  }
+  $identityMatch = Test-RimsLinuxProcessIdentity `
+    -Stored $StoredIdentity `
+    -Current (Get-RimsObjectPropertyValue -Value $current -Name 'identity')
+  if (-not $identityMatch.ok) {
+    return [pscustomobject][ordered]@{
+      ok = $false
+      attempted = $false
+      cleanupPending = $true
+      detail = $identityMatch.detail
+    }
+  }
+  $processGroupId = [int](Get-RimsObjectPropertyValue `
+      -Value $StoredIdentity `
+      -Name 'processGroupId' `
+      -DefaultValue 0)
+  try {
+    $signaled = if ($null -eq $SignalAction) {
+      Invoke-RimsLinuxProcessGroupSignal `
+        -ProcessGroupId $processGroupId `
+        -Signal $Signal
+    } else {
+      [bool](& $SignalAction $processGroupId $Signal)
+    }
+    return [pscustomobject][ordered]@{
+      ok = $signaled
+      attempted = $true
+      cleanupPending = -not $signaled
+      detail = if ($signaled) {
+        "Sent $Signal only to the exactly verified Linux process group."
+      } else {
+        "Could not send $Signal to the exactly verified Linux process group."
+      }
+    }
+  } catch {
+    return [pscustomobject][ordered]@{
+      ok = $false
+      attempted = $true
+      cleanupPending = $true
+      detail = ConvertTo-RimsDiagnosticSummary `
+        -StandardOutput '' `
+        -StandardError $_.Exception.Message
+    }
+  }
+}
+
 function Wait-RimsOwnedProcessExit {
   param(
     [Parameter(Mandatory = $true)]
@@ -214,39 +506,110 @@ function Wait-RimsOwnedProcessExit {
   return -not (Test-RimsStateOwnsProcess -State $State)
 }
 
+function Wait-RimsLinuxProcessExit {
+  param(
+    [Parameter(Mandatory = $true)]
+    [psobject]$StoredIdentity,
+    [ValidateRange(1, 60)]
+    [int]$TimeoutSeconds = 10
+  )
+
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  do {
+    $current = Get-RimsCurrentLinuxProcessIdentity `
+      -StoredIdentity $StoredIdentity
+    if ($current.ok -and -not $current.exists) {
+      return $true
+    }
+    if ($current.ok -and $current.exists) {
+      $match = Test-RimsLinuxProcessIdentity `
+        -Stored $StoredIdentity `
+        -Current $current.identity
+      if (-not $match.ok) {
+        return $false
+      }
+    }
+    Start-Sleep -Milliseconds 200
+  } while ((Get-Date) -lt $deadline)
+  return $false
+}
+
 function Stop-RimsOwnedBackendProcess {
   param(
     [Parameter(Mandatory = $true)]
-    [psobject]$State
+    [psobject]$State,
+    [AllowNull()]
+    [scriptblock]$LinuxSignalAction,
+    [AllowNull()]
+    [scriptblock]$LinuxExitAction
   )
 
   $process = Get-RimsOwnedProcess -State $State
-  if ($null -eq $process) {
-    return $true
+  $windowsOwned = $null -ne $process
+  if ($windowsOwned) {
+    $process.Dispose()
   }
-  $process.Dispose()
 
-  $processGroupId = 0
-  $rawProcessGroupId = Get-RimsObjectPropertyValue `
+  $linuxIdentity = Get-RimsObjectPropertyValue `
     -Value $State `
-    -Name 'linuxProcessGroupId'
-  $hasProcessGroup = [int]::TryParse(
-    [string]$rawProcessGroupId,
-    [ref]$processGroupId
-  ) -and $processGroupId -gt 0
-  if ($hasProcessGroup) {
-    [void](Invoke-RimsLinuxProcessGroupSignal `
-        -ProcessGroupId $processGroupId `
-        -Signal 'TERM')
-    if (Wait-RimsOwnedProcessExit -State $State -TimeoutSeconds 10) {
+    -Name 'linuxIdentity'
+  if ($null -ne $linuxIdentity) {
+    $term = if ($null -eq $LinuxSignalAction) {
+      Invoke-RimsOwnedLinuxGroupSignal `
+        -StoredIdentity $linuxIdentity `
+        -Signal 'TERM'
+    } else {
+      & $LinuxSignalAction $linuxIdentity 'TERM'
+    }
+    if (-not [bool](Get-RimsObjectPropertyValue `
+        -Value $term `
+        -Name 'ok' `
+        -DefaultValue $term)) {
+      return $false
+    }
+    $linuxExited = if ($null -eq $LinuxExitAction) {
+      Wait-RimsLinuxProcessExit `
+        -StoredIdentity $linuxIdentity `
+        -TimeoutSeconds 10
+    } else {
+      [bool](& $LinuxExitAction $linuxIdentity 10)
+    }
+    $windowsExited = Wait-RimsOwnedProcessExit `
+      -State $State `
+      -TimeoutSeconds 10
+    if ($linuxExited -and $windowsExited) {
       return $true
     }
-    [void](Invoke-RimsLinuxProcessGroupSignal `
-        -ProcessGroupId $processGroupId `
-        -Signal 'KILL')
-    if (Wait-RimsOwnedProcessExit -State $State -TimeoutSeconds 3) {
+    $kill = if ($null -eq $LinuxSignalAction) {
+      Invoke-RimsOwnedLinuxGroupSignal `
+        -StoredIdentity $linuxIdentity `
+        -Signal 'KILL'
+    } else {
+      & $LinuxSignalAction $linuxIdentity 'KILL'
+    }
+    if (-not [bool](Get-RimsObjectPropertyValue `
+        -Value $kill `
+        -Name 'ok' `
+        -DefaultValue $kill)) {
+      return $false
+    }
+    $linuxExited = if ($null -eq $LinuxExitAction) {
+      Wait-RimsLinuxProcessExit `
+        -StoredIdentity $linuxIdentity `
+        -TimeoutSeconds 3
+    } else {
+      [bool](& $LinuxExitAction $linuxIdentity 3)
+    }
+    $windowsExited = Wait-RimsOwnedProcessExit `
+      -State $State `
+      -TimeoutSeconds 3
+    if ($linuxExited -and $windowsExited) {
       return $true
     }
+  }
+
+  if (-not $windowsOwned) {
+    return $null -eq $linuxIdentity
   }
 
   $ownedProcess = Get-RimsOwnedProcess -State $State

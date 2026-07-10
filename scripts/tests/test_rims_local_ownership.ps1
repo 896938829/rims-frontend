@@ -155,20 +155,6 @@ try {
       -Expected $postgresCase.expectedOwned `
       -Message "Down decision was wrong for $($postgresCase.name)."
   }
-  $migrationScript = Get-RimsMigrationLaunchScript
-  foreach ($requiredMigrationFragment in @(
-      'sed ''s/\r$//''',
-      'unshare --user --map-root-user --mount',
-      'mount --bind "$stage_dir" "$source_dir/migrations"',
-      'export MIGRATIONS_DIR="$source_dir/migrations"',
-      'cd "$source_dir"',
-      'exec "$HOME/local/go/bin/go" run ./cmd/migrate up'
-    )) {
-    if (-not $migrationScript.Contains($requiredMigrationFragment)) {
-      throw "Migration launcher omitted safe source normalization fragment: $requiredMigrationFragment"
-    }
-  }
-
   Initialize-RimsRuntimeDirectories -Paths $runtimePaths
   $liveLogWriter = $null
   try {
@@ -573,13 +559,17 @@ try {
     -Value (Test-Path -LiteralPath $runtimePaths.state) `
     -Message 'Status deleted dependency-only cleanup-pending state.'
 
-  $composeDownFunction = Get-Item -LiteralPath 'Function:\Invoke-RimsComposeDown'
-  $originalComposeDown = $composeDownFunction.ScriptBlock
+  $postgresCleanupFunction = Get-Item `
+    -LiteralPath 'Function:\Invoke-RimsOwnedPostgresCleanup'
+  $originalPostgresCleanup = $postgresCleanupFunction.ScriptBlock
   try {
     Set-Item `
-      -LiteralPath 'Function:\Invoke-RimsComposeDown' `
+      -LiteralPath 'Function:\Invoke-RimsOwnedPostgresCleanup' `
       -Value {
-        param([string]$BackendWorkspaceRoot)
+        param(
+          [psobject]$State,
+          [string]$BackendWorkspaceRoot
+        )
         return [pscustomobject]@{
           ok = $false
           detail = 'Injected Compose retry failure API_KEY=retry-secret'
@@ -598,9 +588,12 @@ try {
       -Message 'Down removed state after failed pending Compose cleanup.'
 
     Set-Item `
-      -LiteralPath 'Function:\Invoke-RimsComposeDown' `
+      -LiteralPath 'Function:\Invoke-RimsOwnedPostgresCleanup' `
       -Value {
-        param([string]$BackendWorkspaceRoot)
+        param(
+          [psobject]$State,
+          [string]$BackendWorkspaceRoot
+        )
         return [pscustomobject]@{
           ok = $true
           detail = 'Injected Compose retry completed.'
@@ -619,8 +612,8 @@ try {
       -Message 'Down retained state after successful pending cleanup.'
   } finally {
     Set-Item `
-      -LiteralPath 'Function:\Invoke-RimsComposeDown' `
-      -Value $originalComposeDown
+      -LiteralPath 'Function:\Invoke-RimsOwnedPostgresCleanup' `
+      -Value $originalPostgresCleanup
   }
 
   $listener = New-Object Net.Sockets.TcpListener(

@@ -24,6 +24,8 @@ function Get-RimsRuntimePaths {
     stdoutLog = Join-Path $logDirectory 'backend.stdout.log'
     stderrLog = Join-Path $logDirectory 'backend.stderr.log'
     linuxProcessGroup = Join-Path $rootResolution.path 'backend.pgid'
+    linuxIdentity = Join-Path $rootResolution.path 'backend.identity.json'
+    backendActivationGate = Join-Path $rootResolution.path 'backend.activate'
   }
 }
 
@@ -37,6 +39,44 @@ function Initialize-RimsRuntimeDirectories {
   [void][IO.Directory]::CreateDirectory([string]$Paths.logs)
 }
 
+function Get-RimsStateTemporaryPath {
+  param(
+    [Parameter(Mandatory = $true)]
+    [psobject]$Paths
+  )
+
+  return ([string]$Paths.state) + '.tmp.' + [guid]::NewGuid().ToString('N')
+}
+
+function Write-RimsDurableUtf8File {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Path,
+    [Parameter(Mandatory = $true)]
+    [AllowEmptyString()]
+    [string]$Content
+  )
+
+  $bytes = (New-Object Text.UTF8Encoding($false)).GetBytes($Content)
+  $stream = $null
+  try {
+    $stream = New-Object IO.FileStream(
+      $Path,
+      [IO.FileMode]::CreateNew,
+      [IO.FileAccess]::Write,
+      [IO.FileShare]::None,
+      4096,
+      [IO.FileOptions]::WriteThrough
+    )
+    $stream.Write($bytes, 0, $bytes.Length)
+    $stream.Flush($true)
+  } finally {
+    if ($null -ne $stream) {
+      $stream.Dispose()
+    }
+  }
+}
+
 function Write-RimsRuntimeState {
   param(
     [Parameter(Mandatory = $true)]
@@ -46,15 +86,12 @@ function Write-RimsRuntimeState {
   )
 
   Initialize-RimsRuntimeDirectories -Paths $Paths
-  $temporaryPath = ([string]$Paths.state) + '.tmp'
-  $backupPath = ([string]$Paths.state) + '.previous'
+  $temporaryPath = Get-RimsStateTemporaryPath -Paths $Paths
+  $backupPath = ([string]$Paths.state) +
+    '.previous.' + [guid]::NewGuid().ToString('N')
   $json = $State | ConvertTo-Json -Depth 10
   try {
-    [IO.File]::WriteAllText(
-      $temporaryPath,
-      $json,
-      (New-Object Text.UTF8Encoding($false))
-    )
+    Write-RimsDurableUtf8File -Path $temporaryPath -Content $json
     if (Test-Path -LiteralPath $Paths.state -PathType Leaf) {
       [IO.File]::Replace(
         $temporaryPath,
@@ -132,11 +169,18 @@ function Remove-RimsRuntimeState {
 
   foreach ($path in @(
       [string]$Paths.state,
-      ([string]$Paths.state) + '.tmp',
-      ([string]$Paths.state) + '.previous',
-      [string]$Paths.linuxProcessGroup
+      [string]$Paths.linuxProcessGroup,
+      [string](Get-RimsObjectPropertyValue `
+        -Value $Paths `
+        -Name 'linuxIdentity' `
+        -DefaultValue ''),
+      [string](Get-RimsObjectPropertyValue `
+        -Value $Paths `
+        -Name 'backendActivationGate' `
+        -DefaultValue '')
     )) {
-    if (Test-Path -LiteralPath $path -PathType Leaf) {
+    if (-not [string]::IsNullOrWhiteSpace($path) -and
+        (Test-Path -LiteralPath $path -PathType Leaf)) {
       [IO.File]::Delete($path)
     }
   }
@@ -161,4 +205,146 @@ function Test-RimsRuntimeCleanupPending {
         -Name 'cleanupPending' `
         -DefaultValue $false)
   )
+}
+
+function Get-RimsLifecycleLockNames {
+  param(
+    [Parameter(Mandatory = $true)]
+    [psobject]$Paths,
+    [AllowNull()]
+    [Nullable[int]]$BackendPort
+  )
+
+  $canonicalRuntime = [IO.Path]::GetFullPath([string]$Paths.root).
+    TrimEnd('\').ToLowerInvariant()
+  $sha256 = [Security.Cryptography.SHA256]::Create()
+  try {
+    $runtimeBytes = [Text.Encoding]::UTF8.GetBytes($canonicalRuntime)
+    $runtimeHash = ([BitConverter]::ToString(
+        $sha256.ComputeHash($runtimeBytes)
+      ) -replace '-', '').ToLowerInvariant()
+  } finally {
+    $sha256.Dispose()
+  }
+
+  $names = New-Object 'Collections.Generic.List[string]'
+  [void]$names.Add("Local\RimsLocal-runtime-$runtimeHash")
+  if ($null -ne $BackendPort) {
+    [void]$names.Add("Local\RimsLocal-port-$BackendPort")
+  }
+  $result = $names.ToArray()
+  [Array]::Sort($result, [StringComparer]::Ordinal)
+  return $result
+}
+
+function Enter-RimsLifecycleLock {
+  param(
+    [Parameter(Mandatory = $true)]
+    [psobject]$Paths,
+    [AllowNull()]
+    [Nullable[int]]$BackendPort,
+    [ValidateRange(1, 60000)]
+    [int]$TimeoutMilliseconds = 5000
+  )
+
+  $names = @(Get-RimsLifecycleLockNames `
+      -Paths $Paths `
+      -BackendPort $BackendPort)
+  $acquired = New-Object 'Collections.Generic.List[object]'
+  $deadline = [Diagnostics.Stopwatch]::StartNew()
+  foreach ($name in $names) {
+    $mutex = $null
+    $ownsMutex = $false
+    try {
+      $createdNew = $false
+      $mutex = New-Object Threading.Mutex(
+        $false,
+        $name,
+        [ref]$createdNew
+      )
+      $remaining = [Math]::Max(
+        0,
+        $TimeoutMilliseconds - [int]$deadline.ElapsedMilliseconds
+      )
+      try {
+        $ownsMutex = $mutex.WaitOne($remaining)
+      } catch [Threading.AbandonedMutexException] {
+        $ownsMutex = $true
+      }
+      if (-not $ownsMutex) {
+        $mutex.Dispose()
+        for ($index = $acquired.Count - 1; $index -ge 0; $index--) {
+          try { $acquired[$index].mutex.ReleaseMutex() } catch {}
+          $acquired[$index].mutex.Dispose()
+        }
+        return [pscustomobject][ordered]@{
+          ok = $false
+          busy = $true
+          detail = 'Another local lifecycle command owns the runtime or backend port lock.'
+          names = $names
+          handles = @()
+          released = $true
+        }
+      }
+      [void]$acquired.Add([pscustomobject]@{
+          name = $name
+          mutex = $mutex
+        })
+    } catch {
+      if ($null -ne $mutex -and -not $ownsMutex) {
+        $mutex.Dispose()
+      }
+      for ($index = $acquired.Count - 1; $index -ge 0; $index--) {
+        try { $acquired[$index].mutex.ReleaseMutex() } catch {}
+        $acquired[$index].mutex.Dispose()
+      }
+      return [pscustomobject][ordered]@{
+        ok = $false
+        busy = $false
+        detail = ConvertTo-RimsDiagnosticSummary `
+          -StandardOutput '' `
+          -StandardError $_.Exception.Message
+        names = $names
+        handles = @()
+        released = $true
+      }
+    }
+  }
+  $deadline.Stop()
+  return [pscustomobject][ordered]@{
+    ok = $true
+    busy = $false
+    detail = 'Acquired exclusive local lifecycle locks.'
+    names = $names
+    handles = @($acquired.ToArray())
+    released = $false
+  }
+}
+
+function Exit-RimsLifecycleLock {
+  param(
+    [AllowNull()]
+    [object]$Lock
+  )
+
+  if ($null -eq $Lock -or
+      [bool](Get-RimsObjectPropertyValue `
+        -Value $Lock `
+        -Name 'released' `
+        -DefaultValue $true)) {
+    return
+  }
+  $handles = @(Get-RimsObjectPropertyValue `
+      -Value $Lock `
+      -Name 'handles' `
+      -DefaultValue @())
+  for ($index = $handles.Count - 1; $index -ge 0; $index--) {
+    try { $handles[$index].mutex.ReleaseMutex() } catch {}
+    try { $handles[$index].mutex.Dispose() } catch {}
+  }
+  $Lock | Add-Member `
+    -MemberType NoteProperty `
+    -Name released `
+    -Value $true `
+    -Force
 }

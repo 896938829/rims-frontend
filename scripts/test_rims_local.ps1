@@ -6,6 +6,10 @@ $testRoot = Join-Path $scriptDir 'tests'
 $testFiles = @(
   'test_rims_local_support.ps1',
   'test_rims_local_ownership.ps1',
+  'test_rims_local_lock.ps1',
+  'test_rims_local_compose.ps1',
+  'test_rims_local_wsl.ps1',
+  'test_rims_local_launch.ps1',
   'test_rims_local_core.ps1',
   'test_rims_local_cli.ps1'
 )

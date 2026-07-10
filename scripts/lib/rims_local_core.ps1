@@ -546,3 +546,29 @@ function Compare-RimsPath {
     return $false
   }
 }
+
+function Get-RimsFileSha256 {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Path
+  )
+
+  $stream = $null
+  $sha256 = [Security.Cryptography.SHA256]::Create()
+  try {
+    $stream = [IO.File]::Open(
+      $Path,
+      [IO.FileMode]::Open,
+      [IO.FileAccess]::Read,
+      [IO.FileShare]::Read
+    )
+    return ([BitConverter]::ToString(
+        $sha256.ComputeHash($stream)
+      ) -replace '-', '').ToLowerInvariant()
+  } finally {
+    if ($null -ne $stream) {
+      $stream.Dispose()
+    }
+    $sha256.Dispose()
+  }
+}

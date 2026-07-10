@@ -137,7 +137,7 @@ function Resolve-RimsLifecyclePaths {
   }
 }
 
-function Invoke-RimsLocalStatus {
+function Invoke-RimsLocalStatusUnlocked {
   param(
     [Parameter(Mandatory = $true)]
     [string]$ScriptDirectory,
@@ -230,7 +230,7 @@ function Invoke-RimsLocalStatus {
     -BackendDir $resolved.backendPath `
     -BackendWorkspaceRoot $resolved.workspacePath `
     -BackendPort $BackendPort
-  $owned = Test-RimsStateOwnsProcess -State $state
+  $owned = Test-RimsStateOwnsAnyBackendProcess -State $state
   $cleanupPending = Test-RimsRuntimeCleanupPending -State $state
   if (-not $matches) {
     $result.components += New-RimsBackendLifecycleComponent `
@@ -324,7 +324,7 @@ function Invoke-RimsLocalStatus {
     -ExitCode $(if ($overallHealthy) { 0 } else { 1 })
 }
 
-function Invoke-RimsLocalLogs {
+function Invoke-RimsLocalLogsUnlocked {
   param(
     [Parameter(Mandatory = $true)]
     [string]$ScriptDirectory
@@ -390,7 +390,9 @@ function Invoke-RimsDependencyCleanup {
 
   try {
     $rawResult = if ($null -eq $ComposeCleanupAction) {
-      Invoke-RimsComposeDown -BackendWorkspaceRoot $BackendWorkspaceRoot
+      Invoke-RimsOwnedPostgresCleanup `
+        -State $State `
+        -BackendWorkspaceRoot $BackendWorkspaceRoot
     } else {
       & $ComposeCleanupAction $BackendWorkspaceRoot
     }
@@ -440,7 +442,9 @@ function Resolve-RimsFailedLifecycleCleanup {
     [AllowNull()]
     [scriptblock]$BackendCleanupAction,
     [AllowNull()]
-    [scriptblock]$ComposeCleanupAction
+    [scriptblock]$ComposeCleanupAction,
+    [AllowNull()]
+    [scriptblock]$PersistStateAction
   )
 
   $sanitizedFailure = ConvertTo-RimsDiagnosticSummary `
@@ -490,12 +494,39 @@ function Resolve-RimsFailedLifecycleCleanup {
     -Force
 
   try {
-    Write-RimsRuntimeState -Paths $Paths -State $State
+    if ($null -eq $PersistStateAction) {
+      Write-RimsRuntimeState -Paths $Paths -State $State
+    } else {
+      & $PersistStateAction $Paths $State
+    }
   } catch {
-    # Cleanup still proceeds; pending ownership is persisted again if needed.
+    $persistenceDetail = ConvertTo-RimsDiagnosticSummary `
+      -StandardOutput '' `
+      -StandardError $_.Exception.Message
+    return [pscustomobject][ordered]@{
+      ok = $false
+      backendCleanup = [pscustomobject][ordered]@{
+        required = Test-RimsStateOwnsAnyBackendProcess -State $State
+        attempted = $false
+        ok = $false
+        detail = 'Backend cleanup was refused because pending ownership was not durable.'
+      }
+      dependencyCleanup = [pscustomobject][ordered]@{
+        required = $composeOwned
+        attempted = $false
+        ok = $false
+        detail = 'Dependency cleanup was refused because pending ownership was not durable.'
+      }
+      cleanupPending = $true
+      managed = Test-RimsStateOwnsAnyBackendProcess -State $State
+      healthy = $false
+      stateRetained = Test-Path -LiteralPath $Paths.state -PathType Leaf
+      detail = "Cleanup was not started because pending ownership could not be persisted: $persistenceDetail"
+      remediation = 'Restore runtime state write access, then run down with the same paths and port.'
+    }
   }
 
-  $backendWasOwned = Test-RimsStateOwnsProcess -State $State
+  $backendWasOwned = Test-RimsStateOwnsAnyBackendProcess -State $State
   $backendCleanupOk = $true
   $backendCleanupDetail = 'No owned backend process required cleanup.'
   $backendCleanupAttempted = $false
@@ -521,7 +552,9 @@ function Resolve-RimsFailedLifecycleCleanup {
       $reportedBackendCleanup = $false
       $backendActionDetail = $_.Exception.Message
     }
-    $backendCleanupOk = -not (Test-RimsStateOwnsProcess -State $State)
+    $backendCleanupOk = -not (
+      Test-RimsStateOwnsAnyBackendProcess -State $State
+    )
     $backendCleanupDetail = if ($backendCleanupOk) {
       'The exactly owned backend process was confirmed stopped.'
     } elseif ($reportedBackendCleanup) {
@@ -539,7 +572,8 @@ function Resolve-RimsFailedLifecycleCleanup {
     foreach ($propertyName in @(
         'windowsPid',
         'windowsProcessStartTimeUtc',
-        'linuxProcessGroupId'
+        'linuxProcessGroupId',
+        'linuxIdentity'
       )) {
       $State | Add-Member `
         -MemberType NoteProperty `
@@ -639,14 +673,18 @@ function Resolve-RimsFailedLifecycleCleanup {
   $statePersisted = $false
   $stateWriteDetail = ''
   try {
-    Write-RimsRuntimeState -Paths $Paths -State $State
+    if ($null -eq $PersistStateAction) {
+      Write-RimsRuntimeState -Paths $Paths -State $State
+    } else {
+      & $PersistStateAction $Paths $State
+    }
     $statePersisted = $true
   } catch {
     $stateWriteDetail = ConvertTo-RimsDiagnosticSummary `
       -StandardOutput '' `
       -StandardError $_.Exception.Message
   }
-  $managed = Test-RimsStateOwnsProcess -State $State
+  $managed = Test-RimsStateOwnsAnyBackendProcess -State $State
   $detail = if ($statePersisted) {
     'Cleanup remains pending; controller ownership state was retained for a bounded down retry.'
   } else {
@@ -665,7 +703,7 @@ function Resolve-RimsFailedLifecycleCleanup {
   }
 }
 
-function Invoke-RimsLocalDown {
+function Invoke-RimsLocalDownUnlocked {
   param(
     [Parameter(Mandatory = $true)]
     [string]$ScriptDirectory,
@@ -718,7 +756,7 @@ function Invoke-RimsLocalDown {
       -Ok $false `
       -Detail 'Managed state belongs to different backend paths or port; no process was changed.' `
       -Remediation 'Repeat down with the paths and port recorded in state.json.' `
-      -Managed (Test-RimsStateOwnsProcess -State $state) `
+      -Managed (Test-RimsStateOwnsAnyBackendProcess -State $state) `
       -Healthy $false `
       -Stale $false `
       -Port $BackendPort `
@@ -726,7 +764,7 @@ function Invoke-RimsLocalDown {
     return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
   }
 
-  $wasOwned = Test-RimsStateOwnsProcess -State $state
+  $wasOwned = Test-RimsStateOwnsAnyBackendProcess -State $state
   $wasCleanupPending = Test-RimsRuntimeCleanupPending -State $state
   $cleanupOutcome = Resolve-RimsFailedLifecycleCleanup `
     -Paths $paths `
@@ -794,6 +832,8 @@ function New-RimsManagedRuntimeState {
     [bool]$PostgresWasRunning,
     [Parameter(Mandatory = $true)]
     [bool]$ComposeStartedByController,
+    [AllowNull()]
+    [object]$PostgresResourceIdentity = $null,
     [bool]$Healthy = $true,
     [AllowNull()]
     [AllowEmptyString()]
@@ -814,6 +854,7 @@ function New-RimsManagedRuntimeState {
     frontendPort = $FrontendPort
     startedAt = Get-RimsLocalTimestamp
     healthUrl = $StartedBackend.healthUrl
+    lifecycleStage = if ($Healthy) { 'healthy' } else { 'preparing' }
     healthy = $Healthy
     cleanupPending = $false
     failureContext = if ([string]::IsNullOrWhiteSpace($FailureContext)) {
@@ -826,6 +867,9 @@ function New-RimsManagedRuntimeState {
     windowsPid = $StartedBackend.windowsPid
     windowsProcessStartTimeUtc = $StartedBackend.windowsProcessStartTimeUtc
     linuxProcessGroupId = $StartedBackend.linuxProcessGroupId
+    linuxIdentity = Get-RimsObjectPropertyValue `
+      -Value $StartedBackend `
+      -Name 'linuxIdentity'
     runtimeRoot = $RuntimePaths.root
     statePath = $RuntimePaths.state
     stdoutLogPath = $RuntimePaths.stdoutLog
@@ -837,6 +881,7 @@ function New-RimsManagedRuntimeState {
       composeStartedByController = $ComposeStartedByController
       cleanupPending = $false
       cleanupFailureDetail = ''
+      postgresResource = $PostgresResourceIdentity
     }
   }
 }
@@ -898,7 +943,90 @@ function Complete-RimsFailedUpResult {
   return Complete-RimsLocalResult -Result $Result -Ok $false -ExitCode 1
 }
 
-function Invoke-RimsLocalUp {
+function Update-RimsOwnedPostgresIdentity {
+  param(
+    [Parameter(Mandatory = $true)]
+    [psobject]$State,
+    [Parameter(Mandatory = $true)]
+    [psobject]$Context
+  )
+
+  $status = Get-RimsPostgresStatus -Context $Context
+  if (-not $status.ok) {
+    return [pscustomobject][ordered]@{
+      ok = $false
+      exists = $status.exists
+      detail = $status.detail
+    }
+  }
+  if (-not $status.exists) {
+    return [pscustomobject][ordered]@{
+      ok = $true
+      exists = $false
+      detail = 'Controller-created postgres container is absent.'
+    }
+  }
+  $resource = Get-RimsPostgresResourceIdentity `
+    -Context $Context `
+    -ContainerId $status.containerId
+  if (-not $resource.ok) {
+    return [pscustomobject][ordered]@{
+      ok = $false
+      exists = $true
+      detail = $resource.detail
+    }
+  }
+  $dependencyOwnership = Get-RimsObjectPropertyValue `
+    -Value $State `
+    -Name 'dependencyOwnership'
+  $dependencyOwnership | Add-Member `
+    -MemberType NoteProperty `
+    -Name postgresResource `
+    -Value $resource.identity `
+    -Force
+  return [pscustomobject][ordered]@{
+    ok = $true
+    exists = $true
+    detail = $resource.detail
+    identity = $resource.identity
+  }
+}
+
+function Set-RimsDurableDependencyProvisionalState {
+  param(
+    [Parameter(Mandatory = $true)]
+    [psobject]$Paths,
+    [Parameter(Mandatory = $true)]
+    [psobject]$State
+  )
+
+  $State | Add-Member `
+    -MemberType NoteProperty `
+    -Name lifecycleStage `
+    -Value 'dependencies' `
+    -Force
+  $State | Add-Member `
+    -MemberType NoteProperty `
+    -Name healthy `
+    -Value $false `
+    -Force
+  $State | Add-Member `
+    -MemberType NoteProperty `
+    -Name cleanupPending `
+    -Value $true `
+    -Force
+  $dependencyOwnership = Get-RimsObjectPropertyValue `
+    -Value $State `
+    -Name 'dependencyOwnership'
+  $dependencyOwnership | Add-Member `
+    -MemberType NoteProperty `
+    -Name cleanupPending `
+    -Value $true `
+    -Force
+  Write-RimsRuntimeState -Paths $Paths -State $State
+}
+
+function Invoke-RimsLocalUpUnlocked {
   param(
     [Parameter(Mandatory = $true)]
     [ValidateSet('none', 'web', 'android')]
@@ -945,7 +1073,7 @@ function Invoke-RimsLocalUp {
 
   $state = Read-RimsRuntimeState -Paths $paths
   if ($null -ne $state) {
-    $owned = Test-RimsStateOwnsProcess -State $state
+    $owned = Test-RimsStateOwnsAnyBackendProcess -State $state
     $cleanupPending = Test-RimsRuntimeCleanupPending -State $state
     if ($cleanupPending) {
       $result.components += New-RimsBackendLifecycleComponent `
@@ -1071,6 +1199,7 @@ function Invoke-RimsLocalUp {
     -ComposeStartedByController $composeStarted `
     -Healthy $false `
     -FailureContext 'Backend startup did not complete.'
+  $postgresResourceIdentity = $null
   if (-not $postgresBefore.healthy) {
     if (-not $IncludeDependencies) {
       $result.components += New-RimsLocalComponent `
@@ -1083,6 +1212,11 @@ function Invoke-RimsLocalUp {
     }
     $composeUp = Invoke-RimsComposeUpPostgres -Context $context
     if (-not $composeUp.ok) {
+      if ($composeStarted) {
+        [void](Update-RimsOwnedPostgresIdentity `
+            -State $failedLifecycleState `
+            -Context $context)
+      }
       $result.components += New-RimsLocalComponent `
         -Name 'postgres' `
         -Ok $false `
@@ -1100,6 +1234,11 @@ function Invoke-RimsLocalUp {
     }
     $postgresReady = Wait-RimsPostgresHealthy -Context $context
     if ($null -eq $postgresReady -or -not $postgresReady.healthy) {
+      if ($composeStarted) {
+        [void](Update-RimsOwnedPostgresIdentity `
+            -State $failedLifecycleState `
+            -Context $context)
+      }
       $readinessFailure = if ($composeStarted) {
         'Controller-started PostgreSQL did not become healthy within 90 seconds.'
       } else {
@@ -1119,6 +1258,47 @@ function Invoke-RimsLocalUp {
         -FailureContext $readinessFailure `
         -BackendPort $BackendPort `
         -Remediation 'Inspect Docker Compose logs and retry after PostgreSQL is healthy.'
+    }
+  }
+  if ($composeStarted) {
+    $capturedResource = Update-RimsOwnedPostgresIdentity `
+      -State $failedLifecycleState `
+      -Context $context
+    if (-not $capturedResource.ok -or -not $capturedResource.exists) {
+      $result.components += New-RimsLocalComponent `
+        -Name 'postgresOwnership' `
+        -Ok $false `
+        -Required $true `
+        -Detail $capturedResource.detail `
+        -Remediation 'Do not modify the container; restore Docker inspection and run down to retry exact cleanup.'
+      return Complete-RimsFailedUpResult `
+        -Result $result `
+        -Paths $paths `
+        -State $failedLifecycleState `
+        -BackendWorkspaceRoot $resolved.workspacePath `
+        -FailureContext $capturedResource.detail `
+        -BackendPort $BackendPort `
+        -Remediation 'Restore Docker inspection and retry exact cleanup with down.'
+    }
+    $postgresResourceIdentity = $capturedResource.identity
+    try {
+      Set-RimsDurableDependencyProvisionalState `
+        -Paths $paths `
+        -State $failedLifecycleState
+    } catch {
+      $persistenceFailure = ConvertTo-RimsDiagnosticSummary `
+        -StandardOutput '' `
+        -StandardError $_.Exception.Message
+      $result.components += New-RimsLocalComponent `
+        -Name 'runtimeState' `
+        -Ok $false `
+        -Required $true `
+        -Detail "Could not durably record controller-created postgres ownership: $persistenceFailure" `
+        -Remediation 'Restore runtime state write access before attempting cleanup.'
+      return Complete-RimsLocalResult `
+        -Result $result `
+        -Ok $false `
+        -ExitCode 1
     }
   }
   $result.components += New-RimsLocalComponent `
@@ -1157,30 +1337,33 @@ function Invoke-RimsLocalUp {
   $started = Start-RimsManagedBackend `
     -Context $context `
     -RuntimePaths $paths `
-    -BackendPort $BackendPort
+    -BackendPort $BackendPort `
+    -State $failedLifecycleState
   if (-not $started.ok) {
-    $failedState = if ($started.processStarted) {
-      New-RimsManagedRuntimeState `
-        -FrontendPath $frontendPath `
-        -BackendPath $resolved.backendPath `
-        -BackendWorkspaceRoot $resolved.workspacePath `
-        -Target $Target `
-        -BackendPort $BackendPort `
-        -FrontendPort $FrontendPort `
-        -RuntimePaths $paths `
-        -StartedBackend $started `
-        -PostgresExisted $postgresExisted `
-        -PostgresWasRunning $postgresWasRunning `
-        -ComposeStartedByController $composeStarted `
+    if (-not $started.cleanupAllowed) {
+      $stateRemains = Test-Path -LiteralPath $paths.state -PathType Leaf
+      $result.components += New-RimsBackendLifecycleComponent `
+        -Ok $false `
+        -Detail $started.detail `
+        -Remediation $(if ($stateRemains) {
+            'The activation gate stayed closed. Wait for bootstrap timeout, then run down to reconcile durable state.'
+          } else {
+            'The activation gate stayed closed. Restore state persistence before retrying up.'
+          }) `
+        -Managed $false `
         -Healthy $false `
-        -FailureContext $started.detail
-    } else {
-      $failedLifecycleState
+        -Stale $false `
+        -Port $BackendPort `
+        -CleanupPending $stateRemains
+      return Complete-RimsLocalResult `
+        -Result $result `
+        -Ok $false `
+        -ExitCode 1
     }
     return Complete-RimsFailedUpResult `
       -Result $result `
       -Paths $paths `
-      -State $failedState `
+      -State $failedLifecycleState `
       -BackendWorkspaceRoot $resolved.workspacePath `
       -FailureContext $started.detail `
       -BackendPort $BackendPort `
@@ -1199,6 +1382,7 @@ function Invoke-RimsLocalUp {
     -PostgresExisted $postgresExisted `
     -PostgresWasRunning $postgresWasRunning `
     -ComposeStartedByController $composeStarted `
+    -PostgresResourceIdentity $postgresResourceIdentity `
     -Healthy $true
   try {
     Write-RimsRuntimeState -Paths $paths -State $newState
@@ -1229,7 +1413,7 @@ function Invoke-RimsLocalUp {
   return Complete-RimsLocalResult -Result $result -Ok $true -ExitCode 0
 }
 
-function Invoke-RimsLocalRestart {
+function Invoke-RimsLocalRestartUnlocked {
   param(
     [Parameter(Mandatory = $true)]
     [ValidateSet('none', 'web', 'android')]
@@ -1260,14 +1444,14 @@ function Invoke-RimsLocalRestart {
   $state = Read-RimsRuntimeState -Paths $paths
   if ($null -eq $state -or
       -not $resolved.success -or
-      -not (Test-RimsStateOwnsProcess -State $state) -or
+      -not (Test-RimsStateOwnsAnyBackendProcess -State $state) -or
       -not (Test-RimsRuntimeRequestMatchesState `
         -State $state `
         -BackendDir $resolved.backendPath `
         -BackendWorkspaceRoot $resolved.workspacePath `
         -BackendPort $BackendPort)) {
     if ($null -ne $state -and
-        -not (Test-RimsStateOwnsProcess -State $state) -and
+        -not (Test-RimsStateOwnsAnyBackendProcess -State $state) -and
         -not (Test-RimsRuntimeCleanupPending -State $state)) {
       Remove-RimsRuntimeState -Paths $paths
     }
@@ -1287,7 +1471,7 @@ function Invoke-RimsLocalRestart {
     return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
   }
 
-  $down = Invoke-RimsLocalDown `
+  $down = Invoke-RimsLocalDownUnlocked `
     -ScriptDirectory $ScriptDirectory `
     -BackendDir $resolved.backendPath `
     -BackendWorkspaceRoot $resolved.workspacePath `
@@ -1299,7 +1483,7 @@ function Invoke-RimsLocalRestart {
     return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode $down.exitCode
   }
 
-  $up = Invoke-RimsLocalUp `
+  $up = Invoke-RimsLocalUpUnlocked `
     -Target $Target `
     -ScriptDirectory $ScriptDirectory `
     -BackendDir $resolved.backendPath `
@@ -1314,6 +1498,227 @@ function Invoke-RimsLocalRestart {
     -Result $result `
     -Ok $up.ok `
     -ExitCode $up.exitCode
+}
+
+function Get-RimsLifecycleLockTimeoutMilliseconds {
+  $timeout = 5000
+  $configured = 0
+  if ([int]::TryParse(
+      [string]$env:RIMS_LOCAL_LOCK_TIMEOUT_MS,
+      [ref]$configured
+    ) -and $configured -ge 1 -and $configured -le 60000) {
+    $timeout = $configured
+  }
+  return $timeout
+}
+
+function New-RimsLifecycleLockComponent {
+  param(
+    [Parameter(Mandatory = $true)]
+    [psobject]$Lock
+  )
+
+  return [pscustomobject][ordered]@{
+    name = 'lifecycleLock'
+    ok = $Lock.ok
+    required = $true
+    detail = ConvertTo-RimsDiagnosticSummary `
+      -StandardOutput $Lock.detail `
+      -StandardError ''
+    remediation = if ($Lock.ok) { '' } else {
+      'Wait for the active local lifecycle command to finish, then retry.'
+    }
+    busy = $Lock.busy
+  }
+}
+
+function New-RimsLifecycleLockFailureResult {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Command,
+    [Parameter(Mandatory = $true)]
+    [psobject]$Paths,
+    [Parameter(Mandatory = $true)]
+    [psobject]$Lock
+  )
+
+  $result = New-RimsLocalResult -Command $Command
+  $result.components = @(
+    (New-RimsRuntimePathsComponent -Paths $Paths),
+    (New-RimsLifecycleLockComponent -Lock $Lock)
+  )
+  return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+}
+
+function Invoke-RimsLocalStatus {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$ScriptDirectory,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$BackendDir,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$BackendWorkspaceRoot,
+    [Parameter(Mandatory = $true)]
+    [int]$BackendPort,
+    [switch]$IncludeDependencies
+  )
+
+  $paths = Get-RimsRuntimePaths -ScriptDirectory $ScriptDirectory
+  $lock = Enter-RimsLifecycleLock `
+    -Paths $paths `
+    -BackendPort $BackendPort `
+    -TimeoutMilliseconds (Get-RimsLifecycleLockTimeoutMilliseconds)
+  if (-not $lock.ok) {
+    return New-RimsLifecycleLockFailureResult `
+      -Command 'status' `
+      -Paths $paths `
+      -Lock $lock
+  }
+  try {
+    return Invoke-RimsLocalStatusUnlocked @PSBoundParameters
+  } finally {
+    Exit-RimsLifecycleLock -Lock $lock
+  }
+}
+
+function Invoke-RimsLocalLogs {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$ScriptDirectory
+  )
+
+  $paths = Get-RimsRuntimePaths -ScriptDirectory $ScriptDirectory
+  $lock = Enter-RimsLifecycleLock `
+    -Paths $paths `
+    -TimeoutMilliseconds (Get-RimsLifecycleLockTimeoutMilliseconds)
+  if (-not $lock.ok) {
+    return New-RimsLifecycleLockFailureResult `
+      -Command 'logs' `
+      -Paths $paths `
+      -Lock $lock
+  }
+  try {
+    return Invoke-RimsLocalLogsUnlocked @PSBoundParameters
+  } finally {
+    Exit-RimsLifecycleLock -Lock $lock
+  }
+}
+
+function Invoke-RimsLocalDown {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$ScriptDirectory,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$BackendDir,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$BackendWorkspaceRoot,
+    [Parameter(Mandatory = $true)]
+    [int]$BackendPort,
+    [switch]$IncludeDependencies
+  )
+
+  $paths = Get-RimsRuntimePaths -ScriptDirectory $ScriptDirectory
+  $lock = Enter-RimsLifecycleLock `
+    -Paths $paths `
+    -BackendPort $BackendPort `
+    -TimeoutMilliseconds (Get-RimsLifecycleLockTimeoutMilliseconds)
+  if (-not $lock.ok) {
+    return New-RimsLifecycleLockFailureResult `
+      -Command 'down' `
+      -Paths $paths `
+      -Lock $lock
+  }
+  try {
+    return Invoke-RimsLocalDownUnlocked @PSBoundParameters
+  } finally {
+    Exit-RimsLifecycleLock -Lock $lock
+  }
+}
+
+function Invoke-RimsLocalUp {
+  param(
+    [Parameter(Mandatory = $true)]
+    [ValidateSet('none', 'web', 'android')]
+    [string]$Target,
+    [Parameter(Mandatory = $true)]
+    [string]$ScriptDirectory,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$BackendDir,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$BackendWorkspaceRoot,
+    [Parameter(Mandatory = $true)]
+    [int]$BackendPort,
+    [Parameter(Mandatory = $true)]
+    [int]$FrontendPort,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$AndroidDevice,
+    [switch]$IncludeDependencies
+  )
+
+  $paths = Get-RimsRuntimePaths -ScriptDirectory $ScriptDirectory
+  $lock = Enter-RimsLifecycleLock `
+    -Paths $paths `
+    -BackendPort $BackendPort `
+    -TimeoutMilliseconds (Get-RimsLifecycleLockTimeoutMilliseconds)
+  if (-not $lock.ok) {
+    return New-RimsLifecycleLockFailureResult `
+      -Command 'up' `
+      -Paths $paths `
+      -Lock $lock
+  }
+  try {
+    return Invoke-RimsLocalUpUnlocked @PSBoundParameters
+  } finally {
+    Exit-RimsLifecycleLock -Lock $lock
+  }
+}
+
+function Invoke-RimsLocalRestart {
+  param(
+    [Parameter(Mandatory = $true)]
+    [ValidateSet('none', 'web', 'android')]
+    [string]$Target,
+    [Parameter(Mandatory = $true)]
+    [string]$ScriptDirectory,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$BackendDir,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$BackendWorkspaceRoot,
+    [Parameter(Mandatory = $true)]
+    [int]$BackendPort,
+    [Parameter(Mandatory = $true)]
+    [int]$FrontendPort,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$AndroidDevice,
+    [switch]$IncludeDependencies
+  )
+
+  $paths = Get-RimsRuntimePaths -ScriptDirectory $ScriptDirectory
+  $lock = Enter-RimsLifecycleLock `
+    -Paths $paths `
+    -BackendPort $BackendPort `
+    -TimeoutMilliseconds (Get-RimsLifecycleLockTimeoutMilliseconds)
+  if (-not $lock.ok) {
+    return New-RimsLifecycleLockFailureResult `
+      -Command 'restart' `
+      -Paths $paths `
+      -Lock $lock
+  }
+  try {
+    return Invoke-RimsLocalRestartUnlocked @PSBoundParameters
+  } finally {
+    Exit-RimsLifecycleLock -Lock $lock
+  }
 }
 
 function Write-RimsLifecycleText {
