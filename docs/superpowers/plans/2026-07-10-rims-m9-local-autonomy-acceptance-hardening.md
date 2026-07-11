@@ -164,6 +164,8 @@ git commit -m "feat: add local runtime command contract"
 
 **Files:**
 - Modify: `rims_frontend/android/gradle.properties`
+- Modify: `rims_frontend/android/settings.gradle.kts`
+- Modify: `rims_frontend/android/gradle/wrapper/gradle-wrapper.properties`
 - Modify: `scripts/rims_local.ps1`
 - Modify: `scripts/lib/rims_local_common.ps1`
 - Modify: `scripts/test_rims_local.ps1`
@@ -421,9 +423,10 @@ For Android:
    persistent Gradle daemons, and bound Gradle workers to avoid the Kotlin cache
    registration failure and worker/daemon deadlock observed during a clean
    local Android build.
-7. Keep AGP 9 built-in Kotlin enabled so plugins such as `file_picker` that no
-   longer apply the legacy Kotlin Android plugin still compile their Kotlin
-   sources.
+7. Use the API 36 compatible AGP 8.11.1 and Gradle 8.13 pair so the current
+   plugin set can consistently apply the legacy Kotlin Android plugin. Preserve
+   Flutter's legacy Kotlin and DSL compatibility flags until every dependency
+   has migrated to AGP 9 built-in Kotlin.
 
 - [ ] **Step 5: Verify target lifecycle behavior**
 
