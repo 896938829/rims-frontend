@@ -384,6 +384,7 @@ foreach ($command in ($expectedCommands | Where-Object {
         'doctor',
         'up',
         'status',
+        'health',
         'logs',
         'restart',
         'down'
