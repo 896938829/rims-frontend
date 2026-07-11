@@ -163,6 +163,7 @@ git commit -m "feat: add local runtime command contract"
 ## Task 2: Implement Environment Diagnosis
 
 **Files:**
+- Modify: `rims_frontend/android/gradle.properties`
 - Modify: `scripts/rims_local.ps1`
 - Modify: `scripts/lib/rims_local_common.ps1`
 - Modify: `scripts/test_rims_local.ps1`
@@ -415,6 +416,9 @@ For Android:
 4. Run Flutter with `-d $AndroidDevice` and the `10.0.2.2` API origin.
 5. Treat an emulator that was already running as unmanaged and leave it alive
    during `down`.
+6. Disable Kotlin incremental compilation at the project level to avoid the
+   Kotlin 2.3.20 plugin cache-registration failure observed during a clean local
+   Android build.
 
 - [ ] **Step 5: Verify target lifecycle behavior**
 
