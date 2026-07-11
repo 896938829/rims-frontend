@@ -421,6 +421,9 @@ For Android:
    persistent Gradle daemons, and bound Gradle workers to avoid the Kotlin cache
    registration failure and worker/daemon deadlock observed during a clean
    local Android build.
+7. Keep AGP 9 built-in Kotlin enabled so plugins such as `file_picker` that no
+   longer apply the legacy Kotlin Android plugin still compile their Kotlin
+   sources.
 
 - [ ] **Step 5: Verify target lifecycle behavior**
 
