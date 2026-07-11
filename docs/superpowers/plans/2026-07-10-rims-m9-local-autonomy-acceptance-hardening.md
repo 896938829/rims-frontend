@@ -364,6 +364,7 @@ git commit -m "feat: manage local backend lifecycle"
 - Modify: `scripts/test_rims_local.ps1`
 - Modify: `scripts/tests/test_rims_local_cli.ps1`
 - Create: `scripts/tests/test_rims_local_frontend.ps1`
+- Modify: `scripts/tests/test_rims_local_lock.ps1`
 - Modify: `scripts/tests/test_rims_local_support.ps1`
 
 - [ ] **Step 1: Add failing command-builder tests**
