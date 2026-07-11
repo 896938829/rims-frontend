@@ -418,11 +418,10 @@ For Android:
 4. Run Flutter with `-d $AndroidDevice` and the `10.0.2.2` API origin.
 5. Treat an emulator that was already running as unmanaged and leave it alive
    during `down`.
-6. Disable Kotlin incremental compilation, use in-process compilation at both
-   the project and Gradle JVM levels so included builds inherit it, disable
-   persistent Gradle daemons, and bound Gradle workers to avoid the Kotlin cache
-   registration failure and worker/daemon deadlock observed during a clean
-   local Android build.
+6. Disable Kotlin incremental compilation, use in-process compilation at the
+   project level, disable persistent Gradle daemons, and bound Gradle workers to
+   avoid the Kotlin cache registration failure and excessive concurrency
+   observed during a clean local Android build.
 7. Use the API 36 compatible AGP 8.11.1 and Gradle 8.13 pair so the current
    plugin set can consistently apply the legacy Kotlin Android plugin. Preserve
    Flutter's legacy Kotlin and DSL compatibility flags until every dependency
