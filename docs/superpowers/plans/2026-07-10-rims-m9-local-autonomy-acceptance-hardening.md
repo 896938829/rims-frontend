@@ -450,11 +450,16 @@ git commit -m "feat: manage web and android targets"
 ## Task 5: Create Idempotent Local Acceptance Fixtures
 
 **Files:**
-- Create: `E:\My Work\RIMS\rims-goProgect\scripts\m9_dev_seed.sql`
-- Create: `E:\My Work\RIMS\rims-goProgect\scripts\m9_dev_seed.sh`
-- Create: `E:\My Work\RIMS\rims-goProgect\scripts\test_m9_dev_seed.sh`
+- Create: `E:\My Work\rims-frontend\.worktrees\m9-backend-local-autonomy-acceptance\rims-goProgect\scripts\m9_dev_seed.sql`
+- Create: `E:\My Work\rims-frontend\.worktrees\m9-backend-local-autonomy-acceptance\rims-goProgect\scripts\m9_dev_seed.sh`
+- Create: `E:\My Work\rims-frontend\.worktrees\m9-backend-local-autonomy-acceptance\rims-goProgect\scripts\test_m9_dev_seed.sh`
 - Modify: `scripts/rims_local.ps1`
+- Modify: `scripts/lib/rims_local_common.ps1`
+- Create: `scripts/lib/rims_local_fixtures.ps1`
+- Modify: `scripts/lib/rims_local_lifecycle.ps1`
 - Modify: `scripts/test_rims_local.ps1`
+- Modify: `scripts/tests/test_rims_local_cli.ps1`
+- Create: `scripts/tests/test_rims_local_fixtures.ps1`
 
 - [ ] **Step 1: Write a failing seed idempotency test**
 
