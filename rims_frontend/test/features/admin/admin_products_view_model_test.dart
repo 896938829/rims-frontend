@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rims_frontend/core/events/app_event.dart';
 import 'package:rims_frontend/core/events/app_event_bus.dart';
+import 'package:rims_frontend/core/pagination/page_data.dart';
 import 'package:rims_frontend/core/result/failure.dart';
 import 'package:rims_frontend/core/result/result.dart';
 import 'package:rims_frontend/features/admin/domain/entities/admin_product.dart';
@@ -11,6 +12,8 @@ import 'package:rims_frontend/features/admin/domain/entities/admin_user.dart';
 import 'package:rims_frontend/features/admin/domain/entities/admin_warehouse.dart';
 import 'package:rims_frontend/features/admin/domain/repositories/admin_repository.dart';
 import 'package:rims_frontend/features/admin/presentation/view_models/admin_products_view_model.dart';
+
+import 'admin_page_test_support.dart';
 
 void main() {
   test('load exposes backend products', () async {
@@ -391,51 +394,90 @@ final class _FakeAdminRepository implements AdminRepository {
   int createProductCallCount = 0;
   int updateProductCallCount = 0;
   int deleteProductCallCount = 0;
+  List<AdminProduct>? _serverProducts;
 
   @override
-  Future<Result<List<AdminProduct>>> listProducts({
+  Future<Result<PageData<AdminProduct>>> listProducts({
     String keyword = '',
     int page = 1,
-  }) {
+  }) async {
     lastProductKeyword = keyword;
     final queuedResults = listProductsResults;
     if (queuedResults != null && queuedResults.isNotEmpty) {
-      return Future.value(queuedResults.removeAt(0));
+      final result = queuedResults.removeAt(0);
+      result.when(
+        success: (products) => _serverProducts = List.of(products),
+        failure: (_) {},
+      );
+      return adminPageResult(result, page: page);
     }
-    return listProductsResult;
+    final serverProducts = _serverProducts;
+    if (serverProducts != null) {
+      return Success(adminPage(serverProducts, page: page));
+    }
+    final result = await listProductsResult;
+    result.when(
+      success: (products) => _serverProducts = List.of(products),
+      failure: (_) {},
+    );
+    return adminPageResult(result, page: page);
   }
 
   @override
   Future<Result<AdminProduct>> createProduct(
     CreateAdminProductRequest request,
-  ) {
+  ) async {
     createProductCallCount += 1;
     createdProductRequest = request;
-    return createProductResult ?? Future.value(const Success(_tissue));
+    final result =
+        await (createProductResult ?? Future.value(const Success(_tissue)));
+    result.when(
+      success: (product) => _serverProducts?.insert(0, product),
+      failure: (_) {},
+    );
+    return result;
   }
 
   @override
   Future<Result<AdminProduct>> updateProduct(
     UpdateAdminProductRequest request,
-  ) {
+  ) async {
     updateProductCallCount += 1;
     updatedProductRequest = request;
-    return updateProductResult ?? Future.value(const Success(_updatedWater));
+    final result =
+        await (updateProductResult ??
+            Future.value(const Success(_updatedWater)));
+    result.when(
+      success: (product) {
+        final index = _serverProducts?.indexWhere(
+          (item) => item.id == product.id,
+        );
+        if (index != null && index >= 0) _serverProducts![index] = product;
+      },
+      failure: (_) {},
+    );
+    return result;
   }
 
   @override
-  Future<Result<void>> deleteProduct(int id) {
+  Future<Result<void>> deleteProduct(int id) async {
     deleteProductCallCount += 1;
     deletedProductId = id;
-    return deleteProductResult ?? Future.value(const Success<void>(null));
+    final result =
+        await (deleteProductResult ?? Future.value(const Success<void>(null)));
+    result.when(
+      success: (_) => _serverProducts?.removeWhere((item) => item.id == id),
+      failure: (_) {},
+    );
+    return result;
   }
 
   @override
-  Future<Result<List<AdminWarehouse>>> listWarehouses({
+  Future<Result<PageData<AdminWarehouse>>> listWarehouses({
     String keyword = '',
     int page = 1,
   }) {
-    return Future.value(const Success<List<AdminWarehouse>>([]));
+    return Future.value(Success(adminPage(<AdminWarehouse>[])));
   }
 
   @override
@@ -493,11 +535,11 @@ final class _FakeAdminRepository implements AdminRepository {
   }
 
   @override
-  Future<Result<List<AdminUser>>> listUsers({
+  Future<Result<PageData<AdminUser>>> listUsers({
     String keyword = '',
     int page = 1,
   }) {
-    return Future.value(const Success<List<AdminUser>>([]));
+    return Future.value(Success(adminPage(<AdminUser>[])));
   }
 
   @override

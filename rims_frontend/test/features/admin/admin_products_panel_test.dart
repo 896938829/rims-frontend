@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:rims_frontend/core/pagination/page_data.dart';
 import 'package:rims_frontend/core/result/result.dart';
 import 'package:rims_frontend/features/admin/domain/entities/admin_product.dart';
 import 'package:rims_frontend/features/admin/domain/entities/admin_role.dart';
@@ -7,6 +8,8 @@ import 'package:rims_frontend/features/admin/domain/entities/admin_user.dart';
 import 'package:rims_frontend/features/admin/domain/entities/admin_warehouse.dart';
 import 'package:rims_frontend/features/admin/domain/repositories/admin_repository.dart';
 import 'package:rims_frontend/features/admin/presentation/widgets/admin_products_panel.dart';
+
+import 'admin_page_test_support.dart';
 
 void main() {
   testWidgets('AdminProductsPanel loads products and creates product', (
@@ -242,16 +245,17 @@ const _updatedWater = AdminProduct(
 );
 
 final class _FakeAdminRepository implements AdminRepository {
+  final List<AdminProduct> _products = [_water];
   CreateAdminProductRequest? createdProductRequest;
   UpdateAdminProductRequest? updatedProductRequest;
   int? deletedProductId;
 
   @override
-  Future<Result<List<AdminProduct>>> listProducts({
+  Future<Result<PageData<AdminProduct>>> listProducts({
     String keyword = '',
     int page = 1,
   }) async {
-    return const Success<List<AdminProduct>>([_water]);
+    return Success(adminPage(_products));
   }
 
   @override
@@ -259,6 +263,7 @@ final class _FakeAdminRepository implements AdminRepository {
     CreateAdminProductRequest request,
   ) async {
     createdProductRequest = request;
+    _products.insert(0, _tissue);
     return const Success<AdminProduct>(_tissue);
   }
 
@@ -267,21 +272,26 @@ final class _FakeAdminRepository implements AdminRepository {
     UpdateAdminProductRequest request,
   ) async {
     updatedProductRequest = request;
+    _products[_products.indexWhere(
+          (product) => product.id == _updatedWater.id,
+        )] =
+        _updatedWater;
     return const Success<AdminProduct>(_updatedWater);
   }
 
   @override
   Future<Result<void>> deleteProduct(int id) async {
     deletedProductId = id;
+    _products.removeWhere((product) => product.id == id);
     return const Success<void>(null);
   }
 
   @override
-  Future<Result<List<AdminWarehouse>>> listWarehouses({
+  Future<Result<PageData<AdminWarehouse>>> listWarehouses({
     String keyword = '',
     int page = 1,
   }) async {
-    return const Success<List<AdminWarehouse>>([]);
+    return Success(adminPage(<AdminWarehouse>[]));
   }
 
   @override
@@ -339,11 +349,11 @@ final class _FakeAdminRepository implements AdminRepository {
   }
 
   @override
-  Future<Result<List<AdminUser>>> listUsers({
+  Future<Result<PageData<AdminUser>>> listUsers({
     String keyword = '',
     int page = 1,
   }) async {
-    return const Success<List<AdminUser>>([]);
+    return Success(adminPage(<AdminUser>[]));
   }
 
   @override

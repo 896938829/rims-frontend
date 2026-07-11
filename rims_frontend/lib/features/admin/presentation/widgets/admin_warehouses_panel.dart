@@ -11,6 +11,7 @@ import '../../domain/entities/admin_user.dart';
 import '../../domain/entities/admin_warehouse.dart';
 import '../../domain/repositories/admin_repository.dart';
 import '../view_models/admin_warehouses_view_model.dart';
+import 'admin_pagination_control.dart';
 
 final class AdminWarehousesPanel extends StatefulWidget {
   const AdminWarehousesPanel({
@@ -145,6 +146,17 @@ final class _AdminWarehousesPanelState extends State<AdminWarehousesPanel> {
                   if (warehouse != viewModel.warehouses.last)
                     const Divider(height: 18, color: AppColors.border),
                 ],
+                const SizedBox(height: 10),
+                AdminPaginationControl(
+                  keyPrefix: 'admin-warehouses-load-more',
+                  loaded: viewModel.warehouses.length,
+                  total: viewModel.total,
+                  hasMore: viewModel.hasMore,
+                  isLoadingMore: viewModel.isLoadingMore,
+                  hasFailure: viewModel.loadMoreFailure != null,
+                  onLoadMore: viewModel.loadMore,
+                  onRetry: viewModel.retryLoadMore,
+                ),
               ],
             ],
           ),
@@ -817,10 +829,7 @@ _ParsedUserIds _parseUserIds(String value) {
 }
 
 final class _ParsedUserIds {
-  const _ParsedUserIds({
-    required this.userIds,
-    required this.hasInvalidToken,
-  });
+  const _ParsedUserIds({required this.userIds, required this.hasInvalidToken});
 
   final List<int> userIds;
   final bool hasInvalidToken;

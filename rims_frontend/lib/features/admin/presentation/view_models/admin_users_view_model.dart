@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 
 import '../../../../core/events/app_event.dart';
 import '../../../../core/events/app_event_bus.dart';
+import '../../../../core/result/failure.dart';
 import '../../domain/entities/admin_user.dart';
 import '../../domain/repositories/admin_repository.dart';
 
@@ -23,6 +24,12 @@ final class AdminUsersViewModel extends ChangeNotifier {
   String? _formError;
   String? _userActionError;
   String? _passwordActionError;
+  int _page = 0;
+  int _total = 0;
+  int _generation = 0;
+  bool _isLoadingMore = false;
+  bool _reachedEnd = false;
+  Failure? _loadMoreFailure;
 
   List<AdminUser> get users => _users;
   String get query => _query;
@@ -36,6 +43,10 @@ final class AdminUsersViewModel extends ChangeNotifier {
   String? get formError => _formError;
   String? get userActionError => _userActionError;
   String? get passwordActionError => _passwordActionError;
+  int get total => _total;
+  bool get hasMore => _page > 0 && !_reachedEnd && _users.length < _total;
+  bool get isLoadingMore => _isLoadingMore;
+  Failure? get loadMoreFailure => _loadMoreFailure;
 
   @override
   void notifyListeners() {
@@ -53,6 +64,7 @@ final class AdminUsersViewModel extends ChangeNotifier {
   }
 
   Future<void> load({int page = 1}) async {
+    final generation = ++_generation;
     final repository = this.repository;
     if (repository == null) {
       _users = const [];
@@ -62,6 +74,11 @@ final class AdminUsersViewModel extends ChangeNotifier {
     }
 
     _isLoading = true;
+    _page = 0;
+    _total = 0;
+    _isLoadingMore = false;
+    _reachedEnd = false;
+    _loadMoreFailure = null;
     _errorMessage = null;
     notifyListeners();
 
@@ -70,9 +87,13 @@ final class AdminUsersViewModel extends ChangeNotifier {
       page: page,
     );
 
+    if (generation != _generation) return;
     result.when(
-      success: (users) {
-        _users = users;
+      success: (pageData) {
+        _users = _merge(const [], pageData.items);
+        _page = pageData.page;
+        _total = pageData.total;
+        _reachedEnd = pageData.items.isEmpty || !pageData.hasNextPage;
         _errorMessage = null;
       },
       failure: (failure) {
@@ -82,6 +103,51 @@ final class AdminUsersViewModel extends ChangeNotifier {
 
     _isLoading = false;
     notifyListeners();
+  }
+
+  Future<void> loadMore() async {
+    final repository = this.repository;
+    if (repository == null || _isLoadingMore || !hasMore) return;
+    final generation = _generation;
+    final keyword = _query.trim();
+    _isLoadingMore = true;
+    _loadMoreFailure = null;
+    notifyListeners();
+    final result = await repository.listUsers(
+      keyword: keyword,
+      page: _page + 1,
+    );
+    if (generation != _generation || keyword != _query.trim()) return;
+    result.when(
+      success: (pageData) {
+        _users = _merge(_users, pageData.items);
+        _page = pageData.page;
+        _total = pageData.total;
+        _reachedEnd = pageData.items.isEmpty || !pageData.hasNextPage;
+      },
+      failure: (failure) => _loadMoreFailure = failure,
+    );
+    _isLoadingMore = false;
+    notifyListeners();
+  }
+
+  Future<void> retryLoadMore() => loadMore();
+
+  List<AdminUser> _merge(List<AdminUser> existing, List<AdminUser> incoming) {
+    final merged = List<AdminUser>.of(existing);
+    final indexes = <int, int>{
+      for (var i = 0; i < merged.length; i++) merged[i].id: i,
+    };
+    for (final item in incoming) {
+      final index = indexes[item.id];
+      if (index == null) {
+        indexes[item.id] = merged.length;
+        merged.add(item);
+      } else {
+        merged[index] = item;
+      }
+    }
+    return List.unmodifiable(merged);
   }
 
   Future<void> updateQuery(String value) async {
@@ -123,6 +189,7 @@ final class AdminUsersViewModel extends ChangeNotifier {
     }
 
     _isCreatingUser = true;
+    final hadLoadedPage = _page > 0;
     _formError = null;
     notifyListeners();
 
@@ -142,6 +209,7 @@ final class AdminUsersViewModel extends ChangeNotifier {
         _formError = failure.message;
       },
     );
+    if (created && hadLoadedPage) await load();
 
     _isCreatingUser = false;
     notifyListeners();
@@ -167,6 +235,7 @@ final class AdminUsersViewModel extends ChangeNotifier {
     }
 
     _isUpdatingUser = true;
+    final hadLoadedPage = _page > 0;
     _formError = null;
     notifyListeners();
 
@@ -185,6 +254,7 @@ final class AdminUsersViewModel extends ChangeNotifier {
         _formError = failure.message;
       },
     );
+    if (updated && hadLoadedPage) await load();
 
     _isUpdatingUser = false;
     notifyListeners();
@@ -204,6 +274,7 @@ final class AdminUsersViewModel extends ChangeNotifier {
     }
 
     _isDeletingUser = true;
+    final hadLoadedPage = _page > 0;
     _userActionError = null;
     notifyListeners();
 
@@ -222,6 +293,7 @@ final class AdminUsersViewModel extends ChangeNotifier {
         _userActionError = failure.message;
       },
     );
+    if (deleted && hadLoadedPage) await load();
 
     _isDeletingUser = false;
     notifyListeners();

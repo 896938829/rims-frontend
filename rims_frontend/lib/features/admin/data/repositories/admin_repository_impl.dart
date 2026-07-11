@@ -1,4 +1,5 @@
 import '../../../../core/result/result.dart';
+import '../../../../core/pagination/page_data.dart';
 import '../../domain/entities/admin_product.dart';
 import '../../domain/entities/admin_role.dart';
 import '../../domain/entities/admin_user.dart';
@@ -12,7 +13,7 @@ final class AdminRepositoryImpl implements AdminRepository {
   final AdminRemoteDataSource remoteDataSource;
 
   @override
-  Future<Result<List<AdminUser>>> listUsers({
+  Future<Result<PageData<AdminUser>>> listUsers({
     String keyword = '',
     int page = 1,
   }) async {
@@ -22,10 +23,9 @@ final class AdminRepositoryImpl implements AdminRepository {
     );
 
     return result.when(
-      success: (models) => Success<List<AdminUser>>(
-        models.map((model) => model.toEntity()).toList(growable: false),
-      ),
-      failure: FailureResult<List<AdminUser>>.new,
+      success: (page) =>
+          Success<PageData<AdminUser>>(page.map((model) => model.toEntity())),
+      failure: FailureResult<PageData<AdminUser>>.new,
     );
   }
 
@@ -55,7 +55,7 @@ final class AdminRepositoryImpl implements AdminRepository {
   }
 
   @override
-  Future<Result<List<AdminProduct>>> listProducts({
+  Future<Result<PageData<AdminProduct>>> listProducts({
     String keyword = '',
     int page = 1,
   }) async {
@@ -65,10 +65,10 @@ final class AdminRepositoryImpl implements AdminRepository {
     );
 
     return result.when(
-      success: (models) => Success<List<AdminProduct>>(
-        models.map((model) => model.toEntity()).toList(growable: false),
+      success: (page) => Success<PageData<AdminProduct>>(
+        page.map((model) => model.toEntity()),
       ),
-      failure: FailureResult<List<AdminProduct>>.new,
+      failure: FailureResult<PageData<AdminProduct>>.new,
     );
   }
 
@@ -102,7 +102,7 @@ final class AdminRepositoryImpl implements AdminRepository {
   }
 
   @override
-  Future<Result<List<AdminWarehouse>>> listWarehouses({
+  Future<Result<PageData<AdminWarehouse>>> listWarehouses({
     String keyword = '',
     int page = 1,
   }) async {
@@ -112,10 +112,10 @@ final class AdminRepositoryImpl implements AdminRepository {
     );
 
     return result.when(
-      success: (models) => Success<List<AdminWarehouse>>(
-        models.map((model) => model.toEntity()).toList(growable: false),
+      success: (page) => Success<PageData<AdminWarehouse>>(
+        page.map((model) => model.toEntity()),
       ),
-      failure: FailureResult<List<AdminWarehouse>>.new,
+      failure: FailureResult<PageData<AdminWarehouse>>.new,
     );
   }
 

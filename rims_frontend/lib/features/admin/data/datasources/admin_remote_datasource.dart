@@ -3,6 +3,8 @@ import 'package:dio/dio.dart';
 import '../../../../core/network/api_client.dart';
 import '../../../../core/network/api_endpoints.dart';
 import '../../../../core/network/api_envelope.dart';
+import '../../../../core/network/api_page_parser.dart';
+import '../../../../core/pagination/page_data.dart';
 import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
 import '../../domain/entities/admin_product.dart';
@@ -17,7 +19,7 @@ import '../models/admin_warehouse_models.dart';
 const int _adminListPageSize = 20;
 
 abstract interface class AdminRemoteDataSource {
-  Future<Result<List<AdminUserModel>>> listUsers({
+  Future<Result<PageData<AdminUserModel>>> listUsers({
     String keyword = '',
     int page = 1,
   });
@@ -28,7 +30,7 @@ abstract interface class AdminRemoteDataSource {
 
   Future<Result<void>> deleteUser(int id);
 
-  Future<Result<List<AdminProductModel>>> listProducts({
+  Future<Result<PageData<AdminProductModel>>> listProducts({
     String keyword = '',
     int page = 1,
   });
@@ -43,7 +45,7 @@ abstract interface class AdminRemoteDataSource {
 
   Future<Result<void>> deleteProduct(int id);
 
-  Future<Result<List<AdminWarehouseModel>>> listWarehouses({
+  Future<Result<PageData<AdminWarehouseModel>>> listWarehouses({
     String keyword = '',
     int page = 1,
   });
@@ -86,7 +88,7 @@ final class ApiAdminRemoteDataSource implements AdminRemoteDataSource {
   final ApiClient _apiClient;
 
   @override
-  Future<Result<List<AdminUserModel>>> listUsers({
+  Future<Result<PageData<AdminUserModel>>> listUsers({
     String keyword = '',
     int page = 1,
   }) async {
@@ -135,7 +137,7 @@ final class ApiAdminRemoteDataSource implements AdminRemoteDataSource {
   }
 
   @override
-  Future<Result<List<AdminProductModel>>> listProducts({
+  Future<Result<PageData<AdminProductModel>>> listProducts({
     String keyword = '',
     int page = 1,
   }) async {
@@ -184,7 +186,7 @@ final class ApiAdminRemoteDataSource implements AdminRemoteDataSource {
   }
 
   @override
-  Future<Result<List<AdminWarehouseModel>>> listWarehouses({
+  Future<Result<PageData<AdminWarehouseModel>>> listWarehouses({
     String keyword = '',
     int page = 1,
   }) async {
@@ -240,7 +242,7 @@ final class ApiAdminRemoteDataSource implements AdminRemoteDataSource {
       ApiEndpoints.warehouseUsers(warehouseId),
     );
 
-    return _mapEnvelope(result, _parseUsers);
+    return _mapEnvelope(result, _parseUserList);
   }
 
   @override
@@ -375,31 +377,24 @@ final class ApiAdminRemoteDataSource implements AdminRemoteDataSource {
     return _parseWarehouseMap(_requiredMap(data, 'warehouse'));
   }
 
-  List<AdminUserModel> _parseUsers(Object? data) {
-    final rawList = _requiredList(data, 'users');
+  PageData<AdminUserModel> _parseUsers(Object? data) {
+    return parseApiPage(_requiredPageData(data), _parseUserMap);
+  }
 
+  List<AdminUserModel> _parseUserList(Object? data) {
+    final rawList = _requiredList(data, 'users');
     return _requiredMapItems(
       rawList,
       'users',
     ).map(_parseUserMap).toList(growable: false);
   }
 
-  List<AdminProductModel> _parseProducts(Object? data) {
-    final rawList = _requiredList(data, 'products');
-
-    return _requiredMapItems(
-      rawList,
-      'products',
-    ).map(_parseProductMap).toList(growable: false);
+  PageData<AdminProductModel> _parseProducts(Object? data) {
+    return parseApiPage(_requiredPageData(data), _parseProductMap);
   }
 
-  List<AdminWarehouseModel> _parseWarehouses(Object? data) {
-    final rawList = _requiredList(data, 'warehouses');
-
-    return _requiredMapItems(
-      rawList,
-      'warehouses',
-    ).map(_parseWarehouseMap).toList(growable: false);
+  PageData<AdminWarehouseModel> _parseWarehouses(Object? data) {
+    return parseApiPage(_requiredPageData(data), _parseWarehouseMap);
   }
 
   List<AdminRoleModel> _parseRoles(Object? data) {
@@ -418,6 +413,13 @@ final class ApiAdminRemoteDataSource implements AdminRemoteDataSource {
       rawList,
       'permissions',
     ).map(_parsePermissionMap).toList(growable: false);
+  }
+
+  Map<String, Object?> _requiredPageData(Object? data) {
+    if (data is Map<String, Object?>) {
+      return data;
+    }
+    throw const FormatException('Paged API data.list must be a JSON list.');
   }
 
   Map<dynamic, dynamic> _requiredMap(Object? data, String name) {

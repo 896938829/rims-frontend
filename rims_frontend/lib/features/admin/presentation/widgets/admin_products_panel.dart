@@ -10,6 +10,7 @@ import '../../../../core/widgets/rims_status_chip.dart';
 import '../../domain/entities/admin_product.dart';
 import '../../domain/repositories/admin_repository.dart';
 import '../view_models/admin_products_view_model.dart';
+import 'admin_pagination_control.dart';
 
 final class AdminProductsPanel extends StatefulWidget {
   const AdminProductsPanel({
@@ -140,6 +141,17 @@ final class _AdminProductsPanelState extends State<AdminProductsPanel> {
                   if (product != viewModel.products.last)
                     const Divider(height: 18, color: AppColors.border),
                 ],
+                const SizedBox(height: 10),
+                AdminPaginationControl(
+                  keyPrefix: 'admin-products-load-more',
+                  loaded: viewModel.products.length,
+                  total: viewModel.total,
+                  hasMore: viewModel.hasMore,
+                  isLoadingMore: viewModel.isLoadingMore,
+                  hasFailure: viewModel.loadMoreFailure != null,
+                  onLoadMore: viewModel.loadMore,
+                  onRetry: viewModel.retryLoadMore,
+                ),
               ],
             ],
           ),

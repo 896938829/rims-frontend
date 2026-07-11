@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:rims_frontend/core/pagination/page_data.dart';
 import 'package:rims_frontend/core/result/failure.dart';
 import 'package:rims_frontend/core/result/result.dart';
 import 'package:rims_frontend/features/admin/domain/entities/admin_product.dart';
@@ -8,6 +9,8 @@ import 'package:rims_frontend/features/admin/domain/entities/admin_user.dart';
 import 'package:rims_frontend/features/admin/domain/entities/admin_warehouse.dart';
 import 'package:rims_frontend/features/admin/domain/repositories/admin_repository.dart';
 import 'package:rims_frontend/features/admin/presentation/widgets/admin_roles_panel.dart';
+
+import 'admin_page_test_support.dart';
 
 void main() {
   testWidgets('AdminRolesPanel loads roles and saves permissions', (
@@ -145,11 +148,11 @@ final class _FakeAdminRepository implements AdminRepository {
   }
 
   @override
-  Future<Result<List<AdminUser>>> listUsers({
+  Future<Result<PageData<AdminUser>>> listUsers({
     String keyword = '',
     int page = 1,
   }) async {
-    return const Success<List<AdminUser>>([]);
+    return Success(adminPage(<AdminUser>[]));
   }
 
   @override
@@ -168,11 +171,11 @@ final class _FakeAdminRepository implements AdminRepository {
   }
 
   @override
-  Future<Result<List<AdminProduct>>> listProducts({
+  Future<Result<PageData<AdminProduct>>> listProducts({
     String keyword = '',
     int page = 1,
   }) async {
-    return const Success<List<AdminProduct>>([]);
+    return Success(adminPage(<AdminProduct>[]));
   }
 
   @override
@@ -195,11 +198,11 @@ final class _FakeAdminRepository implements AdminRepository {
   }
 
   @override
-  Future<Result<List<AdminWarehouse>>> listWarehouses({
+  Future<Result<PageData<AdminWarehouse>>> listWarehouses({
     String keyword = '',
     int page = 1,
   }) async {
-    return const Success<List<AdminWarehouse>>([]);
+    return Success(adminPage(<AdminWarehouse>[]));
   }
 
   @override

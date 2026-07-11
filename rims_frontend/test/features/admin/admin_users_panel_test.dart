@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:rims_frontend/core/pagination/page_data.dart';
 import 'package:rims_frontend/core/result/result.dart';
 import 'package:rims_frontend/features/admin/domain/entities/admin_product.dart';
 import 'package:rims_frontend/features/admin/domain/entities/admin_role.dart';
@@ -7,6 +8,8 @@ import 'package:rims_frontend/features/admin/domain/entities/admin_user.dart';
 import 'package:rims_frontend/features/admin/domain/entities/admin_warehouse.dart';
 import 'package:rims_frontend/features/admin/domain/repositories/admin_repository.dart';
 import 'package:rims_frontend/features/admin/presentation/widgets/admin_users_panel.dart';
+
+import 'admin_page_test_support.dart';
 
 void main() {
   testWidgets('AdminUsersPanel loads users and creates a test account', (
@@ -243,22 +246,24 @@ const _updatedAlice = AdminUser(
 );
 
 final class _FakeAdminRepository implements AdminRepository {
+  final List<AdminUser> _users = [_alice];
   CreateAdminUserRequest? createdRequest;
   ResetUserPasswordRequest? resetPasswordRequest;
   UpdateAdminUserRequest? updatedRequest;
   int? deletedUserId;
 
   @override
-  Future<Result<List<AdminUser>>> listUsers({
+  Future<Result<PageData<AdminUser>>> listUsers({
     String keyword = '',
     int page = 1,
   }) async {
-    return const Success<List<AdminUser>>([_alice]);
+    return Success(adminPage(_users));
   }
 
   @override
   Future<Result<AdminUser>> createUser(CreateAdminUserRequest request) async {
     createdRequest = request;
+    _users.insert(0, _bob);
     return const Success<AdminUser>(_bob);
   }
 
@@ -280,21 +285,24 @@ final class _FakeAdminRepository implements AdminRepository {
   @override
   Future<Result<AdminUser>> updateUser(UpdateAdminUserRequest request) async {
     updatedRequest = request;
+    _users[_users.indexWhere((user) => user.id == _updatedAlice.id)] =
+        _updatedAlice;
     return const Success<AdminUser>(_updatedAlice);
   }
 
   @override
   Future<Result<void>> deleteUser(int id) async {
     deletedUserId = id;
+    _users.removeWhere((user) => user.id == id);
     return const Success<void>(null);
   }
 
   @override
-  Future<Result<List<AdminProduct>>> listProducts({
+  Future<Result<PageData<AdminProduct>>> listProducts({
     String keyword = '',
     int page = 1,
   }) async {
-    return const Success<List<AdminProduct>>([]);
+    return Success(adminPage(<AdminProduct>[]));
   }
 
   @override
@@ -317,11 +325,11 @@ final class _FakeAdminRepository implements AdminRepository {
   }
 
   @override
-  Future<Result<List<AdminWarehouse>>> listWarehouses({
+  Future<Result<PageData<AdminWarehouse>>> listWarehouses({
     String keyword = '',
     int page = 1,
   }) async {
-    return const Success<List<AdminWarehouse>>([]);
+    return Success(adminPage(<AdminWarehouse>[]));
   }
 
   @override

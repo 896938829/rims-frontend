@@ -1,11 +1,12 @@
 import '../../../../core/result/result.dart';
+import '../../../../core/pagination/page_data.dart';
 import '../entities/admin_product.dart';
 import '../entities/admin_role.dart';
 import '../entities/admin_user.dart';
 import '../entities/admin_warehouse.dart';
 
 abstract interface class AdminRepository {
-  Future<Result<List<AdminUser>>> listUsers({
+  Future<Result<PageData<AdminUser>>> listUsers({
     String keyword = '',
     int page = 1,
   });
@@ -16,7 +17,7 @@ abstract interface class AdminRepository {
 
   Future<Result<void>> deleteUser(int id);
 
-  Future<Result<List<AdminProduct>>> listProducts({
+  Future<Result<PageData<AdminProduct>>> listProducts({
     String keyword = '',
     int page = 1,
   });
@@ -27,7 +28,7 @@ abstract interface class AdminRepository {
 
   Future<Result<void>> deleteProduct(int id);
 
-  Future<Result<List<AdminWarehouse>>> listWarehouses({
+  Future<Result<PageData<AdminWarehouse>>> listWarehouses({
     String keyword = '',
     int page = 1,
   });

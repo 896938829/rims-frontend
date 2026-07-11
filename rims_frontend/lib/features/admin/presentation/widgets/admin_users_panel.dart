@@ -10,6 +10,7 @@ import '../../../../core/widgets/rims_status_chip.dart';
 import '../../domain/entities/admin_user.dart';
 import '../../domain/repositories/admin_repository.dart';
 import '../view_models/admin_users_view_model.dart';
+import 'admin_pagination_control.dart';
 
 final class AdminUsersPanel extends StatefulWidget {
   const AdminUsersPanel({
@@ -137,6 +138,19 @@ final class _AdminUsersPanelState extends State<AdminUsersPanel> {
                 ),
                 if (user != viewModel.users.last)
                   const Divider(height: 18, color: AppColors.border),
+              ],
+              if (viewModel.users.isNotEmpty) ...[
+                const SizedBox(height: 10),
+                AdminPaginationControl(
+                  keyPrefix: 'admin-users-load-more',
+                  loaded: viewModel.users.length,
+                  total: viewModel.total,
+                  hasMore: viewModel.hasMore,
+                  isLoadingMore: viewModel.isLoadingMore,
+                  hasFailure: viewModel.loadMoreFailure != null,
+                  onLoadMore: viewModel.loadMore,
+                  onRetry: viewModel.retryLoadMore,
+                ),
               ],
             ],
           ),

@@ -15,7 +15,7 @@ void main() {
   test('listUsers loads backend users endpoint with keyword and page', () async {
     final adapter = _CapturingAdapter(
       body:
-          '{"code":0,"message":"ok","data":{"list":[{"id":2,"username":"alice","realName":"张三","phone":"13800000000","email":"a@b.com","roleId":2,"roleCode":"user","roleName":"普通用户","status":1}]}}',
+          '{"code":0,"message":"ok","data":{"list":[{"id":2,"username":"alice","realName":"张三","phone":"13800000000","email":"a@b.com","roleId":2,"roleCode":"user","roleName":"普通用户","status":1}],"total":45,"page":2,"pageSize":20}}',
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiAdminRemoteDataSource(
@@ -29,10 +29,12 @@ void main() {
     expect(adapter.lastPath, '/users');
     expect(adapter.lastQuery, {'keyword': 'alice', 'page': 2, 'pageSize': 20});
     result.when(
-      success: (users) {
-        expect(users.single.id, 2);
-        expect(users.single.username, 'alice');
-        expect(users.single.roleName, '普通用户');
+      success: (page) {
+        expect(page.items.single.id, 2);
+        expect(page.items.single.username, 'alice');
+        expect(page.items.single.roleName, '普通用户');
+        expect(page.total, 45);
+        expect(page.page, 2);
       },
       failure: (failure) => fail(failure.message),
     );
@@ -43,15 +45,15 @@ void main() {
     () async {
       await _expectMissingListPayloadFailure(
         request: (dataSource) => dataSource.listUsers(),
-        expectedMessage: 'Invalid users response',
+        expectedMessage: 'Paged API data.list must be a JSON list.',
       );
       await _expectMissingListPayloadFailure(
         request: (dataSource) => dataSource.listProducts(),
-        expectedMessage: 'Invalid products response',
+        expectedMessage: 'Paged API data.list must be a JSON list.',
       );
       await _expectMissingListPayloadFailure(
         request: (dataSource) => dataSource.listWarehouses(),
-        expectedMessage: 'Invalid warehouses response',
+        expectedMessage: 'Paged API data.list must be a JSON list.',
       );
       await _expectMissingListPayloadFailure(
         request: (dataSource) => dataSource.listWarehouseUsers(1),
@@ -73,15 +75,15 @@ void main() {
     () async {
       await _expectMalformedListItemFailure(
         request: (dataSource) => dataSource.listUsers(),
-        expectedMessage: 'Invalid users response',
+        expectedMessage: 'Every paged API list item must be a JSON object.',
       );
       await _expectMalformedListItemFailure(
         request: (dataSource) => dataSource.listProducts(),
-        expectedMessage: 'Invalid products response',
+        expectedMessage: 'Every paged API list item must be a JSON object.',
       );
       await _expectMalformedListItemFailure(
         request: (dataSource) => dataSource.listWarehouses(),
-        expectedMessage: 'Invalid warehouses response',
+        expectedMessage: 'Every paged API list item must be a JSON object.',
       );
       await _expectMalformedListItemFailure(
         request: (dataSource) => dataSource.listWarehouseUsers(1),
@@ -309,7 +311,7 @@ void main() {
     () async {
       final adapter = _CapturingAdapter(
         body:
-            '{"code":0,"message":"ok","data":{"list":[{"id":10,"code":"SKU-WA-550","name":"矿泉水 550ml","unit":"瓶","category":"饮料","spec":"550ml","barcode":"6901234567890","retailPrice":3.5,"costPrice":1.2,"imageUrl":"","status":1}]}}',
+            '{"code":0,"message":"ok","data":{"list":[{"id":10,"code":"SKU-WA-550","name":"矿泉水 550ml","unit":"瓶","category":"饮料","spec":"550ml","barcode":"6901234567890","retailPrice":3.5,"costPrice":1.2,"imageUrl":"","status":1}],"total":45,"page":2,"pageSize":20}}',
       );
       final dio = Dio()..httpClientAdapter = adapter;
       final dataSource = ApiAdminRemoteDataSource(
@@ -323,11 +325,12 @@ void main() {
       expect(adapter.lastPath, '/products');
       expect(adapter.lastQuery, {'keyword': '矿泉水', 'page': 2, 'pageSize': 20});
       result.when(
-        success: (products) {
-          expect(products.single.id, 10);
-          expect(products.single.code, 'SKU-WA-550');
-          expect(products.single.name, '矿泉水 550ml');
-          expect(products.single.costPrice, 1.2);
+        success: (page) {
+          expect(page.items.single.id, 10);
+          expect(page.items.single.code, 'SKU-WA-550');
+          expect(page.items.single.name, '矿泉水 550ml');
+          expect(page.items.single.costPrice, 1.2);
+          expect(page.total, 45);
         },
         failure: (failure) => fail(failure.message),
       );
@@ -531,7 +534,7 @@ void main() {
   test('listWarehouses loads backend warehouses endpoint', () async {
     final adapter = _CapturingAdapter(
       body:
-          '{"code":0,"message":"ok","data":{"list":[{"id":1,"code":"SH","name":"上海仓","status":1,"address":"上海","contactPerson":"王五","contactPhone":"13800000001"}]}}',
+          '{"code":0,"message":"ok","data":{"list":[{"id":1,"code":"SH","name":"上海仓","status":1,"address":"上海","contactPerson":"王五","contactPhone":"13800000001"}],"total":25,"page":2,"pageSize":20}}',
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiAdminRemoteDataSource(
@@ -545,10 +548,11 @@ void main() {
     expect(adapter.lastPath, '/warehouses');
     expect(adapter.lastQuery, {'keyword': '上海', 'page': 2, 'pageSize': 20});
     result.when(
-      success: (warehouses) {
-        expect(warehouses.single.id, 1);
-        expect(warehouses.single.code, 'SH');
-        expect(warehouses.single.name, '上海仓');
+      success: (page) {
+        expect(page.items.single.id, 1);
+        expect(page.items.single.code, 'SH');
+        expect(page.items.single.name, '上海仓');
+        expect(page.total, 25);
       },
       failure: (failure) => fail(failure.message),
     );
@@ -947,8 +951,8 @@ final class _CapturingAdapter implements HttpClientAdapter {
   void close({bool force = false}) {}
 }
 
-Future<void> _expectMissingListPayloadFailure<T>({
-  required Future<Result<List<T>>> Function(ApiAdminRemoteDataSource dataSource)
+Future<void> _expectMissingListPayloadFailure<R>({
+  required Future<Result<R>> Function(ApiAdminRemoteDataSource dataSource)
   request,
   required String expectedMessage,
 }) async {
@@ -969,13 +973,13 @@ Future<void> _expectMissingListPayloadFailure<T>({
   );
 }
 
-Future<void> _expectMalformedListItemFailure<T>({
-  required Future<Result<List<T>>> Function(ApiAdminRemoteDataSource dataSource)
+Future<void> _expectMalformedListItemFailure<R>({
+  required Future<Result<R>> Function(ApiAdminRemoteDataSource dataSource)
   request,
   required String expectedMessage,
 }) async {
   final adapter = _CapturingAdapter(
-    body: '{"code":0,"message":"ok","data":["bad-item"]}',
+    body: '{"code":0,"message":"ok","data":{"list":["bad-item"]}}',
   );
   final dio = Dio()..httpClientAdapter = adapter;
   final dataSource = ApiAdminRemoteDataSource(

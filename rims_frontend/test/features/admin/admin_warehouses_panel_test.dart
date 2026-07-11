@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:rims_frontend/core/pagination/page_data.dart';
 import 'package:rims_frontend/core/result/result.dart';
 import 'package:rims_frontend/features/admin/domain/entities/admin_product.dart';
 import 'package:rims_frontend/features/admin/domain/entities/admin_role.dart';
@@ -7,6 +8,8 @@ import 'package:rims_frontend/features/admin/domain/entities/admin_user.dart';
 import 'package:rims_frontend/features/admin/domain/entities/admin_warehouse.dart';
 import 'package:rims_frontend/features/admin/domain/repositories/admin_repository.dart';
 import 'package:rims_frontend/features/admin/presentation/widgets/admin_warehouses_panel.dart';
+
+import 'admin_page_test_support.dart';
 
 void main() {
   testWidgets('AdminWarehousesPanel loads warehouses and creates warehouse', (
@@ -237,6 +240,7 @@ const _alice = AdminUser(
 );
 
 final class _FakeAdminRepository implements AdminRepository {
+  final List<AdminWarehouse> _warehouses = [_shanghai];
   CreateAdminWarehouseRequest? createdWarehouseRequest;
   UpdateAdminWarehouseRequest? updatedWarehouseRequest;
   BindWarehouseUsersRequest? bindWarehouseUsersRequest;
@@ -246,11 +250,11 @@ final class _FakeAdminRepository implements AdminRepository {
   int? unboundUserId;
 
   @override
-  Future<Result<List<AdminWarehouse>>> listWarehouses({
+  Future<Result<PageData<AdminWarehouse>>> listWarehouses({
     String keyword = '',
     int page = 1,
   }) async {
-    return const Success<List<AdminWarehouse>>([_shanghai]);
+    return Success(adminPage(_warehouses));
   }
 
   @override
@@ -258,6 +262,7 @@ final class _FakeAdminRepository implements AdminRepository {
     CreateAdminWarehouseRequest request,
   ) async {
     createdWarehouseRequest = request;
+    _warehouses.insert(0, _beijing);
     return const Success<AdminWarehouse>(_beijing);
   }
 
@@ -266,12 +271,17 @@ final class _FakeAdminRepository implements AdminRepository {
     UpdateAdminWarehouseRequest request,
   ) async {
     updatedWarehouseRequest = request;
+    _warehouses[_warehouses.indexWhere(
+          (warehouse) => warehouse.id == _updatedShanghai.id,
+        )] =
+        _updatedShanghai;
     return const Success<AdminWarehouse>(_updatedShanghai);
   }
 
   @override
   Future<Result<void>> deleteWarehouse(int id) async {
     deletedWarehouseId = id;
+    _warehouses.removeWhere((warehouse) => warehouse.id == id);
     return const Success<void>(null);
   }
 
@@ -300,11 +310,11 @@ final class _FakeAdminRepository implements AdminRepository {
   }
 
   @override
-  Future<Result<List<AdminUser>>> listUsers({
+  Future<Result<PageData<AdminUser>>> listUsers({
     String keyword = '',
     int page = 1,
   }) async {
-    return const Success<List<AdminUser>>([]);
+    return Success(adminPage(<AdminUser>[]));
   }
 
   @override
@@ -323,11 +333,11 @@ final class _FakeAdminRepository implements AdminRepository {
   }
 
   @override
-  Future<Result<List<AdminProduct>>> listProducts({
+  Future<Result<PageData<AdminProduct>>> listProducts({
     String keyword = '',
     int page = 1,
   }) async {
-    return const Success<List<AdminProduct>>([]);
+    return Success(adminPage(<AdminProduct>[]));
   }
 
   @override

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:rims_frontend/core/pagination/page_data.dart';
 import 'package:rims_frontend/core/result/result.dart';
 import 'package:rims_frontend/features/admin/domain/entities/admin_product.dart';
 import 'package:rims_frontend/features/admin/domain/entities/admin_role.dart';
@@ -10,6 +11,8 @@ import 'package:rims_frontend/features/auth/domain/entities/app_user.dart';
 import 'package:rims_frontend/features/auth/domain/entities/warehouse.dart';
 import 'package:rims_frontend/features/profile/presentation/pages/profile_page.dart';
 import 'package:rims_frontend/features/profile/presentation/view_models/profile_view_model.dart';
+
+import '../admin/admin_page_test_support.dart';
 
 void main() {
   test('ProfileViewModel exposes session user and warehouse data', () {
@@ -353,11 +356,11 @@ final class _FakeAdminRepository implements AdminRepository {
   ResetUserPasswordRequest? resetPasswordRequest;
 
   @override
-  Future<Result<List<AdminProduct>>> listProducts({
+  Future<Result<PageData<AdminProduct>>> listProducts({
     String keyword = '',
     int page = 1,
   }) async {
-    return const Success<List<AdminProduct>>([_adminListProduct]);
+    return Success(adminPage([_adminListProduct]));
   }
 
   @override
@@ -380,11 +383,11 @@ final class _FakeAdminRepository implements AdminRepository {
   }
 
   @override
-  Future<Result<List<AdminWarehouse>>> listWarehouses({
+  Future<Result<PageData<AdminWarehouse>>> listWarehouses({
     String keyword = '',
     int page = 1,
   }) async {
-    return const Success<List<AdminWarehouse>>([_adminListWarehouse]);
+    return Success(adminPage([_adminListWarehouse]));
   }
 
   @override
@@ -444,11 +447,11 @@ final class _FakeAdminRepository implements AdminRepository {
   }
 
   @override
-  Future<Result<List<AdminUser>>> listUsers({
+  Future<Result<PageData<AdminUser>>> listUsers({
     String keyword = '',
     int page = 1,
   }) async {
-    return const Success<List<AdminUser>>([_adminListUser]);
+    return Success(adminPage([_adminListUser]));
   }
 
   @override
