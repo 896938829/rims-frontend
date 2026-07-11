@@ -90,7 +90,7 @@ if ($Command -eq 'doctor') {
   exit $result.exitCode
 }
 
-if ($Command -in @('up', 'status', 'health', 'logs', 'restart', 'down')) {
+if ($Command -in @('up', 'status', 'health', 'logs', 'restart', 'reset', 'down')) {
   try {
     $result = switch ($Command) {
       'up' {
@@ -137,6 +137,15 @@ if ($Command -in @('up', 'status', 'health', 'logs', 'restart', 'down')) {
           -FrontendPort $FrontendPort `
           -AndroidDevice $AndroidDevice `
           -IncludeDependencies:$IncludeDependencies
+        break
+      }
+      'reset' {
+        Invoke-RimsLocalReset `
+          -Target $Target `
+          -ScriptDirectory $scriptDir `
+          -BackendDir $BackendDir `
+          -BackendWorkspaceRoot $BackendWorkspaceRoot `
+          -BackendPort $BackendPort
         break
       }
       'down' {

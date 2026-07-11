@@ -1358,6 +1358,48 @@ function Invoke-RimsLocalUpUnlocked {
         -Port $BackendPort `
         -ProcessId (Get-RimsObjectPropertyValue -Value $state -Name 'windowsPid')
       if ($healthy) {
+        if (Test-RimsShouldApplyM9Fixtures `
+            -Command 'up' `
+            -IncludeDependencies:$IncludeDependencies) {
+          $existingContext = Get-RimsWslLifecycleContext `
+            -BackendDir $resolved.backendPath `
+            -BackendWorkspaceRoot $resolved.workspacePath `
+            -RuntimePaths $paths
+          if (-not $existingContext.ok) {
+            $result.errors = @(
+              "Could not prepare WSL fixture paths: $($existingContext.detail)"
+            )
+            return Complete-RimsLocalResult `
+              -Result $result `
+              -Ok $false `
+              -ExitCode 1
+          }
+          $existingMigration = Invoke-RimsBackendMigrations `
+            -Context $existingContext
+          $result.components += New-RimsLocalComponent `
+            -Name 'migrations' `
+            -Ok $existingMigration.ok `
+            -Required $true `
+            -Detail $existingMigration.detail `
+            -Remediation $(if ($existingMigration.ok) { '' } else {
+                'Inspect the sanitized migration error and verify database configuration.'
+              })
+          if (-not $existingMigration.ok) {
+            return Complete-RimsLocalResult `
+              -Result $result `
+              -Ok $false `
+              -ExitCode 1
+          }
+          $existingFixture = Invoke-RimsM9Fixtures -Context $existingContext
+          $result.components += New-RimsM9FixtureComponent `
+            -FixtureResult $existingFixture
+          if (-not $existingFixture.ok) {
+            return Complete-RimsLocalResult `
+              -Result $result `
+              -Ok $false `
+              -ExitCode 1
+          }
+        }
         $frontendCompatibility = Get-RimsFrontendRequestCompatibility `
           -State $state `
           -Target $Target `
@@ -1611,6 +1653,24 @@ function Invoke-RimsLocalUpUnlocked {
       -Remediation 'Inspect the sanitized migration error and verify database configuration.'
   }
 
+  if (Test-RimsShouldApplyM9Fixtures `
+      -Command 'up' `
+      -IncludeDependencies:$IncludeDependencies) {
+    $fixture = Invoke-RimsM9Fixtures -Context $context
+    $result.components += New-RimsM9FixtureComponent `
+      -FixtureResult $fixture
+    if (-not $fixture.ok) {
+      return Complete-RimsFailedUpResult `
+        -Result $result `
+        -Paths $paths `
+        -State $failedLifecycleState `
+        -BackendWorkspaceRoot $resolved.workspacePath `
+        -FailureContext $fixture.detail `
+        -BackendPort $BackendPort `
+        -Remediation 'Inspect the sanitized fixture failure and verify the local database guard.'
+    }
+  }
+
   $started = Start-RimsManagedBackend `
     -Context $context `
     -RuntimePaths $paths `
@@ -1724,6 +1784,106 @@ function Invoke-RimsLocalUpUnlocked {
     -Port $BackendPort `
     -ProcessId $started.windowsPid
   return Complete-RimsLocalResult -Result $result -Ok $true -ExitCode 0
+}
+
+function Invoke-RimsLocalResetUnlocked {
+  param(
+    [Parameter(Mandatory = $true)]
+    [ValidateSet('none', 'web', 'android')]
+    [string]$Target,
+    [Parameter(Mandatory = $true)]
+    [string]$ScriptDirectory,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$BackendDir,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$BackendWorkspaceRoot,
+    [Parameter(Mandatory = $true)]
+    [int]$BackendPort
+  )
+
+  $result = New-RimsLocalResult -Command 'reset'
+  $paths = Get-RimsRuntimePaths -ScriptDirectory $ScriptDirectory
+  $result.components += New-RimsRuntimePathsComponent -Paths $paths
+  if ($Target -ne 'none') {
+    $result.errors = @('Reset requires -Target none and does not launch a frontend.')
+    return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+  }
+
+  $resolved = Resolve-RimsLifecyclePaths `
+    -BackendDir $BackendDir `
+    -BackendWorkspaceRoot $BackendWorkspaceRoot
+  $doctorComponents = @(Invoke-RimsLocalDoctor `
+      -Target 'none' `
+      -BackendDir $BackendDir `
+      -BackendWorkspaceRoot $BackendWorkspaceRoot `
+      -AndroidDevice '' `
+      -ScriptDirectory $ScriptDirectory)
+  $result.components += $doctorComponents
+  $failedDoctor = @($doctorComponents | Where-Object {
+      $_.required -and -not $_.ok
+    })
+  if (-not $resolved.success -or $failedDoctor.Count -gt 0) {
+    $result.errors = @('Required local reset checks failed; no data was changed.')
+    return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+  }
+
+  $state = Read-RimsRuntimeState -Paths $paths
+  if ($null -ne $state) {
+    $result.errors = @(
+      'Reset requires a stopped managed runtime; run down before resetting fixtures.'
+    )
+    return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+  }
+
+  $context = Get-RimsWslLifecycleContext `
+    -BackendDir $resolved.backendPath `
+    -BackendWorkspaceRoot $resolved.workspacePath `
+    -RuntimePaths $paths
+  if (-not $context.ok) {
+    $result.errors = @("Could not prepare WSL reset paths: $($context.detail)")
+    return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+  }
+
+  $postgres = Get-RimsPostgresStatus -Context $context
+  $postgresOk = $postgres.ok -and $postgres.healthy
+  $result.components += New-RimsLocalComponent `
+    -Name 'postgres' `
+    -Ok $postgresOk `
+    -Required $true `
+    -Detail $(if ($postgresOk) {
+        'Pre-existing PostgreSQL is healthy and remains user-managed.'
+      } else {
+        "PostgreSQL must already be healthy for reset ($($postgres.status))."
+      }) `
+    -Remediation $(if ($postgresOk) { '' } else {
+        'Start the expected local PostgreSQL yourself, then retry reset.'
+      })
+  if (-not $postgresOk) {
+    return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+  }
+
+  $migration = Invoke-RimsBackendMigrations -Context $context
+  $result.components += New-RimsLocalComponent `
+    -Name 'migrations' `
+    -Ok $migration.ok `
+    -Required $true `
+    -Detail $migration.detail `
+    -Remediation $(if ($migration.ok) { '' } else {
+        'Inspect the sanitized migration error and verify database configuration.'
+      })
+  if (-not $migration.ok) {
+    return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+  }
+
+  $fixture = Invoke-RimsM9Fixtures -Context $context -Reset
+  $result.components += New-RimsM9FixtureComponent `
+    -FixtureResult $fixture
+  return Complete-RimsLocalResult `
+    -Result $result `
+    -Ok $fixture.ok `
+    -ExitCode $(if ($fixture.ok) { 0 } else { 1 })
 }
 
 function Invoke-RimsLocalRestartUnlocked {
@@ -2009,6 +2169,41 @@ function Invoke-RimsLocalUp {
   }
   try {
     return Invoke-RimsLocalUpUnlocked @PSBoundParameters
+  } finally {
+    Exit-RimsLifecycleLock -Lock $lock
+  }
+}
+
+function Invoke-RimsLocalReset {
+  param(
+    [Parameter(Mandatory = $true)]
+    [ValidateSet('none', 'web', 'android')]
+    [string]$Target,
+    [Parameter(Mandatory = $true)]
+    [string]$ScriptDirectory,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$BackendDir,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$BackendWorkspaceRoot,
+    [Parameter(Mandatory = $true)]
+    [int]$BackendPort
+  )
+
+  $paths = Get-RimsRuntimePaths -ScriptDirectory $ScriptDirectory
+  $lock = Enter-RimsLifecycleLock `
+    -Paths $paths `
+    -BackendPort $BackendPort `
+    -TimeoutMilliseconds (Get-RimsLifecycleLockTimeoutMilliseconds)
+  if (-not $lock.ok) {
+    return New-RimsLifecycleLockFailureResult `
+      -Command 'reset' `
+      -Paths $paths `
+      -Lock $lock
+  }
+  try {
+    return Invoke-RimsLocalResetUnlocked @PSBoundParameters
   } finally {
     Exit-RimsLifecycleLock -Lock $lock
   }

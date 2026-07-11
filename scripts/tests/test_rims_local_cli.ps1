@@ -395,6 +395,7 @@ foreach ($command in ($expectedCommands | Where-Object {
         'health',
         'logs',
         'restart',
+        'reset',
         'down'
       )
     })) {
@@ -431,14 +432,21 @@ foreach ($command in ($expectedCommands | Where-Object {
     -Message 'Unimplemented command returned an unclear error.'
 }
 
-$textFailure = Invoke-LocalCli -Arguments @('-Command', 'reset', '-Output', 'Text')
+$textFailure = Invoke-LocalCli -Arguments @(
+  '-Command',
+  'reset',
+  '-Target',
+  'web',
+  '-Output',
+  'Text'
+)
 if ($textFailure.ExitCode -eq 0) {
-  throw 'Expected text reset to fail until it is implemented.'
+  throw 'Expected reset with a frontend target to fail.'
 }
 Assert-Equal `
-  -Actual $textFailure.StandardOutput `
+  -Actual $textFailure.StandardError `
   -Expected '' `
-  -Message 'Text failure wrote to stdout.'
-if (-not $textFailure.StandardError.Contains('not implemented yet')) {
-  throw 'Text failure did not explain that the command is not implemented yet.'
+  -Message 'Normal reset failure wrote diagnostics to stderr.'
+if (-not $textFailure.StandardOutput.Contains('Target none')) {
+  throw 'Text reset failure did not explain its target constraint.'
 }

@@ -10,6 +10,8 @@ $testFiles = @(
   'test_rims_local_compose.ps1',
   'test_rims_local_wsl.ps1',
   'test_rims_local_launch.ps1',
+  'test_rims_local_fixtures.ps1',
+  'test_rims_local_reset.ps1',
   'test_rims_local_frontend.ps1',
   'test_rims_local_core.ps1',
   'test_rims_local_cli.ps1'
