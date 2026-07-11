@@ -295,6 +295,33 @@ function Wait-RimsAndroidBootCompleted {
   return $false
 }
 
+function Read-RimsSharedTextFile {
+  param([Parameter(Mandatory = $true)][string]$Path)
+
+  $stream = $null
+  $reader = $null
+  try {
+    $stream = [IO.FileStream]::new(
+      $Path,
+      [IO.FileMode]::Open,
+      [IO.FileAccess]::Read,
+      ([IO.FileShare]::ReadWrite -bor [IO.FileShare]::Delete)
+    )
+    $reader = [IO.StreamReader]::new(
+      $stream,
+      [Text.Encoding]::UTF8,
+      $true
+    )
+    return $reader.ReadToEnd()
+  } finally {
+    if ($null -ne $reader) {
+      $reader.Dispose()
+    } elseif ($null -ne $stream) {
+      $stream.Dispose()
+    }
+  }
+}
+
 function Test-RimsFlutterAppStartedMachineOutput {
   param([AllowNull()][AllowEmptyString()][string]$Output)
 
@@ -303,12 +330,23 @@ function Test-RimsFlutterAppStartedMachineOutput {
       continue
     }
     try {
-      $event = $line | ConvertFrom-Json -ErrorAction Stop
-      if ([string](Get-RimsObjectPropertyValue `
-          -Value $event `
-          -Name 'event' `
-          -DefaultValue '') -ceq 'app.started') {
-        return $true
+      $parsed = ConvertFrom-Json -InputObject $line -ErrorAction Stop
+      $events = if ($parsed -is [System.Array]) {
+        $parsed
+      } else {
+        ,$parsed
+      }
+      foreach ($event in $events) {
+        $eventName = if ($null -eq $event) {
+          ''
+        } elseif ($null -eq $event.PSObject.Properties['event']) {
+          ''
+        } else {
+          [string]$event.PSObject.Properties['event'].Value
+        }
+        if ($eventName -ceq 'app.started') {
+          return $true
+        }
       }
     } catch {
     }
@@ -316,11 +354,28 @@ function Test-RimsFlutterAppStartedMachineOutput {
   return $false
 }
 
+function Get-RimsFlutterLaunchDiagnosticLines {
+  param([AllowNull()][AllowEmptyString()][string]$Text)
+
+  $lines = @()
+  foreach ($line in ($Text -split '\r?\n')) {
+    if ($line -match '^RIMS_FLUTTER_LAUNCH\s+(.+)$') {
+      $lines += $Matches[1]
+    }
+  }
+  return $lines
+}
+
+function Get-RimsAndroidMachineReadinessTimeoutSeconds {
+  return 900
+}
+
 function Wait-RimsFlutterAppStarted {
   param(
     [Parameter(Mandatory = $true)][psobject]$State,
     [Parameter(Mandatory = $true)][string]$OutputPath,
-    [ValidateRange(1, 300)][int]$TimeoutSeconds = 90
+    [ValidateRange(1, 1800)][int]$TimeoutSeconds = 90,
+    [AllowNull()][scriptblock]$ReadOutputAction
   )
 
   $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
@@ -331,13 +386,20 @@ function Wait-RimsFlutterAppStarted {
       return $false
     }
     try {
-      if ((Test-Path -LiteralPath $OutputPath -PathType Leaf) -and
+      $output = if ($null -ne $ReadOutputAction) {
+        [string](& $ReadOutputAction $OutputPath)
+      } elseif (Test-Path -LiteralPath $OutputPath -PathType Leaf) {
+        Read-RimsSharedTextFile -Path $OutputPath
+      } else {
+        $null
+      }
+      if ($null -ne $output -and
           (Test-RimsFlutterAppStartedMachineOutput `
-            -Output ([IO.File]::ReadAllText($OutputPath)))) {
+            -Output $output)) {
         return $true
       }
     } catch {
-      return $false
+      # A redirected stdout handle can be transiently unavailable while Flutter starts.
     }
     Start-Sleep -Milliseconds 250
   } while ((Get-Date) -lt $deadline)
@@ -461,6 +523,7 @@ function Start-RimsHiddenFlutterProcess {
     executable = $FlutterExecutable
     workingDirectory = $LaunchSpec.workingDirectory
     gate = $FrontendPaths.activationGate
+    target = $LaunchSpec.target
     arguments = @($LaunchSpec.arguments)
   } | ConvertTo-Json -Compress
   $payload64 = [Convert]::ToBase64String(
@@ -468,14 +531,19 @@ function Start-RimsHiddenFlutterProcess {
   )
   $launcher = @'
 $p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:RIMS_FLUTTER_LAUNCH))|ConvertFrom-Json
+$ErrorActionPreference='Continue'
 $limit=(Get-Date).AddSeconds(30)
 while(-not (Test-Path -LiteralPath $p.gate -PathType Leaf)){
   if((Get-Date)-ge $limit){exit 124}
   Start-Sleep -Milliseconds 50
 }
+[Console]::Error.WriteLine("RIMS_FLUTTER_LAUNCH gate-open target=$($p.target) executable=$($p.executable) argumentCount=$(@($p.arguments).Count)")
 Set-Location -LiteralPath $p.workingDirectory
+[Console]::Error.WriteLine("RIMS_FLUTTER_LAUNCH invoke-before target=$($p.target)")
 & $p.executable @($p.arguments)
-exit $LASTEXITCODE
+$code=$LASTEXITCODE
+[Console]::Error.WriteLine("RIMS_FLUTTER_LAUNCH invoke-after target=$($p.target) exitCode=$code")
+exit $code
 '@
   $encoded = [Convert]::ToBase64String(
     [Text.Encoding]::Unicode.GetBytes($launcher)
@@ -577,6 +645,20 @@ function Invoke-RimsAndroidEmulatorLaunchStateMachine {
   }
 }
 
+function New-RimsHiddenEmulatorLauncherScript {
+  return @'
+$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:RIMS_EMULATOR_LAUNCH))|ConvertFrom-Json
+$limit=(Get-Date).AddSeconds(30)
+while(-not (Test-Path -LiteralPath $p.gate -PathType Leaf)){
+  if((Get-Date)-ge $limit){exit 124}
+  Start-Sleep -Milliseconds 50
+}
+$child=Start-Process -FilePath $p.executable -ArgumentList @('-avd',$p.avdName,'-no-window') -WindowStyle Hidden -PassThru
+$child.WaitForExit()
+exit $child.ExitCode
+'@
+}
+
 function Start-RimsHiddenEmulatorLauncher {
   param(
     [Parameter(Mandatory = $true)][string]$EmulatorExecutable,
@@ -590,16 +672,7 @@ function Start-RimsHiddenEmulatorLauncher {
     gate = $FrontendPaths.emulatorActivationGate
   } | ConvertTo-Json -Compress
   $payload64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload))
-  $launcher = @'
-$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:RIMS_EMULATOR_LAUNCH))|ConvertFrom-Json
-$limit=(Get-Date).AddSeconds(30)
-while(-not (Test-Path -LiteralPath $p.gate -PathType Leaf)){
-  if((Get-Date)-ge $limit){exit 124}
-  Start-Sleep -Milliseconds 50
-}
-& $p.executable -avd $p.avdName
-exit $LASTEXITCODE
-'@
+  $launcher = New-RimsHiddenEmulatorLauncherScript
   $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($launcher))
   $previousPayload = $env:RIMS_EMULATOR_LAUNCH
   try {
@@ -857,7 +930,8 @@ function Start-RimsManagedFrontend {
         }
         $started = Wait-RimsFlutterAppStarted `
           -State $current `
-          -OutputPath $frontendPaths.stdoutLog
+          -OutputPath $frontendPaths.stdoutLog `
+          -TimeoutSeconds (Get-RimsAndroidMachineReadinessTimeoutSeconds)
         if ($started) {
           $current.frontend.appStarted = $true
         }

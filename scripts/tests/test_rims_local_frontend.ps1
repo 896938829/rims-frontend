@@ -3,11 +3,24 @@ Set-StrictMode -Version Latest
 
 $scriptDir = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $frontendModule = Join-Path $scriptDir 'lib\rims_local_frontend.ps1'
+$androidGradleProperties = Join-Path `
+  (Split-Path -Parent $scriptDir) `
+  'rims_frontend\android\gradle.properties'
+$androidSettings = Join-Path `
+  (Split-Path -Parent $scriptDir) `
+  'rims_frontend\android\settings.gradle.kts'
+$androidGradleWrapperProperties = Join-Path `
+  (Split-Path -Parent $scriptDir) `
+  'rims_frontend\android\gradle\wrapper\gradle-wrapper.properties'
 
 if (-not (Test-Path -LiteralPath $frontendModule -PathType Leaf)) {
   throw 'Frontend lifecycle module is required.'
 }
 
+. $commonScript
+Remove-Item -LiteralPath 'Function:\Test-RimsFlutterAppStartedMachineOutput' `
+  -Force `
+  -ErrorAction SilentlyContinue
 . $frontendModule
 
 $web = New-FlutterLaunchSpec `
@@ -54,18 +67,153 @@ Assert-Contains `
   -Collection $android.arguments `
   -Expected '--machine' `
   -Message 'Android Flutter launch must emit machine events for app readiness.'
+Assert-True `
+  -Value ((Get-Content -LiteralPath $androidGradleProperties) -contains 'kotlin.incremental=false') `
+  -Message 'Android builds must disable the Kotlin 2.3.20 incremental cache.'
+Assert-True `
+  -Value ((Get-Content -LiteralPath $androidGradleProperties) -contains 'kotlin.compiler.execution.strategy=in-process') `
+  -Message 'Android builds must avoid the Kotlin 2.3.20 compiler daemon deadlock.'
+Assert-True `
+  -Value ((Get-Content -LiteralPath $androidGradleProperties) -contains 'org.gradle.daemon=false') `
+  -Message 'Android builds must not leave a persistent Gradle daemon.'
+Assert-True `
+  -Value ((Get-Content -LiteralPath $androidGradleProperties) -contains 'org.gradle.workers.max=4') `
+  -Message 'Android build worker concurrency must remain bounded.'
+Assert-True `
+  -Value ((Get-Content -LiteralPath $androidGradleProperties) -contains 'android.builtInKotlin=false') `
+  -Message 'Legacy Kotlin plugin compatibility must remain enabled.'
+$androidSettingsText = Get-Content -LiteralPath $androidSettings -Raw
+Assert-True `
+  -Value ($androidSettingsText -like '*id("com.android.application") version "8.11.1" apply false*') `
+  -Message 'Android Gradle Plugin must remain on the API 36 compatible legacy-KGP baseline.'
+$androidGradleWrapperText = Get-Content -LiteralPath $androidGradleWrapperProperties -Raw
+Assert-True `
+  -Value ($androidGradleWrapperText -like '*gradle-8.13-bin.zip*') `
+  -Message 'Gradle wrapper must match the AGP 8.11.1 compatibility baseline.'
+$singleMachineStarted = @'
+[{"event":"app.started","params":{"appId":"rims"}}]
+'@
+$multiMachineStarted = @'
+[{"event":"daemon.connected"},{"event":"app.start"},{"event":"app.started","params":{"appId":"rims"}}]
+'@
+$otherMachineEvents = @'
+[{"event":"daemon.connected"},{"event":"app.start"}]
+'@
 
 Assert-True `
   -Value (Test-RimsFlutterAppStartedMachineOutput `
       -Output '{"event":"app.started","params":{"appId":"rims"}}') `
   -Message 'A valid Flutter app.started machine event was not accepted.'
+Assert-True `
+  -Value (Test-RimsFlutterAppStartedMachineOutput `
+      -Output $singleMachineStarted) `
+  -Message 'A single-event Flutter machine array was not accepted.'
+Assert-True `
+  -Value (Test-RimsFlutterAppStartedMachineOutput `
+      -Output $multiMachineStarted) `
+  -Message 'A multi-event Flutter machine array was not accepted.'
 Assert-False `
   -Value (Test-RimsFlutterAppStartedMachineOutput `
       -Output '{"event":"app.progress"}') `
   -Message 'Flutter machine output without app.started was accepted.'
 Assert-False `
+  -Value (Test-RimsFlutterAppStartedMachineOutput `
+      -Output $otherMachineEvents) `
+  -Message 'A Flutter machine array without app.started was accepted.'
+Assert-False `
   -Value (Test-RimsFlutterAppStartedMachineOutput -Output '{not-json') `
   -Message 'Invalid Flutter machine output was accepted.'
+Assert-False `
+  -Value (Test-RimsFlutterAppStartedMachineOutput -Output '[]') `
+  -Message 'An empty Flutter machine array was accepted.'
+
+$sharedLogPath = Join-Path `
+  ([IO.Path]::GetTempPath()) `
+  ('rims-flutter-shared-' + [guid]::NewGuid().ToString('N') + '.log')
+$sharedLogWriter = $null
+try {
+  $sharedLogWriter = [IO.FileStream]::new(
+    $sharedLogPath,
+    [IO.FileMode]::Create,
+    [IO.FileAccess]::Write,
+    [IO.FileShare]::ReadWrite
+  )
+  $sharedLogBytes = [Text.Encoding]::UTF8.GetBytes($singleMachineStarted)
+  $sharedLogWriter.Write($sharedLogBytes, 0, $sharedLogBytes.Length)
+  $sharedLogWriter.Flush()
+  Assert-True `
+    -Value ((Read-RimsSharedTextFile -Path $sharedLogPath).Contains('app.started')) `
+    -Message 'Flutter readiness could not read a log held open for redirected output.'
+} finally {
+  if ($null -ne $sharedLogWriter) {
+    $sharedLogWriter.Dispose()
+  }
+  Remove-Item -LiteralPath $sharedLogPath -Force -ErrorAction SilentlyContinue
+}
+
+$originalOwnedProcessCheck = (Get-Command `
+    -Name Test-RimsNestedOwnedProcess `
+    -CommandType Function).ScriptBlock
+$machineReadAttempts = [pscustomobject]@{ value = 0 }
+try {
+  Set-Item -LiteralPath 'Function:\Test-RimsNestedOwnedProcess' -Value {
+    param($State, $PropertyName)
+    return $true
+  }
+  $machineReadiness = Wait-RimsFlutterAppStarted `
+    -State ([pscustomobject]@{ frontend = [pscustomobject]@{} }) `
+    -OutputPath 'C:\unused\frontend.stdout.log' `
+    -TimeoutSeconds 2 `
+    -ReadOutputAction {
+      $machineReadAttempts.value++
+      if ($machineReadAttempts.value -eq 1) {
+        throw 'Injected transient stdout read failure.'
+      }
+      return '[{"event":"app.started"}]'
+    }
+  Assert-True `
+    -Value $machineReadiness `
+    -Message 'A transient Flutter stdout read failure ended machine readiness early.'
+  Assert-True `
+    -Value ($machineReadAttempts.value -ge 2) `
+    -Message 'Flutter machine readiness did not retry stdout after a transient read failure.'
+} finally {
+  Set-Item `
+    -LiteralPath 'Function:\Test-RimsNestedOwnedProcess' `
+    -Value $originalOwnedProcessCheck
+}
+
+$flutterDiagnostics = @(Get-RimsFlutterLaunchDiagnosticLines -Text @'
+RIMS_FLUTTER_LAUNCH gate-open target=android executable=C:\flutter\bin\flutter.bat argumentCount=7
+RIMS_FLUTTER_LAUNCH invoke-before target=android
+RIMS_FLUTTER_LAUNCH invoke-after target=android exitCode=1
+unrelated output DB_PASSWORD=must-not-return
+'@)
+Assert-Equal `
+  -Actual ($flutterDiagnostics -join '|') `
+  -Expected 'gate-open target=android executable=C:\flutter\bin\flutter.bat argumentCount=7|invoke-before target=android|invoke-after target=android exitCode=1' `
+  -Message 'Flutter launch diagnostics were not extracted without unrelated output.'
+Assert-Equal `
+  -Actual (Get-RimsAndroidMachineReadinessTimeoutSeconds) `
+  -Expected 900 `
+  -Message 'Android machine readiness timeout is too short for a bounded cold build.'
+
+$emulatorLauncherScript = New-RimsHiddenEmulatorLauncherScript
+if (-not $emulatorLauncherScript.Contains('Start-Process')) {
+  throw 'Gated emulator launcher does not start the emulator through Start-Process.'
+}
+if (-not $emulatorLauncherScript.Contains('-WindowStyle Hidden')) {
+  throw 'Gated emulator launcher does not keep the emulator child hidden.'
+}
+if (-not $emulatorLauncherScript.Contains("'-no-window'")) {
+  throw 'Gated emulator launcher does not pass -no-window to the emulator child.'
+}
+if (-not $emulatorLauncherScript.Contains('WaitForExit')) {
+  throw 'Gated emulator launcher does not wait for its emulator child.'
+}
+if ($emulatorLauncherScript.Contains('& $p.executable -avd $p.avdName')) {
+  throw 'Gated emulator launcher still invokes emulator.exe directly.'
+}
 
 $noneRejected = $false
 try {
