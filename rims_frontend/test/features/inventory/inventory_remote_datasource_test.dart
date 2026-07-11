@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rims_frontend/core/network/api_client.dart';
+import 'package:rims_frontend/core/pagination/page_data.dart';
 import 'package:rims_frontend/core/result/result.dart';
 import 'package:rims_frontend/features/inventory/data/datasources/inventory_remote_datasource.dart';
 
@@ -59,7 +60,7 @@ void main() {
   test('listInventoryAlerts loads inventory alerts endpoint', () async {
     final adapter = _CapturingAdapter(
       body:
-          '{"code":0,"message":"ok","data":{"list":[{"id":2,"productId":20,"productName":"低库存商品","sku":"SKU-LOW","availableQuantity":2,"stockQuantity":3,"statusLabel":"低库存"}]}}',
+          '{"code":0,"message":"ok","data":{"list":[{"id":2,"productId":20,"productName":"低库存商品","sku":"SKU-LOW","availableQuantity":2,"stockQuantity":3,"statusLabel":"低库存"}],"total":1,"page":1,"pageSize":20}}',
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiInventoryRemoteDataSource(
@@ -71,9 +72,10 @@ void main() {
     expect(result.isSuccess, isTrue);
     expect(adapter.lastPath, '/inventory/alerts');
     result.when(
-      success: (items) {
-        expect(items.single.productId, 20);
-        expect(items.single.statusLabel, '低库存');
+      success: (page) {
+        expect(page.items.single.productId, 20);
+        expect(page.items.single.statusLabel, '低库存');
+        expect(page.total, 1);
       },
       failure: (failure) => fail(failure.message),
     );
@@ -82,21 +84,24 @@ void main() {
   test('listInventory keeps retail price from backend product data', () async {
     final adapter = _CapturingAdapter(
       body:
-          '{"code":0,"message":"ok","data":{"list":[{"id":1,"productId":10,"availableQuantity":8,"stockQuantity":10,"product":{"id":10,"name":"矿泉水 550ml","code":"SKU-WA-550","retailPrice":"6.50"}}]}}',
+          '{"code":0,"message":"ok","data":{"list":[{"id":1,"productId":10,"availableQuantity":8,"stockQuantity":10,"product":{"id":10,"name":"矿泉水 550ml","code":"SKU-WA-550","retailPrice":"6.50"}}],"total":45,"page":2,"pageSize":20}}',
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiInventoryRemoteDataSource(
       ApiClient(dio: dio, enableLogging: false),
     );
 
-    final result = await dataSource.listInventory(keyword: '矿泉水');
+    final result = await dataSource.listInventory(keyword: '矿泉水', page: 2);
 
     expect(result.isSuccess, isTrue);
     expect(adapter.lastPath, '/inventory');
     result.when(
-      success: (items) {
-        expect(items.single.productId, 10);
-        expect(items.single.retailPrice, 6.5);
+      success: (page) {
+        expect(page.items.single.productId, 10);
+        expect(page.items.single.retailPrice, 6.5);
+        expect(page.total, 45);
+        expect(page.page, 2);
+        expect(page.pageSize, 20);
       },
       failure: (failure) => fail(failure.message),
     );
@@ -104,7 +109,8 @@ void main() {
 
   test('inventory list endpoints send page and pageSize parameters', () async {
     final adapter = _CapturingAdapter(
-      body: '{"code":0,"message":"ok","data":{"list":[]}}',
+      body:
+          '{"code":0,"message":"ok","data":{"list":[],"total":0,"page":1,"pageSize":20}}',
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiInventoryRemoteDataSource(
@@ -131,17 +137,17 @@ void main() {
         load: (dataSource) =>
             dataSource.listInventory(keyword: ' SKU ', page: 2),
         expectedPath: '/inventory',
-        expectedMessage: 'Invalid inventory list response',
+        expectedMessage: 'Paged API data.list must be a JSON list.',
       );
       await _expectMissingListPayload(
         load: (dataSource) => dataSource.listInventoryAlerts(page: 2),
         expectedPath: '/inventory/alerts',
-        expectedMessage: 'Invalid inventory alerts response',
+        expectedMessage: 'Paged API data.list must be a JSON list.',
       );
       await _expectMissingListPayload(
         load: (dataSource) => dataSource.listNonStandardInventory(page: 2),
         expectedPath: '/non-std-inventory',
-        expectedMessage: 'Invalid non-standard inventory response',
+        expectedMessage: 'Paged API data.list must be a JSON list.',
       );
     },
   );
@@ -153,17 +159,17 @@ void main() {
         load: (dataSource) =>
             dataSource.listInventory(keyword: ' SKU ', page: 2),
         expectedPath: '/inventory',
-        expectedMessage: 'Invalid inventory list response',
+        expectedMessage: 'Every paged API list item must be a JSON object.',
       );
       await _expectNonObjectListItem(
         load: (dataSource) => dataSource.listInventoryAlerts(page: 2),
         expectedPath: '/inventory/alerts',
-        expectedMessage: 'Invalid inventory alerts response',
+        expectedMessage: 'Every paged API list item must be a JSON object.',
       );
       await _expectNonObjectListItem(
         load: (dataSource) => dataSource.listNonStandardInventory(page: 2),
         expectedPath: '/non-std-inventory',
-        expectedMessage: 'Invalid non-standard inventory response',
+        expectedMessage: 'Every paged API list item must be a JSON object.',
       );
     },
   );
@@ -173,7 +179,7 @@ void main() {
     () async {
       final adapter = _CapturingAdapter(
         body:
-            '{"code":0,"message":"ok","data":{"list":[{"id":11,"tempLabel":"TMP-001","description":"破损瓶","unit":"件","quantity":5,"convertedQty":1,"remainingQty":4,"status":1}]}}',
+            '{"code":0,"message":"ok","data":{"list":[{"id":11,"tempLabel":"TMP-001","description":"破损瓶","unit":"件","quantity":5,"convertedQty":1,"remainingQty":4,"status":1}],"total":25,"page":1,"pageSize":20}}',
       );
       final dio = Dio()..httpClientAdapter = adapter;
       final dataSource = ApiInventoryRemoteDataSource(
@@ -185,10 +191,11 @@ void main() {
       expect(result.isSuccess, isTrue);
       expect(adapter.lastPath, '/non-std-inventory');
       result.when(
-        success: (items) {
-          expect(items.single.id, 11);
-          expect(items.single.tempLabel, 'TMP-001');
-          expect(items.single.remainingQuantity, 4);
+        success: (page) {
+          expect(page.items.single.id, 11);
+          expect(page.items.single.tempLabel, 'TMP-001');
+          expect(page.items.single.remainingQuantity, 4);
+          expect(page.total, 25);
         },
         failure: (failure) => fail(failure.message),
       );
@@ -255,7 +262,8 @@ void main() {
 }
 
 Future<void> _expectMissingListPayload<T>({
-  required Future<Result<List<T>>> Function(ApiInventoryRemoteDataSource) load,
+  required Future<Result<PageData<T>>> Function(ApiInventoryRemoteDataSource)
+  load,
   required String expectedPath,
   required String expectedMessage,
 }) async {
@@ -278,12 +286,14 @@ Future<void> _expectMissingListPayload<T>({
 }
 
 Future<void> _expectNonObjectListItem<T>({
-  required Future<Result<List<T>>> Function(ApiInventoryRemoteDataSource) load,
+  required Future<Result<PageData<T>>> Function(ApiInventoryRemoteDataSource)
+  load,
   required String expectedPath,
   required String expectedMessage,
 }) async {
   final adapter = _CapturingAdapter(
-    body: '{"code":0,"message":"ok","data":{"list":["bad-item"]}}',
+    body:
+        '{"code":0,"message":"ok","data":{"list":["bad-item"],"total":1,"page":1,"pageSize":20}}',
   );
   final dio = Dio()..httpClientAdapter = adapter;
   final dataSource = ApiInventoryRemoteDataSource(

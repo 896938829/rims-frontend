@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 
+import '../../../../core/result/failure.dart';
 import '../../../documents/domain/entities/document_data.dart';
 import '../../../documents/domain/repositories/documents_repository.dart';
 import '../../domain/entities/inventory_item.dart';
@@ -32,6 +33,7 @@ final class InventoryViewModel extends ChangeNotifier {
   String _query = '';
   String _selectedTab = allProductsTab;
   bool _isLoading = false;
+  bool _isLoadingMore = false;
   bool _isLoadingTransactions = false;
   bool _isLookingUpBarcode = false;
   bool _isSavingSettings = false;
@@ -39,10 +41,17 @@ final class InventoryViewModel extends ChangeNotifier {
   String? _transactionError;
   String? _barcodeLookupError;
   String? _settingsError;
+  Failure? _loadMoreFailure;
+  int _page = 0;
+  int _total = 0;
+  int _queryGeneration = 0;
+  int? _loadingMoreGeneration;
+  bool _reachedEnd = false;
 
   String get query => _query;
   String get selectedTab => _selectedTab;
   bool get isLoading => _isLoading;
+  bool get isLoadingMore => _isLoadingMore;
   bool get isLoadingTransactions => _isLoadingTransactions;
   bool get isLookingUpBarcode => _isLookingUpBarcode;
   bool get isSavingSettings => _isSavingSettings;
@@ -50,6 +59,10 @@ final class InventoryViewModel extends ChangeNotifier {
   String? get transactionError => _transactionError;
   String? get barcodeLookupError => _barcodeLookupError;
   String? get settingsError => _settingsError;
+  Failure? get loadMoreFailure => _loadMoreFailure;
+  int get loadedCount => _items.length;
+  int get total => _total;
+  bool get hasMore => _page > 0 && !_reachedEnd && loadedCount < _total;
   bool get isEmpty => _items.isEmpty && !_isLoading && _errorMessage == null;
   List<InventoryItem> get items => _items;
   List<TransactionRecord> get transactions =>
@@ -59,17 +72,9 @@ final class InventoryViewModel extends ChangeNotifier {
   List<String> get tabs => const ['商品', '标准', '低库存', '非标', '停用'];
 
   List<InventoryMetric> get metrics => [
-    InventoryMetric(label: 'SKU数', value: _formatInt(_items.length)),
-    InventoryMetric(
-      label: '总库存',
-      value: _formatInt(
-        _items.fold<int>(0, (sum, item) => sum + item.stockQuantity),
-      ),
-    ),
-    InventoryMetric(
-      label: '低库存',
-      value: _formatInt(_items.where(_isLowStock).length),
-    ),
+    InventoryMetric(label: '已加载', value: _formatInt(loadedCount)),
+    InventoryMetric(label: '总条目', value: _formatInt(_total)),
+    InventoryMetric(label: '加载进度', value: '$loadedCount/$_total'),
   ];
 
   List<InventoryItem> get visibleItems {
@@ -110,26 +115,41 @@ final class InventoryViewModel extends ChangeNotifier {
   }
 
   Future<void> load({int page = 1}) async {
+    final generation = ++_queryGeneration;
     final repository = this.repository;
     if (repository == null) {
       _items = const [];
+      _page = 0;
+      _total = 0;
+      _reachedEnd = false;
       _errorMessage = null;
+      _loadMoreFailure = null;
       notifyListeners();
       return;
     }
 
     _isLoading = true;
+    _isLoadingMore = false;
+    _loadingMoreGeneration = null;
+    _page = 0;
+    _total = 0;
+    _reachedEnd = false;
     _errorMessage = null;
+    _loadMoreFailure = null;
     notifyListeners();
 
-    final result = await repository.listInventory(
-      keyword: _query.trim(),
-      page: page,
-    );
+    final keyword = _query.trim();
+    final result = await repository.listInventory(keyword: keyword, page: page);
 
+    if (generation != _queryGeneration || keyword != _query.trim()) {
+      return;
+    }
     result.when(
-      success: (items) {
-        _items = items;
+      success: (pageData) {
+        _items = _mergeInventoryItems(const [], pageData.items);
+        _page = pageData.page;
+        _total = pageData.total;
+        _reachedEnd = pageData.items.isEmpty || !pageData.hasNextPage;
         _errorMessage = null;
       },
       failure: (failure) {
@@ -142,6 +162,54 @@ final class InventoryViewModel extends ChangeNotifier {
 
     await loadTransactions();
   }
+
+  Future<void> loadMore() async {
+    final repository = this.repository;
+    if (repository == null || _isLoading || _isLoadingMore || !hasMore) {
+      return;
+    }
+
+    final generation = _queryGeneration;
+    final keyword = _query.trim();
+    final requestedPage = _page + 1;
+    _isLoadingMore = true;
+    _loadingMoreGeneration = generation;
+    _loadMoreFailure = null;
+    notifyListeners();
+
+    final result = await repository.listInventory(
+      keyword: keyword,
+      page: requestedPage,
+    );
+    if (generation != _queryGeneration || keyword != _query.trim()) {
+      if (_loadingMoreGeneration == generation) {
+        _isLoadingMore = false;
+        _loadingMoreGeneration = null;
+        notifyListeners();
+      }
+      return;
+    }
+
+    result.when(
+      success: (pageData) {
+        _items = _mergeInventoryItems(_items, pageData.items);
+        _page = pageData.page;
+        _total = pageData.total;
+        _reachedEnd = pageData.items.isEmpty || !pageData.hasNextPage;
+        _loadMoreFailure = null;
+      },
+      failure: (failure) {
+        _loadMoreFailure = failure;
+      },
+    );
+    if (_loadingMoreGeneration == generation) {
+      _isLoadingMore = false;
+      _loadingMoreGeneration = null;
+    }
+    notifyListeners();
+  }
+
+  Future<void> retryLoadMore() => loadMore();
 
   Future<void> loadTransactions() async {
     final repository = documentsRepository;
@@ -181,6 +249,27 @@ final class InventoryViewModel extends ChangeNotifier {
 
     _query = value;
     await load();
+  }
+
+  List<InventoryItem> _mergeInventoryItems(
+    List<InventoryItem> existing,
+    List<InventoryItem> incoming,
+  ) {
+    final merged = List<InventoryItem>.of(existing);
+    final indexes = <int, int>{
+      for (var index = 0; index < merged.length; index += 1)
+        merged[index].id: index,
+    };
+    for (final item in incoming) {
+      final index = indexes[item.id];
+      if (index == null) {
+        indexes[item.id] = merged.length;
+        merged.add(item);
+      } else {
+        merged[index] = item;
+      }
+    }
+    return List<InventoryItem>.unmodifiable(merged);
   }
 
   Future<InventoryItem?> lookupBarcode(String barcode) async {

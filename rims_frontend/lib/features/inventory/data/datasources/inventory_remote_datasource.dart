@@ -3,6 +3,8 @@ import 'package:dio/dio.dart';
 import '../../../../core/network/api_client.dart';
 import '../../../../core/network/api_endpoints.dart';
 import '../../../../core/network/api_envelope.dart';
+import '../../../../core/network/api_page_parser.dart';
+import '../../../../core/pagination/page_data.dart';
 import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
 import '../models/inventory_models.dart';
@@ -10,12 +12,14 @@ import '../models/inventory_models.dart';
 const int _inventoryListPageSize = 20;
 
 abstract interface class InventoryRemoteDataSource {
-  Future<Result<List<InventoryItemModel>>> listInventory({
+  Future<Result<PageData<InventoryItemModel>>> listInventory({
     String keyword = '',
     int page = 1,
   });
 
-  Future<Result<List<InventoryItemModel>>> listInventoryAlerts({int page = 1});
+  Future<Result<PageData<InventoryItemModel>>> listInventoryAlerts({
+    int page = 1,
+  });
 
   Future<Result<InventoryItemModel>> findProductByBarcode(String barcode);
 
@@ -25,9 +29,8 @@ abstract interface class InventoryRemoteDataSource {
     int? status,
   });
 
-  Future<Result<List<NonStandardInventoryItemModel>>> listNonStandardInventory({
-    int page = 1,
-  });
+  Future<Result<PageData<NonStandardInventoryItemModel>>>
+  listNonStandardInventory({int page = 1});
 }
 
 final class ApiInventoryRemoteDataSource implements InventoryRemoteDataSource {
@@ -36,7 +39,7 @@ final class ApiInventoryRemoteDataSource implements InventoryRemoteDataSource {
   final ApiClient _apiClient;
 
   @override
-  Future<Result<List<InventoryItemModel>>> listInventory({
+  Future<Result<PageData<InventoryItemModel>>> listInventory({
     String keyword = '',
     int page = 1,
   }) async {
@@ -50,14 +53,11 @@ final class ApiInventoryRemoteDataSource implements InventoryRemoteDataSource {
       },
     );
 
-    return _mapEnvelope(
-      result,
-      (data) => _parseInventoryItems(data, 'inventory list'),
-    );
+    return _mapEnvelope(result, _parseInventoryItems);
   }
 
   @override
-  Future<Result<List<InventoryItemModel>>> listInventoryAlerts({
+  Future<Result<PageData<InventoryItemModel>>> listInventoryAlerts({
     int page = 1,
   }) async {
     final result = await _apiClient.get<dynamic>(
@@ -65,10 +65,7 @@ final class ApiInventoryRemoteDataSource implements InventoryRemoteDataSource {
       queryParameters: {'page': page, 'pageSize': _inventoryListPageSize},
     );
 
-    return _mapEnvelope(
-      result,
-      (data) => _parseInventoryItems(data, 'inventory alerts'),
-    );
+    return _mapEnvelope(result, _parseInventoryItems);
   }
 
   @override
@@ -105,18 +102,14 @@ final class ApiInventoryRemoteDataSource implements InventoryRemoteDataSource {
   }
 
   @override
-  Future<Result<List<NonStandardInventoryItemModel>>> listNonStandardInventory({
-    int page = 1,
-  }) async {
+  Future<Result<PageData<NonStandardInventoryItemModel>>>
+  listNonStandardInventory({int page = 1}) async {
     final result = await _apiClient.get<dynamic>(
       ApiEndpoints.nonStandardInventory,
       queryParameters: {'page': page, 'pageSize': _inventoryListPageSize},
     );
 
-    return _mapEnvelope(
-      result,
-      (data) => _parseNonStandardInventoryItems(data, 'non-standard inventory'),
-    );
+    return _mapEnvelope(result, _parseNonStandardInventoryItems);
   }
 
   Result<T> _mapEnvelope<T>(
@@ -173,46 +166,27 @@ final class ApiInventoryRemoteDataSource implements InventoryRemoteDataSource {
     return InventoryItemModel.fromJson(_requiredMap(data, 'inventory'));
   }
 
-  List<InventoryItemModel> _parseInventoryItems(Object? data, String name) {
-    return _requiredMapItems(
-      _requiredList(data, name),
-      name,
-    ).map((json) => InventoryItemModel.fromJson(json)).toList(growable: false);
+  PageData<InventoryItemModel> _parseInventoryItems(Object? data) {
+    return parseApiPage<InventoryItemModel>(
+      _requiredPageData(data),
+      InventoryItemModel.fromJson,
+    );
   }
 
-  List<NonStandardInventoryItemModel> _parseNonStandardInventoryItems(
+  PageData<NonStandardInventoryItemModel> _parseNonStandardInventoryItems(
     Object? data,
-    String name,
   ) {
-    return _requiredMapItems(_requiredList(data, name), name)
-        .map((json) => NonStandardInventoryItemModel.fromJson(json))
-        .toList(growable: false);
+    return parseApiPage<NonStandardInventoryItemModel>(
+      _requiredPageData(data),
+      NonStandardInventoryItemModel.fromJson,
+    );
   }
 
-  List<dynamic> _requiredList(Object? data, String name) {
-    return switch (data) {
-      {'list': final List<dynamic> list} => list,
-      {'items': final List<dynamic> list} => list,
-      {'records': final List<dynamic> list} => list,
-      {'rows': final List<dynamic> list} => list,
-      final List<dynamic> list => list,
-      _ => throw FormatException('Invalid $name response'),
-    };
-  }
-
-  List<Map<dynamic, dynamic>> _requiredMapItems(
-    List<dynamic> list,
-    String name,
-  ) {
-    return list
-        .map((item) {
-          if (item is Map) {
-            return Map<dynamic, dynamic>.from(item);
-          }
-
-          throw FormatException('Invalid $name response');
-        })
-        .toList(growable: false);
+  Map<String, Object?> _requiredPageData(Object? data) {
+    if (data is Map<String, Object?>) {
+      return data;
+    }
+    throw const FormatException('Paged API data.list must be a JSON list.');
   }
 
   Map<dynamic, dynamic> _requiredMap(Object? data, String name) {

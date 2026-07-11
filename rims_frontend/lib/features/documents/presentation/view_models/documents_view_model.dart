@@ -284,8 +284,8 @@ final class DocumentsViewModel extends ChangeNotifier {
     }
 
     result.when(
-      success: (items) {
-        _productCandidates = items;
+      success: (page) {
+        _productCandidates = page.items;
         _productSearchError = null;
       },
       failure: (failure) {
@@ -322,8 +322,8 @@ final class DocumentsViewModel extends ChangeNotifier {
 
     final result = await repository.listNonStandardInventory();
     result.when(
-      success: (items) {
-        _nonStandardInventoryItems = items;
+      success: (page) {
+        _nonStandardInventoryItems = page.items;
         _clearStaleNonStandardInventory();
         _nonStandardInventoryError = null;
       },

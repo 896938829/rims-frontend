@@ -8,7 +8,6 @@ import '../../../auth/domain/entities/warehouse.dart';
 import '../../../documents/domain/entities/document_data.dart';
 import '../../../documents/domain/repositories/documents_repository.dart';
 import '../../../inventory/domain/entities/inventory_item.dart';
-import '../../../inventory/domain/entities/non_standard_inventory_item.dart';
 import '../../../inventory/domain/repositories/inventory_repository.dart';
 import '../../../reports/domain/entities/report_data.dart';
 import '../../../reports/domain/repositories/reports_repository.dart';
@@ -62,12 +61,13 @@ final class HomeViewModel extends ChangeNotifier {
   final DocumentsRepository? documentsRepository;
   final ReportsRepository? reportsRepository;
   List<InventoryItem> _inventoryItems = const [];
-  List<InventoryItem> _inventoryAlerts = const [];
-  List<NonStandardInventoryItem> _nonStandardInventoryItems = const [];
   List<InventoryOverviewItem> _inventoryOverviewItems = const [];
   List<DocumentRecord> _recentDocuments = const [];
   bool _inventoryAlertsLoaded = false;
   bool _nonStandardInventoryLoaded = false;
+  int _inventoryTotal = 0;
+  int _inventoryAlertTotal = 0;
+  int _nonStandardInventoryTotal = 0;
   bool _isLoading = false;
   String? _errorMessage;
   String? _recentDocumentsErrorMessage;
@@ -83,22 +83,16 @@ final class HomeViewModel extends ChangeNotifier {
   bool get isLoading => _isLoading;
   String? get errorMessage => _errorMessage;
   String? get recentDocumentsErrorMessage => _recentDocumentsErrorMessage;
+  int get inventoryTotal => _inventoryTotal;
+  int get inventoryAlertTotal => _inventoryAlertTotal;
+  int get nonStandardInventoryTotal => _nonStandardInventoryTotal;
 
   List<HomeMetric> get metrics => [
     HomeMetric(
       label: '商品数',
-      value: _formatInt(_overviewInt('商品数') ?? _inventoryItems.length),
+      value: _formatInt(_overviewInt('商品数') ?? _inventoryTotal),
     ),
-    HomeMetric(
-      label: '库存总量',
-      value: _formatInt(
-        _overviewInt('库存总量') ??
-            _inventoryItems.fold<int>(
-              0,
-              (sum, item) => sum + item.stockQuantity,
-            ),
-      ),
-    ),
+    HomeMetric(label: '库存总量', value: _formatInt(_overviewInt('库存总量') ?? 0)),
     HomeMetric(
       label: '预警数量',
       value: _formatInt(_overviewInt('预警数量') ?? _inventoryAlertCount),
@@ -173,14 +167,18 @@ final class HomeViewModel extends ChangeNotifier {
     final inventoryRepository = this.inventoryRepository;
     if (inventoryRepository == null) {
       _inventoryItems = const [];
-      _inventoryAlerts = const [];
-      _nonStandardInventoryItems = const [];
       _inventoryAlertsLoaded = false;
       _nonStandardInventoryLoaded = false;
+      _inventoryTotal = 0;
+      _inventoryAlertTotal = 0;
+      _nonStandardInventoryTotal = 0;
     } else {
       final inventoryResult = await inventoryRepository.listInventory();
       inventoryResult.when(
-        success: (items) => _inventoryItems = items,
+        success: (page) {
+          _inventoryItems = page.items;
+          _inventoryTotal = page.total;
+        },
         failure: (value) {
           failure ??= value;
         },
@@ -188,8 +186,8 @@ final class HomeViewModel extends ChangeNotifier {
 
       final alertsResult = await inventoryRepository.listInventoryAlerts();
       alertsResult.when(
-        success: (items) {
-          _inventoryAlerts = items;
+        success: (page) {
+          _inventoryAlertTotal = page.total;
           _inventoryAlertsLoaded = true;
         },
         failure: (_) {},
@@ -198,8 +196,8 @@ final class HomeViewModel extends ChangeNotifier {
       final nonStandardResult = await inventoryRepository
           .listNonStandardInventory();
       nonStandardResult.when(
-        success: (items) {
-          _nonStandardInventoryItems = items;
+        success: (page) {
+          _nonStandardInventoryTotal = page.total;
           _nonStandardInventoryLoaded = true;
         },
         failure: (_) {},
@@ -248,12 +246,12 @@ final class HomeViewModel extends ChangeNotifier {
   }
 
   int get _inventoryAlertCount {
-    return _inventoryAlertsLoaded ? _inventoryAlerts.length : _lowStockCount;
+    return _inventoryAlertsLoaded ? _inventoryAlertTotal : _lowStockCount;
   }
 
   int get _nonStandardCount {
     return _nonStandardInventoryLoaded
-        ? _nonStandardInventoryItems.length
+        ? _nonStandardInventoryTotal
         : _inventoryItems.where((item) => item.statusLabel == '非标').length;
   }
 

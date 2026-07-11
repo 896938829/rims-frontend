@@ -1,4 +1,5 @@
 import '../../../../core/result/result.dart';
+import '../../../../core/pagination/page_data.dart';
 import '../../domain/entities/inventory_item.dart';
 import '../../domain/entities/non_standard_inventory_item.dart';
 import '../../domain/repositories/inventory_repository.dart';
@@ -10,7 +11,7 @@ final class InventoryRepositoryImpl implements InventoryRepository {
   final InventoryRemoteDataSource remoteDataSource;
 
   @override
-  Future<Result<List<InventoryItem>>> listInventory({
+  Future<Result<PageData<InventoryItem>>> listInventory({
     String keyword = '',
     int page = 1,
   }) async {
@@ -20,24 +21,24 @@ final class InventoryRepositoryImpl implements InventoryRepository {
     );
 
     return result.when(
-      success: (models) => Success<List<InventoryItem>>(
-        models.map((model) => model.toEntity()).toList(growable: false),
+      success: (page) => Success<PageData<InventoryItem>>(
+        page.map((model) => model.toEntity()),
       ),
-      failure: FailureResult<List<InventoryItem>>.new,
+      failure: FailureResult<PageData<InventoryItem>>.new,
     );
   }
 
   @override
-  Future<Result<List<InventoryItem>>> listInventoryAlerts({
+  Future<Result<PageData<InventoryItem>>> listInventoryAlerts({
     int page = 1,
   }) async {
     final result = await remoteDataSource.listInventoryAlerts(page: page);
 
     return result.when(
-      success: (models) => Success<List<InventoryItem>>(
-        models.map((model) => model.toEntity()).toList(growable: false),
+      success: (page) => Success<PageData<InventoryItem>>(
+        page.map((model) => model.toEntity()),
       ),
-      failure: FailureResult<List<InventoryItem>>.new,
+      failure: FailureResult<PageData<InventoryItem>>.new,
     );
   }
 
@@ -70,16 +71,16 @@ final class InventoryRepositoryImpl implements InventoryRepository {
   }
 
   @override
-  Future<Result<List<NonStandardInventoryItem>>> listNonStandardInventory({
+  Future<Result<PageData<NonStandardInventoryItem>>> listNonStandardInventory({
     int page = 1,
   }) async {
     final result = await remoteDataSource.listNonStandardInventory(page: page);
 
     return result.when(
-      success: (models) => Success<List<NonStandardInventoryItem>>(
-        models.map((model) => model.toEntity()).toList(growable: false),
+      success: (page) => Success<PageData<NonStandardInventoryItem>>(
+        page.map((model) => model.toEntity()),
       ),
-      failure: FailureResult<List<NonStandardInventoryItem>>.new,
+      failure: FailureResult<PageData<NonStandardInventoryItem>>.new,
     );
   }
 }

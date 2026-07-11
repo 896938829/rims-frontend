@@ -172,17 +172,23 @@ final class _InventoryPageState extends State<InventoryPage> {
                     ],
                   ),
                 )
-              else if (visibleItems.isEmpty)
+              else if (visibleItems.isEmpty) ...[
                 RimsCard(
                   child: Text(
                     '没有匹配的库存商品',
                     textAlign: TextAlign.center,
                     style: AppTextStyles.bodySmall,
                   ),
-                )
-              else
+                ),
+                if (viewModel.items.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  _InventoryPaginationControl(viewModel: viewModel),
+                ],
+              ]
+              else ...[
                 for (final item in visibleItems) ...[
                   InventoryProductTile(
+                    key: ValueKey('inventory-item-${item.id}'),
                     product: item,
                     onTap: () {
                       viewModel.selectItem(item);
@@ -191,6 +197,9 @@ final class _InventoryPageState extends State<InventoryPage> {
                   ),
                   if (item != visibleItems.last) const SizedBox(height: 10),
                 ],
+                const SizedBox(height: 12),
+                _InventoryPaginationControl(viewModel: viewModel),
+              ],
             ],
           ),
         );
@@ -214,6 +223,72 @@ final class _InventoryPageState extends State<InventoryPage> {
       showDragHandle: true,
       builder: (context) =>
           _InventoryDetailSheet(viewModel: viewModel, initialItem: item),
+    );
+  }
+}
+
+final class _InventoryPaginationControl extends StatelessWidget {
+  const _InventoryPaginationControl({required this.viewModel});
+
+  final InventoryViewModel viewModel;
+
+  @override
+  Widget build(BuildContext context) {
+    if (viewModel.loadMoreFailure != null) {
+      return Semantics(
+        label: '重试加载更多库存',
+        button: true,
+        child: SizedBox(
+          height: 48,
+          width: double.infinity,
+          child: OutlinedButton.icon(
+            key: const Key('inventory-load-more-retry'),
+            onPressed: viewModel.isLoadingMore
+                ? null
+                : () => unawaited(viewModel.retryLoadMore()),
+            icon: const Icon(Icons.refresh, size: 18),
+            label: const Text('加载失败，重试'),
+          ),
+        ),
+      );
+    }
+
+    if (viewModel.hasMore) {
+      return Semantics(
+        label: viewModel.isLoadingMore ? '正在加载更多库存' : '加载更多库存',
+        button: true,
+        child: SizedBox(
+          height: 48,
+          width: double.infinity,
+          child: TextButton.icon(
+            key: const Key('inventory-load-more-button'),
+            onPressed: viewModel.isLoadingMore
+                ? null
+                : () => unawaited(viewModel.loadMore()),
+            icon: viewModel.isLoadingMore
+                ? const SizedBox.square(
+                    dimension: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.keyboard_arrow_down, size: 20),
+            label: Text(
+              viewModel.isLoadingMore
+                  ? '正在加载...'
+                  : '加载更多 (${viewModel.loadedCount}/${viewModel.total})',
+            ),
+          ),
+        ),
+      );
+    }
+
+    return Semantics(
+      label: '库存已全部加载',
+      child: SizedBox(
+        key: const Key('inventory-page-end'),
+        height: 48,
+        width: double.infinity,
+        child: Center(child: Text('已加载全部 ${viewModel.loadedCount} 条库存')),
+      ),
     );
   }
 }

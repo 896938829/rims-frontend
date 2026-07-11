@@ -6,6 +6,7 @@ import 'package:rims_frontend/core/events/app_event.dart';
 import 'package:rims_frontend/core/events/app_event_bus.dart';
 import 'package:rims_frontend/core/result/failure.dart';
 import 'package:rims_frontend/core/result/result.dart';
+import 'package:rims_frontend/core/pagination/page_data.dart';
 import 'package:rims_frontend/features/auth/domain/entities/warehouse.dart';
 import 'package:rims_frontend/features/documents/domain/entities/document_data.dart';
 import 'package:rims_frontend/features/documents/domain/repositories/documents_repository.dart';
@@ -321,8 +322,8 @@ void main() {
   });
 
   test('searchProducts ignores stale product results', () async {
-    final firstSearch = Completer<Result<List<InventoryItem>>>();
-    final secondSearch = Completer<Result<List<InventoryItem>>>();
+    final firstSearch = Completer<Result<PageData<InventoryItem>>>();
+    final secondSearch = Completer<Result<PageData<InventoryItem>>>();
     final inventoryRepository = _FakeInventoryRepository(
       inventorySearchResults: [firstSearch.future, secondSearch.future],
     );
@@ -334,13 +335,13 @@ void main() {
     final olderSearch = viewModel.searchProducts('旧商品');
     final newerSearch = viewModel.searchProducts('矿泉水');
 
-    secondSearch.complete(const Success<List<InventoryItem>>([_standardItem]));
+    secondSearch.complete(Success(_inventoryPage([_standardItem])));
     await newerSearch;
 
     expect(viewModel.productQuery, '矿泉水');
     expect(viewModel.productCandidates, [_standardItem]);
 
-    firstSearch.complete(const Success<List<InventoryItem>>([_staleItem]));
+    firstSearch.complete(Success(_inventoryPage([_staleItem])));
     await olderSearch;
 
     expect(inventoryRepository.inventoryKeywords, ['旧商品', '矿泉水']);
@@ -570,9 +571,9 @@ void main() {
     () async {
       final repository = _FakeDocumentsRepository();
       final inventoryRepository = _FakeInventoryRepository(
-        nonStandardInventoryResults: const [
-          Success<List<NonStandardInventoryItem>>([_nonStandardItem]),
-          Success<List<NonStandardInventoryItem>>([]),
+        nonStandardInventoryResults: [
+          Success(_nonStandardPage([_nonStandardItem])),
+          Success(_nonStandardPage([])),
         ],
       );
       final viewModel =
@@ -1702,14 +1703,24 @@ final class _RetryTransactionsRepository extends _FakeDocumentsRepository {
   }
 }
 
+PageData<InventoryItem> _inventoryPage(List<InventoryItem> items) {
+  return PageData(items: items, total: items.length, page: 1, pageSize: 20);
+}
+
+PageData<NonStandardInventoryItem> _nonStandardPage(
+  List<NonStandardInventoryItem> items,
+) {
+  return PageData(items: items, total: items.length, page: 1, pageSize: 20);
+}
+
 final class _FakeInventoryRepository implements InventoryRepository {
   _FakeInventoryRepository({
     this.inventorySearchResults = const [],
     this.nonStandardInventoryResults = const [],
   });
 
-  final List<Future<Result<List<InventoryItem>>>> inventorySearchResults;
-  final List<Result<List<NonStandardInventoryItem>>>
+  final List<Future<Result<PageData<InventoryItem>>>> inventorySearchResults;
+  final List<Result<PageData<NonStandardInventoryItem>>>
   nonStandardInventoryResults;
   final List<String> inventoryKeywords = [];
   String? lastKeyword;
@@ -1718,7 +1729,7 @@ final class _FakeInventoryRepository implements InventoryRepository {
   int nonStandardInventoryCallCount = 0;
 
   @override
-  Future<Result<List<InventoryItem>>> listInventory({
+  Future<Result<PageData<InventoryItem>>> listInventory({
     String keyword = '',
     int page = 1,
   }) async {
@@ -1730,14 +1741,14 @@ final class _FakeInventoryRepository implements InventoryRepository {
       return inventorySearchResults[callIndex];
     }
 
-    return const Success<List<InventoryItem>>([_standardItem]);
+    return Success(_inventoryPage([_standardItem]));
   }
 
   @override
-  Future<Result<List<InventoryItem>>> listInventoryAlerts({
+  Future<Result<PageData<InventoryItem>>> listInventoryAlerts({
     int page = 1,
   }) async {
-    return const Success<List<InventoryItem>>([]);
+    return Success(_inventoryPage([]));
   }
 
   @override
@@ -1755,7 +1766,7 @@ final class _FakeInventoryRepository implements InventoryRepository {
   }
 
   @override
-  Future<Result<List<NonStandardInventoryItem>>> listNonStandardInventory({
+  Future<Result<PageData<NonStandardInventoryItem>>> listNonStandardInventory({
     int page = 1,
   }) async {
     loadedNonStandardInventory = true;
@@ -1765,6 +1776,6 @@ final class _FakeInventoryRepository implements InventoryRepository {
       return nonStandardInventoryResults[callIndex];
     }
 
-    return const Success<List<NonStandardInventoryItem>>([_nonStandardItem]);
+    return Success(_nonStandardPage([_nonStandardItem]));
   }
 }

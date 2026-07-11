@@ -6,6 +6,7 @@ import 'package:rims_frontend/core/events/app_event.dart';
 import 'package:rims_frontend/core/events/app_event_bus.dart';
 import 'package:rims_frontend/core/result/failure.dart';
 import 'package:rims_frontend/core/result/result.dart';
+import 'package:rims_frontend/core/pagination/page_data.dart';
 import 'package:rims_frontend/core/widgets/rims_status_chip.dart';
 import 'package:rims_frontend/features/auth/domain/entities/app_user.dart';
 import 'package:rims_frontend/features/auth/domain/entities/warehouse.dart';
@@ -155,7 +156,10 @@ void main() {
       final viewModel = HomeViewModel(
         user: _user,
         warehouse: _warehouse,
-        inventoryRepository: const _FakeInventoryRepository(),
+        inventoryRepository: const _FakeInventoryRepository(
+          inventoryTotal: 45,
+          alertTotal: 7,
+        ),
         documentsRepository: const _FakeDocumentsRepository(),
         reportsRepository: const _FailingOverviewReportsRepository(),
       );
@@ -163,12 +167,10 @@ void main() {
       await viewModel.load();
 
       expect(viewModel.errorMessage, isNull);
-      expect(viewModel.metrics.map((metric) => metric.value), [
-        '2',
-        '153',
-        '2',
-      ]);
-      expect(viewModel.warnings.single.label, '低库存');
+      expect(viewModel.metrics.map((metric) => metric.value), ['45', '0', '7']);
+      expect(viewModel.inventoryTotal, 45);
+      expect(viewModel.inventoryAlertTotal, 7);
+      expect(viewModel.warnings.single.count, 7);
       expect(viewModel.recentDocuments, [_recentDocument]);
     },
   );
@@ -393,24 +395,43 @@ const _nonStandardItemTwo = NonStandardInventoryItem(
   status: 1,
 );
 
+PageData<T> _homePage<T>(List<T> items, {int? total}) {
+  return PageData<T>(
+    items: items,
+    total: total ?? items.length,
+    page: 1,
+    pageSize: 20,
+  );
+}
+
 final class _FakeInventoryRepository implements InventoryRepository {
-  const _FakeInventoryRepository({this.nonStandardItems = const []});
+  const _FakeInventoryRepository({
+    this.nonStandardItems = const [],
+    this.inventoryTotal = 2,
+    this.alertTotal = 2,
+  });
 
   final List<NonStandardInventoryItem> nonStandardItems;
+  final int inventoryTotal;
+  final int alertTotal;
 
   @override
-  Future<Result<List<InventoryItem>>> listInventory({
+  Future<Result<PageData<InventoryItem>>> listInventory({
     String keyword = '',
     int page = 1,
   }) async {
-    return const Success<List<InventoryItem>>([_standardItem, _lowStockItem]);
+    return Success(
+      _homePage([_standardItem, _lowStockItem], total: inventoryTotal),
+    );
   }
 
   @override
-  Future<Result<List<InventoryItem>>> listInventoryAlerts({
+  Future<Result<PageData<InventoryItem>>> listInventoryAlerts({
     int page = 1,
   }) async {
-    return const Success<List<InventoryItem>>([_lowStockItem, _lowStockItem]);
+    return Success(
+      _homePage([_lowStockItem, _lowStockItem], total: alertTotal),
+    );
   }
 
   @override
@@ -428,10 +449,10 @@ final class _FakeInventoryRepository implements InventoryRepository {
   }
 
   @override
-  Future<Result<List<NonStandardInventoryItem>>> listNonStandardInventory({
+  Future<Result<PageData<NonStandardInventoryItem>>> listNonStandardInventory({
     int page = 1,
   }) async {
-    return Success<List<NonStandardInventoryItem>>(nonStandardItems);
+    return Success(_homePage(nonStandardItems));
   }
 }
 
@@ -439,19 +460,19 @@ final class _CountingInventoryRepository implements InventoryRepository {
   int listInventoryCallCount = 0;
 
   @override
-  Future<Result<List<InventoryItem>>> listInventory({
+  Future<Result<PageData<InventoryItem>>> listInventory({
     String keyword = '',
     int page = 1,
   }) async {
     listInventoryCallCount += 1;
-    return const Success<List<InventoryItem>>([_standardItem, _lowStockItem]);
+    return Success(_homePage([_standardItem, _lowStockItem]));
   }
 
   @override
-  Future<Result<List<InventoryItem>>> listInventoryAlerts({
+  Future<Result<PageData<InventoryItem>>> listInventoryAlerts({
     int page = 1,
   }) async {
-    return const Success<List<InventoryItem>>([_lowStockItem]);
+    return Success(_homePage([_lowStockItem]));
   }
 
   @override
@@ -469,10 +490,10 @@ final class _CountingInventoryRepository implements InventoryRepository {
   }
 
   @override
-  Future<Result<List<NonStandardInventoryItem>>> listNonStandardInventory({
+  Future<Result<PageData<NonStandardInventoryItem>>> listNonStandardInventory({
     int page = 1,
   }) async {
-    return const Success<List<NonStandardInventoryItem>>([]);
+    return Success(_homePage([]));
   }
 }
 
@@ -480,18 +501,18 @@ final class _FailingAlertsInventoryRepository implements InventoryRepository {
   const _FailingAlertsInventoryRepository();
 
   @override
-  Future<Result<List<InventoryItem>>> listInventory({
+  Future<Result<PageData<InventoryItem>>> listInventory({
     String keyword = '',
     int page = 1,
   }) async {
-    return const Success<List<InventoryItem>>([_standardItem, _lowStockItem]);
+    return Success(_homePage([_standardItem, _lowStockItem]));
   }
 
   @override
-  Future<Result<List<InventoryItem>>> listInventoryAlerts({
+  Future<Result<PageData<InventoryItem>>> listInventoryAlerts({
     int page = 1,
   }) async {
-    return const FailureResult<List<InventoryItem>>(
+    return const FailureResult<PageData<InventoryItem>>(
       NetworkFailure(message: '库存预警不可用'),
     );
   }
@@ -511,10 +532,10 @@ final class _FailingAlertsInventoryRepository implements InventoryRepository {
   }
 
   @override
-  Future<Result<List<NonStandardInventoryItem>>> listNonStandardInventory({
+  Future<Result<PageData<NonStandardInventoryItem>>> listNonStandardInventory({
     int page = 1,
   }) async {
-    return const Success<List<NonStandardInventoryItem>>([]);
+    return Success(_homePage([]));
   }
 }
 
@@ -527,32 +548,32 @@ final class _RetryInventoryRepository implements InventoryRepository {
   }
 
   @override
-  Future<Result<List<InventoryItem>>> listInventory({
+  Future<Result<PageData<InventoryItem>>> listInventory({
     String keyword = '',
     int page = 1,
   }) async {
     listInventoryCallCount += 1;
     if (listInventoryCallCount == 1) {
-      return const FailureResult<List<InventoryItem>>(
+      return const FailureResult<PageData<InventoryItem>>(
         NetworkFailure(message: '库存服务不可用'),
       );
     }
 
     _retryInventoryCompleter = Completer<List<InventoryItem>>();
-    return Success<List<InventoryItem>>(await _retryInventoryCompleter!.future);
+    return Success(_homePage(await _retryInventoryCompleter!.future));
   }
 
   @override
-  Future<Result<List<InventoryItem>>> listInventoryAlerts({
+  Future<Result<PageData<InventoryItem>>> listInventoryAlerts({
     int page = 1,
   }) async {
     if (listInventoryCallCount == 1) {
-      return const FailureResult<List<InventoryItem>>(
+      return const FailureResult<PageData<InventoryItem>>(
         NetworkFailure(message: '库存预警不可用'),
       );
     }
 
-    return const Success<List<InventoryItem>>([_lowStockItem]);
+    return Success(_homePage([_lowStockItem]));
   }
 
   @override
@@ -570,10 +591,10 @@ final class _RetryInventoryRepository implements InventoryRepository {
   }
 
   @override
-  Future<Result<List<NonStandardInventoryItem>>> listNonStandardInventory({
+  Future<Result<PageData<NonStandardInventoryItem>>> listNonStandardInventory({
     int page = 1,
   }) async {
-    return const Success<List<NonStandardInventoryItem>>([]);
+    return Success(_homePage([]));
   }
 }
 
@@ -583,30 +604,30 @@ final class _SequentialHomeInventoryRepository implements InventoryRepository {
   int listNonStandardInventoryCallCount = 0;
 
   @override
-  Future<Result<List<InventoryItem>>> listInventory({
+  Future<Result<PageData<InventoryItem>>> listInventory({
     String keyword = '',
     int page = 1,
   }) async {
     listInventoryCallCount += 1;
     if (listInventoryCallCount == 1) {
-      return const Success<List<InventoryItem>>([_standardItem, _lowStockItem]);
+      return Success(_homePage([_standardItem, _lowStockItem]));
     }
 
-    return const FailureResult<List<InventoryItem>>(
+    return const FailureResult<PageData<InventoryItem>>(
       NetworkFailure(message: '库存服务短暂不可用'),
     );
   }
 
   @override
-  Future<Result<List<InventoryItem>>> listInventoryAlerts({
+  Future<Result<PageData<InventoryItem>>> listInventoryAlerts({
     int page = 1,
   }) async {
     listInventoryAlertsCallCount += 1;
     if (listInventoryAlertsCallCount == 1) {
-      return const Success<List<InventoryItem>>([_lowStockItem, _lowStockItem]);
+      return Success(_homePage([_lowStockItem, _lowStockItem]));
     }
 
-    return const FailureResult<List<InventoryItem>>(
+    return const FailureResult<PageData<InventoryItem>>(
       NetworkFailure(message: '库存预警短暂不可用'),
     );
   }
@@ -626,15 +647,15 @@ final class _SequentialHomeInventoryRepository implements InventoryRepository {
   }
 
   @override
-  Future<Result<List<NonStandardInventoryItem>>> listNonStandardInventory({
+  Future<Result<PageData<NonStandardInventoryItem>>> listNonStandardInventory({
     int page = 1,
   }) async {
     listNonStandardInventoryCallCount += 1;
     if (listNonStandardInventoryCallCount == 1) {
-      return const Success<List<NonStandardInventoryItem>>([]);
+      return Success(_homePage([]));
     }
 
-    return const FailureResult<List<NonStandardInventoryItem>>(
+    return const FailureResult<PageData<NonStandardInventoryItem>>(
       NetworkFailure(message: '非标库存短暂不可用'),
     );
   }

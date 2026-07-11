@@ -1,14 +1,15 @@
 import '../../../../core/result/result.dart';
+import '../../../../core/pagination/page_data.dart';
 import '../entities/inventory_item.dart';
 import '../entities/non_standard_inventory_item.dart';
 
 abstract interface class InventoryRepository {
-  Future<Result<List<InventoryItem>>> listInventory({
+  Future<Result<PageData<InventoryItem>>> listInventory({
     String keyword = '',
     int page = 1,
   });
 
-  Future<Result<List<InventoryItem>>> listInventoryAlerts({int page = 1});
+  Future<Result<PageData<InventoryItem>>> listInventoryAlerts({int page = 1});
 
   Future<Result<InventoryItem>> findProductByBarcode(String barcode);
 
@@ -18,7 +19,7 @@ abstract interface class InventoryRepository {
     int? status,
   });
 
-  Future<Result<List<NonStandardInventoryItem>>> listNonStandardInventory({
+  Future<Result<PageData<NonStandardInventoryItem>>> listNonStandardInventory({
     int page = 1,
   });
 }

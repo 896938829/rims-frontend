@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rims_frontend/core/result/failure.dart';
 import 'package:rims_frontend/core/result/result.dart';
+import 'package:rims_frontend/core/pagination/page_data.dart';
 import 'package:rims_frontend/features/documents/domain/entities/document_data.dart';
 import 'package:rims_frontend/features/documents/domain/repositories/documents_repository.dart';
 import 'package:rims_frontend/features/inventory/domain/entities/inventory_item.dart';
@@ -14,7 +15,7 @@ import 'package:rims_frontend/features/inventory/presentation/view_models/invent
 
 void main() {
   test('load sets loading then exposes backend inventory items', () async {
-    final pending = Completer<Result<List<InventoryItem>>>();
+    final pending = Completer<Result<PageData<InventoryItem>>>();
     final repository = _FakeInventoryRepository(result: pending.future);
     final viewModel = InventoryViewModel(repository: repository);
 
@@ -23,7 +24,7 @@ void main() {
     expect(viewModel.isLoading, isTrue);
     expect(repository.lastKeyword, '');
 
-    pending.complete(const Success<List<InventoryItem>>([_standardItem]));
+    pending.complete(Success(_inventoryPage([_standardItem])));
     await loadFuture;
 
     expect(viewModel.isLoading, isFalse);
@@ -43,9 +44,7 @@ void main() {
       );
       final viewModel = InventoryViewModel(
         repository: _FakeInventoryRepository(
-          result: Future.value(
-            const Success<List<InventoryItem>>([_standardItem]),
-          ),
+          result: Future.value(Success(_inventoryPage([_standardItem]))),
         ),
         documentsRepository: documentsRepository,
       );
@@ -62,9 +61,7 @@ void main() {
   test('transaction failure does not clear loaded inventory items', () async {
     final viewModel = InventoryViewModel(
       repository: _FakeInventoryRepository(
-        result: Future.value(
-          const Success<List<InventoryItem>>([_standardItem]),
-        ),
+        result: Future.value(Success(_inventoryPage([_standardItem]))),
       ),
       documentsRepository: _FakeDocumentsRepository(
         transactionResult: const FailureResult<List<TransactionRecord>>(
@@ -82,7 +79,7 @@ void main() {
 
   test('updateQuery reloads inventory with keyword', () async {
     final repository = _FakeInventoryRepository(
-      result: Future.value(const Success<List<InventoryItem>>([_lowStockItem])),
+      result: Future.value(Success(_inventoryPage([_lowStockItem]))),
     );
     final viewModel = InventoryViewModel(repository: repository);
 
@@ -96,7 +93,7 @@ void main() {
   test('failure exposes user-facing error message', () async {
     final repository = _FakeInventoryRepository(
       result: Future.value(
-        const FailureResult<List<InventoryItem>>(
+        const FailureResult<PageData<InventoryItem>>(
           NetworkFailure(message: '网络不可用'),
         ),
       ),
@@ -112,9 +109,9 @@ void main() {
 
   test('reload failure keeps previously loaded inventory items', () async {
     final repository = _SequentialInventoryRepository(
-      results: const [
-        Success<List<InventoryItem>>([_standardItem]),
-        FailureResult<List<InventoryItem>>(
+      results: [
+        Success(_inventoryPage([_standardItem])),
+        FailureResult<PageData<InventoryItem>>(
           NetworkFailure(message: '库存服务短暂不可用'),
         ),
       ],
@@ -132,7 +129,7 @@ void main() {
 
   test('empty repository result exposes empty state', () async {
     final repository = _FakeInventoryRepository(
-      result: Future.value(const Success<List<InventoryItem>>([])),
+      result: Future.value(Success(_inventoryPage([]))),
     );
     final viewModel = InventoryViewModel(repository: repository);
 
@@ -145,7 +142,7 @@ void main() {
   test('selected tab filters loaded items locally', () async {
     final repository = _FakeInventoryRepository(
       result: Future.value(
-        const Success<List<InventoryItem>>([_standardItem, _nonStandardItem]),
+        Success(_inventoryPage([_standardItem, _nonStandardItem])),
       ),
     );
     final viewModel = InventoryViewModel(repository: repository);
@@ -163,7 +160,7 @@ void main() {
   test('low stock tab filters warning inventory locally', () async {
     final repository = _FakeInventoryRepository(
       result: Future.value(
-        const Success<List<InventoryItem>>([_standardItem, _lowStockItem]),
+        Success(_inventoryPage([_standardItem, _lowStockItem])),
       ),
     );
     final viewModel = InventoryViewModel(repository: repository);
@@ -177,11 +174,7 @@ void main() {
   test('low stock tab excludes disabled inventory', () async {
     final repository = _FakeInventoryRepository(
       result: Future.value(
-        const Success<List<InventoryItem>>([
-          _standardItem,
-          _lowStockItem,
-          _disabledItem,
-        ]),
+        Success(_inventoryPage([_standardItem, _lowStockItem, _disabledItem])),
       ),
     );
     final viewModel = InventoryViewModel(repository: repository);
@@ -192,30 +185,37 @@ void main() {
     expect(viewModel.visibleItems, [_lowStockItem]);
   });
 
-  test('low stock metric excludes disabled inventory', () async {
-    final repository = _FakeInventoryRepository(
-      result: Future.value(
-        const Success<List<InventoryItem>>([
-          _standardItem,
-          _lowStockItem,
-          _disabledItem,
-        ]),
-      ),
-    );
-    final viewModel = InventoryViewModel(repository: repository);
+  test(
+    'metrics describe loaded page coverage without partial aggregates',
+    () async {
+      final repository = _FakeInventoryRepository(
+        result: Future.value(
+          Success(
+            _inventoryPage([_standardItem, _lowStockItem, _disabledItem]),
+          ),
+        ),
+      );
+      final viewModel = InventoryViewModel(repository: repository);
 
-    await viewModel.load();
+      await viewModel.load();
 
-    expect(
-      viewModel.metrics.singleWhere((metric) => metric.label == '低库存').value,
-      '1',
-    );
-  });
+      expect(viewModel.metrics.map((metric) => metric.label), [
+        '已加载',
+        '总条目',
+        '加载进度',
+      ]);
+      expect(viewModel.metrics.map((metric) => metric.value), [
+        '3',
+        '3',
+        '3/3',
+      ]);
+    },
+  );
 
   test('disabled tab filters inactive inventory locally', () async {
     final repository = _FakeInventoryRepository(
       result: Future.value(
-        const Success<List<InventoryItem>>([_standardItem, _disabledItem]),
+        Success(_inventoryPage([_standardItem, _disabledItem])),
       ),
     );
     final viewModel = InventoryViewModel(repository: repository);
@@ -228,7 +228,7 @@ void main() {
 
   test('lookupBarcode selects backend product and trims input', () async {
     final repository = _FakeInventoryRepository(
-      result: Future.value(const Success<List<InventoryItem>>([_standardItem])),
+      result: Future.value(Success(_inventoryPage([_standardItem]))),
       barcodeResult: const Success<InventoryItem>(_barcodeItem),
     );
     final viewModel = InventoryViewModel(repository: repository);
@@ -245,7 +245,7 @@ void main() {
   test('admin updates selected inventory settings', () async {
     final updateCompleter = Completer<Result<InventoryItem>>();
     final repository = _FakeInventoryRepository(
-      result: Future.value(const Success<List<InventoryItem>>([_standardItem])),
+      result: Future.value(Success(_inventoryPage([_standardItem]))),
       updateResult: updateCompleter.future,
     );
     final viewModel = InventoryViewModel(
@@ -278,7 +278,7 @@ void main() {
 
   test('ordinary user cannot update inventory settings', () async {
     final repository = _FakeInventoryRepository(
-      result: Future.value(const Success<List<InventoryItem>>([_standardItem])),
+      result: Future.value(Success(_inventoryPage([_standardItem]))),
     );
     final viewModel = InventoryViewModel(repository: repository);
 
@@ -298,9 +298,7 @@ void main() {
   ) async {
     final viewModel = InventoryViewModel(
       repository: _FakeInventoryRepository(
-        result: Future.value(
-          const Success<List<InventoryItem>>([_standardItem]),
-        ),
+        result: Future.value(Success(_inventoryPage([_standardItem]))),
       ),
     );
     await viewModel.load();
@@ -325,9 +323,7 @@ void main() {
   ) async {
     final viewModel = InventoryViewModel(
       repository: _FakeInventoryRepository(
-        result: Future.value(
-          const Success<List<InventoryItem>>([_standardItem]),
-        ),
+        result: Future.value(Success(_inventoryPage([_standardItem]))),
       ),
       documentsRepository: _FakeDocumentsRepository(
         transactionResult: const Success<List<TransactionRecord>>([
@@ -385,9 +381,7 @@ void main() {
   ) async {
     final viewModel = InventoryViewModel(
       repository: _FakeInventoryRepository(
-        result: Future.value(
-          const Success<List<InventoryItem>>([_standardItem]),
-        ),
+        result: Future.value(Success(_inventoryPage([_standardItem]))),
       ),
       canManageInventorySettings: true,
     );
@@ -412,9 +406,7 @@ void main() {
   ) async {
     final viewModel = InventoryViewModel(
       repository: _FakeInventoryRepository(
-        result: Future.value(
-          const Success<List<InventoryItem>>([_standardItem]),
-        ),
+        result: Future.value(Success(_inventoryPage([_standardItem]))),
       ),
     );
     await viewModel.load();
@@ -437,6 +429,136 @@ void main() {
       find.byKey(const Key('inventory-save-settings-button')),
       findsNothing,
     );
+  });
+
+  test('initial page replaces rows and exposes server coverage', () async {
+    final repository = _QueuedInventoryRepository([
+      Future.value(Success(_inventoryPage([_standardItem], total: 45))),
+    ]);
+    final viewModel = InventoryViewModel(repository: repository);
+
+    await viewModel.load();
+
+    expect(viewModel.items, [_standardItem]);
+    expect(viewModel.loadedCount, 1);
+    expect(viewModel.total, 45);
+    expect(viewModel.hasMore, isTrue);
+    expect(repository.requestedPages, [1]);
+  });
+
+  test('loadMore appends in order and replaces duplicate IDs', () async {
+    const updatedStandard = InventoryItem(
+      id: 1,
+      productId: 10,
+      productName: '矿泉水 550ml',
+      sku: 'SKU-WA-550',
+      availableQuantity: 99,
+      stockQuantity: 120,
+      statusLabel: '标准',
+      imageUrl: '',
+    );
+    final repository = _QueuedInventoryRepository([
+      Future.value(Success(_inventoryPage([_standardItem], total: 45))),
+      Future.value(
+        Success(
+          _inventoryPage([updatedStandard, _lowStockItem], total: 45, page: 2),
+        ),
+      ),
+    ]);
+    final viewModel = InventoryViewModel(repository: repository);
+
+    await viewModel.load();
+    await viewModel.loadMore();
+
+    expect(viewModel.items, [updatedStandard, _lowStockItem]);
+    expect(repository.requestedPages, [1, 2]);
+  });
+
+  test(
+    'load-more failure preserves rows and retry requests same page',
+    () async {
+      final repository = _QueuedInventoryRepository([
+        Future.value(Success(_inventoryPage([_standardItem], total: 45))),
+        Future.value(
+          const FailureResult<PageData<InventoryItem>>(
+            NetworkFailure(message: '下一页暂时不可用'),
+          ),
+        ),
+        Future.value(
+          Success(_inventoryPage([_lowStockItem], total: 45, page: 2)),
+        ),
+      ]);
+      final viewModel = InventoryViewModel(repository: repository);
+
+      await viewModel.load();
+      await viewModel.loadMore();
+
+      expect(viewModel.items, [_standardItem]);
+      expect(viewModel.errorMessage, isNull);
+      expect(viewModel.loadMoreFailure?.message, '下一页暂时不可用');
+
+      await viewModel.retryLoadMore();
+
+      expect(repository.requestedPages, [1, 2, 2]);
+      expect(viewModel.items, [_standardItem, _lowStockItem]);
+      expect(viewModel.loadMoreFailure, isNull);
+    },
+  );
+
+  test('concurrent loadMore calls issue only one request', () async {
+    final pendingPage = Completer<Result<PageData<InventoryItem>>>();
+    final repository = _QueuedInventoryRepository([
+      Future.value(Success(_inventoryPage([_standardItem], total: 45))),
+      pendingPage.future,
+    ]);
+    final viewModel = InventoryViewModel(repository: repository);
+    await viewModel.load();
+
+    final first = viewModel.loadMore();
+    final second = viewModel.loadMore();
+
+    expect(viewModel.isLoadingMore, isTrue);
+    expect(repository.requestedPages, [1, 2]);
+    pendingPage.complete(
+      Success(_inventoryPage([_lowStockItem], total: 45, page: 2)),
+    );
+    await Future.wait([first, second]);
+  });
+
+  test('query reset ignores an obsolete in-flight next page', () async {
+    final stalePage = Completer<Result<PageData<InventoryItem>>>();
+    final repository = _QueuedInventoryRepository([
+      Future.value(Success(_inventoryPage([_standardItem], total: 45))),
+      stalePage.future,
+      Future.value(Success(_inventoryPage([_lowStockItem]))),
+    ]);
+    final viewModel = InventoryViewModel(repository: repository);
+    await viewModel.load();
+
+    final oldLoadMore = viewModel.loadMore();
+    await viewModel.updateQuery('low');
+    stalePage.complete(
+      Success(_inventoryPage([_disabledItem], total: 45, page: 2)),
+    );
+    await oldLoadMore;
+
+    expect(repository.requestedPages, [1, 2, 1]);
+    expect(repository.requestedKeywords, ['', '', 'low']);
+    expect(viewModel.items, [_lowStockItem]);
+  });
+
+  test('an empty next page ends pagination despite stale total', () async {
+    final repository = _QueuedInventoryRepository([
+      Future.value(Success(_inventoryPage([_standardItem], total: 45))),
+      Future.value(Success(_inventoryPage([], total: 45, page: 2))),
+    ]);
+    final viewModel = InventoryViewModel(repository: repository);
+
+    await viewModel.load();
+    await viewModel.loadMore();
+
+    expect(viewModel.items, [_standardItem]);
+    expect(viewModel.hasMore, isFalse);
   });
 }
 
@@ -543,6 +665,30 @@ const _otherTransaction = TransactionRecord(
   createdAt: '2026-06-27T11:30:00Z',
 );
 
+PageData<InventoryItem> _inventoryPage(
+  List<InventoryItem> items, {
+  int? total,
+  int page = 1,
+}) {
+  return PageData<InventoryItem>(
+    items: items,
+    total: total ?? items.length,
+    page: page,
+    pageSize: 20,
+  );
+}
+
+PageData<NonStandardInventoryItem> _nonStandardInventoryPage(
+  List<NonStandardInventoryItem> items,
+) {
+  return PageData<NonStandardInventoryItem>(
+    items: items,
+    total: items.length,
+    page: 1,
+    pageSize: 20,
+  );
+}
+
 final class _FakeInventoryRepository implements InventoryRepository {
   _FakeInventoryRepository({
     required this.result,
@@ -550,7 +696,7 @@ final class _FakeInventoryRepository implements InventoryRepository {
     this.updateResult,
   });
 
-  final Future<Result<List<InventoryItem>>> result;
+  final Future<Result<PageData<InventoryItem>>> result;
   final Result<InventoryItem> barcodeResult;
   final Future<Result<InventoryItem>>? updateResult;
   String? lastKeyword;
@@ -560,7 +706,7 @@ final class _FakeInventoryRepository implements InventoryRepository {
   int? updatedStatus;
 
   @override
-  Future<Result<List<InventoryItem>>> listInventory({
+  Future<Result<PageData<InventoryItem>>> listInventory({
     String keyword = '',
     int page = 1,
   }) {
@@ -569,10 +715,10 @@ final class _FakeInventoryRepository implements InventoryRepository {
   }
 
   @override
-  Future<Result<List<InventoryItem>>> listInventoryAlerts({
+  Future<Result<PageData<InventoryItem>>> listInventoryAlerts({
     int page = 1,
   }) async {
-    return const Success<List<InventoryItem>>([]);
+    return Success(_inventoryPage([]));
   }
 
   @override
@@ -594,21 +740,21 @@ final class _FakeInventoryRepository implements InventoryRepository {
   }
 
   @override
-  Future<Result<List<NonStandardInventoryItem>>> listNonStandardInventory({
+  Future<Result<PageData<NonStandardInventoryItem>>> listNonStandardInventory({
     int page = 1,
   }) async {
-    return const Success<List<NonStandardInventoryItem>>([]);
+    return Success(_nonStandardInventoryPage([]));
   }
 }
 
 final class _SequentialInventoryRepository implements InventoryRepository {
   _SequentialInventoryRepository({required this.results});
 
-  final List<Result<List<InventoryItem>>> results;
+  final List<Result<PageData<InventoryItem>>> results;
   int listInventoryCallCount = 0;
 
   @override
-  Future<Result<List<InventoryItem>>> listInventory({
+  Future<Result<PageData<InventoryItem>>> listInventory({
     String keyword = '',
     int page = 1,
   }) async {
@@ -622,10 +768,10 @@ final class _SequentialInventoryRepository implements InventoryRepository {
   }
 
   @override
-  Future<Result<List<InventoryItem>>> listInventoryAlerts({
+  Future<Result<PageData<InventoryItem>>> listInventoryAlerts({
     int page = 1,
   }) async {
-    return const Success<List<InventoryItem>>([]);
+    return Success(_inventoryPage([]));
   }
 
   @override
@@ -643,10 +789,10 @@ final class _SequentialInventoryRepository implements InventoryRepository {
   }
 
   @override
-  Future<Result<List<NonStandardInventoryItem>>> listNonStandardInventory({
+  Future<Result<PageData<NonStandardInventoryItem>>> listNonStandardInventory({
     int page = 1,
   }) async {
-    return const Success<List<NonStandardInventoryItem>>([]);
+    return Success(_nonStandardInventoryPage([]));
   }
 }
 
@@ -715,26 +861,26 @@ final class _RetryInventoryRepository implements InventoryRepository {
   }
 
   @override
-  Future<Result<List<InventoryItem>>> listInventory({
+  Future<Result<PageData<InventoryItem>>> listInventory({
     String keyword = '',
     int page = 1,
   }) async {
     listInventoryCallCount += 1;
     if (listInventoryCallCount == 1) {
-      return const FailureResult<List<InventoryItem>>(
+      return const FailureResult<PageData<InventoryItem>>(
         NetworkFailure(message: '库存服务不可用'),
       );
     }
 
     _retryInventoryCompleter = Completer<List<InventoryItem>>();
-    return Success<List<InventoryItem>>(await _retryInventoryCompleter!.future);
+    return Success(_inventoryPage(await _retryInventoryCompleter!.future));
   }
 
   @override
-  Future<Result<List<InventoryItem>>> listInventoryAlerts({
+  Future<Result<PageData<InventoryItem>>> listInventoryAlerts({
     int page = 1,
   }) async {
-    return const Success<List<InventoryItem>>([]);
+    return Success(_inventoryPage([]));
   }
 
   @override
@@ -752,9 +898,58 @@ final class _RetryInventoryRepository implements InventoryRepository {
   }
 
   @override
-  Future<Result<List<NonStandardInventoryItem>>> listNonStandardInventory({
+  Future<Result<PageData<NonStandardInventoryItem>>> listNonStandardInventory({
     int page = 1,
   }) async {
-    return const Success<List<NonStandardInventoryItem>>([]);
+    return Success(_nonStandardInventoryPage([]));
+  }
+}
+
+final class _QueuedInventoryRepository implements InventoryRepository {
+  _QueuedInventoryRepository(this._results);
+
+  final List<Future<Result<PageData<InventoryItem>>>> _results;
+  final List<int> requestedPages = [];
+  final List<String> requestedKeywords = [];
+  int _resultIndex = 0;
+
+  @override
+  Future<Result<PageData<InventoryItem>>> listInventory({
+    String keyword = '',
+    int page = 1,
+  }) {
+    requestedPages.add(page);
+    requestedKeywords.add(keyword);
+    final index = _resultIndex;
+    _resultIndex += 1;
+    return _results[index];
+  }
+
+  @override
+  Future<Result<PageData<InventoryItem>>> listInventoryAlerts({
+    int page = 1,
+  }) async {
+    return Success(_inventoryPage([]));
+  }
+
+  @override
+  Future<Result<InventoryItem>> findProductByBarcode(String barcode) async {
+    return const Success(_barcodeItem);
+  }
+
+  @override
+  Future<Result<PageData<NonStandardInventoryItem>>> listNonStandardInventory({
+    int page = 1,
+  }) async {
+    return Success(_nonStandardInventoryPage([]));
+  }
+
+  @override
+  Future<Result<InventoryItem>> updateInventorySettings({
+    required int inventoryId,
+    int? alertThreshold,
+    int? status,
+  }) async {
+    return const Success(_updatedStandardItem);
   }
 }
