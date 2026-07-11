@@ -416,9 +416,10 @@ For Android:
 4. Run Flutter with `-d $AndroidDevice` and the `10.0.2.2` API origin.
 5. Treat an emulator that was already running as unmanaged and leave it alive
    during `down`.
-6. Disable Kotlin incremental compilation and use in-process compilation at the
-   project level to avoid the Kotlin 2.3.20 plugin cache-registration failure
-   and daemon deadlock observed during a clean local Android build.
+6. Disable Kotlin incremental compilation, use in-process compilation, disable
+   persistent Gradle daemons, and bound Gradle workers at the project level to
+   avoid the Kotlin 2.3.20 cache-registration failure and worker/daemon deadlock
+   observed during a clean local Android build.
 
 - [ ] **Step 5: Verify target lifecycle behavior**
 
