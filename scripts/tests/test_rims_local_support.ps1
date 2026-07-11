@@ -304,15 +304,6 @@ function Get-TextHelpSectionEntries {
 }
 
 function Get-TestAndroidChoice {
-  $adbPath = Resolve-RimsAndroidTool `
-    -CommandName 'adb.exe' `
-    -SdkRelativePath 'platform-tools\adb.exe'
-  $onlineDevices = @(Get-RimsOnlineAndroidDevices `
-      -AdbExecutable $adbPath)
-  if ($onlineDevices.Count -gt 0) {
-    return $onlineDevices[0]
-  }
-
   $emulatorPath = Resolve-RimsAndroidTool `
     -CommandName 'emulator.exe' `
     -SdkRelativePath 'emulator\emulator.exe'

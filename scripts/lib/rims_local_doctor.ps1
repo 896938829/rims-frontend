@@ -545,13 +545,13 @@ function Test-RimsAndroidDeviceComponent {
     [string[]]$InstalledAvds
   )
 
-  $choices = @($OnlineDevices + $InstalledAvds | Select-Object -Unique)
+  $choices = @($InstalledAvds | Select-Object -Unique)
   $choiceDetail = if ($choices.Count -gt 0) {
     $choices -join ', '
   } else {
     '(none)'
   }
-  $remediation = 'Pass -AndroidDevice <id> using an online adb device id or installed AVD id.'
+  $remediation = 'Pass -AndroidDevice <avd-name> using an installed Android AVD name.'
 
   if ([string]::IsNullOrWhiteSpace($AndroidDevice)) {
     return New-RimsLocalComponent `
@@ -560,14 +560,6 @@ function Test-RimsAndroidDeviceComponent {
       -Required $true `
       -Detail "No Android device was requested. Available choices: $choiceDetail." `
       -Remediation $remediation
-  }
-  if ($OnlineDevices -contains $AndroidDevice) {
-    return New-RimsLocalComponent `
-      -Name 'androidDevice' `
-      -Ok $true `
-      -Required $true `
-      -Detail "Requested Android device '$AndroidDevice' is online. Available choices: $choiceDetail." `
-      -Remediation ''
   }
   if ($InstalledAvds -contains $AndroidDevice) {
     return New-RimsLocalComponent `
@@ -581,7 +573,7 @@ function Test-RimsAndroidDeviceComponent {
     -Name 'androidDevice' `
     -Ok $false `
     -Required $true `
-    -Detail "Requested Android device '$AndroidDevice' was not found. Available choices: $choiceDetail." `
+    -Detail "Requested Android AVD '$AndroidDevice' was not found. Available choices: $choiceDetail." `
     -Remediation $remediation
 }
 

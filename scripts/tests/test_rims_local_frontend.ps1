@@ -50,6 +50,22 @@ Assert-Contains `
   -Collection $android.arguments `
   -Expected '--dart-define=API_BASE_URL=http://10.0.2.2:18080/api/v1' `
   -Message 'Android API URL changed.'
+Assert-Contains `
+  -Collection $android.arguments `
+  -Expected '--machine' `
+  -Message 'Android Flutter launch must emit machine events for app readiness.'
+
+Assert-True `
+  -Value (Test-RimsFlutterAppStartedMachineOutput `
+      -Output '{"event":"app.started","params":{"appId":"rims"}}') `
+  -Message 'A valid Flutter app.started machine event was not accepted.'
+Assert-False `
+  -Value (Test-RimsFlutterAppStartedMachineOutput `
+      -Output '{"event":"app.progress"}') `
+  -Message 'Flutter machine output without app.started was accepted.'
+Assert-False `
+  -Value (Test-RimsFlutterAppStartedMachineOutput -Output '{not-json') `
+  -Message 'Invalid Flutter machine output was accepted.'
 
 $noneRejected = $false
 try {
@@ -215,6 +231,18 @@ Assert-False `
   -Value $unmanagedWrongAvd.healthy `
   -Message 'An unmanaged emulator with the wrong AVD was healthy.'
 
+$ownedNotBooted = Get-RimsAndroidEmulatorHealth `
+  -Emulator ([pscustomobject]@{
+      serial = 'emulator-5554'
+      avdName = 'Medium_Phone_API_36.1'
+    }) `
+  -OnlineSerialsAction { return @('emulator-5554') } `
+  -AvdNameAction { param($serial) return 'Medium_Phone_API_36.1' } `
+  -BootCompletedAction { param($serial) return $false }
+Assert-False `
+  -Value $ownedNotBooted.healthy `
+  -Message 'A not-booted owned emulator was healthy.'
+
 function New-TestFrontendState {
   return [pscustomobject][ordered]@{
     lifecycleStage = 'healthy'
@@ -369,6 +397,40 @@ Assert-Equal `
   -Actual $emulatorCleanupCount.value `
   -Expected 0 `
   -Message 'Healthy controller-owned emulator was rolled back.'
+
+$emulatorGateOrder = New-Object 'Collections.Generic.List[string]'
+$emulatorGateState = New-TestFrontendState
+$emulatorGateState.cleanupPending = $true
+$emulatorGateState.emulator = [pscustomobject]@{
+  avdName = 'Medium_Phone_API_36.1'
+  serial = $null
+  owned = $false
+  windowsPid = $null
+  windowsProcessStartTimeUtc = $null
+  cleanupPending = $true
+}
+$emulatorGate = Invoke-RimsAndroidEmulatorLaunchStateMachine `
+  -State $emulatorGateState `
+  -PersistStateAction { param($state) [void]$emulatorGateOrder.Add('persist') } `
+  -SpawnAction {
+    [void]$emulatorGateOrder.Add('spawn')
+    return [pscustomobject]@{
+      ok = $true
+      identity = [pscustomobject]@{
+        windowsPid = 7203
+        windowsProcessStartTimeUtc = '2026-01-01T00:00:05.0000000Z'
+      }
+    }
+  } `
+  -ActivateAction { [void]$emulatorGateOrder.Add('activate') } `
+  -SerialAction { [void]$emulatorGateOrder.Add('serial'); return 'emulator-5558' } `
+  -BootAction { param($serial) return $true } `
+  -CleanupAction { return $true }
+Assert-True -Value $emulatorGate.ok -Message 'Gated emulator launch failed.'
+Assert-Equal `
+  -Actual ($emulatorGateOrder[0..2] -join '|') `
+  -Expected 'spawn|persist|activate' `
+  -Message 'Emulator activation opened before durable launcher ownership.'
 
 $emulatorTimeoutState = New-TestFrontendState
 $emulatorTimeoutState.cleanupPending = $true
@@ -722,10 +784,12 @@ $restartOriginalRuntime = [Environment]::GetEnvironmentVariable(
 $restartDownFunction = (Get-Item 'Function:\Invoke-RimsLocalDownUnlocked').ScriptBlock
 $restartUpFunction = (Get-Item 'Function:\Invoke-RimsLocalUpUnlocked').ScriptBlock
 $restartCalls = [pscustomobject]@{ down = 0; up = 0 }
+$restartBackend = $null
 try {
   [Environment]::SetEnvironmentVariable('RIMS_RUNTIME_DIR', $restartRuntimeRoot, 'Process')
   $restartPaths = Get-RimsRuntimePaths -ScriptDirectory $scriptDir
   $restartBackend = Start-TestSleepProcess -TrackedProcesses $tracked
+  $restartBackendId = $restartBackend.Id
   $restartPort = Get-TestEphemeralPort
   $restartState = New-TestRuntimeState `
     -Process $restartBackend `
@@ -768,9 +832,24 @@ try {
 } finally {
   Set-Item -LiteralPath 'Function:\Invoke-RimsLocalDownUnlocked' -Value $restartDownFunction
   Set-Item -LiteralPath 'Function:\Invoke-RimsLocalUpUnlocked' -Value $restartUpFunction
+  if ($null -ne $restartBackend) {
+    $restartCleanupState = [pscustomobject]@{
+      restartHelper = [pscustomobject]@{
+        windowsPid = $restartBackend.Id
+        windowsProcessStartTimeUtc = $restartBackend.StartTime.ToUniversalTime().ToString('o')
+      }
+    }
+    [void](Stop-RimsNestedOwnedProcess `
+        -State $restartCleanupState `
+        -PropertyName 'restartHelper')
+    $restartBackend.Dispose()
+  }
   [Environment]::SetEnvironmentVariable('RIMS_RUNTIME_DIR', $restartOriginalRuntime, 'Process')
   Remove-Item -LiteralPath $restartRuntimeRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
+Assert-False `
+  -Value (Test-TestProcessAlive -ProcessId $restartBackendId) `
+  -Message 'Restart lock test leaked its helper process.'
 
 $missingBackend = Join-Path `
   ([IO.Path]::GetTempPath()) `

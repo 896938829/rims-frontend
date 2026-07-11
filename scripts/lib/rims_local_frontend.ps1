@@ -51,6 +51,7 @@ function New-FlutterLaunchSpec {
     @(
       'run',
       '--no-pub',
+      '--machine',
       '-d',
       $AndroidSerial,
       "--dart-define=API_BASE_URL=http://10.0.2.2:$BackendPort/api/v1"
@@ -77,6 +78,7 @@ function Get-RimsFrontendRuntimePaths {
     emulatorStdoutLog = Join-Path $Paths.logs 'emulator.stdout.log'
     emulatorStderrLog = Join-Path $Paths.logs 'emulator.stderr.log'
     activationGate = Join-Path $Paths.root 'frontend.activate'
+    emulatorActivationGate = Join-Path $Paths.root 'emulator.activate'
   }
 }
 
@@ -293,6 +295,55 @@ function Wait-RimsAndroidBootCompleted {
   return $false
 }
 
+function Test-RimsFlutterAppStartedMachineOutput {
+  param([AllowNull()][AllowEmptyString()][string]$Output)
+
+  foreach ($line in ($Output -split '\r?\n')) {
+    if ([string]::IsNullOrWhiteSpace($line)) {
+      continue
+    }
+    try {
+      $event = $line | ConvertFrom-Json -ErrorAction Stop
+      if ([string](Get-RimsObjectPropertyValue `
+          -Value $event `
+          -Name 'event' `
+          -DefaultValue '') -ceq 'app.started') {
+        return $true
+      }
+    } catch {
+    }
+  }
+  return $false
+}
+
+function Wait-RimsFlutterAppStarted {
+  param(
+    [Parameter(Mandatory = $true)][psobject]$State,
+    [Parameter(Mandatory = $true)][string]$OutputPath,
+    [ValidateRange(1, 300)][int]$TimeoutSeconds = 90
+  )
+
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  do {
+    if (-not (Test-RimsNestedOwnedProcess `
+        -State $State `
+        -PropertyName 'frontend')) {
+      return $false
+    }
+    try {
+      if ((Test-Path -LiteralPath $OutputPath -PathType Leaf) -and
+          (Test-RimsFlutterAppStartedMachineOutput `
+            -Output ([IO.File]::ReadAllText($OutputPath)))) {
+        return $true
+      }
+    } catch {
+      return $false
+    }
+    Start-Sleep -Milliseconds 250
+  } while ((Get-Date) -lt $deadline)
+  return $false
+}
+
 function New-RimsFrontendProcessIdentity {
   param([Parameter(Mandatory = $true)][Diagnostics.Process]$Process)
 
@@ -302,6 +353,36 @@ function New-RimsFrontendProcessIdentity {
       'o',
       [Globalization.CultureInfo]::InvariantCulture
     )
+  }
+}
+
+function Test-RimsFrontendPortOwnedByProcess {
+  param(
+    [Parameter(Mandatory = $true)][int]$Port,
+    [Parameter(Mandatory = $true)][int]$RootProcessId
+  )
+
+  try {
+    $listener = @(Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction Stop |
+        Select-Object -First 1)
+    if ($listener.Count -eq 0) {
+      return $false
+    }
+    $processes = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+    $known = New-Object 'Collections.Generic.HashSet[int]'
+    [void]$known.Add($RootProcessId)
+    do {
+      $added = $false
+      foreach ($process in $processes) {
+        if ($known.Contains([int]$process.ParentProcessId) -and
+            $known.Add([int]$process.ProcessId)) {
+          $added = $true
+        }
+      }
+    } while ($added)
+    return $known.Contains([int]$listener[0].OwningProcess)
+  } catch {
+    return $null
   }
 }
 
@@ -425,6 +506,7 @@ function Invoke-RimsAndroidEmulatorLaunchStateMachine {
     [Parameter(Mandatory = $true)][psobject]$State,
     [Parameter(Mandatory = $true)][scriptblock]$PersistStateAction,
     [Parameter(Mandatory = $true)][scriptblock]$SpawnAction,
+    [AllowNull()][scriptblock]$ActivateAction,
     [Parameter(Mandatory = $true)][scriptblock]$SerialAction,
     [Parameter(Mandatory = $true)][scriptblock]$BootAction,
     [Parameter(Mandatory = $true)][scriptblock]$CleanupAction
@@ -445,7 +527,20 @@ function Invoke-RimsAndroidEmulatorLaunchStateMachine {
     $State.emulator.windowsPid = $spawned.identity.windowsPid
     $State.emulator.windowsProcessStartTimeUtc = `
       $spawned.identity.windowsProcessStartTimeUtc
+    $State.emulator | Add-Member `
+      -MemberType NoteProperty `
+      -Name launcherWindowsPid `
+      -Value $spawned.identity.windowsPid `
+      -Force
+    $State.emulator | Add-Member `
+      -MemberType NoteProperty `
+      -Name launcherWindowsProcessStartTimeUtc `
+      -Value $spawned.identity.windowsProcessStartTimeUtc `
+      -Force
     & $PersistStateAction $State
+    if ($null -ne $ActivateAction) {
+      & $ActivateAction
+    }
 
     $serial = [string](& $SerialAction)
     if ([string]::IsNullOrWhiteSpace($serial)) {
@@ -479,6 +574,49 @@ function Invoke-RimsAndroidEmulatorLaunchStateMachine {
         -StandardOutput '' `
         -StandardError $_.Exception.Message
     }
+  }
+}
+
+function Start-RimsHiddenEmulatorLauncher {
+  param(
+    [Parameter(Mandatory = $true)][string]$EmulatorExecutable,
+    [Parameter(Mandatory = $true)][string]$AvdName,
+    [Parameter(Mandatory = $true)][psobject]$FrontendPaths
+  )
+
+  $payload = [pscustomobject]@{
+    executable = $EmulatorExecutable
+    avdName = $AvdName
+    gate = $FrontendPaths.emulatorActivationGate
+  } | ConvertTo-Json -Compress
+  $payload64 = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($payload))
+  $launcher = @'
+$p=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:RIMS_EMULATOR_LAUNCH))|ConvertFrom-Json
+$limit=(Get-Date).AddSeconds(30)
+while(-not (Test-Path -LiteralPath $p.gate -PathType Leaf)){
+  if((Get-Date)-ge $limit){exit 124}
+  Start-Sleep -Milliseconds 50
+}
+& $p.executable -avd $p.avdName
+exit $LASTEXITCODE
+'@
+  $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($launcher))
+  $previousPayload = $env:RIMS_EMULATOR_LAUNCH
+  try {
+    $env:RIMS_EMULATOR_LAUNCH = $payload64
+    $process = Start-Process `
+      -FilePath (Join-Path $PSHOME 'powershell.exe') `
+      -ArgumentList @('-NoProfile', '-EncodedCommand', $encoded) `
+      -RedirectStandardOutput $FrontendPaths.emulatorStdoutLog `
+      -RedirectStandardError $FrontendPaths.emulatorStderrLog `
+      -WindowStyle Hidden `
+      -PassThru
+    return [pscustomobject]@{
+      ok = $true
+      identity = New-RimsFrontendProcessIdentity -Process $process
+    }
+  } finally {
+    $env:RIMS_EMULATOR_LAUNCH = $previousPayload
   }
 }
 
@@ -542,6 +680,9 @@ function Resolve-RimsAndroidRuntime {
     serial = $null
     owned = $false
     launchRequestedByController = $true
+    launcherCommandMarker = 'rims-emulator-launcher'
+    launcherWindowsPid = $null
+    launcherWindowsProcessStartTimeUtc = $null
     windowsPid = $null
     windowsProcessStartTimeUtc = $null
     cleanupPending = $true
@@ -550,6 +691,9 @@ function Resolve-RimsAndroidRuntime {
   }
   $State.cleanupPending = $true
   Write-RimsRuntimeState -Paths $Paths -State $State
+  if (Test-Path -LiteralPath $frontendPaths.emulatorActivationGate -PathType Leaf) {
+    Remove-Item -LiteralPath $frontendPaths.emulatorActivationGate -Force
+  }
 
   $launch = Invoke-RimsAndroidEmulatorLaunchStateMachine `
     -State $State `
@@ -558,17 +702,13 @@ function Resolve-RimsAndroidRuntime {
       Write-RimsRuntimeState -Paths $Paths -State $current
     } `
     -SpawnAction {
-      $process = Start-Process `
-        -FilePath $emulator `
-        -ArgumentList @('-avd', $requested) `
-        -RedirectStandardOutput $frontendPaths.emulatorStdoutLog `
-        -RedirectStandardError $frontendPaths.emulatorStderrLog `
-        -WindowStyle Hidden `
-        -PassThru
-      return [pscustomobject]@{
-        ok = $true
-        identity = New-RimsFrontendProcessIdentity -Process $process
-      }
+      Start-RimsHiddenEmulatorLauncher `
+        -EmulatorExecutable $emulator `
+        -AvdName $requested `
+        -FrontendPaths $frontendPaths
+    } `
+    -ActivateAction {
+      [IO.File]::WriteAllText($frontendPaths.emulatorActivationGate, 'activate')
     } `
     -SerialAction {
       Wait-RimsAndroidSerialForAvd `
@@ -590,6 +730,7 @@ function Resolve-RimsAndroidRuntime {
   if (-not $launch.ok) {
     throw $launch.detail
   }
+  Remove-Item -LiteralPath $frontendPaths.emulatorActivationGate -Force -ErrorAction SilentlyContinue
   return [pscustomobject]@{
     ok = $true
     serial = $launch.serial
@@ -612,16 +753,28 @@ function Start-RimsManagedFrontend {
   $frontendDirectory = Join-Path $State.frontendPath 'rims_frontend'
   $frontendPaths = Get-RimsFrontendRuntimePaths -Paths $Paths
   Initialize-RimsRuntimeDirectories -Paths $Paths
-  if ($Target -eq 'web' -and (Test-RimsTcpPortListening -Port $FrontendPort)) {
-    return [pscustomobject]@{
-      ok = $false
-      detail = "Frontend port $FrontendPort is occupied by an unmanaged listener; it was left untouched."
-      cleanupPending = $false
-    }
-  }
-
-  $android = $null
+  $frontendPortLock = $null
   try {
+    if ($Target -eq 'web') {
+      $frontendPortLock = Enter-RimsFrontendPortLock -FrontendPort $FrontendPort
+      if (-not $frontendPortLock.ok) {
+        return [pscustomobject]@{
+          ok = $false
+          detail = $frontendPortLock.detail
+          cleanupPending = $false
+        }
+      }
+      if (Test-RimsTcpPortListening -Port $FrontendPort) {
+        return [pscustomobject]@{
+          ok = $false
+          detail = "Frontend port $FrontendPort is occupied by an unmanaged listener; it was left untouched."
+          cleanupPending = $false
+        }
+      }
+    }
+
+    $android = $null
+    try {
     if ($Target -eq 'android') {
       $android = Resolve-RimsAndroidRuntime `
         -State $State `
@@ -652,6 +805,7 @@ function Start-RimsManagedFrontend {
       windowsPid = $null
       windowsProcessStartTimeUtc = $null
       cleanupPending = $true
+      appStarted = $false
       stdoutLogPath = $frontendPaths.stdoutLog
       stderrLogPath = $frontendPaths.stderrLog
       commandSummary = "flutter run -d $(if ($Target -eq 'web') { 'web-server' } else { $serial })"
@@ -681,24 +835,33 @@ function Start-RimsManagedFrontend {
         if ($Target -eq 'web') {
           $deadline = (Get-Date).AddSeconds(90)
           do {
-            if (Test-RimsHealthEndpoint `
-                -Url $launchSpec.url `
-                -TimeoutSeconds 2) {
-              return $true
-            }
             if (-not (Test-RimsNestedOwnedProcess `
                 -State $current `
                 -PropertyName 'frontend')) {
               return $false
             }
+            $listenerOwned = Test-RimsFrontendPortOwnedByProcess `
+              -Port $FrontendPort `
+              -RootProcessId $current.frontend.windowsPid
+            if ($listenerOwned -eq $false) {
+              return $false
+            }
+            if (Test-RimsHealthEndpoint `
+                -Url $launchSpec.url `
+                -TimeoutSeconds 2) {
+              return $true
+            }
             Start-Sleep -Milliseconds 500
           } while ((Get-Date) -lt $deadline)
           return $false
         }
-        Start-Sleep -Seconds 3
-        return Test-RimsNestedOwnedProcess `
+        $started = Wait-RimsFlutterAppStarted `
           -State $current `
-          -PropertyName 'frontend'
+          -OutputPath $frontendPaths.stdoutLog
+        if ($started) {
+          $current.frontend.appStarted = $true
+        }
+        return $started
       } `
       -CleanupAction {
         param($current)
@@ -718,7 +881,7 @@ function Start-RimsManagedFrontend {
       }
       cleanupPending = $false
     }
-  } catch {
+    } catch {
     $failure = ConvertTo-RimsDiagnosticSummary `
       -StandardOutput '' `
       -StandardError $_.Exception.Message
@@ -745,11 +908,14 @@ function Start-RimsManagedFrontend {
     } catch {
       $cleanupOk = $false
     }
-    return [pscustomobject]@{
-      ok = $false
-      detail = $failure
-      cleanupPending = -not $cleanupOk
+      return [pscustomobject]@{
+        ok = $false
+        detail = $failure
+        cleanupPending = -not $cleanupOk
+      }
     }
+  } finally {
+    Exit-RimsFrontendPortLock -Lock $frontendPortLock
   }
 }
 
@@ -771,11 +937,12 @@ function Stop-RimsOwnedEmulator {
   return Stop-RimsNestedOwnedProcess -State $State -PropertyName 'emulator'
 }
 
-function Get-RimsUnmanagedAndroidEmulatorHealth {
+function Get-RimsAndroidEmulatorHealth {
   param(
     [Parameter(Mandatory = $true)][psobject]$Emulator,
     [Parameter(Mandatory = $true)][scriptblock]$OnlineSerialsAction,
-    [Parameter(Mandatory = $true)][scriptblock]$AvdNameAction
+    [Parameter(Mandatory = $true)][scriptblock]$AvdNameAction,
+    [Parameter(Mandatory = $true)][scriptblock]$BootCompletedAction
   )
 
   $serial = [string](Get-RimsObjectPropertyValue `
@@ -802,13 +969,19 @@ function Get-RimsUnmanagedAndroidEmulatorHealth {
       }
     }
     $actualAvd = [string](& $AvdNameAction $serial)
-    $healthy = $actualAvd -ceq $expectedAvd
+    if ($actualAvd -cne $expectedAvd) {
+      return [pscustomobject][ordered]@{
+        healthy = $false
+        detail = "Pre-existing Android device '$serial' does not match recorded AVD '$expectedAvd'."
+      }
+    }
+    $booted = [bool](& $BootCompletedAction $serial)
     return [pscustomobject][ordered]@{
-      healthy = $healthy
-      detail = if ($healthy) {
+      healthy = $booted
+      detail = if ($booted) {
         "Pre-existing Android device '$serial' is online with AVD '$expectedAvd'."
       } else {
-        "Pre-existing Android device '$serial' does not match recorded AVD '$expectedAvd'."
+        "Pre-existing Android device '$serial' has not completed boot."
       }
     }
   } catch {
@@ -817,6 +990,24 @@ function Get-RimsUnmanagedAndroidEmulatorHealth {
       detail = 'Pre-existing Android device could not be verified through adb.'
     }
   }
+}
+
+function Get-RimsUnmanagedAndroidEmulatorHealth {
+  param(
+    [Parameter(Mandatory = $true)][psobject]$Emulator,
+    [Parameter(Mandatory = $true)][scriptblock]$OnlineSerialsAction,
+    [Parameter(Mandatory = $true)][scriptblock]$AvdNameAction,
+    [AllowNull()][scriptblock]$BootCompletedAction
+  )
+
+  if ($null -eq $BootCompletedAction) {
+    $BootCompletedAction = { param($serial) return $true }
+  }
+  return Get-RimsAndroidEmulatorHealth `
+    -Emulator $Emulator `
+    -OnlineSerialsAction $OnlineSerialsAction `
+    -AvdNameAction $AvdNameAction `
+    -BootCompletedAction $BootCompletedAction
 }
 
 function Test-RimsStateOwnsAnyFrontendProcess {
@@ -913,8 +1104,17 @@ function Get-RimsFrontendComponent {
       -Value $frontend `
       -Name 'url' `
       -DefaultValue '')
-  $healthy = -not $cleanupPending -and $owned -and ($target -ne 'web' -or
-    (Test-RimsHealthEndpoint -Url $url -TimeoutSeconds 2))
+  $appStarted = [bool](Get-RimsObjectPropertyValue `
+      -Value $frontend `
+      -Name 'appStarted' `
+      -DefaultValue $false)
+  $healthy = -not $cleanupPending -and $owned -and $(if ($target -eq 'web') {
+      Test-RimsHealthEndpoint -Url $url -TimeoutSeconds 2
+    } elseif ($target -eq 'android') {
+      $appStarted
+    } else {
+      $true
+    })
   return [pscustomobject][ordered]@{
     name = 'frontend'
     ok = $healthy
@@ -958,14 +1158,12 @@ function Get-RimsEmulatorComponent {
   $verification = $null
   $running = if ($cleanupPending) {
     $false
-  } elseif ($owned) {
-    Test-RimsNestedOwnedProcess -State $State -PropertyName 'emulator'
   } else {
     try {
       $adb = Resolve-RimsAndroidTool `
         -CommandName 'adb.exe' `
         -SdkRelativePath 'platform-tools\adb.exe'
-      $verification = Get-RimsUnmanagedAndroidEmulatorHealth `
+      $verification = Get-RimsAndroidEmulatorHealth `
         -Emulator $emulator `
         -OnlineSerialsAction {
           Get-RimsAdbDeviceSerials -AdbExecutable $adb
@@ -973,8 +1171,20 @@ function Get-RimsEmulatorComponent {
         -AvdNameAction {
           param($serial)
           Get-RimsAndroidAvdName -AdbExecutable $adb -Serial $serial
+        } `
+        -BootCompletedAction {
+          param($serial)
+          $probe = Invoke-RimsExternalCommand `
+            -FilePath $adb `
+            -Arguments @('-s', $serial, 'shell', 'getprop', 'sys.boot_completed') `
+            -TimeoutSeconds 15
+          return $probe.ExitCode -eq 0 -and $probe.StandardOutput.Trim() -eq '1'
         }
-      $verification.healthy
+      $verification.healthy -and $(if ($owned) {
+          Test-RimsNestedOwnedProcess -State $State -PropertyName 'emulator'
+        } else {
+          $true
+        })
     } catch {
       $false
     }

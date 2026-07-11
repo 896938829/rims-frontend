@@ -348,3 +348,61 @@ function Exit-RimsLifecycleLock {
     -Value $true `
     -Force
 }
+
+function Enter-RimsFrontendPortLock {
+  param(
+    [ValidateRange(1, 65535)][int]$FrontendPort,
+    [ValidateRange(1, 60000)][int]$TimeoutMilliseconds = 5000
+  )
+
+  $mutex = $null
+  $ownsMutex = $false
+  try {
+    $mutex = New-Object Threading.Mutex($false, "Local\RimsLocal-frontend-port-$FrontendPort")
+    try {
+      $ownsMutex = $mutex.WaitOne($TimeoutMilliseconds)
+    } catch [Threading.AbandonedMutexException] {
+      $ownsMutex = $true
+    }
+    if (-not $ownsMutex) {
+      $mutex.Dispose()
+      return [pscustomobject][ordered]@{
+        ok = $false
+        busy = $true
+        detail = "Another local frontend lifecycle command owns port $FrontendPort."
+        mutex = $null
+        released = $true
+      }
+    }
+    return [pscustomobject][ordered]@{
+      ok = $true
+      busy = $false
+      detail = "Acquired exclusive frontend-port lock for $FrontendPort."
+      mutex = $mutex
+      released = $false
+    }
+  } catch {
+    if ($null -ne $mutex -and -not $ownsMutex) {
+      $mutex.Dispose()
+    }
+    return [pscustomobject][ordered]@{
+      ok = $false
+      busy = $false
+      detail = ConvertTo-RimsDiagnosticSummary -StandardOutput '' -StandardError $_.Exception.Message
+      mutex = $null
+      released = $true
+    }
+  }
+}
+
+function Exit-RimsFrontendPortLock {
+  param([AllowNull()][object]$Lock)
+
+  if ($null -eq $Lock -or [bool](Get-RimsObjectPropertyValue `
+      -Value $Lock -Name 'released' -DefaultValue $true)) {
+    return
+  }
+  try { $Lock.mutex.ReleaseMutex() } catch {}
+  try { $Lock.mutex.Dispose() } catch {}
+  $Lock | Add-Member -MemberType NoteProperty -Name released -Value $true -Force
+}

@@ -56,6 +56,14 @@ $expectedCommands = @(
 )
 $expectedTargets = @('none', 'web', 'android')
 
+$serialOnlyAndroidDevice = Test-RimsAndroidDeviceComponent `
+  -AndroidDevice 'emulator-5554' `
+  -OnlineDevices @('emulator-5554') `
+  -InstalledAvds @('Medium_Phone_API_36.1')
+Assert-False `
+  -Value $serialOnlyAndroidDevice.ok `
+  -Message 'Doctor accepted an adb serial where the AndroidDevice contract requires an AVD name.'
+
 $escapedArgumentHelp = Invoke-LocalCli -Arguments @(
   '-Command',
   'help',

@@ -47,6 +47,33 @@ try {
     -Expected (@($lockNames | Sort-Object) -join '|') `
     -Message 'Lifecycle locks are not acquired in deterministic name order.'
 
+  $frontendPortLock = Enter-RimsFrontendPortLock `
+    -FrontendPort $lockPort `
+    -TimeoutMilliseconds 1000
+  Assert-True `
+    -Value $frontendPortLock.ok `
+    -Message 'First frontend-port client could not acquire its lock.'
+  try {
+    $frontendPortProbe = Start-Job -ScriptBlock {
+      param($ModulePath, $Port)
+      . $ModulePath
+      $lock = Enter-RimsFrontendPortLock -FrontendPort $Port -TimeoutMilliseconds 300
+      try {
+        return [pscustomobject]@{ ok = $lock.ok; busy = $lock.busy }
+      } finally {
+        Exit-RimsFrontendPortLock -Lock $lock
+      }
+    } -ArgumentList $commonScript, $lockPort
+    [void](Wait-Job -Job $frontendPortProbe -Timeout 5)
+    $secondFrontendPortLock = Receive-Job -Job $frontendPortProbe
+    Remove-Job -Job $frontendPortProbe -Force
+    Assert-False `
+      -Value $secondFrontendPortLock.ok `
+      -Message 'A second controller acquired the same frontend-port lock.'
+  } finally {
+    Exit-RimsFrontendPortLock -Lock $frontendPortLock
+  }
+
   $firstLock = Enter-RimsLifecycleLock `
     -Paths $lockPaths `
     -BackendPort $lockPort `
