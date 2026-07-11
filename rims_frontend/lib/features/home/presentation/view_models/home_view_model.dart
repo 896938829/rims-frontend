@@ -68,6 +68,7 @@ final class HomeViewModel extends ChangeNotifier {
   int _inventoryTotal = 0;
   int _inventoryAlertTotal = 0;
   int _nonStandardInventoryTotal = 0;
+  int _recentDocumentsTotal = 0;
   bool _isLoading = false;
   String? _errorMessage;
   String? _recentDocumentsErrorMessage;
@@ -86,6 +87,7 @@ final class HomeViewModel extends ChangeNotifier {
   int get inventoryTotal => _inventoryTotal;
   int get inventoryAlertTotal => _inventoryAlertTotal;
   int get nonStandardInventoryTotal => _nonStandardInventoryTotal;
+  int get recentDocumentsTotal => _recentDocumentsTotal;
 
   List<HomeMetric> get metrics => [
     HomeMetric(
@@ -218,12 +220,14 @@ final class HomeViewModel extends ChangeNotifier {
     final documentsRepository = this.documentsRepository;
     if (documentsRepository == null) {
       _recentDocuments = const [];
+      _recentDocumentsTotal = 0;
       _recentDocumentsErrorMessage = null;
     } else {
       final documentsResult = await documentsRepository.listRecentDocuments();
       documentsResult.when(
-        success: (documents) {
-          _recentDocuments = documents;
+        success: (page) {
+          _recentDocuments = page.items;
+          _recentDocumentsTotal = page.total;
           _recentDocumentsErrorMessage = null;
         },
         failure: (value) {

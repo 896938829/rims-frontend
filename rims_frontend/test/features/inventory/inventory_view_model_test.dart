@@ -37,10 +37,9 @@ void main() {
     'load exposes recent transactions for the selected inventory item',
     () async {
       final documentsRepository = _FakeDocumentsRepository(
-        transactionResult: const Success<List<TransactionRecord>>([
-          _standardTransaction,
-          _otherTransaction,
-        ]),
+        transactionResult: Success(
+          _transactionPage([_standardTransaction, _otherTransaction]),
+        ),
       );
       final viewModel = InventoryViewModel(
         repository: _FakeInventoryRepository(
@@ -64,7 +63,7 @@ void main() {
         result: Future.value(Success(_inventoryPage([_standardItem]))),
       ),
       documentsRepository: _FakeDocumentsRepository(
-        transactionResult: const FailureResult<List<TransactionRecord>>(
+        transactionResult: const FailureResult<PageData<TransactionRecord>>(
           NetworkFailure(message: '流水加载失败'),
         ),
       ),
@@ -326,9 +325,7 @@ void main() {
         result: Future.value(Success(_inventoryPage([_standardItem]))),
       ),
       documentsRepository: _FakeDocumentsRepository(
-        transactionResult: const Success<List<TransactionRecord>>([
-          _standardTransaction,
-        ]),
+        transactionResult: Success(_transactionPage([_standardTransaction])),
       ),
     );
     await viewModel.load();
@@ -689,6 +686,10 @@ PageData<NonStandardInventoryItem> _nonStandardInventoryPage(
   );
 }
 
+PageData<TransactionRecord> _transactionPage(List<TransactionRecord> items) {
+  return PageData(items: items, total: items.length, page: 1, pageSize: 10);
+}
+
 final class _FakeInventoryRepository implements InventoryRepository {
   _FakeInventoryRepository({
     required this.result,
@@ -798,22 +799,29 @@ final class _SequentialInventoryRepository implements InventoryRepository {
 
 final class _FakeDocumentsRepository implements DocumentsRepository {
   _FakeDocumentsRepository({
-    this.transactionResult = const Success<List<TransactionRecord>>([]),
-  });
+    Result<PageData<TransactionRecord>>? transactionResult,
+  }) : transactionResult = transactionResult ?? Success(_transactionPage([]));
 
-  final Result<List<TransactionRecord>> transactionResult;
+  final Result<PageData<TransactionRecord>> transactionResult;
   int listTransactionsCallCount = 0;
 
   @override
-  Future<Result<List<DocumentRecord>>> listRecentDocuments({
+  Future<Result<PageData<DocumentRecord>>> listRecentDocuments({
     int? docType,
     int page = 1,
   }) async {
-    return const Success<List<DocumentRecord>>([]);
+    return Success(
+      PageData(
+        items: const <DocumentRecord>[],
+        total: 0,
+        page: 1,
+        pageSize: 10,
+      ),
+    );
   }
 
   @override
-  Future<Result<List<TransactionRecord>>> listTransactions({
+  Future<Result<PageData<TransactionRecord>>> listTransactions({
     String keyword = '',
     int page = 1,
   }) async {

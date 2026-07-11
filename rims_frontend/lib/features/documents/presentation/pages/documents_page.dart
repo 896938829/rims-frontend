@@ -230,15 +230,28 @@ final class _DocumentsPageState extends State<DocumentsPage> {
                     style: AppTextStyles.bodySmall,
                   ),
                 )
-              else if (visibleDocuments.isEmpty)
+              else if (visibleDocuments.isEmpty) ...[
                 RimsCard(
                   child: Text(
                     '没有匹配的单据',
                     textAlign: TextAlign.center,
                     style: AppTextStyles.bodySmall,
                   ),
-                )
-              else
+                ),
+                if (viewModel.recentDocuments.isNotEmpty) ...[
+                  const SizedBox(height: 10),
+                  _DocumentsPageControl(
+                    prefix: 'documents',
+                    hasMore: viewModel.hasMoreDocuments,
+                    isLoading: viewModel.isLoadingMoreDocuments,
+                    failure: viewModel.documentLoadMoreFailure?.message,
+                    loaded: viewModel.recentDocuments.length,
+                    total: viewModel.documentTotal,
+                    onLoadMore: viewModel.loadMoreDocuments,
+                    onRetry: viewModel.retryLoadMoreDocuments,
+                  ),
+                ],
+              ] else ...[
                 for (final document in visibleDocuments) ...[
                   _RecentDocumentCard(
                     document: document,
@@ -250,6 +263,18 @@ final class _DocumentsPageState extends State<DocumentsPage> {
                   if (document != visibleDocuments.last)
                     const SizedBox(height: 10),
                 ],
+                const SizedBox(height: 10),
+                _DocumentsPageControl(
+                  prefix: 'documents',
+                  hasMore: viewModel.hasMoreDocuments,
+                  isLoading: viewModel.isLoadingMoreDocuments,
+                  failure: viewModel.documentLoadMoreFailure?.message,
+                  loaded: viewModel.recentDocuments.length,
+                  total: viewModel.documentTotal,
+                  onLoadMore: viewModel.loadMoreDocuments,
+                  onRetry: viewModel.retryLoadMoreDocuments,
+                ),
+              ],
               const SizedBox(height: 20),
               const RimsSectionHeader(title: '库存流水'),
               const SizedBox(height: 10),
@@ -275,16 +300,89 @@ final class _DocumentsPageState extends State<DocumentsPage> {
                     style: AppTextStyles.bodySmall,
                   ),
                 )
-              else
+              else ...[
                 for (final transaction in viewModel.transactions) ...[
                   _TransactionRecordCard(transaction: transaction),
                   if (transaction != viewModel.transactions.last)
                     const SizedBox(height: 10),
                 ],
+                const SizedBox(height: 10),
+                _DocumentsPageControl(
+                  prefix: 'transactions',
+                  hasMore: viewModel.hasMoreTransactions,
+                  isLoading: viewModel.isLoadingMoreTransactions,
+                  failure: viewModel.transactionLoadMoreFailure?.message,
+                  loaded: viewModel.transactions.length,
+                  total: viewModel.transactionTotal,
+                  onLoadMore: viewModel.loadMoreTransactions,
+                  onRetry: viewModel.retryLoadMoreTransactions,
+                ),
+              ],
             ],
           ),
         );
       },
+    );
+  }
+}
+
+final class _DocumentsPageControl extends StatelessWidget {
+  const _DocumentsPageControl({
+    required this.prefix,
+    required this.hasMore,
+    required this.isLoading,
+    required this.failure,
+    required this.loaded,
+    required this.total,
+    required this.onLoadMore,
+    required this.onRetry,
+  });
+
+  final String prefix;
+  final bool hasMore;
+  final bool isLoading;
+  final String? failure;
+  final int loaded;
+  final int total;
+  final Future<void> Function() onLoadMore;
+  final Future<void> Function() onRetry;
+
+  @override
+  Widget build(BuildContext context) {
+    if (failure != null) {
+      return SizedBox(
+        height: 48,
+        width: double.infinity,
+        child: OutlinedButton.icon(
+          key: Key('$prefix-load-more-retry'),
+          onPressed: isLoading ? null : () => unawaited(onRetry()),
+          icon: const Icon(Icons.refresh, size: 18),
+          label: const Text('加载失败，重试'),
+        ),
+      );
+    }
+    if (hasMore) {
+      return SizedBox(
+        height: 48,
+        width: double.infinity,
+        child: TextButton.icon(
+          key: Key('$prefix-load-more-button'),
+          onPressed: isLoading ? null : () => unawaited(onLoadMore()),
+          icon: isLoading
+              ? const SizedBox.square(
+                  dimension: 18,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.keyboard_arrow_down, size: 20),
+          label: Text(isLoading ? '正在加载...' : '加载更多 ($loaded/$total)'),
+        ),
+      );
+    }
+    return SizedBox(
+      key: Key('$prefix-page-end'),
+      height: 48,
+      width: double.infinity,
+      child: Center(child: Text('已加载全部 $loaded 条')),
     );
   }
 }

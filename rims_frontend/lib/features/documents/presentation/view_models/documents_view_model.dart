@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import '../../../../core/result/result.dart';
+import '../../../../core/result/failure.dart';
 import '../../../../core/resources/app_icons.dart';
 import '../../../auth/domain/entities/warehouse.dart';
 import '../../domain/entities/document_data.dart';
@@ -84,6 +85,18 @@ final class DocumentsViewModel extends ChangeNotifier {
   bool _isLoadingReturnSources = false;
   bool _hasLoadedReturnSourceDocuments = false;
   bool _isSubmitting = false;
+  int _documentPage = 0;
+  int _documentTotal = 0;
+  int _documentGeneration = 0;
+  bool _isLoadingMoreDocuments = false;
+  bool _documentsReachedEnd = false;
+  Failure? _documentLoadMoreFailure;
+  int _transactionPage = 0;
+  int _transactionTotal = 0;
+  int _transactionGeneration = 0;
+  bool _isLoadingMoreTransactions = false;
+  bool _transactionsReachedEnd = false;
+  Failure? _transactionLoadMoreFailure;
 
   List<DocumentAction> get actions => _actions
       .where(
@@ -171,6 +184,20 @@ final class DocumentsViewModel extends ChangeNotifier {
   bool get isLoadingNonStandardInventory => _isLoadingNonStandardInventory;
   bool get isLoadingReturnSources => _isLoadingReturnSources;
   bool get isSubmitting => _isSubmitting;
+  int get documentTotal => _documentTotal;
+  bool get hasMoreDocuments =>
+      _documentPage > 0 &&
+      !_documentsReachedEnd &&
+      _recentDocuments.length < _documentTotal;
+  bool get isLoadingMoreDocuments => _isLoadingMoreDocuments;
+  Failure? get documentLoadMoreFailure => _documentLoadMoreFailure;
+  int get transactionTotal => _transactionTotal;
+  bool get hasMoreTransactions =>
+      _transactionPage > 0 &&
+      !_transactionsReachedEnd &&
+      _transactions.length < _transactionTotal;
+  bool get isLoadingMoreTransactions => _isLoadingMoreTransactions;
+  Failure? get transactionLoadMoreFailure => _transactionLoadMoreFailure;
   String get quantityInputLabel => isStocktakeAction ? '实盘数量' : '数量';
   String get quantityInputHint => isStocktakeAction ? '输入实盘数量' : '输入数量';
 
@@ -222,7 +249,7 @@ final class DocumentsViewModel extends ChangeNotifier {
 
     _selectedDocumentTypeFilter = docType;
     notifyListeners();
-    unawaited(load());
+    unawaited(_loadDocumentsFirstPage());
   }
 
   void selectDocumentStatusFilter(String? status) {
@@ -359,21 +386,31 @@ final class DocumentsViewModel extends ChangeNotifier {
     _returnSourceError = null;
     notifyListeners();
 
-    final result = await repository.listRecentDocuments(docType: 2);
-    if (_selectedAction != selectedAction || !isReturnAction) {
-      return;
+    final documents = <DocumentRecord>[];
+    var pageNumber = 1;
+    while (true) {
+      final result = await repository.listRecentDocuments(
+        docType: 2,
+        page: pageNumber,
+      );
+      if (_selectedAction != selectedAction || !isReturnAction) return;
+      switch (result) {
+        case Success(:final data):
+          documents.addAll(data.items);
+          if (data.items.isEmpty || !data.hasNextPage) {
+            _returnSourceDocuments = _eligibleReturnSourceDocuments(documents);
+            _returnSourceError = null;
+            pageNumber = 0;
+          } else {
+            pageNumber = data.nextPage;
+          }
+        case FailureResult(:final failure):
+          _returnSourceDocuments = const [];
+          _returnSourceError = failure.message;
+          pageNumber = 0;
+      }
+      if (pageNumber == 0) break;
     }
-
-    result.when(
-      success: (documents) {
-        _returnSourceDocuments = _eligibleReturnSourceDocuments(documents);
-        _returnSourceError = null;
-      },
-      failure: (failure) {
-        _returnSourceDocuments = const [];
-        _returnSourceError = failure.message;
-      },
-    );
     _clearStaleReturnSourceDocument();
 
     _isLoadingReturnSources = false;
@@ -446,35 +483,158 @@ final class DocumentsViewModel extends ChangeNotifier {
     _transactionError = null;
     notifyListeners();
 
-    final documentsResult = await repository.listRecentDocuments(
-      docType: _selectedDocumentTypeFilter,
-    );
-
-    documentsResult.when(
-      success: (documents) {
-        _recentDocuments = documents;
-        _clearStaleReturnSourceDocument();
-        _errorMessage = null;
-      },
-      failure: (failure) {
-        _errorMessage = failure.message;
-      },
-    );
-
-    final transactionsResult = await repository.listTransactions();
-
-    transactionsResult.when(
-      success: (transactions) {
-        _transactions = transactions;
-        _transactionError = null;
-      },
-      failure: (failure) {
-        _transactionError = failure.message;
-      },
-    );
+    await _loadDocumentsFirstPage();
+    await _loadTransactionsFirstPage();
 
     _isLoading = false;
     notifyListeners();
+  }
+
+  Future<void> _loadDocumentsFirstPage() async {
+    final repository = this.repository;
+    if (repository == null) return;
+    final generation = ++_documentGeneration;
+    final docType = _selectedDocumentTypeFilter;
+    _documentPage = 0;
+    _documentTotal = 0;
+    _isLoadingMoreDocuments = false;
+    _documentsReachedEnd = false;
+    _documentLoadMoreFailure = null;
+    final result = await repository.listRecentDocuments(docType: docType);
+    if (generation != _documentGeneration ||
+        docType != _selectedDocumentTypeFilter) {
+      return;
+    }
+    result.when(
+      success: (page) {
+        _recentDocuments = _mergeById(const [], page.items, (item) => item.id);
+        _documentPage = page.page;
+        _documentTotal = page.total;
+        _documentsReachedEnd = page.items.isEmpty || !page.hasNextPage;
+        _clearStaleReturnSourceDocument();
+        _errorMessage = null;
+      },
+      failure: (failure) => _errorMessage = failure.message,
+    );
+    notifyListeners();
+  }
+
+  Future<void> _loadTransactionsFirstPage() async {
+    final repository = this.repository;
+    if (repository == null) return;
+    final generation = ++_transactionGeneration;
+    _transactionPage = 0;
+    _transactionTotal = 0;
+    _isLoadingMoreTransactions = false;
+    _transactionsReachedEnd = false;
+    _transactionLoadMoreFailure = null;
+    final result = await repository.listTransactions();
+    if (generation != _transactionGeneration) return;
+    result.when(
+      success: (page) {
+        _transactions = _mergeById(const [], page.items, (item) => item.id);
+        _transactionPage = page.page;
+        _transactionTotal = page.total;
+        _transactionsReachedEnd = page.items.isEmpty || !page.hasNextPage;
+        _transactionError = null;
+      },
+      failure: (failure) => _transactionError = failure.message,
+    );
+    notifyListeners();
+  }
+
+  Future<void> loadMoreDocuments() async {
+    final repository = this.repository;
+    if (repository == null || _isLoadingMoreDocuments || !hasMoreDocuments) {
+      return;
+    }
+    final generation = _documentGeneration;
+    final docType = _selectedDocumentTypeFilter;
+    _isLoadingMoreDocuments = true;
+    _documentLoadMoreFailure = null;
+    notifyListeners();
+    final result = await repository.listRecentDocuments(
+      docType: docType,
+      page: _documentPage + 1,
+    );
+    if (generation != _documentGeneration ||
+        docType != _selectedDocumentTypeFilter) {
+      return;
+    }
+    result.when(
+      success: (page) {
+        _recentDocuments = _mergeById(
+          _recentDocuments,
+          page.items,
+          (item) => item.id,
+        );
+        _documentPage = page.page;
+        _documentTotal = page.total;
+        _documentsReachedEnd = page.items.isEmpty || !page.hasNextPage;
+      },
+      failure: (failure) => _documentLoadMoreFailure = failure,
+    );
+    _isLoadingMoreDocuments = false;
+    notifyListeners();
+  }
+
+  Future<void> retryLoadMoreDocuments() => loadMoreDocuments();
+
+  Future<void> loadMoreTransactions() async {
+    final repository = this.repository;
+    if (repository == null ||
+        _isLoadingMoreTransactions ||
+        !hasMoreTransactions) {
+      return;
+    }
+    final generation = _transactionGeneration;
+    _isLoadingMoreTransactions = true;
+    _transactionLoadMoreFailure = null;
+    notifyListeners();
+    final result = await repository.listTransactions(
+      page: _transactionPage + 1,
+    );
+    if (generation != _transactionGeneration) return;
+    result.when(
+      success: (page) {
+        _transactions = _mergeById(
+          _transactions,
+          page.items,
+          (item) => item.id,
+        );
+        _transactionPage = page.page;
+        _transactionTotal = page.total;
+        _transactionsReachedEnd = page.items.isEmpty || !page.hasNextPage;
+      },
+      failure: (failure) => _transactionLoadMoreFailure = failure,
+    );
+    _isLoadingMoreTransactions = false;
+    notifyListeners();
+  }
+
+  Future<void> retryLoadMoreTransactions() => loadMoreTransactions();
+
+  List<T> _mergeById<T>(
+    List<T> existing,
+    List<T> incoming,
+    int Function(T item) idOf,
+  ) {
+    final merged = List<T>.of(existing);
+    final indexes = <int, int>{
+      for (var index = 0; index < merged.length; index += 1)
+        idOf(merged[index]): index,
+    };
+    for (final item in incoming) {
+      final id = idOf(item);
+      final index = indexes[id];
+      if (index == null) {
+        indexes[id] = merged.length;
+        merged.add(item);
+      } else {
+        merged[index] = item;
+      }
+    }
+    return List<T>.unmodifiable(merged);
   }
 
   void _clearStaleReturnSourceDocument() {
@@ -536,6 +696,7 @@ final class DocumentsViewModel extends ChangeNotifier {
     }
 
     _isSubmitting = true;
+    final hadLoadedDocumentPage = _documentPage > 0;
     _formError = null;
     notifyListeners();
 
@@ -581,6 +742,10 @@ final class DocumentsViewModel extends ChangeNotifier {
         _formError = failure.message;
       },
     );
+
+    if (created && hadLoadedDocumentPage) {
+      await _loadDocumentsFirstPage();
+    }
 
     _isSubmitting = false;
     notifyListeners();

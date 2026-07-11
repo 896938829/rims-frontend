@@ -1,4 +1,5 @@
 import '../../../../core/result/result.dart';
+import '../../../../core/pagination/page_data.dart';
 import '../../domain/entities/document_data.dart';
 import '../../domain/repositories/documents_repository.dart';
 import '../datasources/documents_remote_datasource.dart';
@@ -9,7 +10,7 @@ final class DocumentsRepositoryImpl implements DocumentsRepository {
   final DocumentsRemoteDataSource remoteDataSource;
 
   @override
-  Future<Result<List<DocumentRecord>>> listRecentDocuments({
+  Future<Result<PageData<DocumentRecord>>> listRecentDocuments({
     int? docType,
     int page = 1,
   }) async {
@@ -19,15 +20,15 @@ final class DocumentsRepositoryImpl implements DocumentsRepository {
     );
 
     return result.when(
-      success: (models) => Success<List<DocumentRecord>>(
-        models.map((model) => model.toEntity()).toList(growable: false),
+      success: (page) => Success<PageData<DocumentRecord>>(
+        page.map((model) => model.toEntity()),
       ),
-      failure: FailureResult<List<DocumentRecord>>.new,
+      failure: FailureResult<PageData<DocumentRecord>>.new,
     );
   }
 
   @override
-  Future<Result<List<TransactionRecord>>> listTransactions({
+  Future<Result<PageData<TransactionRecord>>> listTransactions({
     String keyword = '',
     int page = 1,
   }) async {
@@ -37,10 +38,10 @@ final class DocumentsRepositoryImpl implements DocumentsRepository {
     );
 
     return result.when(
-      success: (models) => Success<List<TransactionRecord>>(
-        models.map((model) => model.toEntity()).toList(growable: false),
+      success: (page) => Success<PageData<TransactionRecord>>(
+        page.map((model) => model.toEntity()),
       ),
-      failure: FailureResult<List<TransactionRecord>>.new,
+      failure: FailureResult<PageData<TransactionRecord>>.new,
     );
   }
 

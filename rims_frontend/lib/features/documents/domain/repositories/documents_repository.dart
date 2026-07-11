@@ -1,13 +1,14 @@
 import '../../../../core/result/result.dart';
+import '../../../../core/pagination/page_data.dart';
 import '../entities/document_data.dart';
 
 abstract interface class DocumentsRepository {
-  Future<Result<List<DocumentRecord>>> listRecentDocuments({
+  Future<Result<PageData<DocumentRecord>>> listRecentDocuments({
     int? docType,
     int page = 1,
   });
 
-  Future<Result<List<TransactionRecord>>> listTransactions({
+  Future<Result<PageData<TransactionRecord>>> listTransactions({
     String keyword = '',
     int page = 1,
   });

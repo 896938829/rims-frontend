@@ -853,19 +853,19 @@ final class _FakeDocumentsRepository implements DocumentsRepository {
   const _FakeDocumentsRepository();
 
   @override
-  Future<Result<List<DocumentRecord>>> listRecentDocuments({
+  Future<Result<PageData<DocumentRecord>>> listRecentDocuments({
     int? docType,
     int page = 1,
   }) async {
-    return const Success<List<DocumentRecord>>([_recentDocument]);
+    return Success(_homePage([_recentDocument]));
   }
 
   @override
-  Future<Result<List<TransactionRecord>>> listTransactions({
+  Future<Result<PageData<TransactionRecord>>> listTransactions({
     String keyword = '',
     int page = 1,
   }) async {
-    return const Success<List<TransactionRecord>>([]);
+    return Success(_homePage([]));
   }
 
   @override
@@ -895,21 +895,21 @@ final class _FailingDocumentsRepository implements DocumentsRepository {
   const _FailingDocumentsRepository();
 
   @override
-  Future<Result<List<DocumentRecord>>> listRecentDocuments({
+  Future<Result<PageData<DocumentRecord>>> listRecentDocuments({
     int? docType,
     int page = 1,
   }) async {
-    return const FailureResult<List<DocumentRecord>>(
+    return const FailureResult<PageData<DocumentRecord>>(
       NetworkFailure(message: '最近单据不可用'),
     );
   }
 
   @override
-  Future<Result<List<TransactionRecord>>> listTransactions({
+  Future<Result<PageData<TransactionRecord>>> listTransactions({
     String keyword = '',
     int page = 1,
   }) async {
-    return const Success<List<TransactionRecord>>([]);
+    return Success(_homePage([]));
   }
 
   @override
@@ -939,26 +939,26 @@ final class _SequentialHomeDocumentsRepository implements DocumentsRepository {
   int listRecentDocumentsCallCount = 0;
 
   @override
-  Future<Result<List<DocumentRecord>>> listRecentDocuments({
+  Future<Result<PageData<DocumentRecord>>> listRecentDocuments({
     int? docType,
     int page = 1,
   }) async {
     listRecentDocumentsCallCount += 1;
     if (listRecentDocumentsCallCount == 1) {
-      return const Success<List<DocumentRecord>>([_recentDocument]);
+      return Success(_homePage([_recentDocument]));
     }
 
-    return const FailureResult<List<DocumentRecord>>(
+    return const FailureResult<PageData<DocumentRecord>>(
       NetworkFailure(message: '最近单据刷新失败'),
     );
   }
 
   @override
-  Future<Result<List<TransactionRecord>>> listTransactions({
+  Future<Result<PageData<TransactionRecord>>> listTransactions({
     String keyword = '',
     int page = 1,
   }) async {
-    return const Success<List<TransactionRecord>>([]);
+    return Success(_homePage([]));
   }
 
   @override

@@ -1314,6 +1314,153 @@ void main() {
     expect(find.text('流水加载失败'), findsNothing);
     expect(find.text('销售单 · SO-20260626-001'), findsOneWidget);
   });
+
+  test('documents and transactions expose independent page state', () async {
+    final repository = _PagedDocumentsRepository(
+      documentResults: [
+        Success(_documentPage([_remoteDocument], total: 21)),
+      ],
+      transactionResults: [
+        Success(_transactionPage([_transactionRecord], total: 12)),
+      ],
+    );
+    final viewModel = DocumentsViewModel(repository: repository);
+
+    await viewModel.load();
+
+    expect(viewModel.documentTotal, 21);
+    expect(viewModel.hasMoreDocuments, isTrue);
+    expect(viewModel.transactionTotal, 12);
+    expect(viewModel.hasMoreTransactions, isTrue);
+    expect(repository.documentPages, [1]);
+    expect(repository.transactionPages, [1]);
+  });
+
+  test(
+    'loading more documents appends by ID without reloading transactions',
+    () async {
+      const updatedDocument = DocumentRecord(
+        id: 1,
+        docType: 2,
+        title: '销售出库',
+        number: 'SO-20260626-001',
+        status: '已完成',
+      );
+      final repository = _PagedDocumentsRepository(
+        documentResults: [
+          Success(_documentPage([_remoteDocument], total: 21)),
+          Success(
+            _documentPage(
+              [updatedDocument, _completedInboundDocument],
+              total: 21,
+              page: 2,
+            ),
+          ),
+        ],
+        transactionResults: [Success(_transactionPage([]))],
+      );
+      final viewModel = DocumentsViewModel(repository: repository);
+      await viewModel.load();
+
+      await viewModel.loadMoreDocuments();
+
+      expect(viewModel.recentDocuments, [
+        updatedDocument,
+        _completedInboundDocument,
+      ]);
+      expect(repository.documentPages, [1, 2]);
+      expect(repository.transactionPages, [1]);
+    },
+  );
+
+  test(
+    'transaction load-more failure retries same page independently',
+    () async {
+      final repository = _PagedDocumentsRepository(
+        documentResults: [
+          Success(_documentPage([_remoteDocument])),
+        ],
+        transactionResults: [
+          Success(_transactionPage([_transactionRecord], total: 12)),
+          const FailureResult<PageData<TransactionRecord>>(
+            NetworkFailure(message: '下一页流水失败'),
+          ),
+          Success(_transactionPage([], total: 12, page: 2)),
+        ],
+      );
+      final viewModel = DocumentsViewModel(repository: repository);
+      await viewModel.load();
+
+      await viewModel.loadMoreTransactions();
+      expect(viewModel.transactions, [_transactionRecord]);
+      expect(viewModel.transactionLoadMoreFailure?.message, '下一页流水失败');
+      await viewModel.retryLoadMoreTransactions();
+
+      expect(repository.transactionPages, [1, 2, 2]);
+      expect(repository.documentPages, [1]);
+      expect(viewModel.hasMoreTransactions, isFalse);
+    },
+  );
+
+  test('document type filter resets only the document stream', () async {
+    final repository = _PagedDocumentsRepository(
+      documentResults: [
+        Success(_documentPage([_remoteDocument], total: 21)),
+        Success(_documentPage([_completedInboundDocument])),
+      ],
+      transactionResults: [
+        Success(_transactionPage([_transactionRecord])),
+      ],
+    );
+    final viewModel = DocumentsViewModel(repository: repository);
+    await viewModel.load();
+
+    viewModel.selectDocumentTypeFilter(1);
+    await repository.waitForDocumentCalls(2);
+
+    expect(repository.documentPages, [1, 1]);
+    expect(repository.documentTypes, [null, 1]);
+    expect(repository.transactionPages, [1]);
+  });
+
+  test('return source lookup traverses every sales document page', () async {
+    final repository = _PagedDocumentsRepository(
+      documentResults: [
+        Success(_documentPage([_draftSalesDocument], total: 11)),
+        Success(_documentPage([_completedSalesDocument], total: 11, page: 2)),
+      ],
+      transactionResults: const [],
+    );
+    final viewModel = DocumentsViewModel(repository: repository)
+      ..selectActionByLabel('退货入库');
+
+    await viewModel.loadReturnSourceDocuments();
+
+    expect(viewModel.returnSourceDocuments, [_completedSalesDocument]);
+    expect(repository.documentPages, [1, 2]);
+    expect(repository.documentTypes, [2, 2]);
+  });
+
+  test('creation refreshes authoritative document page one', () async {
+    final repository = _FakeDocumentsRepository(
+      listResults: const [
+        Success<List<DocumentRecord>>([_remoteDocument]),
+        Success<List<DocumentRecord>>([_completedInboundDocument]),
+      ],
+    );
+    final viewModel = DocumentsViewModel(
+      repository: repository,
+      inventoryRepository: _FakeInventoryRepository(),
+    )..updateQuantity('3');
+    await viewModel.load();
+    await viewModel.searchProducts('矿泉水');
+    viewModel.selectProduct(_standardItem);
+
+    expect(await viewModel.createDocument(), isTrue);
+
+    expect(repository.listCallCount, 2);
+    expect(viewModel.recentDocuments, [_completedInboundDocument]);
+  });
 }
 
 const _remoteDocument = DocumentRecord(
@@ -1561,7 +1708,7 @@ final class _FakeDocumentsRepository implements DocumentsRepository {
   final List<int?> listDocTypes = [];
 
   @override
-  Future<Result<List<DocumentRecord>>> listRecentDocuments({
+  Future<Result<PageData<DocumentRecord>>> listRecentDocuments({
     int? docType,
     int page = 1,
   }) async {
@@ -1570,10 +1717,10 @@ final class _FakeDocumentsRepository implements DocumentsRepository {
     final callIndex = listCallCount;
     listCallCount += 1;
     if (callIndex < listResults.length) {
-      return listResults[callIndex];
+      return _pageResult(listResults[callIndex], page: page);
     }
 
-    return listResult;
+    return _pageResult(listResult, page: page);
   }
 
   @override
@@ -1605,17 +1752,17 @@ final class _FakeDocumentsRepository implements DocumentsRepository {
   }
 
   @override
-  Future<Result<List<TransactionRecord>>> listTransactions({
+  Future<Result<PageData<TransactionRecord>>> listTransactions({
     String keyword = '',
     int page = 1,
   }) async {
     final callIndex = _transactionResultCallCount;
     _transactionResultCallCount += 1;
     if (callIndex < transactionResults.length) {
-      return transactionResults[callIndex];
+      return _pageResult(transactionResults[callIndex], page: page);
     }
 
-    return transactionResult;
+    return _pageResult(transactionResult, page: page);
   }
 }
 
@@ -1628,29 +1775,29 @@ final class _RetryDocumentsRepository implements DocumentsRepository {
   }
 
   @override
-  Future<Result<List<DocumentRecord>>> listRecentDocuments({
+  Future<Result<PageData<DocumentRecord>>> listRecentDocuments({
     int? docType,
     int page = 1,
   }) async {
     listCallCount += 1;
     if (listCallCount == 1) {
-      return const FailureResult<List<DocumentRecord>>(
+      return const FailureResult<PageData<DocumentRecord>>(
         NetworkFailure(message: '单据列表加载失败'),
       );
     }
 
     _retryDocumentsCompleter = Completer<List<DocumentRecord>>();
-    return Success<List<DocumentRecord>>(
-      await _retryDocumentsCompleter!.future,
+    return Success<PageData<DocumentRecord>>(
+      _documentPage(await _retryDocumentsCompleter!.future, page: page),
     );
   }
 
   @override
-  Future<Result<List<TransactionRecord>>> listTransactions({
+  Future<Result<PageData<TransactionRecord>>> listTransactions({
     String keyword = '',
     int page = 1,
   }) async {
-    return const Success<List<TransactionRecord>>([_transactionRecord]);
+    return Success(_transactionPage([_transactionRecord], page: page));
   }
 
   @override
@@ -1685,22 +1832,118 @@ final class _RetryTransactionsRepository extends _FakeDocumentsRepository {
   }
 
   @override
-  Future<Result<List<TransactionRecord>>> listTransactions({
+  Future<Result<PageData<TransactionRecord>>> listTransactions({
     String keyword = '',
     int page = 1,
   }) async {
     transactionCallCount += 1;
     if (transactionCallCount == 1) {
-      return const FailureResult<List<TransactionRecord>>(
+      return const FailureResult<PageData<TransactionRecord>>(
         NetworkFailure(message: '流水加载失败'),
       );
     }
 
     _retryTransactionsCompleter = Completer<List<TransactionRecord>>();
-    return Success<List<TransactionRecord>>(
-      await _retryTransactionsCompleter!.future,
+    return Success<PageData<TransactionRecord>>(
+      _transactionPage(await _retryTransactionsCompleter!.future, page: page),
     );
   }
+}
+
+final class _PagedDocumentsRepository implements DocumentsRepository {
+  _PagedDocumentsRepository({
+    required this.documentResults,
+    required this.transactionResults,
+  });
+
+  final List<Result<PageData<DocumentRecord>>> documentResults;
+  final List<Result<PageData<TransactionRecord>>> transactionResults;
+  final List<int> documentPages = [];
+  final List<int?> documentTypes = [];
+  final List<int> transactionPages = [];
+  int _documentIndex = 0;
+  int _transactionIndex = 0;
+
+  Future<void> waitForDocumentCalls(int count) async {
+    while (documentPages.length < count) {
+      await Future<void>.delayed(Duration.zero);
+    }
+  }
+
+  @override
+  Future<Result<PageData<DocumentRecord>>> listRecentDocuments({
+    int? docType,
+    int page = 1,
+  }) async {
+    documentPages.add(page);
+    documentTypes.add(docType);
+    final result = documentResults[_documentIndex];
+    _documentIndex += 1;
+    return result;
+  }
+
+  @override
+  Future<Result<PageData<TransactionRecord>>> listTransactions({
+    String keyword = '',
+    int page = 1,
+  }) async {
+    transactionPages.add(page);
+    final result = transactionResults[_transactionIndex];
+    _transactionIndex += 1;
+    return result;
+  }
+
+  @override
+  Future<Result<DocumentRecord>> createDocument(
+    CreateDocumentRequest request,
+  ) async => const Success(_remoteDocument);
+
+  @override
+  Future<Result<void>> completeDocument(int id) async =>
+      const Success<void>(null);
+
+  @override
+  Future<Result<void>> confirmDocument(int id) async =>
+      const Success<void>(null);
+
+  @override
+  Future<Result<void>> settleDocument(int id) async =>
+      const Success<void>(null);
+}
+
+Result<PageData<T>> _pageResult<T>(Result<List<T>> result, {int page = 1}) {
+  return result.when(
+    success: (items) => Success(
+      PageData(items: items, total: items.length, page: page, pageSize: 10),
+    ),
+    failure: FailureResult<PageData<T>>.new,
+  );
+}
+
+PageData<DocumentRecord> _documentPage(
+  List<DocumentRecord> items, {
+  int? total,
+  int page = 1,
+}) {
+  return PageData(
+    items: items,
+    total: total ?? items.length,
+    page: page,
+    pageSize: 10,
+  );
+}
+
+PageData<TransactionRecord> _transactionPage(
+  List<TransactionRecord> items, {
+  int? total,
+  int page = 1,
+}) {
+  return PageData(
+    items: items,
+    total: total ?? items.length,
+    page: page,
+    pageSize: 10,
+  );
 }
 
 PageData<InventoryItem> _inventoryPage(List<InventoryItem> items) {

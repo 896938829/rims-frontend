@@ -3,18 +3,20 @@ import 'package:dio/dio.dart';
 import '../../../../core/network/api_client.dart';
 import '../../../../core/network/api_endpoints.dart';
 import '../../../../core/network/api_envelope.dart';
+import '../../../../core/network/api_page_parser.dart';
+import '../../../../core/pagination/page_data.dart';
 import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
 import '../../domain/entities/document_data.dart';
 import '../models/document_models.dart';
 
 abstract interface class DocumentsRemoteDataSource {
-  Future<Result<List<DocumentRecordModel>>> listRecentDocuments({
+  Future<Result<PageData<DocumentRecordModel>>> listRecentDocuments({
     int? docType,
     int page = 1,
   });
 
-  Future<Result<List<TransactionRecordModel>>> listTransactions({
+  Future<Result<PageData<TransactionRecordModel>>> listTransactions({
     String keyword = '',
     int page = 1,
   });
@@ -36,7 +38,7 @@ final class ApiDocumentsRemoteDataSource implements DocumentsRemoteDataSource {
   final ApiClient _apiClient;
 
   @override
-  Future<Result<List<DocumentRecordModel>>> listRecentDocuments({
+  Future<Result<PageData<DocumentRecordModel>>> listRecentDocuments({
     int? docType,
     int page = 1,
   }) async {
@@ -54,7 +56,7 @@ final class ApiDocumentsRemoteDataSource implements DocumentsRemoteDataSource {
   }
 
   @override
-  Future<Result<List<TransactionRecordModel>>> listTransactions({
+  Future<Result<PageData<TransactionRecordModel>>> listTransactions({
     String keyword = '',
     int page = 1,
   }) async {
@@ -212,21 +214,15 @@ final class ApiDocumentsRemoteDataSource implements DocumentsRemoteDataSource {
     );
   }
 
-  List<DocumentRecordModel> _parseDocuments(Object? data) {
-    final rawList = _requiredList(data, 'documents');
-
-    return _requiredMapItems(
-      rawList,
-      'documents',
-    ).map((json) => DocumentRecordModel.fromJson(json)).toList(growable: false);
+  PageData<DocumentRecordModel> _parseDocuments(Object? data) {
+    return parseApiPage(_requiredPageData(data), DocumentRecordModel.fromJson);
   }
 
-  List<TransactionRecordModel> _parseTransactions(Object? data) {
-    final rawList = _requiredList(data, 'transactions');
-
-    return _requiredMapItems(rawList, 'transactions')
-        .map((json) => TransactionRecordModel.fromJson(json))
-        .toList(growable: false);
+  PageData<TransactionRecordModel> _parseTransactions(Object? data) {
+    return parseApiPage(
+      _requiredPageData(data),
+      TransactionRecordModel.fromJson,
+    );
   }
 
   Map<dynamic, dynamic> _requiredMap(Object? data, String name) {
@@ -237,29 +233,10 @@ final class ApiDocumentsRemoteDataSource implements DocumentsRemoteDataSource {
     throw FormatException('Invalid $name response');
   }
 
-  List<dynamic> _requiredList(Object? data, String name) {
-    return switch (data) {
-      {'list': final List<dynamic> list} => list,
-      {'items': final List<dynamic> list} => list,
-      {'records': final List<dynamic> list} => list,
-      {'rows': final List<dynamic> list} => list,
-      final List<dynamic> list => list,
-      _ => throw FormatException('Invalid $name response'),
-    };
-  }
-
-  List<Map<dynamic, dynamic>> _requiredMapItems(
-    List<dynamic> list,
-    String name,
-  ) {
-    return list
-        .map((item) {
-          if (item is Map) {
-            return Map<dynamic, dynamic>.from(item);
-          }
-
-          throw FormatException('Invalid $name response');
-        })
-        .toList(growable: false);
+  Map<String, Object?> _requiredPageData(Object? data) {
+    if (data is Map<String, Object?>) {
+      return data;
+    }
+    throw const FormatException('Paged API data.list must be a JSON list.');
   }
 }

@@ -10,7 +10,7 @@ void main() {
   test('listRecentDocuments uses backend pageSize query parameter', () async {
     final adapter = _CapturingAdapter(
       body:
-          '{"code":0,"message":"ok","data":{"list":[{"id":7,"docNo":"XS-20260627-001","docType":2,"docTypeName":"销售单","statusName":"待提交"}]}}',
+          '{"code":0,"message":"ok","data":{"list":[{"id":7,"docNo":"XS-20260627-001","docType":2,"docTypeName":"销售单","statusName":"待提交"}],"total":21,"page":1,"pageSize":10}}',
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiDocumentsRemoteDataSource(
@@ -22,12 +22,19 @@ void main() {
     expect(result.isSuccess, isTrue);
     expect(adapter.lastPath, '/documents');
     expect(adapter.lastQueryParameters, {'page': 1, 'pageSize': 10});
+    result.when(
+      success: (page) {
+        expect(page.items.single.id, 7);
+        expect(page.total, 21);
+      },
+      failure: (failure) => fail(failure.message),
+    );
   });
 
   test('listRecentDocuments sends selected document type parameter', () async {
     final adapter = _CapturingAdapter(
       body:
-          '{"code":0,"message":"ok","data":{"list":[{"id":7,"docNo":"XS-20260627-001","docType":2,"docTypeName":"销售单","statusName":"待提交"}]}}',
+          '{"code":0,"message":"ok","data":{"list":[{"id":7,"docNo":"XS-20260627-001","docType":2,"docTypeName":"销售单","statusName":"待提交"}],"total":21,"page":3,"pageSize":10}}',
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiDocumentsRemoteDataSource(
@@ -43,6 +50,13 @@ void main() {
       'pageSize': 10,
       'docType': 2,
     });
+    result.when(
+      success: (page) {
+        expect(page.page, 3);
+        expect(page.pageSize, 10);
+      },
+      failure: (failure) => fail(failure.message),
+    );
   });
 
   test(
@@ -63,7 +77,7 @@ void main() {
         success: (_) =>
             fail('listRecentDocuments should fail without backend list data'),
         failure: (failure) =>
-            expect(failure.message, 'Invalid documents response'),
+            expect(failure.message, 'Paged API data.list must be a JSON list.'),
       );
     },
   );
@@ -72,7 +86,8 @@ void main() {
     'listRecentDocuments rejects success envelope with non-object list item',
     () async {
       final adapter = _CapturingAdapter(
-        body: '{"code":0,"message":"ok","data":["bad-item"]}',
+        body:
+            '{"code":0,"message":"ok","data":{"list":["bad-item"],"total":1,"page":1,"pageSize":10}}',
       );
       final dio = Dio()..httpClientAdapter = adapter;
       final dataSource = ApiDocumentsRemoteDataSource(
@@ -85,8 +100,10 @@ void main() {
       result.when(
         success: (_) =>
             fail('listRecentDocuments should fail with malformed list item'),
-        failure: (failure) =>
-            expect(failure.message, 'Invalid documents response'),
+        failure: (failure) => expect(
+          failure.message,
+          'Every paged API list item must be a JSON object.',
+        ),
       );
     },
   );
@@ -328,10 +345,11 @@ void main() {
       'keyword': 'XS2026',
     });
     result.when(
-      success: (transactions) {
-        expect(transactions.single.id, 21);
-        expect(transactions.single.docNo, 'XS20260627001');
-        expect(transactions.single.direction, -1);
+      success: (page) {
+        expect(page.items.single.id, 21);
+        expect(page.items.single.docNo, 'XS20260627001');
+        expect(page.items.single.direction, -1);
+        expect(page.total, 1);
       },
       failure: (failure) => fail(failure.message),
     );
@@ -355,7 +373,7 @@ void main() {
         success: (_) =>
             fail('listTransactions should fail without backend list data'),
         failure: (failure) =>
-            expect(failure.message, 'Invalid transactions response'),
+            expect(failure.message, 'Paged API data.list must be a JSON list.'),
       );
     },
   );
@@ -364,7 +382,8 @@ void main() {
     'listTransactions rejects success envelope with non-object list item',
     () async {
       final adapter = _CapturingAdapter(
-        body: '{"code":0,"message":"ok","data":["bad-item"]}',
+        body:
+            '{"code":0,"message":"ok","data":{"list":["bad-item"],"total":1,"page":1,"pageSize":10}}',
       );
       final dio = Dio()..httpClientAdapter = adapter;
       final dataSource = ApiDocumentsRemoteDataSource(
@@ -377,8 +396,10 @@ void main() {
       result.when(
         success: (_) =>
             fail('listTransactions should fail with malformed list item'),
-        failure: (failure) =>
-            expect(failure.message, 'Invalid transactions response'),
+        failure: (failure) => expect(
+          failure.message,
+          'Every paged API list item must be a JSON object.',
+        ),
       );
     },
   );

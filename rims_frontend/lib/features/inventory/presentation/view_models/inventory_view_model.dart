@@ -228,8 +228,8 @@ final class InventoryViewModel extends ChangeNotifier {
     final result = await repository.listTransactions();
 
     result.when(
-      success: (transactions) {
-        _transactions = transactions;
+      success: (page) {
+        _transactions = page.items;
         _transactionError = null;
       },
       failure: (failure) {
