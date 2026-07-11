@@ -106,6 +106,23 @@ Assert-Equal `
   -Expected 'emulator-5554|emulator-5556' `
   -Message 'AVD mapping did not inspect serials explicitly.'
 
+$sameSerialCalls = New-Object 'Collections.Generic.List[string]'
+$sameSerialDifferentAvd = Find-RimsRunningAndroidTarget `
+  -RequestedDevice 'emulator-5554' `
+  -OnlineSerials @('emulator-5554') `
+  -AvdNameAction {
+    param($serial)
+    [void]$sameSerialCalls.Add($serial)
+    return 'Different_AVD'
+  }
+Assert-False `
+  -Value $sameSerialDifferentAvd.found `
+  -Message 'A serial equal to the requested AVD name was accepted without AVD verification.'
+Assert-Equal `
+  -Actual ($sameSerialCalls -join '|') `
+  -Expected 'emulator-5554' `
+  -Message 'A serial equal to the requested AVD name bypassed emu avd name verification.'
+
 $noRunningTarget = Find-RimsRunningAndroidTarget `
   -RequestedDevice 'Medium_Phone_API_36.1' `
   -OnlineSerials @() `
@@ -113,6 +130,90 @@ $noRunningTarget = Find-RimsRunningAndroidTarget `
 Assert-False `
   -Value $noRunningTarget.found `
   -Message 'An empty adb device list must permit a new owned emulator launch.'
+
+$existingWebState = [pscustomobject]@{
+  target = 'web'
+  frontendPort = 18091
+  frontend = [pscustomobject]@{ target = 'web' }
+  emulator = $null
+}
+$noneCompatibility = Get-RimsFrontendRequestCompatibility `
+  -State $existingWebState `
+  -Target 'none' `
+  -FrontendPort 18091 `
+  -AndroidDevice ''
+Assert-False `
+  -Value $noneCompatibility.matches `
+  -Message 'Target none accepted a state that still manages a frontend.'
+
+$webPortCompatibility = Get-RimsFrontendRequestCompatibility `
+  -State $existingWebState `
+  -Target 'web' `
+  -FrontendPort 18092 `
+  -AndroidDevice ''
+Assert-False `
+  -Value $webPortCompatibility.matches `
+  -Message 'Web frontend accepted a different requested port.'
+
+$existingAndroidState = [pscustomobject]@{
+  target = 'android'
+  frontendPort = 18091
+  frontend = [pscustomobject]@{ target = 'android' }
+  emulator = [pscustomobject]@{ avdName = 'Medium_Phone_API_36.1' }
+}
+$androidAvdCompatibility = Get-RimsFrontendRequestCompatibility `
+  -State $existingAndroidState `
+  -Target 'android' `
+  -FrontendPort 18091 `
+  -AndroidDevice 'Different_AVD'
+Assert-False `
+  -Value $androidAvdCompatibility.matches `
+  -Message 'Android frontend accepted a different requested AVD.'
+
+$unmanagedProbeCalls = New-Object 'Collections.Generic.List[string]'
+$unmanagedOnline = Get-RimsUnmanagedAndroidEmulatorHealth `
+  -Emulator ([pscustomobject]@{
+      serial = 'emulator-5554'
+      avdName = 'Medium_Phone_API_36.1'
+    }) `
+  -OnlineSerialsAction {
+    [void]$unmanagedProbeCalls.Add('devices')
+    return @('emulator-5554')
+  } `
+  -AvdNameAction {
+    param($serial)
+    [void]$unmanagedProbeCalls.Add("avd:$serial")
+    return 'Medium_Phone_API_36.1'
+  }
+Assert-True `
+  -Value $unmanagedOnline.healthy `
+  -Message 'An online unmanaged emulator with an exact AVD was unhealthy.'
+Assert-Equal `
+  -Actual ($unmanagedProbeCalls -join '|') `
+  -Expected 'devices|avd:emulator-5554' `
+  -Message 'Unmanaged emulator health did not revalidate adb devices and the exact AVD.'
+
+$unmanagedOffline = Get-RimsUnmanagedAndroidEmulatorHealth `
+  -Emulator ([pscustomobject]@{
+      serial = 'emulator-5554'
+      avdName = 'Medium_Phone_API_36.1'
+    }) `
+  -OnlineSerialsAction { return @() } `
+  -AvdNameAction { throw 'Offline serial must not be treated as healthy.' }
+Assert-False `
+  -Value $unmanagedOffline.healthy `
+  -Message 'An offline unmanaged emulator was healthy.'
+
+$unmanagedWrongAvd = Get-RimsUnmanagedAndroidEmulatorHealth `
+  -Emulator ([pscustomobject]@{
+      serial = 'emulator-5554'
+      avdName = 'Medium_Phone_API_36.1'
+    }) `
+  -OnlineSerialsAction { return @('emulator-5554') } `
+  -AvdNameAction { param($serial) return 'Different_AVD' }
+Assert-False `
+  -Value $unmanagedWrongAvd.healthy `
+  -Message 'An unmanaged emulator with the wrong AVD was healthy.'
 
 function New-TestFrontendState {
   return [pscustomobject][ordered]@{
@@ -223,6 +324,87 @@ $bootTimedOut = Wait-RimsAndroidBootCompleted `
 Assert-False -Value $bootTimedOut -Message 'Android boot timeout passed.'
 Assert-True -Value ($bootAttempts.value -gt 0) -Message 'Android boot was never probed.'
 
+$emulatorLaunchSnapshots = New-Object 'Collections.Generic.List[object]'
+$emulatorCleanupCount = [pscustomobject]@{ value = 0 }
+$emulatorLaunchState = New-TestFrontendState
+$emulatorLaunchState.cleanupPending = $true
+$emulatorLaunchState.emulator = [pscustomobject]@{
+  avdName = 'Medium_Phone_API_36.1'
+  serial = $null
+  owned = $false
+  windowsPid = $null
+  windowsProcessStartTimeUtc = $null
+  cleanupPending = $true
+}
+$emulatorLaunch = Invoke-RimsAndroidEmulatorLaunchStateMachine `
+  -State $emulatorLaunchState `
+  -PersistStateAction {
+    param($state)
+    [void]$emulatorLaunchSnapshots.Add(($state | ConvertTo-Json -Depth 8 | ConvertFrom-Json))
+  } `
+  -SpawnAction {
+    return [pscustomobject]@{
+      ok = $true
+      identity = [pscustomobject]@{
+        windowsPid = 7201
+        windowsProcessStartTimeUtc = '2026-01-01T00:00:03.0000000Z'
+      }
+    }
+  } `
+  -SerialAction { return 'emulator-5554' } `
+  -BootAction { return $true } `
+  -CleanupAction { $emulatorCleanupCount.value++; return $true }
+Assert-True -Value $emulatorLaunch.ok -Message 'Controller-owned emulator launch failed.'
+Assert-Equal `
+  -Actual $emulatorLaunchState.emulator.serial `
+  -Expected 'emulator-5554' `
+  -Message 'Controller-owned emulator serial was not persisted.'
+Assert-True `
+  -Value $emulatorLaunchState.emulator.owned `
+  -Message 'Controller-owned emulator did not persist exact process ownership.'
+Assert-False `
+  -Value $emulatorLaunchState.cleanupPending `
+  -Message 'Healthy controller-owned emulator remained cleanup-pending.'
+Assert-Equal `
+  -Actual $emulatorCleanupCount.value `
+  -Expected 0 `
+  -Message 'Healthy controller-owned emulator was rolled back.'
+
+$emulatorTimeoutState = New-TestFrontendState
+$emulatorTimeoutState.cleanupPending = $true
+$emulatorTimeoutState.emulator = [pscustomobject]@{
+  avdName = 'Medium_Phone_API_36.1'
+  serial = $null
+  owned = $false
+  windowsPid = $null
+  windowsProcessStartTimeUtc = $null
+  cleanupPending = $true
+}
+$emulatorTimeoutCleanup = [pscustomobject]@{ value = 0 }
+$emulatorTimeout = Invoke-RimsAndroidEmulatorLaunchStateMachine `
+  -State $emulatorTimeoutState `
+  -PersistStateAction { param($state) } `
+  -SpawnAction {
+    return [pscustomobject]@{
+      ok = $true
+      identity = [pscustomobject]@{
+        windowsPid = 7202
+        windowsProcessStartTimeUtc = '2026-01-01T00:00:04.0000000Z'
+      }
+    }
+  } `
+  -SerialAction { return 'emulator-5556' } `
+  -BootAction { return $false } `
+  -CleanupAction { $emulatorTimeoutCleanup.value++; return $true }
+Assert-False -Value $emulatorTimeout.ok -Message 'Android boot timeout launch passed.'
+Assert-Equal `
+  -Actual $emulatorTimeoutCleanup.value `
+  -Expected 1 `
+  -Message 'Android boot timeout did not roll back its exact owned emulator.'
+Assert-True `
+  -Value $emulatorTimeoutState.cleanupPending `
+  -Message 'Android boot timeout discarded cleanup-pending ownership.'
+
 $runtimeRoot = Join-Path ([IO.Path]::GetTempPath()) ('rims-frontend-test-' + [guid]::NewGuid().ToString('N'))
 $originalRuntime = $env:RIMS_RUNTIME_DIR
 $tracked = New-Object 'Collections.Generic.List[Diagnostics.Process]'
@@ -247,11 +429,237 @@ try {
       -FrontendPort $port `
       -AndroidDevice ''
     Assert-False -Value $conflict.ok -Message 'Occupied Web port was adopted.'
-    Assert-False `
-      -Value $conflict.cleanupPending `
-      -Message 'Unmanaged Web listener became cleanup-pending.'
+  Assert-False `
+    -Value $conflict.cleanupPending `
+    -Message 'Unmanaged Web listener became cleanup-pending.'
   } finally {
     $listener.Stop()
+  }
+
+  $pendingBackend = Start-TestSleepProcess -TrackedProcesses $tracked
+  $pendingFrontend = Start-TestSleepProcess -TrackedProcesses $tracked
+  $pendingEmulator = Start-TestSleepProcess -TrackedProcesses $tracked
+  $pendingPort = Get-TestEphemeralPort
+  $pendingLifecycleState = New-TestRuntimeState `
+    -Process $pendingBackend `
+    -RuntimePaths $runtimePaths `
+    -BackendPort $pendingPort `
+    -CleanupPending $true
+  $pendingLifecycleState.target = 'android'
+  $pendingLifecycleState | Add-Member -MemberType NoteProperty -Name frontend -Value ([pscustomobject]@{
+    target = 'android'
+    windowsPid = $pendingFrontend.Id
+    windowsProcessStartTimeUtc = $pendingFrontend.StartTime.ToUniversalTime().ToString('o')
+    cleanupPending = $true
+  }) -Force
+  $pendingLifecycleState | Add-Member -MemberType NoteProperty -Name emulator -Value ([pscustomobject]@{
+    owned = $true
+    serial = 'emulator-5554'
+    avdName = 'Medium_Phone_API_36.1'
+    windowsPid = $pendingEmulator.Id
+    windowsProcessStartTimeUtc = $pendingEmulator.StartTime.ToUniversalTime().ToString('o')
+    cleanupPending = $true
+  }) -Force
+  Write-RimsRuntimeState -Paths $runtimePaths -State $pendingLifecycleState
+  $pendingLifecycleStatus = Invoke-RimsLocalStatus `
+    -ScriptDirectory $scriptDir `
+    -BackendDir 'C:\test-backend-source' `
+    -BackendWorkspaceRoot 'C:\test-backend-runtime' `
+    -BackendPort $pendingPort
+  $pendingFrontendComponents = @($pendingLifecycleStatus.components | Where-Object {
+      $_.name -eq 'frontend'
+    })
+  $pendingEmulatorComponents = @($pendingLifecycleStatus.components | Where-Object {
+      $_.name -eq 'emulator'
+    })
+  Assert-Equal `
+    -Actual $pendingFrontendComponents.Count `
+    -Expected 1 `
+    -Message 'Cleanup-pending status omitted the frontend component.'
+  Assert-Equal `
+    -Actual $pendingEmulatorComponents.Count `
+    -Expected 1 `
+    -Message 'Cleanup-pending status omitted the emulator component.'
+  Assert-False `
+    -Value $pendingFrontendComponents[0].ok `
+    -Message 'Cleanup-pending frontend was healthy.'
+  Assert-False `
+    -Value $pendingEmulatorComponents[0].ok `
+    -Message 'Cleanup-pending emulator was healthy.'
+  Remove-RimsRuntimeState -Paths $runtimePaths
+
+  $downBackend = Start-TestSleepProcess -TrackedProcesses $tracked
+  $downFrontend = Start-TestSleepProcess -TrackedProcesses $tracked
+  $downEmulator = Start-TestSleepProcess -TrackedProcesses $tracked
+  $downPort = Get-TestEphemeralPort
+  $downState = New-TestRuntimeState `
+    -Process $downBackend `
+    -RuntimePaths $runtimePaths `
+    -BackendPort $downPort
+  $downState.target = 'android'
+  $downState | Add-Member -MemberType NoteProperty -Name frontend -Value ([pscustomobject]@{
+    target = 'android'
+    windowsPid = $downFrontend.Id
+    windowsProcessStartTimeUtc = $downFrontend.StartTime.ToUniversalTime().ToString('o')
+    cleanupPending = $false
+  }) -Force
+  $downState | Add-Member -MemberType NoteProperty -Name emulator -Value ([pscustomobject]@{
+    owned = $true
+    serial = 'emulator-5554'
+    avdName = 'Medium_Phone_API_36.1'
+    windowsPid = $downEmulator.Id
+    windowsProcessStartTimeUtc = $downEmulator.StartTime.ToUniversalTime().ToString('o')
+    cleanupPending = $false
+  }) -Force
+  Write-RimsRuntimeState -Paths $runtimePaths -State $downState
+  $fullDown = Invoke-RimsLocalDown `
+    -ScriptDirectory $scriptDir `
+    -BackendDir 'C:\test-backend-source' `
+    -BackendWorkspaceRoot 'C:\test-backend-runtime' `
+    -BackendPort $downPort
+  Assert-True -Value $fullDown.ok -Message 'Exact down did not complete the full frontend lifecycle.'
+  Assert-True `
+    -Value (Wait-TestProcessExit -ProcessId $downBackend.Id) `
+    -Message 'Exact down left the controller-owned backend alive.'
+  Assert-True `
+    -Value (Wait-TestProcessExit -ProcessId $downFrontend.Id) `
+    -Message 'Exact down left the controller-owned frontend alive.'
+  Assert-True `
+    -Value (Wait-TestProcessExit -ProcessId $downEmulator.Id) `
+    -Message 'Exact down left the controller-owned emulator alive.'
+  Assert-False `
+    -Value (Test-Path -LiteralPath $runtimePaths.state) `
+    -Message 'Exact down retained state after the full lifecycle completed.'
+
+  $resolveAndroidToolFunction = (Get-Item 'Function:\Resolve-RimsAndroidTool').ScriptBlock
+  $resolveAdbDevicesFunction = (Get-Item 'Function:\Get-RimsAdbDeviceSerials').ScriptBlock
+  $resolveInstalledAvdsFunction = (Get-Item 'Function:\Get-RimsInstalledAndroidAvds').ScriptBlock
+  $resolveSerialWaitFunction = (Get-Item 'Function:\Wait-RimsAndroidSerialForAvd').ScriptBlock
+  $resolveBootWaitFunction = (Get-Item 'Function:\Wait-RimsAndroidBootCompleted').ScriptBlock
+  $resolvedEmulatorProcess = Start-TestSleepProcess -TrackedProcesses $tracked
+  try {
+    Set-Item -LiteralPath 'Function:\Resolve-RimsAndroidTool' -Value {
+      param($CommandName, $SdkRelativePath)
+      return $CommandName
+    }
+    Set-Item -LiteralPath 'Function:\Get-RimsAdbDeviceSerials' -Value {
+      param($AdbExecutable)
+      return @()
+    }
+    Set-Item -LiteralPath 'Function:\Get-RimsInstalledAndroidAvds' -Value {
+      param($EmulatorExecutable)
+      return @('Medium_Phone_API_36.1')
+    }
+    Set-Item -LiteralPath 'Function:\Wait-RimsAndroidSerialForAvd' -Value {
+      param($AdbExecutable, $AvdName, $TimeoutSeconds)
+      return 'emulator-5554'
+    }
+    Set-Item -LiteralPath 'Function:\Wait-RimsAndroidBootCompleted' -Value {
+      param($AdbExecutable, $Serial, $TimeoutSeconds, $ProbeAction)
+      return $true
+    }
+    Set-Item -LiteralPath 'Function:\Start-Process' -Value {
+      param($FilePath, $ArgumentList, $RedirectStandardOutput, $RedirectStandardError, $WindowStyle, [switch]$PassThru)
+      return $resolvedEmulatorProcess
+    }
+    $resolvedAndroidState = New-TestFrontendState
+    $resolvedAndroid = Resolve-RimsAndroidRuntime `
+      -State $resolvedAndroidState `
+      -Paths $runtimePaths `
+      -AndroidDevice 'Medium_Phone_API_36.1'
+    Assert-Equal `
+      -Actual $resolvedAndroid.serial `
+      -Expected 'emulator-5554' `
+      -Message 'Resolved Android runtime returned the wrong serial.'
+    if (-not $resolvedAndroid.detail.Contains('emulator-5554')) {
+      throw 'Resolved Android runtime detail omitted the launched serial.'
+    }
+  } finally {
+    Set-Item -LiteralPath 'Function:\Resolve-RimsAndroidTool' -Value $resolveAndroidToolFunction
+    Set-Item -LiteralPath 'Function:\Get-RimsAdbDeviceSerials' -Value $resolveAdbDevicesFunction
+    Set-Item -LiteralPath 'Function:\Get-RimsInstalledAndroidAvds' -Value $resolveInstalledAvdsFunction
+    Set-Item -LiteralPath 'Function:\Wait-RimsAndroidSerialForAvd' -Value $resolveSerialWaitFunction
+    Set-Item -LiteralPath 'Function:\Wait-RimsAndroidBootCompleted' -Value $resolveBootWaitFunction
+    Remove-Item -LiteralPath 'Function:\Start-Process' -Force
+    Remove-RimsRuntimeState -Paths $runtimePaths
+  }
+
+  $newBackendOnFrontendFailure = Start-TestSleepProcess -TrackedProcesses $tracked
+  $newBackendFailurePort = Get-TestEphemeralPort
+  $newBackendFailureState = New-TestRuntimeState `
+    -Process $newBackendOnFrontendFailure `
+    -RuntimePaths $runtimePaths `
+    -BackendPort $newBackendFailurePort
+  $newBackendFailure = Complete-RimsFailedUpResult `
+    -Result (New-RimsLocalResult -Command 'up') `
+    -Paths $runtimePaths `
+    -State $newBackendFailureState `
+    -BackendWorkspaceRoot 'C:\test-backend-runtime' `
+    -FailureContext 'Injected frontend launch failure.' `
+    -BackendPort $newBackendFailurePort `
+    -Remediation 'Retry the frontend launch.'
+  Assert-False `
+    -Value $newBackendFailure.ok `
+    -Message 'Frontend failure reported a newly-created backend start as successful.'
+  Assert-True `
+    -Value (Wait-TestProcessExit -ProcessId $newBackendOnFrontendFailure.Id) `
+    -Message 'Frontend failure did not roll back the backend created by this invocation.'
+  Assert-False `
+    -Value (Test-Path -LiteralPath $runtimePaths.state) `
+    -Message 'Frontend failure retained state after newly-created backend rollback.'
+
+  $existingBackendOnFrontendFailure = Start-TestSleepProcess -TrackedProcesses $tracked
+  $existingBackendFailurePort = Get-TestEphemeralPort
+  $existingBackendFailureState = New-TestRuntimeState `
+    -Process $existingBackendOnFrontendFailure `
+    -RuntimePaths $runtimePaths `
+    -BackendPort $existingBackendFailurePort
+  Write-RimsRuntimeState -Paths $runtimePaths -State $existingBackendFailureState
+  $doctorFunction = (Get-Item 'Function:\Invoke-RimsLocalDoctor').ScriptBlock
+  $healthFunction = (Get-Item 'Function:\Test-RimsHealthEndpoint').ScriptBlock
+  $startFrontendFunction = (Get-Item 'Function:\Start-RimsManagedFrontend').ScriptBlock
+  try {
+    Set-Item -LiteralPath 'Function:\Invoke-RimsLocalDoctor' -Value {
+      param($Target, $BackendDir, $BackendWorkspaceRoot, $AndroidDevice, $ScriptDirectory)
+      return [pscustomobject]@{
+        name = 'testDoctor'
+        ok = $true
+        required = $true
+        detail = 'Injected doctor success.'
+        remediation = ''
+      }
+    }
+    Set-Item -LiteralPath 'Function:\Test-RimsHealthEndpoint' -Value {
+      param($Url, $TimeoutSeconds)
+      return $true
+    }
+    Set-Item -LiteralPath 'Function:\Start-RimsManagedFrontend' -Value {
+      param($State, $Paths, $Target, $BackendPort, $FrontendPort, $AndroidDevice)
+      return [pscustomobject]@{
+        ok = $false
+        detail = 'Injected frontend launch failure.'
+        cleanupPending = $false
+      }
+    }
+    $existingBackendFailure = Invoke-RimsLocalUp `
+      -Target 'web' `
+      -ScriptDirectory $scriptDir `
+      -BackendDir 'C:\test-backend-source' `
+      -BackendWorkspaceRoot 'C:\test-backend-runtime' `
+      -BackendPort $existingBackendFailurePort `
+      -FrontendPort 18091 `
+      -AndroidDevice ''
+    Assert-False `
+      -Value $existingBackendFailure.ok `
+      -Message 'Existing backend frontend failure reported success.'
+    Assert-True `
+      -Value (Test-TestProcessAlive -ProcessId $existingBackendOnFrontendFailure.Id) `
+      -Message 'Frontend failure stopped the backend that existed before up.'
+  } finally {
+    Set-Item -LiteralPath 'Function:\Invoke-RimsLocalDoctor' -Value $doctorFunction
+    Set-Item -LiteralPath 'Function:\Test-RimsHealthEndpoint' -Value $healthFunction
+    Set-Item -LiteralPath 'Function:\Start-RimsManagedFrontend' -Value $startFrontendFunction
+    Remove-RimsRuntimeState -Paths $runtimePaths
   }
 
   $ownedProcess = Start-TestSleepProcess -TrackedProcesses $tracked
@@ -304,12 +712,64 @@ try {
   }
 }
 
-$restartDefinition = (Get-Command `
-    -Name 'Invoke-RimsLocalRestartUnlocked' `
-    -CommandType Function).Definition
-if (-not $restartDefinition.Contains('Invoke-RimsLocalDownUnlocked') -or
-    -not $restartDefinition.Contains('Invoke-RimsLocalUpUnlocked')) {
-  throw 'Restart no longer composes unlocked down/up operations under one lock.'
+$restartRuntimeRoot = Join-Path `
+  ([IO.Path]::GetTempPath()) `
+  ('rims-restart-lock-' + [guid]::NewGuid().ToString('N'))
+$restartOriginalRuntime = [Environment]::GetEnvironmentVariable(
+  'RIMS_RUNTIME_DIR',
+  'Process'
+)
+$restartDownFunction = (Get-Item 'Function:\Invoke-RimsLocalDownUnlocked').ScriptBlock
+$restartUpFunction = (Get-Item 'Function:\Invoke-RimsLocalUpUnlocked').ScriptBlock
+$restartCalls = [pscustomobject]@{ down = 0; up = 0 }
+try {
+  [Environment]::SetEnvironmentVariable('RIMS_RUNTIME_DIR', $restartRuntimeRoot, 'Process')
+  $restartPaths = Get-RimsRuntimePaths -ScriptDirectory $scriptDir
+  $restartBackend = Start-TestSleepProcess -TrackedProcesses $tracked
+  $restartPort = Get-TestEphemeralPort
+  $restartState = New-TestRuntimeState `
+    -Process $restartBackend `
+    -RuntimePaths $restartPaths `
+    -BackendPort $restartPort
+  Write-RimsRuntimeState -Paths $restartPaths -State $restartState
+  Set-Item -LiteralPath 'Function:\Invoke-RimsLocalDownUnlocked' -Value {
+    param($ScriptDirectory, $BackendDir, $BackendWorkspaceRoot, $BackendPort, $IncludeDependencies)
+    $restartCalls.down++
+    return Complete-RimsLocalResult `
+      -Result (New-RimsLocalResult -Command 'down') `
+      -Ok $true `
+      -ExitCode 0
+  }
+  Set-Item -LiteralPath 'Function:\Invoke-RimsLocalUpUnlocked' -Value {
+    param($Target, $ScriptDirectory, $BackendDir, $BackendWorkspaceRoot, $BackendPort, $FrontendPort, $AndroidDevice, $IncludeDependencies)
+    $restartCalls.up++
+    return Complete-RimsLocalResult `
+      -Result (New-RimsLocalResult -Command 'up') `
+      -Ok $true `
+      -ExitCode 0
+  }
+  $restartResult = Invoke-RimsLocalRestart `
+    -Target 'none' `
+    -ScriptDirectory $scriptDir `
+    -BackendDir 'C:\test-backend-source' `
+    -BackendWorkspaceRoot 'C:\test-backend-runtime' `
+    -BackendPort $restartPort `
+    -FrontendPort 18091 `
+    -AndroidDevice ''
+  Assert-True -Value $restartResult.ok -Message 'Restart deadlocked or failed under its lifecycle lock.'
+  Assert-Equal `
+    -Actual $restartCalls.down `
+    -Expected 1 `
+    -Message 'Restart did not execute its unlocked down operation exactly once.'
+  Assert-Equal `
+    -Actual $restartCalls.up `
+    -Expected 1 `
+    -Message 'Restart did not execute its unlocked up operation exactly once.'
+} finally {
+  Set-Item -LiteralPath 'Function:\Invoke-RimsLocalDownUnlocked' -Value $restartDownFunction
+  Set-Item -LiteralPath 'Function:\Invoke-RimsLocalUpUnlocked' -Value $restartUpFunction
+  [Environment]::SetEnvironmentVariable('RIMS_RUNTIME_DIR', $restartOriginalRuntime, 'Process')
+  Remove-Item -LiteralPath $restartRuntimeRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
 $missingBackend = Join-Path `

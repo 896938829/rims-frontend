@@ -110,6 +110,84 @@ function Test-RimsRuntimeRequestMatchesState {
   )
 }
 
+function Get-RimsFrontendRequestCompatibility {
+  param(
+    [Parameter(Mandatory = $true)]
+    [psobject]$State,
+    [Parameter(Mandatory = $true)]
+    [ValidateSet('none', 'web', 'android')]
+    [string]$Target,
+    [Parameter(Mandatory = $true)]
+    [int]$FrontendPort,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$AndroidDevice
+  )
+
+  $currentTarget = [string](Get-RimsObjectPropertyValue `
+      -Value $State `
+      -Name 'target' `
+      -DefaultValue 'none')
+  $frontend = Get-RimsObjectPropertyValue -Value $State -Name 'frontend'
+  $emulator = Get-RimsObjectPropertyValue -Value $State -Name 'emulator'
+  $hasRecordedResources = $null -ne $frontend -or $null -ne $emulator
+  if ($Target -eq 'none') {
+    $matches = $currentTarget -eq 'none' -and -not $hasRecordedResources
+    return [pscustomobject][ordered]@{
+      matches = $matches
+      hasRecordedResources = $hasRecordedResources
+      detail = if ($matches) {
+        'Requested backend-only mode matches the recorded frontend state.'
+      } else {
+        "Requested backend-only mode conflicts with recorded frontend target '$currentTarget'."
+      }
+    }
+  }
+  if ($currentTarget -ne $Target) {
+    return [pscustomobject][ordered]@{
+      matches = $false
+      hasRecordedResources = $hasRecordedResources
+      detail = "Managed frontend target '$currentTarget' differs from requested '$Target'."
+    }
+  }
+  if ($Target -eq 'web') {
+    $recordedPort = [int](Get-RimsObjectPropertyValue `
+        -Value $State `
+        -Name 'frontendPort' `
+        -DefaultValue 0)
+    $matches = $recordedPort -eq $FrontendPort
+    return [pscustomobject][ordered]@{
+      matches = $matches
+      hasRecordedResources = $hasRecordedResources
+      detail = if ($matches) {
+        'Requested Web frontend port matches the recorded state.'
+      } else {
+        "Managed Web frontend port '$recordedPort' differs from requested '$FrontendPort'."
+      }
+    }
+  }
+  $requestedAvd = if ([string]::IsNullOrWhiteSpace($AndroidDevice)) {
+    'Medium_Phone_API_36.1'
+  } else {
+    $AndroidDevice
+  }
+  $recordedAvd = [string](Get-RimsObjectPropertyValue `
+      -Value $emulator `
+      -Name 'avdName' `
+      -DefaultValue '')
+  $matches = -not [string]::IsNullOrWhiteSpace($recordedAvd) -and
+    $recordedAvd -ceq $requestedAvd
+  return [pscustomobject][ordered]@{
+    matches = $matches
+    hasRecordedResources = $hasRecordedResources
+    detail = if ($matches) {
+      'Requested Android AVD matches the recorded state.'
+    } else {
+      "Managed Android AVD '$recordedAvd' differs from requested '$requestedAvd'."
+    }
+  }
+}
+
 function Resolve-RimsLifecyclePaths {
   param(
     [AllowNull()]
@@ -257,9 +335,9 @@ function Invoke-RimsLocalStatusUnlocked {
     $result.components += New-RimsBackendLifecycleComponent `
       -Ok $false `
       -Detail $(if ($owned) {
-          'Backend and dependency cleanup remain pending; exact backend ownership was preserved.'
+          'Controller-owned cleanup remains pending; exact backend ownership was preserved.'
         } else {
-          'Dependency cleanup remains pending; no managed backend process is present.'
+          'Controller-owned cleanup remains pending; no managed backend process is present.'
         }) `
       -Remediation 'Run down with the same backend paths and port to retry bounded cleanup.' `
       -Managed $owned `
@@ -272,6 +350,17 @@ function Invoke-RimsLocalStatusUnlocked {
           $null
         }) `
       -CleanupPending $true
+    $stateFrontendPort = [int](Get-RimsObjectPropertyValue `
+        -Value $state `
+        -Name 'frontendPort' `
+        -DefaultValue 8091)
+    $result.components += Get-RimsFrontendComponent `
+      -State $state `
+      -FrontendPort $stateFrontendPort
+    $emulatorComponent = Get-RimsEmulatorComponent -State $state
+    if ($null -ne $emulatorComponent) {
+      $result.components += $emulatorComponent
+    }
     $result.components += New-RimsLocalComponent `
       -Name 'dependencyCleanup' `
       -Ok $false `
@@ -1268,25 +1357,31 @@ function Invoke-RimsLocalUpUnlocked {
         -Stale $false `
         -Port $BackendPort `
         -ProcessId (Get-RimsObjectPropertyValue -Value $state -Name 'windowsPid')
-      if ($healthy -and $Target -ne 'none') {
+      if ($healthy) {
+        $frontendCompatibility = Get-RimsFrontendRequestCompatibility `
+          -State $state `
+          -Target $Target `
+          -FrontendPort $FrontendPort `
+          -AndroidDevice $AndroidDevice
         $currentTarget = [string](Get-RimsObjectPropertyValue `
             -Value $state `
             -Name 'target' `
             -DefaultValue 'none')
-        if ($currentTarget -ne 'none' -and $currentTarget -ne $Target) {
+        if (-not $frontendCompatibility.matches -and
+            ($Target -eq 'none' -or $currentTarget -ne 'none' -or
+              $frontendCompatibility.hasRecordedResources)) {
           $result.components += New-RimsLocalComponent `
             -Name 'frontend' `
             -Ok $false `
             -Required $true `
-            -Detail "Managed frontend target '$currentTarget' differs from requested '$Target'." `
-            -Remediation 'Run restart or down before changing frontend targets.'
+            -Detail $frontendCompatibility.detail `
+            -Remediation 'Run restart or down before changing frontend lifecycle parameters.'
           return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
         }
-        $existingFrontend = Get-RimsFrontendComponent `
-          -State $state `
-          -FrontendPort $FrontendPort
-        if ($currentTarget -eq $Target -and $existingFrontend.ok) {
-          $result.components += $existingFrontend
+        if ($Target -eq 'none') {
+          $result.components += Get-RimsFrontendComponent `
+            -State $state `
+            -FrontendPort $FrontendPort
         } elseif ($currentTarget -eq 'none') {
           $frontendStarted = Start-RimsManagedFrontend `
             -State $state `
@@ -1305,13 +1400,12 @@ function Invoke-RimsLocalUpUnlocked {
               })
           $healthy = $frontendStarted.ok
         } else {
+          $existingFrontend = Get-RimsFrontendComponent `
+            -State $state `
+            -FrontendPort $FrontendPort
           $result.components += $existingFrontend
-          $healthy = $false
+          $healthy = $existingFrontend.ok
         }
-      } elseif ($healthy) {
-        $result.components += Get-RimsFrontendComponent `
-          -State $state `
-          -FrontendPort $FrontendPort
       }
       return Complete-RimsLocalResult `
         -Result $result `

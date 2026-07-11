@@ -26,6 +26,7 @@ $commands = @(
   'doctor',
   'up',
   'status',
+  'health',
   'logs',
   'restart',
   'reset',

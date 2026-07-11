@@ -233,13 +233,6 @@ function Find-RimsRunningAndroidTarget {
     throw 'Android device contains unsupported command characters.'
   }
   foreach ($serial in $OnlineSerials) {
-    if ($serial -eq $RequestedDevice) {
-      return [pscustomobject]@{
-        found = $true
-        serial = $serial
-        avdName = [string](& $AvdNameAction $serial)
-      }
-    }
     $avdName = [string](& $AvdNameAction $serial)
     if ($avdName -ceq $RequestedDevice) {
       return [pscustomobject]@{
@@ -427,6 +420,68 @@ exit $LASTEXITCODE
   }
 }
 
+function Invoke-RimsAndroidEmulatorLaunchStateMachine {
+  param(
+    [Parameter(Mandatory = $true)][psobject]$State,
+    [Parameter(Mandatory = $true)][scriptblock]$PersistStateAction,
+    [Parameter(Mandatory = $true)][scriptblock]$SpawnAction,
+    [Parameter(Mandatory = $true)][scriptblock]$SerialAction,
+    [Parameter(Mandatory = $true)][scriptblock]$BootAction,
+    [Parameter(Mandatory = $true)][scriptblock]$CleanupAction
+  )
+
+  $spawned = $null
+  $avdName = [string](Get-RimsObjectPropertyValue `
+      -Value $State.emulator `
+      -Name 'avdName' `
+      -DefaultValue '')
+  try {
+    $spawned = & $SpawnAction
+    if ($null -eq $spawned -or -not $spawned.ok -or
+        $null -eq $spawned.identity) {
+      throw "Android AVD '$avdName' did not start."
+    }
+    $State.emulator.owned = $true
+    $State.emulator.windowsPid = $spawned.identity.windowsPid
+    $State.emulator.windowsProcessStartTimeUtc = `
+      $spawned.identity.windowsProcessStartTimeUtc
+    & $PersistStateAction $State
+
+    $serial = [string](& $SerialAction)
+    if ([string]::IsNullOrWhiteSpace($serial)) {
+      throw "Android AVD '$avdName' did not expose an adb serial in time."
+    }
+    $State.emulator.serial = $serial
+    & $PersistStateAction $State
+
+    if (-not (& $BootAction $serial)) {
+      throw "Android AVD '$avdName' did not complete boot in time."
+    }
+    $State.emulator.cleanupPending = $false
+    $State.cleanupPending = $false
+    & $PersistStateAction $State
+    return [pscustomobject][ordered]@{
+      ok = $true
+      serial = $serial
+      detail = "Started Android AVD '$avdName' as $serial."
+    }
+  } catch {
+    if ($null -ne $spawned) {
+      try {
+        [void](& $CleanupAction $State)
+      } catch {
+      }
+    }
+    return [pscustomobject][ordered]@{
+      ok = $false
+      serial = $null
+      detail = ConvertTo-RimsDiagnosticSummary `
+        -StandardOutput '' `
+        -StandardError $_.Exception.Message
+    }
+  }
+}
+
 function Resolve-RimsAndroidRuntime {
   param(
     [Parameter(Mandatory = $true)][psobject]$State,
@@ -496,43 +551,51 @@ function Resolve-RimsAndroidRuntime {
   $State.cleanupPending = $true
   Write-RimsRuntimeState -Paths $Paths -State $State
 
-  $process = Start-Process `
-    -FilePath $emulator `
-    -ArgumentList @('-avd', $requested) `
-    -RedirectStandardOutput $frontendPaths.emulatorStdoutLog `
-    -RedirectStandardError $frontendPaths.emulatorStderrLog `
-    -WindowStyle Hidden `
-    -PassThru
-  $identity = New-RimsFrontendProcessIdentity -Process $process
-  $State.emulator.owned = $true
-  $State.emulator.windowsPid = $identity.windowsPid
-  $State.emulator.windowsProcessStartTimeUtc = $identity.windowsProcessStartTimeUtc
-  Write-RimsRuntimeState -Paths $Paths -State $State
-
-  $serial = Wait-RimsAndroidSerialForAvd `
-    -AdbExecutable $adb `
-    -AvdName $requested
-  if ([string]::IsNullOrWhiteSpace($serial)) {
-    [void](Stop-RimsNestedOwnedProcess -State $State -PropertyName 'emulator')
-    throw "Android AVD '$requested' did not expose an adb serial in time."
+  $launch = Invoke-RimsAndroidEmulatorLaunchStateMachine `
+    -State $State `
+    -PersistStateAction {
+      param($current)
+      Write-RimsRuntimeState -Paths $Paths -State $current
+    } `
+    -SpawnAction {
+      $process = Start-Process `
+        -FilePath $emulator `
+        -ArgumentList @('-avd', $requested) `
+        -RedirectStandardOutput $frontendPaths.emulatorStdoutLog `
+        -RedirectStandardError $frontendPaths.emulatorStderrLog `
+        -WindowStyle Hidden `
+        -PassThru
+      return [pscustomobject]@{
+        ok = $true
+        identity = New-RimsFrontendProcessIdentity -Process $process
+      }
+    } `
+    -SerialAction {
+      Wait-RimsAndroidSerialForAvd `
+        -AdbExecutable $adb `
+        -AvdName $requested
+    } `
+    -BootAction {
+      param($serial)
+      Wait-RimsAndroidBootCompleted `
+        -AdbExecutable $adb `
+        -Serial $serial
+    } `
+    -CleanupAction {
+      param($current)
+      (Stop-RimsNestedOwnedProcess `
+          -State $current `
+          -PropertyName 'emulator').ok
+    }
+  if (-not $launch.ok) {
+    throw $launch.detail
   }
-  $State.emulator.serial = $serial
-  Write-RimsRuntimeState -Paths $Paths -State $State
-  if (-not (Wait-RimsAndroidBootCompleted `
-      -AdbExecutable $adb `
-      -Serial $serial)) {
-    [void](Stop-RimsNestedOwnedProcess -State $State -PropertyName 'emulator')
-    throw "Android AVD '$requested' did not complete boot in time."
-  }
-  $State.emulator.cleanupPending = $false
-  $State.cleanupPending = $false
-  Write-RimsRuntimeState -Paths $Paths -State $State
   return [pscustomobject]@{
     ok = $true
-    serial = $serial
+    serial = $launch.serial
     avdName = $requested
     owned = $true
-    detail = "Started Android AVD '$requested' as $serial."
+    detail = "Started Android AVD '$requested' as $($launch.serial)."
   }
 }
 
@@ -708,6 +771,54 @@ function Stop-RimsOwnedEmulator {
   return Stop-RimsNestedOwnedProcess -State $State -PropertyName 'emulator'
 }
 
+function Get-RimsUnmanagedAndroidEmulatorHealth {
+  param(
+    [Parameter(Mandatory = $true)][psobject]$Emulator,
+    [Parameter(Mandatory = $true)][scriptblock]$OnlineSerialsAction,
+    [Parameter(Mandatory = $true)][scriptblock]$AvdNameAction
+  )
+
+  $serial = [string](Get-RimsObjectPropertyValue `
+      -Value $Emulator `
+      -Name 'serial' `
+      -DefaultValue '')
+  $expectedAvd = [string](Get-RimsObjectPropertyValue `
+      -Value $Emulator `
+      -Name 'avdName' `
+      -DefaultValue '')
+  if ([string]::IsNullOrWhiteSpace($serial) -or
+      [string]::IsNullOrWhiteSpace($expectedAvd)) {
+    return [pscustomobject][ordered]@{
+      healthy = $false
+      detail = 'Pre-existing Android device state is missing its serial or AVD name.'
+    }
+  }
+  try {
+    $onlineSerials = @(& $OnlineSerialsAction)
+    if (-not (@($onlineSerials | Where-Object { $_ -ceq $serial }).Count -eq 1)) {
+      return [pscustomobject][ordered]@{
+        healthy = $false
+        detail = "Pre-existing Android device '$serial' is no longer online."
+      }
+    }
+    $actualAvd = [string](& $AvdNameAction $serial)
+    $healthy = $actualAvd -ceq $expectedAvd
+    return [pscustomobject][ordered]@{
+      healthy = $healthy
+      detail = if ($healthy) {
+        "Pre-existing Android device '$serial' is online with AVD '$expectedAvd'."
+      } else {
+        "Pre-existing Android device '$serial' does not match recorded AVD '$expectedAvd'."
+      }
+    }
+  } catch {
+    return [pscustomobject][ordered]@{
+      healthy = $false
+      detail = 'Pre-existing Android device could not be verified through adb.'
+    }
+  }
+}
+
 function Test-RimsStateOwnsAnyFrontendProcess {
   param([AllowNull()][object]$State)
 
@@ -779,7 +890,12 @@ function Get-RimsFrontendComponent {
       -Value $State `
       -Name 'target' `
       -DefaultValue 'none')
-  if ($target -eq 'none') {
+  $frontend = Get-RimsObjectPropertyValue -Value $State -Name 'frontend'
+  $cleanupPending = [bool](Get-RimsObjectPropertyValue `
+      -Value $frontend `
+      -Name 'cleanupPending' `
+      -DefaultValue $false)
+  if ($target -eq 'none' -and -not $cleanupPending) {
     return [pscustomobject][ordered]@{
       name = 'frontend'
       ok = $true
@@ -792,24 +908,29 @@ function Get-RimsFrontendComponent {
       port = $FrontendPort
     }
   }
-  $frontend = Get-RimsObjectPropertyValue -Value $State -Name 'frontend'
   $owned = Test-RimsNestedOwnedProcess -State $State -PropertyName 'frontend'
   $url = [string](Get-RimsObjectPropertyValue `
       -Value $frontend `
       -Name 'url' `
       -DefaultValue '')
-  $healthy = $owned -and ($target -ne 'web' -or
+  $healthy = -not $cleanupPending -and $owned -and ($target -ne 'web' -or
     (Test-RimsHealthEndpoint -Url $url -TimeoutSeconds 2))
   return [pscustomobject][ordered]@{
     name = 'frontend'
     ok = $healthy
     required = $true
-    detail = if ($healthy) {
+    detail = if ($cleanupPending) {
+      "Managed $target frontend cleanup remains pending."
+    } elseif ($healthy) {
       "Managed $target frontend is healthy$(if ($url) { " at $url" })."
     } else {
       "Managed $target frontend is absent or unhealthy."
     }
-    remediation = if ($healthy) { '' } else { 'Inspect frontend logs, then run restart or down.' }
+    remediation = if ($healthy) { '' } elseif ($cleanupPending) {
+      'Run down with the same parameters to retry exact frontend cleanup.'
+    } else {
+      'Inspect frontend logs, then run restart or down.'
+    }
     target = $target
     managed = $owned
     healthy = $healthy
@@ -830,21 +951,56 @@ function Get-RimsEmulatorComponent {
       -Value $emulator `
       -Name 'owned' `
       -DefaultValue $false)
-  $running = if ($owned) {
+  $cleanupPending = [bool](Get-RimsObjectPropertyValue `
+      -Value $emulator `
+      -Name 'cleanupPending' `
+      -DefaultValue $false)
+  $verification = $null
+  $running = if ($cleanupPending) {
+    $false
+  } elseif ($owned) {
     Test-RimsNestedOwnedProcess -State $State -PropertyName 'emulator'
   } else {
-    $true
+    try {
+      $adb = Resolve-RimsAndroidTool `
+        -CommandName 'adb.exe' `
+        -SdkRelativePath 'platform-tools\adb.exe'
+      $verification = Get-RimsUnmanagedAndroidEmulatorHealth `
+        -Emulator $emulator `
+        -OnlineSerialsAction {
+          Get-RimsAdbDeviceSerials -AdbExecutable $adb
+        } `
+        -AvdNameAction {
+          param($serial)
+          Get-RimsAndroidAvdName -AdbExecutable $adb -Serial $serial
+        }
+      $verification.healthy
+    } catch {
+      $false
+    }
   }
   return [pscustomobject][ordered]@{
     name = 'emulator'
     ok = $running
     required = $true
-    detail = if ($owned) {
+    detail = if ($cleanupPending) {
+      'Android emulator cleanup remains pending.'
+    } elseif ($owned) {
       'Controller-owned Android emulator identity is present.'
     } else {
-      'Pre-existing Android device is recorded as user-managed.'
+      if ($null -eq $verification) {
+        'Pre-existing Android device could not be verified through adb.'
+      } else {
+        $verification.detail
+      }
     }
-    remediation = if ($running) { '' } else { 'Run down to reconcile exact emulator ownership.' }
+    remediation = if ($running) { '' } elseif ($cleanupPending) {
+      'Run down with the same parameters to retry exact emulator cleanup.'
+    } elseif ($owned) {
+      'Run down to reconcile exact emulator ownership.'
+    } else {
+      'Reconnect the recorded AVD or use a matching AndroidDevice; down will leave it user-managed.'
+    }
     owned = $owned
     serial = Get-RimsObjectPropertyValue -Value $emulator -Name 'serial'
     avdName = Get-RimsObjectPropertyValue -Value $emulator -Name 'avdName'
