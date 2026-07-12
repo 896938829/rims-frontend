@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -24,6 +25,7 @@ void main() {
     FileCopier? copyFile,
     FileDeleter? deleteFile,
     ManifestCommitter? commitManifest,
+    ManifestReadObserver? onManifestRead,
     DateTime? now,
     String Function()? idFactory,
   }) {
@@ -34,6 +36,7 @@ void main() {
       copyFile: copyFile,
       deleteFile: deleteFile,
       commitManifest: commitManifest,
+      onManifestRead: onManifestRead,
       thumbnailBuilder: (sourcePath, destinationPath) async {
         await File(destinationPath).writeAsBytes([9, 8, 7]);
         return destinationPath;
@@ -107,6 +110,118 @@ void main() {
       );
     },
   );
+
+  test('manifest paths outside the user roots are quarantined', () async {
+    final externalFile = File(
+      '${root.path}${Platform.pathSeparator}external.pdf',
+    )..writeAsBytesSync([4, 3, 2, 1]);
+    final externalThumbnail = File(
+      '${root.path}${Platform.pathSeparator}external.png',
+    )..writeAsBytesSync([9, 9]);
+    final userDirectory = Directory(
+      '${root.path}${Platform.pathSeparator}rims_attachments${Platform.pathSeparator}user_NDI',
+    );
+    await userDirectory.create(recursive: true);
+    final manifest = File(
+      '${userDirectory.path}${Platform.pathSeparator}manifest.json',
+    );
+    Future<void> writeMaliciousManifest() => manifest.writeAsString(
+      jsonEncode({
+        'version': 1,
+        'items': [
+          {
+            'requestId': 'outside-request',
+            'businessType': 'document_draft',
+            'businessId': 1,
+            'localDraftId': 'draft-source',
+            'stagedPath': externalFile.path,
+            'originalName': 'outside.pdf',
+            'mimeType': 'application/pdf',
+            'fileSize': 4,
+            'thumbnailPath': externalThumbnail.path,
+            'createdAt': DateTime.utc(2020).toIso8601String(),
+          },
+        ],
+      }),
+      flush: true,
+    );
+    final staging = store(idFactory: () => 'safe-id');
+
+    await writeMaliciousManifest();
+    final recovered = await staging.recoverForUser('42');
+    expect(
+      recovered.when(success: (items) => items, failure: (_) => null),
+      isEmpty,
+    );
+    expect(externalFile.existsSync(), isTrue);
+    expect(externalThumbnail.existsSync(), isTrue);
+
+    await writeMaliciousManifest();
+    expect(
+      (await staging.duplicateDraftAttachments(
+        userId: '42',
+        sourceDraftId: 'draft-source',
+        targetDraftId: 'draft-copy',
+        requestIds: const ['outside-request'],
+      )).isFailure,
+      isTrue,
+    );
+    expect(externalFile.existsSync(), isTrue);
+
+    await writeMaliciousManifest();
+    await staging.removeStagedAttachments(
+      userId: '42',
+      requestIds: const ['outside-request'],
+    );
+    expect(externalFile.existsSync(), isTrue);
+    expect(externalThumbnail.existsSync(), isTrue);
+
+    await writeMaliciousManifest();
+    await staging.cleanupStale(maxAge: const Duration(days: 1));
+    expect(externalFile.existsSync(), isTrue);
+    expect(externalThumbnail.existsSync(), isTrue);
+  });
+
+  test('concurrent stages serialize manifest read modify write', () async {
+    var nextId = 0;
+    var manifestReads = 0;
+    final firstRead = Completer<void>();
+    final releaseFirstRead = Completer<void>();
+    final staging = store(
+      idFactory: () => 'id-${nextId++}',
+      onManifestRead: (_) async {
+        manifestReads += 1;
+        if (manifestReads == 1) {
+          firstRead.complete();
+          await releaseFirstRead.future;
+        }
+      },
+    );
+
+    final first = staging.stage(
+      userId: '42',
+      binding: AttachmentBinding.documentDraft('draft'),
+      selection: selection(name: 'first.jpg'),
+      existingCount: 0,
+    );
+    await firstRead.future;
+    final second = staging.stage(
+      userId: '42',
+      binding: AttachmentBinding.documentDraft('draft'),
+      selection: selection(name: 'second.jpg'),
+      existingCount: 0,
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 30));
+    releaseFirstRead.complete();
+
+    expect((await first).isSuccess, isTrue);
+    expect((await second).isSuccess, isTrue);
+    final recovered = await store().recoverForUser('42');
+    recovered.when(
+      success: (items) => expect(items, hasLength(2)),
+      failure: (failure) => fail(failure.message),
+    );
+  });
 
   test(
     'duplicates draft files with new ids and independent lifecycle',

@@ -31,7 +31,7 @@ final class DraftAttachmentPanel extends StatelessWidget {
                 key: const Key('document-draft-attachment-camera'),
                 tooltip: '拍照暂存',
                 icon: Icons.photo_camera_outlined,
-                onPressed: viewModel.isBusy
+                onPressed: viewModel.isBusy || !viewModel.isMutationAllowed
                     ? null
                     : () => unawaited(
                         viewModel.pick(AttachmentPickSource.camera),
@@ -41,7 +41,7 @@ final class DraftAttachmentPanel extends StatelessWidget {
                 key: const Key('document-draft-attachment-gallery'),
                 tooltip: '相册暂存',
                 icon: Icons.photo_library_outlined,
-                onPressed: viewModel.isBusy
+                onPressed: viewModel.isBusy || !viewModel.isMutationAllowed
                     ? null
                     : () => unawaited(
                         viewModel.pick(AttachmentPickSource.gallery),
@@ -51,7 +51,7 @@ final class DraftAttachmentPanel extends StatelessWidget {
                 key: const Key('document-draft-attachment-file'),
                 tooltip: '文件暂存',
                 icon: Icons.attach_file,
-                onPressed: viewModel.isBusy
+                onPressed: viewModel.isBusy || !viewModel.isMutationAllowed
                     ? null
                     : () =>
                           unawaited(viewModel.pick(AttachmentPickSource.file)),
@@ -74,8 +74,9 @@ final class DraftAttachmentPanel extends StatelessWidget {
               ),
               trailing: IconButton(
                 tooltip: '移除暂存附件',
-                onPressed: () =>
-                    unawaited(viewModel.remove(item.pending.requestId)),
+                onPressed: viewModel.isMutationAllowed
+                    ? () => unawaited(viewModel.remove(item.pending.requestId))
+                    : null,
                 icon: const Icon(Icons.close, size: 18),
               ),
             ),

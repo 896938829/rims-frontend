@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
@@ -20,11 +21,14 @@ typedef DirectoryProvider = Future<Directory> Function();
 typedef FileCopier = Future<void> Function(String source, String destination);
 typedef FileDeleter = Future<void> Function(File file);
 typedef ManifestCommitter = Future<void> Function(File temporary, File target);
+typedef ManifestReadObserver = Future<void> Function(File manifest);
 typedef ThumbnailBuilder =
     Future<String?> Function(String source, String destination);
 
 final class FileAttachmentStagingStore
     implements AttachmentStagingStore, DraftAttachmentStagingStore {
+  static final _accountOperations = _AsyncKeyedLock();
+
   FileAttachmentStagingStore({
     required DirectoryProvider rootDirectory,
     required String Function() idFactory,
@@ -32,6 +36,7 @@ final class FileAttachmentStagingStore
     FileCopier? copyFile,
     FileDeleter? deleteFile,
     ManifestCommitter? commitManifest,
+    ManifestReadObserver? onManifestRead,
     ThumbnailBuilder? thumbnailBuilder,
   }) : this._(
          rootDirectory,
@@ -40,6 +45,7 @@ final class FileAttachmentStagingStore
          copyFile ?? _defaultCopy,
          deleteFile ?? _deleteIfExists,
          commitManifest ?? _defaultCommitManifest,
+         onManifestRead,
          thumbnailBuilder ?? buildBoundedThumbnail,
        );
 
@@ -50,6 +56,7 @@ final class FileAttachmentStagingStore
     this._copyFile,
     this._deleteFile,
     this._commitManifest,
+    this._onManifestRead,
     this._thumbnailBuilder,
   );
 
@@ -59,10 +66,26 @@ final class FileAttachmentStagingStore
   final FileCopier _copyFile;
   final FileDeleter _deleteFile;
   final ManifestCommitter _commitManifest;
+  final ManifestReadObserver? _onManifestRead;
   final ThumbnailBuilder _thumbnailBuilder;
 
   @override
   Future<Result<StagedAttachment>> stage({
+    required String userId,
+    required AttachmentBinding binding,
+    required SelectedAttachmentSource selection,
+    required int existingCount,
+  }) => _withUserLock(
+    userId,
+    () => _stage(
+      userId: userId,
+      binding: binding,
+      selection: selection,
+      existingCount: existingCount,
+    ),
+  );
+
+  Future<Result<StagedAttachment>> _stage({
     required String userId,
     required AttachmentBinding binding,
     required SelectedAttachmentSource selection,
@@ -133,7 +156,10 @@ final class FileAttachmentStagingStore
   }
 
   @override
-  Future<Result<List<StagedAttachment>>> recoverForUser(String userId) async {
+  Future<Result<List<StagedAttachment>>> recoverForUser(String userId) =>
+      _withUserLock(userId, () => _recoverForUser(userId));
+
+  Future<Result<List<StagedAttachment>>> _recoverForUser(String userId) async {
     try {
       final directory = await _userDirectory(userId, create: false);
       if (!await directory.exists()) return const Success([]);
@@ -159,6 +185,21 @@ final class FileAttachmentStagingStore
 
   @override
   Future<Result<List<StagedAttachment>>> duplicateDraftAttachments({
+    required String userId,
+    required String sourceDraftId,
+    required String targetDraftId,
+    required List<String> requestIds,
+  }) => _withUserLock(
+    userId,
+    () => _duplicateDraftAttachments(
+      userId: userId,
+      sourceDraftId: sourceDraftId,
+      targetDraftId: targetDraftId,
+      requestIds: requestIds,
+    ),
+  );
+
+  Future<Result<List<StagedAttachment>>> _duplicateDraftAttachments({
     required String userId,
     required String sourceDraftId,
     required String targetDraftId,
@@ -263,6 +304,14 @@ final class FileAttachmentStagingStore
   Future<Result<void>> removeStagedAttachments({
     required String userId,
     required List<String> requestIds,
+  }) => _withUserLock(
+    userId,
+    () => _removeStagedAttachments(userId: userId, requestIds: requestIds),
+  );
+
+  Future<Result<void>> _removeStagedAttachments({
+    required String userId,
+    required List<String> requestIds,
   }) async {
     if (requestIds.isEmpty) return const Success(null);
     var cleanupIntentPersisted = false;
@@ -288,7 +337,10 @@ final class FileAttachmentStagingStore
   }
 
   @override
-  Future<Result<void>> remove(String userId, String requestId) async {
+  Future<Result<void>> remove(String userId, String requestId) =>
+      _withUserLock(userId, () => _remove(userId, requestId));
+
+  Future<Result<void>> _remove(String userId, String requestId) async {
     try {
       final directory = await _userDirectory(userId, create: false);
       if (!await directory.exists()) return const Success(null);
@@ -323,22 +375,26 @@ final class FileAttachmentStagingStore
       final cutoff = _clock().toUtc().subtract(maxAge);
       await for (final entity in root.list()) {
         if (entity is! Directory) continue;
-        final items = await _readManifest(entity);
-        final retained = <StagedAttachment>[];
-        for (final item in items) {
-          if (item.createdAt.isBefore(cutoff)) {
-            await _deleteIfExists(File(item.pending.stagedPath));
-            final thumbnail = item.thumbnailPath;
-            if (thumbnail != null) await _deleteIfExists(File(thumbnail));
-          } else {
-            retained.add(item);
+        await _accountOperations.run(entity.absolute.path, () async {
+          if (!await entity.exists()) return;
+          await _completePendingCleanup(entity);
+          final items = await _readManifest(entity);
+          final retained = <StagedAttachment>[];
+          for (final item in items) {
+            if (item.createdAt.isBefore(cutoff)) {
+              await _deleteIfExists(File(item.pending.stagedPath));
+              final thumbnail = item.thumbnailPath;
+              if (thumbnail != null) await _deleteIfExists(File(thumbnail));
+            } else {
+              retained.add(item);
+            }
           }
-        }
-        await _writeManifest(entity, retained);
-        await _deleteFilesOlderThan(
-          Directory('${entity.path}${Platform.pathSeparator}downloads'),
-          cutoff,
-        );
+          await _writeManifest(entity, retained);
+          await _deleteFilesOlderThan(
+            Directory('${entity.path}${Platform.pathSeparator}downloads'),
+            cutoff,
+          );
+        });
       }
       return const Success(null);
     } catch (error) {
@@ -352,7 +408,10 @@ final class FileAttachmentStagingStore
   }
 
   @override
-  Future<Result<void>> clearForUser(String userId) async {
+  Future<Result<void>> clearForUser(String userId) =>
+      _withUserLock(userId, () => _clearForUser(userId));
+
+  Future<Result<void>> _clearForUser(String userId) async {
     try {
       final directory = await _userDirectory(userId, create: false);
       if (await directory.exists()) await directory.delete(recursive: true);
@@ -369,6 +428,16 @@ final class FileAttachmentStagingStore
 
   @override
   Future<Result<String>> saveDownload({
+    required String userId,
+    required String originalName,
+    required Uint8List bytes,
+  }) => _withUserLock(
+    userId,
+    () =>
+        _saveDownload(userId: userId, originalName: originalName, bytes: bytes),
+  );
+
+  Future<Result<String>> _saveDownload({
     required String userId,
     required String originalName,
     required Uint8List bytes,
@@ -445,20 +514,83 @@ final class FileAttachmentStagingStore
     return directory;
   }
 
+  Future<T> _withUserLock<T>(
+    String userId,
+    Future<T> Function() operation,
+  ) async {
+    final directory = await _userDirectory(userId, create: false);
+    return _accountOperations.run(directory.absolute.path, operation);
+  }
+
   Future<List<StagedAttachment>> _readManifest(Directory directory) async {
     final file = File(
       '${directory.path}${Platform.pathSeparator}manifest.json',
     );
-    if (!await file.exists()) return [];
+    if (!await file.exists()) {
+      await _onManifestRead?.call(file);
+      return [];
+    }
     final decoded = jsonDecode(await file.readAsString());
     if (decoded is! Map<String, Object?> ||
         decoded['version'] != _manifestVersion ||
         decoded['items'] is! List<Object?>) {
       throw const FormatException('Invalid attachment staging manifest.');
     }
-    return (decoded['items']! as List<Object?>)
-        .map(_stagedFromJson)
-        .toList(growable: false);
+    final rawItems = decoded['items']! as List<Object?>;
+    final items = <StagedAttachment>[];
+    for (final raw in rawItems) {
+      try {
+        final item = _stagedFromJson(raw);
+        if (await _isTrustedManifestItem(directory, item)) items.add(item);
+      } on Object {
+        // Invalid persisted entries are excluded from every file operation.
+      }
+    }
+    await _onManifestRead?.call(file);
+    if (items.length != rawItems.length) {
+      await _writeManifest(directory, items);
+    }
+    return items;
+  }
+
+  Future<bool> _isTrustedManifestItem(
+    Directory directory,
+    StagedAttachment item,
+  ) async {
+    final requestId = item.pending.requestId;
+    if (!RegExp(r'^[A-Za-z0-9_-]+$').hasMatch(requestId)) return false;
+    final extension = _extension(item.pending.originalName);
+    if (!kAcceptedAttachmentExtensions.contains(extension)) return false;
+    final stagedRoot = Directory(
+      '${directory.path}${Platform.pathSeparator}staged',
+    );
+    if (!await _matchesOwnedPath(
+      path: item.pending.stagedPath,
+      root: stagedRoot,
+      expectedFilename: '$requestId.$extension',
+    )) {
+      return false;
+    }
+    final thumbnail = item.thumbnailPath;
+    if (thumbnail == null) return true;
+    return _matchesOwnedPath(
+      path: thumbnail,
+      root: Directory('${directory.path}${Platform.pathSeparator}thumbnails'),
+      expectedFilename: '$requestId.png',
+    );
+  }
+
+  Future<bool> _matchesOwnedPath({
+    required String path,
+    required Directory root,
+    required String expectedFilename,
+  }) async {
+    final canonicalRoot = await _canonicalPath(root);
+    final canonicalFile = await _canonicalPath(File(path));
+    final comparableRoot = _comparablePath(canonicalRoot);
+    final comparableFile = _comparablePath(canonicalFile);
+    return _filename(canonicalFile) == expectedFilename &&
+        comparableFile.startsWith('$comparableRoot${Platform.pathSeparator}');
   }
 
   Future<void> _writeManifest(
@@ -710,12 +842,48 @@ Future<void> _deleteIfExists(File file) async {
 
 String _filename(String path) => path.split(Platform.pathSeparator).last;
 
+Future<String> _canonicalPath(FileSystemEntity entity) async {
+  try {
+    if (await entity.exists()) return await entity.resolveSymbolicLinks();
+  } on FileSystemException {
+    return _normalizeAbsolutePath(entity.path);
+  }
+  return _normalizeAbsolutePath(entity.path);
+}
+
+String _normalizeAbsolutePath(String path) => Uri.file(
+  File(path).absolute.path,
+  windows: Platform.isWindows,
+).normalizePath().toFilePath(windows: Platform.isWindows);
+
+String _comparablePath(String path) =>
+    Platform.isWindows ? path.toLowerCase() : path;
+
 Future<void> _deleteFilesOlderThan(Directory directory, DateTime cutoff) async {
   if (!await directory.exists()) return;
   await for (final entity in directory.list()) {
     if (entity is! File) continue;
     final modifiedAt = await entity.lastModified();
     if (modifiedAt.toUtc().isBefore(cutoff)) await entity.delete();
+  }
+}
+
+final class _AsyncKeyedLock {
+  final Map<String, Future<void>> _tails = {};
+
+  Future<T> run<T>(String rawKey, Future<T> Function() operation) async {
+    final key = _comparablePath(_normalizeAbsolutePath(rawKey));
+    final previous = _tails[key] ?? Future<void>.value();
+    final release = Completer<void>();
+    final tail = release.future;
+    _tails[key] = tail;
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release.complete();
+      if (identical(_tails[key], tail)) _tails.remove(key);
+    }
   }
 }
 

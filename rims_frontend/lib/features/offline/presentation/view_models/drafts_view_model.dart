@@ -43,6 +43,7 @@ final class DraftsViewModel extends ChangeNotifier {
   String? _errorMessage;
   bool _isDisposed = false;
   int _loadGeneration = 0;
+  int _contextGeneration = 0;
 
   List<DraftListItem> get drafts => List.unmodifiable(_drafts);
   bool get isLoading => _isLoading;
@@ -92,6 +93,7 @@ final class DraftsViewModel extends ChangeNotifier {
     required int warehouseId,
     String? attachmentUserId,
   }) async {
+    _contextGeneration += 1;
     this.accountId = accountId;
     this.roleCode = roleCode;
     this.warehouseId = warehouseId;
@@ -106,6 +108,7 @@ final class DraftsViewModel extends ChangeNotifier {
   }
 
   Future<DocumentDraft?> duplicate(String draftId) async {
+    final operationGeneration = _contextGeneration;
     final operationAccountId = accountId;
     final operationRoleCode = roleCode;
     final operationAttachmentUserId = attachmentUserId;
@@ -114,7 +117,9 @@ final class DraftsViewModel extends ChangeNotifier {
       draftId: draftId,
     );
     if (source == null) return null;
-    if (accountId != operationAccountId) return null;
+    if (!_isCurrentContext(operationGeneration, operationAccountId)) {
+      return null;
+    }
     final timestamp = now().toUtc();
     final targetDraftId = draftIdFactory();
     var duplicatedAttachmentIds = const <String>[];
@@ -138,10 +143,19 @@ final class DraftsViewModel extends ChangeNotifier {
               .map((item) => item.pending.requestId)
               .toList(growable: false);
         case FailureResult(:final failure):
-          _errorMessage = failure.message;
-          _notify();
+          if (_isCurrentContext(operationGeneration, operationAccountId)) {
+            _errorMessage = failure.message;
+            _notify();
+          }
           return null;
       }
+    }
+    if (!_isCurrentContext(operationGeneration, operationAccountId)) {
+      await _cleanupDuplicatedAttachments(
+        userId: operationAttachmentUserId,
+        requestIds: duplicatedAttachmentIds,
+      );
+      return null;
     }
     final duplicate = DocumentDraft(
       id: targetDraftId,
@@ -157,7 +171,18 @@ final class DraftsViewModel extends ChangeNotifier {
     final result = await repository.save(duplicate, expectedVersion: 0);
     switch (result) {
       case Success(:final data):
-        if (accountId == operationAccountId) _replaceOrAdd(data);
+        if (!_isCurrentContext(operationGeneration, operationAccountId)) {
+          await repository.delete(
+            accountId: operationAccountId,
+            draftId: data.id,
+          );
+          await _cleanupDuplicatedAttachments(
+            userId: operationAttachmentUserId,
+            requestIds: duplicatedAttachmentIds,
+          );
+          return null;
+        }
+        _replaceOrAdd(data);
         return data;
       case FailureResult(:final failure):
         var errorMessage = failure.message;
@@ -175,7 +200,7 @@ final class DraftsViewModel extends ChangeNotifier {
                 '$errorMessage; attachment cleanup failed: ${failure.message}';
           }
         }
-        if (accountId == operationAccountId) {
+        if (_isCurrentContext(operationGeneration, operationAccountId)) {
           _errorMessage = errorMessage;
           _notify();
         }
@@ -184,14 +209,25 @@ final class DraftsViewModel extends ChangeNotifier {
   }
 
   Future<bool> renameRemark(String draftId, String remark) async {
-    final source = await open(draftId);
+    final operationGeneration = _contextGeneration;
+    final operationAccountId = accountId;
+    final source = await repository.load(
+      accountId: operationAccountId,
+      draftId: draftId,
+    );
     if (source == null) return false;
+    if (!_isCurrentContext(operationGeneration, operationAccountId)) {
+      return false;
+    }
     final payload = Map<String, Object?>.from(source.payload)
       ..['remark'] = remark;
     final result = await repository.save(
       source.copyWith(payload: payload, updatedAt: now().toUtc()),
       expectedVersion: source.version,
     );
+    if (!_isCurrentContext(operationGeneration, operationAccountId)) {
+      return false;
+    }
     return result.when(
       success: (saved) {
         _replaceOrAdd(saved);
@@ -207,13 +243,70 @@ final class DraftsViewModel extends ChangeNotifier {
 
   Future<bool> discard(String draftId, {required bool confirmed}) async {
     if (!confirmed) return false;
-    await repository.delete(accountId: accountId, draftId: draftId);
+    final operationGeneration = _contextGeneration;
+    final operationAccountId = accountId;
+    final operationAttachmentUserId = attachmentUserId;
+    final source = await repository.load(
+      accountId: operationAccountId,
+      draftId: draftId,
+    );
+    if (source == null ||
+        !_isCurrentContext(operationGeneration, operationAccountId)) {
+      return false;
+    }
+    if (source.attachmentStagingIds.isNotEmpty &&
+        (attachmentStagingStore == null || operationAttachmentUserId == null)) {
+      _errorMessage = '草稿附件清理服务不可用，未丢弃草稿';
+      _notify();
+      return false;
+    }
+    try {
+      await repository.delete(accountId: operationAccountId, draftId: draftId);
+    } on Object catch (error) {
+      if (_isCurrentContext(operationGeneration, operationAccountId)) {
+        _errorMessage = error.toString();
+        _notify();
+      }
+      return false;
+    }
+    Result<void>? cleanup;
+    if (source.attachmentStagingIds.isNotEmpty) {
+      cleanup = await attachmentStagingStore!.removeStagedAttachments(
+        userId: operationAttachmentUserId!,
+        requestIds: source.attachmentStagingIds,
+      );
+    }
+    if (!_isCurrentContext(operationGeneration, operationAccountId)) {
+      return false;
+    }
     _drafts = _drafts
         .where((item) => item.draft.id != draftId)
         .toList(growable: false);
+    if (cleanup case FailureResult(:final failure)) {
+      _errorMessage = '草稿已删除；附件清理待重试: ${failure.message}';
+    } else {
+      _errorMessage = null;
+    }
     _notify();
     return true;
   }
+
+  Future<void> _cleanupDuplicatedAttachments({
+    required String? userId,
+    required List<String> requestIds,
+  }) async {
+    final stagingStore = attachmentStagingStore;
+    if (stagingStore == null || userId == null || requestIds.isEmpty) return;
+    await stagingStore.removeStagedAttachments(
+      userId: userId,
+      requestIds: requestIds,
+    );
+  }
+
+  bool _isCurrentContext(int generation, String requestedAccountId) =>
+      !_isDisposed &&
+      generation == _contextGeneration &&
+      accountId == requestedAccountId;
 
   void _replaceOrAdd(DocumentDraft draft) {
     final next =

@@ -260,7 +260,9 @@ final class _DocumentsPageState extends State<DocumentsPage> {
                       child: DocumentActionCard(
                         action: action,
                         isSelected: action == viewModel.selectedAction,
-                        onTap: () => _selectAction(action),
+                        onTap: viewModel.isSubmitting
+                            ? null
+                            : () => _selectAction(action),
                       ),
                     ),
                 ],
@@ -1264,6 +1266,8 @@ final class _DocumentFormState extends State<_DocumentForm> {
       userId: userId,
       draftIdProvider: widget.viewModel.ensureDraftId,
       onChanged: widget.viewModel.updateAttachmentStagingIds,
+      canMutate: () => !widget.viewModel.isSubmitting,
+      mutationEpochProvider: () => widget.viewModel.submissionEpoch,
     );
   }
 
@@ -1356,7 +1360,9 @@ final class _DocumentFormState extends State<_DocumentForm> {
                 ),
                 TextButton(
                   key: const Key('document-confirm-draft-review'),
-                  onPressed: viewModel.confirmDraftReview,
+                  onPressed: viewModel.isSubmitting
+                      ? null
+                      : viewModel.confirmDraftReview,
                   child: const Text('确认复核'),
                 ),
               ],
@@ -1404,7 +1410,7 @@ final class _DocumentFormState extends State<_DocumentForm> {
             const SizedBox(height: 8),
             _ProductSearchState(
               viewModel: viewModel,
-              onProductSelected: _selectProduct,
+              onProductSelected: viewModel.isSubmitting ? null : _selectProduct,
             ),
           ],
           if (viewModel.isTransferAction) ...[
@@ -1459,7 +1465,9 @@ final class _DocumentFormState extends State<_DocumentForm> {
                 subtitle: Text('数量 ${line.quantity}'),
                 trailing: IconButton(
                   tooltip: '移除明细',
-                  onPressed: () => viewModel.removeDraftLine(line.productId),
+                  onPressed: viewModel.isSubmitting
+                      ? null
+                      : () => viewModel.removeDraftLine(line.productId),
                   icon: const Icon(Icons.remove_circle_outline),
                 ),
               ),
@@ -1519,7 +1527,7 @@ final class _ProductSearchState extends StatelessWidget {
   });
 
   final DocumentsViewModel viewModel;
-  final ValueChanged<InventoryItem> onProductSelected;
+  final ValueChanged<InventoryItem>? onProductSelected;
 
   @override
   Widget build(BuildContext context) {
@@ -1591,14 +1599,16 @@ final class _NonStandardInventorySelector extends StatelessWidget {
             ),
           ),
       ],
-      onChanged: (itemId) {
-        for (final item in items) {
-          if (item.id == itemId) {
-            viewModel.selectNonStandardInventory(item);
-            return;
-          }
-        }
-      },
+      onChanged: viewModel.isSubmitting
+          ? null
+          : (itemId) {
+              for (final item in items) {
+                if (item.id == itemId) {
+                  viewModel.selectNonStandardInventory(item);
+                  return;
+                }
+              }
+            },
     );
   }
 }
@@ -1623,13 +1633,13 @@ final class _ProductCandidateRow extends StatelessWidget {
   const _ProductCandidateRow({required this.product, required this.onSelected});
 
   final InventoryItem product;
-  final ValueChanged<InventoryItem> onSelected;
+  final ValueChanged<InventoryItem>? onSelected;
 
   @override
   Widget build(BuildContext context) {
     return InkWell(
       key: Key('document-product-option-${product.productId}'),
-      onTap: () => onSelected(product),
+      onTap: onSelected == null ? null : () => onSelected!(product),
       child: Padding(
         padding: const EdgeInsets.symmetric(vertical: 7),
         child: Row(
@@ -1682,14 +1692,16 @@ final class _TargetWarehouseSelector extends StatelessWidget {
             ),
           ),
       ],
-      onChanged: (warehouseId) {
-        for (final warehouse in targetWarehouses) {
-          if (warehouse.id == warehouseId) {
-            viewModel.selectTargetWarehouse(warehouse);
-            return;
-          }
-        }
-      },
+      onChanged: viewModel.isSubmitting
+          ? null
+          : (warehouseId) {
+              for (final warehouse in targetWarehouses) {
+                if (warehouse.id == warehouseId) {
+                  viewModel.selectTargetWarehouse(warehouse);
+                  return;
+                }
+              }
+            },
     );
   }
 }
@@ -1737,14 +1749,16 @@ final class _ReturnSourceSelector extends StatelessWidget {
             ),
           ),
       ],
-      onChanged: (documentId) {
-        for (final document in sourceDocuments) {
-          if (document.id == documentId) {
-            viewModel.selectReturnSourceDocument(document);
-            return;
-          }
-        }
-      },
+      onChanged: viewModel.isSubmitting
+          ? null
+          : (documentId) {
+              for (final document in sourceDocuments) {
+                if (document.id == documentId) {
+                  viewModel.selectReturnSourceDocument(document);
+                  return;
+                }
+              }
+            },
     );
   }
 }

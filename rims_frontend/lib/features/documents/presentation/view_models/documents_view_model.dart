@@ -124,6 +124,8 @@ final class DocumentsViewModel extends ChangeNotifier {
   Future<void>? _draftSaveInFlight;
   bool _draftDirty = false;
   bool _draftSubmissionBarrier = false;
+  int _submissionEpoch = 0;
+  int _draftContextGeneration = 0;
   String? _activeDraftId;
   DateTime? _draftCreatedAt;
   int _draftVersion = 0;
@@ -236,6 +238,7 @@ final class DocumentsViewModel extends ChangeNotifier {
   bool get isLoadingNonStandardInventory => _isLoadingNonStandardInventory;
   bool get isLoadingReturnSources => _isLoadingReturnSources;
   bool get isSubmitting => _isSubmitting;
+  int get submissionEpoch => _submissionEpoch;
   int get documentTotal => _documentTotal;
   bool get hasMoreDocuments =>
       _documentPage > 0 &&
@@ -258,6 +261,7 @@ final class DocumentsViewModel extends ChangeNotifier {
   String get quantityInputHint => isStocktakeAction ? '输入实盘数量' : '输入数量';
 
   void selectAction(DocumentAction action) {
+    if (!_canMutateDocumentForm) return;
     if (_isAdminOnlyAction(action) && !canManageAdminDocumentActions) {
       return;
     }
@@ -295,6 +299,7 @@ final class DocumentsViewModel extends ChangeNotifier {
   }
 
   void updateProductName(String value) {
+    if (!_canMutateDocumentForm) return;
     _productQuery = value;
     if (_selectedProduct?.productName != value) {
       _selectedProduct = null;
@@ -346,6 +351,7 @@ final class DocumentsViewModel extends ChangeNotifier {
   }
 
   Future<void> searchProducts(String value) async {
+    if (!_canMutateDocumentForm) return;
     final requestId = ++_productSearchRequestId;
     _productQuery = value;
     if (_selectedProduct?.productName != value) {
@@ -390,6 +396,7 @@ final class DocumentsViewModel extends ChangeNotifier {
   }
 
   void selectProduct(InventoryItem product) {
+    if (!_canMutateDocumentForm) return;
     _selectedProduct = product;
     _productQuery = product.productName;
     _productCandidates = const [];
@@ -404,6 +411,7 @@ final class DocumentsViewModel extends ChangeNotifier {
   }
 
   void addProductToDraft(InventoryItem product, {required int quantity}) {
+    if (!_canMutateDocumentForm) return;
     if (isConversionAction && _draftLines.isNotEmpty) {
       _formError = '转标准只能选择一个标准商品';
       notifyListeners();
@@ -437,6 +445,7 @@ final class DocumentsViewModel extends ChangeNotifier {
   }
 
   void updateDraftLineQuantity(int productId, int quantity) {
+    if (!_canMutateDocumentForm) return;
     if (isStocktakeAction ? quantity < 0 : quantity <= 0) {
       _formError = isStocktakeAction ? '实盘数量不能为负数' : '数量必须大于 0';
       notifyListeners();
@@ -462,6 +471,7 @@ final class DocumentsViewModel extends ChangeNotifier {
   }
 
   void removeDraftLine(int productId) {
+    if (!_canMutateDocumentForm) return;
     _draftLines = _draftLines
         .where((line) => line.productId != productId)
         .toList(growable: false);
@@ -613,6 +623,7 @@ final class DocumentsViewModel extends ChangeNotifier {
   }
 
   void selectNonStandardInventory(NonStandardInventoryItem item) {
+    if (!_canMutateDocumentForm) return;
     _selectedNonStandardInventory = item;
     _nonStandardSourceId = item.id;
     _formError = null;
@@ -621,6 +632,7 @@ final class DocumentsViewModel extends ChangeNotifier {
   }
 
   void selectTargetWarehouse(Warehouse warehouse) {
+    if (!_canMutateDocumentForm) return;
     _selectedTargetWarehouse = warehouse;
     _formError = null;
     _scheduleDraftSave();
@@ -628,6 +640,7 @@ final class DocumentsViewModel extends ChangeNotifier {
   }
 
   void selectReturnSourceDocument(DocumentRecord document) {
+    if (!_canMutateDocumentForm) return;
     _selectedReturnSourceDocument = document;
     _pendingReturnSourceDocumentId = null;
     _returnSourceError = null;
@@ -637,6 +650,7 @@ final class DocumentsViewModel extends ChangeNotifier {
   }
 
   void updateQuantity(String value) {
+    if (!_canMutateDocumentForm) return;
     _quantityText = value;
     _formError = null;
     _scheduleDraftSave();
@@ -644,6 +658,7 @@ final class DocumentsViewModel extends ChangeNotifier {
   }
 
   void updateRemark(String value) {
+    if (!_canMutateDocumentForm) return;
     _remark = value;
     _formError = null;
     _scheduleDraftSave();
@@ -656,12 +671,14 @@ final class DocumentsViewModel extends ChangeNotifier {
   }
 
   void updateAttachmentStagingIds(List<String> requestIds) {
+    if (!_canMutateDocumentForm) return;
     _attachmentStagingIds = List.unmodifiable(requestIds);
     _scheduleDraftSave();
     notifyListeners();
   }
 
   void confirmDraftReview() {
+    if (!_canMutateDocumentForm) return;
     if (!_requiresDraftReview) return;
     _requiresDraftReview = false;
     _draftObservedRoleCode = observedRoleCode;
@@ -678,23 +695,28 @@ final class DocumentsViewModel extends ChangeNotifier {
   }
 
   Future<void> _ensureDraftSaveWorker() async {
-    final current = _draftSaveInFlight;
-    if (current != null) {
-      await current;
-      return;
-    }
-    final worker = _runDraftSaveWorker();
-    _draftSaveInFlight = worker;
-    await worker;
-    if (identical(_draftSaveInFlight, worker)) {
-      _draftSaveInFlight = null;
+    while (_draftDirty && !_isDisposed) {
+      final current = _draftSaveInFlight;
+      if (current != null) {
+        await current;
+        continue;
+      }
+      final generation = _draftContextGeneration;
+      final worker = _runDraftSaveWorker(generation);
+      _draftSaveInFlight = worker;
+      await worker;
+      if (identical(_draftSaveInFlight, worker)) {
+        _draftSaveInFlight = null;
+      }
     }
   }
 
-  Future<void> _runDraftSaveWorker() async {
-    while (_draftDirty && !_isDisposed) {
+  Future<void> _runDraftSaveWorker(int generation) async {
+    while (_draftDirty &&
+        !_isDisposed &&
+        generation == _draftContextGeneration) {
       _draftDirty = false;
-      await _persistDraft();
+      await _persistDraft(generation);
     }
   }
 
@@ -728,8 +750,15 @@ final class DocumentsViewModel extends ChangeNotifier {
       notifyListeners();
       return false;
     }
+    if (!canManageAdminDocumentActions && _isAdminOnlyDocType(draft.docType)) {
+      _draftSaveError = '当前账号无权使用该单据类型';
+      notifyListeners();
+      return false;
+    }
 
     _draftSaveTimer?.cancel();
+    _draftContextGeneration += 1;
+    _draftDirty = false;
     _activeDraftId = draft.id;
     _draftCreatedAt = draft.createdAt;
     _draftVersion = draft.version;
@@ -790,9 +819,13 @@ final class DocumentsViewModel extends ChangeNotifier {
     _draftObservedRoleCode = observedRoleCode;
   }
 
-  Future<void> _persistDraft() async {
+  Future<void> _persistDraft(int generation) async {
     final repository = draftRepository!;
     final timestamp = now().toUtc();
+    final draftId = _activeDraftId!;
+    final activeAccountId = accountId!;
+    final warehouseId = currentWarehouse!.id;
+    final expectedVersion = _draftVersion;
     final request = CreateDocumentRequest(
       docType: _selectedAction.docType,
       typeLabel: _selectedAction.label,
@@ -819,19 +852,28 @@ final class DocumentsViewModel extends ChangeNotifier {
       };
     }
     final draft = DocumentDraft(
-      id: _activeDraftId!,
-      accountId: accountId!,
-      warehouseId: currentWarehouse!.id,
+      id: draftId,
+      accountId: activeAccountId,
+      warehouseId: warehouseId,
       docType: _selectedAction.docType,
       observedRoleCode: _draftObservedRoleCode ?? observedRoleCode,
       payload: payload,
       attachmentStagingIds: _attachmentStagingIds,
       createdAt: _draftCreatedAt ?? timestamp,
       updatedAt: timestamp,
-      version: _draftVersion,
+      version: expectedVersion,
     );
-    final result = await repository.save(draft, expectedVersion: _draftVersion);
-    if (_isDisposed) return;
+    final result = await repository.save(
+      draft,
+      expectedVersion: expectedVersion,
+    );
+    if (_isDisposed ||
+        generation != _draftContextGeneration ||
+        _activeDraftId != draftId ||
+        accountId != activeAccountId ||
+        currentWarehouse?.id != warehouseId) {
+      return;
+    }
     result.when(
       success: (saved) {
         _draftVersion = saved.version;
@@ -1127,6 +1169,12 @@ final class DocumentsViewModel extends ChangeNotifier {
     if (_isSubmitting) {
       return false;
     }
+    if (!canManageAdminDocumentActions &&
+        _isAdminOnlyDocType(_selectedAction.docType)) {
+      _formError = '当前账号无权使用该单据类型';
+      notifyListeners();
+      return false;
+    }
     if (_requiresDraftReview) {
       _formError = '请确认草稿复核后再提交';
       notifyListeners();
@@ -1213,6 +1261,10 @@ final class DocumentsViewModel extends ChangeNotifier {
     }
 
     _draftSubmissionBarrier = true;
+    _submissionEpoch += 1;
+    _productSearchRequestId += 1;
+    _isSearchingProducts = false;
+    _productCandidates = const [];
     _draftSaveTimer?.cancel();
     _isSubmitting = true;
     final hadLoadedDocumentPage = _documentPage > 0;
@@ -1338,6 +1390,9 @@ final class DocumentsViewModel extends ChangeNotifier {
     _isSubmitting = false;
     notifyListeners();
   }
+
+  bool get _canMutateDocumentForm =>
+      !_draftSubmissionBarrier && !_isSubmitting && !_isDisposed;
 
   DocumentRecord _withSubmittedLineSummary({
     required DocumentRecord document,

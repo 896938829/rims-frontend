@@ -229,6 +229,132 @@ void main() {
     },
   );
 
+  test('late rename result cannot enter the new account list', () async {
+    final delayedSave = Completer<Result<DocumentDraft>>();
+    final repository = _MemoryDraftRepository([
+      _draft('rename-7'),
+      _draft('account-8', accountId: '8'),
+    ], delayedSave: delayedSave);
+    final viewModel = DraftsViewModel(
+      repository: repository,
+      accountId: '7',
+      roleCode: 'operator',
+      warehouseId: 11,
+    );
+
+    final rename = viewModel.renameRemark('rename-7', 'late rename');
+    await repository.saveStarted.future;
+    await viewModel.updateContext(
+      accountId: '8',
+      roleCode: 'operator',
+      warehouseId: 11,
+    );
+    delayedSave.complete(
+      Success(
+        _draft('rename-7').copyWith(
+          payload: const {'lines': [], 'remark': 'late rename'},
+          version: 2,
+        ),
+      ),
+    );
+
+    expect(await rename, isFalse);
+    expect(viewModel.drafts.map((item) => item.draft.id), ['account-8']);
+  });
+
+  test('late discard cannot remove the same id from the new account', () async {
+    final repository = _ScopedDelayedDeleteRepository();
+    final viewModel = DraftsViewModel(
+      repository: repository,
+      accountId: '7',
+      roleCode: 'operator',
+      warehouseId: 11,
+    );
+    await viewModel.load();
+
+    final discard = viewModel.discard('shared-id', confirmed: true);
+    await repository.deleteStarted.future;
+    await viewModel.updateContext(
+      accountId: '8',
+      roleCode: 'operator',
+      warehouseId: 11,
+    );
+    repository.releaseDelete.complete();
+
+    expect(await discard, isFalse);
+    expect(viewModel.drafts.map((item) => item.draft.id), ['shared-id']);
+    expect(viewModel.drafts.single.draft.accountId, '8');
+  });
+
+  test(
+    'late duplicate success compensates old account draft and files',
+    () async {
+      final delayedSave = Completer<Result<DocumentDraft>>();
+      final repository = _MemoryDraftRepository([
+        _draft('source-7', attachmentIds: ['file-7']),
+        _draft('account-8', accountId: '8'),
+      ], delayedSave: delayedSave);
+      final staging = _FakeDraftAttachmentStagingStore();
+      final viewModel = DraftsViewModel(
+        repository: repository,
+        accountId: '7',
+        roleCode: 'operator',
+        warehouseId: 11,
+        attachmentStagingStore: staging,
+        attachmentUserId: '7',
+        draftIdFactory: () => 'copy-7',
+      );
+
+      final duplicate = viewModel.duplicate('source-7');
+      await repository.saveStarted.future;
+      await viewModel.updateContext(
+        accountId: '8',
+        roleCode: 'operator',
+        warehouseId: 11,
+        attachmentUserId: '8',
+      );
+      delayedSave.complete(
+        Success(_draft('copy-7', attachmentIds: ['copy-file'])),
+      );
+
+      expect(await duplicate, isNull);
+      expect(repository.deleted, [('7', 'copy-7')]);
+      expect(staging.removalRequests.single.$1, '7');
+      expect(staging.removalRequests.single.$2, ['copy-file']);
+      expect(viewModel.drafts.map((item) => item.draft.id), ['account-8']);
+    },
+  );
+
+  test(
+    'discard reports pending attachment cleanup after draft deletion',
+    () async {
+      final repository = _MemoryDraftRepository([
+        _draft('discard-me', attachmentIds: ['staged-file']),
+      ]);
+      final staging = _FakeDraftAttachmentStagingStore(
+        removeResult: const FailureResult(
+          LocalStorageFailure(message: 'cleanup pending'),
+        ),
+      );
+      final viewModel = DraftsViewModel(
+        repository: repository,
+        accountId: '7',
+        roleCode: 'operator',
+        warehouseId: 11,
+        attachmentStagingStore: staging,
+        attachmentUserId: '7',
+      );
+      await viewModel.load();
+
+      expect(await viewModel.discard('discard-me', confirmed: true), isTrue);
+
+      expect(repository.byId('discard-me'), isNull);
+      expect(staging.removalRequests.single.$1, '7');
+      expect(staging.removalRequests.single.$2, ['staged-file']);
+      expect(viewModel.errorMessage, '草稿已删除；附件清理待重试: cleanup pending');
+    },
+  );
+
   test('a rebuilt view model recovers persisted drafts', () async {
     final repository = _MemoryDraftRepository([_draft('persisted')]);
     final first = DraftsViewModel(
@@ -314,6 +440,8 @@ final class _MemoryDraftRepository implements DocumentDraftRepository {
   final Map<String, DocumentDraft> _drafts;
   final String? failingDraftId;
   final Completer<Result<DocumentDraft>>? delayedSave;
+  final Completer<void> saveStarted = Completer<void>();
+  final List<(String, String)> deleted = [];
 
   DocumentDraft? byId(String id) => _drafts[id];
 
@@ -322,7 +450,12 @@ final class _MemoryDraftRepository implements DocumentDraftRepository {
     DocumentDraft draft, {
     required int expectedVersion,
   }) async {
-    if (delayedSave case final completer?) return completer.future;
+    if (delayedSave case final completer?) {
+      if (!saveStarted.isCompleted) saveStarted.complete();
+      final result = await completer.future;
+      if (result case Success(:final data)) _drafts[data.id] = data;
+      return result;
+    }
     if (draft.id == failingDraftId) {
       return const FailureResult(
         LocalStorageFailure(message: 'copy draft failed'),
@@ -352,6 +485,7 @@ final class _MemoryDraftRepository implements DocumentDraftRepository {
     required String accountId,
     required String draftId,
   }) async {
+    deleted.add((accountId, draftId));
     if (_drafts[draftId]?.accountId == accountId) _drafts.remove(draftId);
   }
 
@@ -434,4 +568,38 @@ final class _DelayedListDraftRepository implements DocumentDraftRepository {
     DocumentDraft draft, {
     required int expectedVersion,
   }) async => Success(draft);
+}
+
+final class _ScopedDelayedDeleteRepository implements DocumentDraftRepository {
+  final Completer<void> deleteStarted = Completer<void>();
+  final Completer<void> releaseDelete = Completer<void>();
+
+  @override
+  Future<List<DocumentDraft>> list(String accountId) async => [
+    _draft('shared-id', accountId: accountId),
+  ];
+
+  @override
+  Future<DocumentDraft?> load({
+    required String accountId,
+    required String draftId,
+  }) async => _draft(draftId, accountId: accountId);
+
+  @override
+  Future<void> delete({
+    required String accountId,
+    required String draftId,
+  }) async {
+    deleteStarted.complete();
+    await releaseDelete.future;
+  }
+
+  @override
+  Future<Result<DocumentDraft>> save(
+    DocumentDraft draft, {
+    required int expectedVersion,
+  }) async => Success(draft);
+
+  @override
+  Future<void> prune() async {}
 }

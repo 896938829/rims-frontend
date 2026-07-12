@@ -155,6 +155,62 @@ void main() {
     viewModel.dispose();
   });
 
+  test('operator cannot open or submit an old admin document draft', () async {
+    for (final docType in [4, 6]) {
+      final draft = _savedDraft(
+        'admin-$docType',
+        docType: docType,
+        observedRoleCode: 'admin',
+      );
+      final documents = _FakeDocumentsRepository();
+      final viewModel = DocumentsViewModel(
+        repository: documents,
+        draftRepository: _FakeDocumentDraftRepository(loaded: draft),
+        accountId: '7',
+        observedRoleCode: 'operator',
+        canManageAdminDocumentActions: false,
+        currentWarehouse: const Warehouse(
+          id: 11,
+          code: 'MAIN',
+          name: 'Main',
+          isDefault: true,
+        ),
+      );
+
+      expect(await viewModel.openDraft(draft.id), isFalse);
+      expect(viewModel.activeDraftId, isNull);
+      expect(viewModel.draftSaveError, '当前账号无权使用该单据类型');
+      expect(await viewModel.createDocument(), isFalse);
+      expect(documents.createCallCount, 0);
+      viewModel.dispose();
+    }
+  });
+
+  test('late save for draft A cannot update draft B save identity', () async {
+    final drafts = _ControlledDraftRepository()
+      ..seed(_savedDraft('draft-b', remark: 'draft B'));
+    final viewModel = _draftEnabledViewModel(
+      drafts: drafts,
+      draftIdFactory: () => 'draft-a',
+    );
+    viewModel.updateRemark('draft A');
+    final saveA = viewModel.saveDraft();
+    await _waitFor(() => drafts.saveCallCount == 1);
+
+    expect(await viewModel.openDraft('draft-b'), isTrue);
+    drafts.completeNextSave(version: 99);
+    await saveA;
+    viewModel.updateRemark('draft B changed');
+    final saveB = viewModel.saveDraft();
+    await _waitFor(() => drafts.saveCallCount == 2);
+
+    expect(drafts.pendingDraftIds.single, 'draft-b');
+    expect(drafts.pendingExpectedVersions.single, 1);
+    drafts.completeNextSave();
+    await saveB;
+    viewModel.dispose();
+  });
+
   test('successful submit deletes only the active account draft', () async {
     final drafts = _FakeDocumentDraftRepository();
     final viewModel = DocumentsViewModel(
@@ -726,6 +782,55 @@ void main() {
     expect(viewModel.recentDocuments, [_remoteDocument]);
   });
 
+  test('submission barrier rejects every document form mutation', () async {
+    final pending = Completer<Result<DocumentRecord>>();
+    final repository = _FakeDocumentsRepository(createResult: pending.future);
+    final viewModel =
+        DocumentsViewModel(
+            repository: repository,
+            warehouses: const [_shanghaiWarehouse, _beijingWarehouse],
+            currentWarehouse: _shanghaiWarehouse,
+          )
+          ..addProductToDraft(_standardItem, quantity: 2)
+          ..updateRemark('before submit')
+          ..updateAttachmentStagingIds(['before-file']);
+    final initialEpoch = viewModel.submissionEpoch;
+
+    final submit = viewModel.createDocument();
+    expect(viewModel.isSubmitting, isTrue);
+    expect(viewModel.submissionEpoch, initialEpoch + 1);
+
+    viewModel.selectActionByLabel('采购入库');
+    viewModel.updateProductName('blocked query');
+    await viewModel.searchProducts('blocked search');
+    viewModel.selectProduct(_staleItem);
+    viewModel.addScannedProduct(_staleItem);
+    viewModel.addProductToDraft(_staleItem, quantity: 3);
+    viewModel.updateDraftLineQuantity(_standardItem.productId, 9);
+    viewModel.removeDraftLine(_standardItem.productId);
+    viewModel.selectNonStandardInventory(_nonStandardItem);
+    viewModel.selectTargetWarehouse(_beijingWarehouse);
+    viewModel.selectReturnSourceDocument(_completedSalesDocument);
+    viewModel.updateQuantity('99');
+    viewModel.updateRemark('blocked remark');
+    viewModel.updateAttachmentStagingIds(['blocked-file']);
+
+    expect(viewModel.selectedAction.docType, 2);
+    expect(viewModel.productQuery, isEmpty);
+    expect(viewModel.selectedProduct, isNull);
+    expect(viewModel.draftLines.single.productId, _standardItem.productId);
+    expect(viewModel.draftLines.single.quantity, 2);
+    expect(viewModel.nonStandardSourceId, isNull);
+    expect(viewModel.selectedTargetWarehouse, isNull);
+    expect(viewModel.selectedReturnSourceDocument, isNull);
+    expect(viewModel.quantityText, isEmpty);
+    expect(viewModel.remark, 'before submit');
+    expect(viewModel.attachmentStagingIds, ['before-file']);
+
+    pending.complete(const Success(_remoteDocument));
+    expect(await submit, isTrue);
+  });
+
   test('createDocument surfaces repository failure', () async {
     final repository = _FakeDocumentsRepository(
       createResult: Future.value(
@@ -785,6 +890,33 @@ void main() {
     expect(viewModel.productCandidates, [_standardItem]);
     expect(viewModel.isSearchingProducts, isFalse);
   });
+
+  test(
+    'search result issued before submit cannot mutate the form later',
+    () async {
+      final searchResult = Completer<Result<PageData<InventoryItem>>>();
+      final createResult = Completer<Result<DocumentRecord>>();
+      final viewModel = DocumentsViewModel(
+        repository: _FakeDocumentsRepository(createResult: createResult.future),
+        inventoryRepository: _FakeInventoryRepository(
+          inventorySearchResults: [searchResult.future],
+        ),
+      )..addProductToDraft(_standardItem, quantity: 2);
+
+      final search = viewModel.searchProducts('late search');
+      await Future<void>.delayed(Duration.zero);
+      final submit = viewModel.createDocument();
+      expect(viewModel.isSubmitting, isTrue);
+      searchResult.complete(Success(_inventoryPage([_staleItem])));
+      await search;
+
+      expect(viewModel.productCandidates, isEmpty);
+      expect(viewModel.isSearchingProducts, isFalse);
+
+      createResult.complete(const Success(_remoteDocument));
+      expect(await submit, isTrue);
+    },
+  );
 
   test('transfer document requires a target warehouse', () async {
     final repository = _FakeDocumentsRepository();
@@ -1548,6 +1680,70 @@ void main() {
     },
   );
 
+  testWidgets('DocumentsPage disables all form commands during submit', (
+    tester,
+  ) async {
+    final pending = Completer<Result<DocumentRecord>>();
+    final repository = _FakeDocumentsRepository(createResult: pending.future);
+    final viewModel =
+        DocumentsViewModel(
+            repository: repository,
+            warehouses: const [_shanghaiWarehouse, _beijingWarehouse],
+            currentWarehouse: _shanghaiWarehouse,
+            draftIdFactory: () => 'submit-ui-draft',
+          )
+          ..selectActionByLabel('调拨单')
+          ..selectTargetWarehouse(_beijingWarehouse)
+          ..addProductToDraft(_standardItem, quantity: 2);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: DocumentsPage(
+            viewModel: viewModel,
+            attachmentPicker: _PageDraftPicker(),
+            attachmentStagingStore: _PageDraftStaging(),
+            attachmentUserId: '7',
+          ),
+        ),
+      ),
+    );
+
+    await tester.ensureVisible(find.byKey(const Key('document-create-button')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('document-create-button')));
+    await tester.pump();
+    expect(viewModel.isSubmitting, isTrue);
+
+    final actionInkWell = tester.widget<InkWell>(
+      find.descendant(
+        of: find.byKey(const Key('document-action-sales'), skipOffstage: false),
+        matching: find.byType(InkWell, skipOffstage: false),
+      ),
+    );
+    final targetSelector = tester.widget<DropdownButtonFormField<int>>(
+      find.byKey(const Key('document-target-warehouse-selector')),
+    );
+    final removeLine = tester.widget<IconButton>(
+      find.descendant(
+        of: find.byKey(Key('document-draft-line-${_standardItem.productId}')),
+        matching: find.byType(IconButton),
+      ),
+    );
+    final attachmentButton = tester.widget<IconButton>(
+      find.descendant(
+        of: find.byKey(const Key('document-draft-attachment-file')),
+        matching: find.byType(IconButton),
+      ),
+    );
+    expect(actionInkWell.onTap, isNull);
+    expect(targetSelector.onChanged, isNull);
+    expect(removeLine.onPressed, isNull);
+    expect(attachmentButton.onPressed, isNull);
+
+    pending.complete(const Success(_remoteDocument));
+    await tester.pumpAndSettle();
+  });
+
   testWidgets('DocumentsPage clears transfer target selector after success', (
     tester,
   ) async {
@@ -2189,14 +2385,19 @@ Future<void> _waitFor(bool Function() condition) async {
   throw TestFailure('Condition was not reached.');
 }
 
-DocumentDraft _savedDraft(String id, {String remark = ''}) {
+DocumentDraft _savedDraft(
+  String id, {
+  String remark = '',
+  int docType = 2,
+  String observedRoleCode = 'operator',
+}) {
   final now = DateTime.utc(2026, 7, 13);
   return DocumentDraft(
     id: id,
     accountId: '7',
     warehouseId: 11,
-    docType: 2,
-    observedRoleCode: 'operator',
+    docType: docType,
+    observedRoleCode: observedRoleCode,
     payload: {
       'lines': [
         {
@@ -2289,10 +2490,14 @@ final class _ControlledDraftRepository implements DocumentDraftRepository {
   int saveCallCount = 0;
 
   Iterable<String> get persistedDraftIds => _persisted.keys;
+  Iterable<String> get pendingDraftIds => _pending.map((item) => item.$1.id);
+  Iterable<int> get pendingExpectedVersions => _pending.map((item) => item.$2);
 
-  void completeNextSave() {
+  void seed(DocumentDraft draft) => _persisted[draft.id] = draft;
+
+  void completeNextSave({int? version}) {
     final pending = _pending.removeAt(0);
-    final saved = pending.$1.copyWith(version: pending.$2 + 1);
+    final saved = pending.$1.copyWith(version: version ?? pending.$2 + 1);
     pending.$3.complete(Success(saved));
   }
 
