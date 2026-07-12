@@ -410,8 +410,11 @@ final class _FakeAdminRepository implements AdminRepository {
   }
 
   @override
-  Future<Result<List<AdminUser>>> listWarehouseUsers(int warehouseId) async {
-    return const Success<List<AdminUser>>([_adminListUser]);
+  Future<Result<PageData<AdminUser>>> listWarehouseUsers(
+    int warehouseId, {
+    int page = 1,
+  }) async {
+    return Success(adminPage([_adminListUser], page: page));
   }
 
   @override

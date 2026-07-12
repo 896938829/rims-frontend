@@ -178,7 +178,18 @@ final class _HomePageState extends State<HomePage> {
               else
                 InventoryWarningCard(warnings: viewModel.warnings),
               const SizedBox(height: 20),
-              const RimsSectionHeader(title: '最近单据'),
+              RimsSectionHeader(
+                title: '最近单据',
+                trailing: viewModel.recentDocuments.isEmpty
+                    ? null
+                    : Text(
+                        '已显示 ${viewModel.recentDocuments.length} / ${viewModel.recentDocumentsTotal}',
+                        key: const Key('home-recent-documents-coverage'),
+                        style: AppTextStyles.bodySmall.copyWith(
+                          color: AppColors.textSecondary,
+                        ),
+                      ),
+              ),
               const SizedBox(height: 10),
               if (viewModel.isLoading && viewModel.recentDocuments.isEmpty)
                 const _HomeStateCard(label: '正在加载最近单据...')

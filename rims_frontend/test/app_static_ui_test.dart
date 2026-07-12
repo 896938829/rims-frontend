@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:rims_frontend/core/pagination/page_data.dart';
 import 'package:rims_frontend/core/events/app_event.dart';
 import 'package:rims_frontend/core/events/app_event_bus.dart';
 import 'package:rims_frontend/core/result/failure.dart';
@@ -702,21 +703,28 @@ final class _FakeReportsRepository implements ReportsRepository {
   }
 
   @override
-  Future<Result<List<SlowMovingInventoryItem>>> loadSlowMovingInventory({
+  Future<Result<PageData<SlowMovingInventoryItem>>> loadSlowMovingInventory({
     required DateTime startDate,
     required DateTime endDate,
     int maxSales = 1,
     int page = 1,
     int pageSize = 5,
   }) async {
-    return const Success<List<SlowMovingInventoryItem>>([
-      SlowMovingInventoryItem(
-        productName: '纸巾',
-        sku: 'SKU-TI',
-        stockQuantity: 80,
-        salesQuantity: 0,
-        lastSaleAt: null,
+    return Success(
+      PageData(
+        items: const [
+          SlowMovingInventoryItem(
+            productName: '纸巾',
+            sku: 'SKU-TI',
+            stockQuantity: 80,
+            salesQuantity: 0,
+            lastSaleAt: null,
+          ),
+        ],
+        total: 1,
+        page: page,
+        pageSize: pageSize,
       ),
-    ]);
+    );
   }
 }

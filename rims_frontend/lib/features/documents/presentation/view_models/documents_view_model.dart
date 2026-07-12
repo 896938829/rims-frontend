@@ -347,18 +347,32 @@ final class DocumentsViewModel extends ChangeNotifier {
     _nonStandardInventoryError = null;
     notifyListeners();
 
-    final result = await repository.listNonStandardInventory();
-    result.when(
-      success: (page) {
-        _nonStandardInventoryItems = page.items;
-        _clearStaleNonStandardInventory();
-        _nonStandardInventoryError = null;
-      },
-      failure: (failure) {
-        _nonStandardInventoryItems = const [];
-        _nonStandardInventoryError = failure.message;
-      },
-    );
+    final items = <NonStandardInventoryItem>[];
+    var pageNumber = 1;
+    while (pageNumber > 0) {
+      final result = await repository.listNonStandardInventory(
+        page: pageNumber,
+      );
+      switch (result) {
+        case Success(:final data):
+          items.addAll(data.items);
+          pageNumber = data.items.isEmpty || !data.hasNextPage
+              ? 0
+              : data.nextPage;
+        case FailureResult(:final failure):
+          _nonStandardInventoryItems = const [];
+          _nonStandardInventoryError = failure.message;
+          pageNumber = 0;
+      }
+    }
+    if (_nonStandardInventoryError == null) {
+      _nonStandardInventoryItems = _mergeById(
+        const [],
+        items,
+        (item) => item.id,
+      );
+      _clearStaleNonStandardInventory();
+    }
 
     _isLoadingNonStandardInventory = false;
     notifyListeners();

@@ -3,6 +3,8 @@ import 'package:dio/dio.dart';
 import '../../../../core/network/api_client.dart';
 import '../../../../core/network/api_endpoints.dart';
 import '../../../../core/network/api_envelope.dart';
+import '../../../../core/network/api_page_parser.dart';
+import '../../../../core/pagination/page_data.dart';
 import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
 import '../models/report_models.dart';
@@ -33,7 +35,8 @@ abstract interface class ReportsRemoteDataSource {
     int limit = 5,
   });
 
-  Future<Result<List<SlowMovingInventoryItemModel>>> loadSlowMovingInventory({
+  Future<Result<PageData<SlowMovingInventoryItemModel>>>
+  loadSlowMovingInventory({
     required DateTime startDate,
     required DateTime endDate,
     int maxSales = 1,
@@ -67,7 +70,10 @@ final class ApiReportsRemoteDataSource implements ReportsRemoteDataSource {
   }) async {
     final result = await _apiClient.get<dynamic>(
       ApiEndpoints.salesTrend,
-      queryParameters: {..._dateRangeQuery(startDate, endDate), 'bucket': 'day'},
+      queryParameters: {
+        ..._dateRangeQuery(startDate, endDate),
+        'bucket': 'day',
+      },
     );
 
     return _mapEnvelope(result, _parseTrendPoints);
@@ -117,7 +123,8 @@ final class ApiReportsRemoteDataSource implements ReportsRemoteDataSource {
   }
 
   @override
-  Future<Result<List<SlowMovingInventoryItemModel>>> loadSlowMovingInventory({
+  Future<Result<PageData<SlowMovingInventoryItemModel>>>
+  loadSlowMovingInventory({
     required DateTime startDate,
     required DateTime endDate,
     int maxSales = 1,
@@ -226,11 +233,11 @@ final class ApiReportsRemoteDataSource implements ReportsRemoteDataSource {
         .toList(growable: false);
   }
 
-  List<SlowMovingInventoryItemModel> _parseSlowMovingItems(Object? data) {
-    return _readRequiredList(data, 'slow-moving inventory')
-        .mapItems('slow-moving inventory')
-        .map((json) => SlowMovingInventoryItemModel.fromJson(json))
-        .toList(growable: false);
+  PageData<SlowMovingInventoryItemModel> _parseSlowMovingItems(Object? data) {
+    if (data is! Map<String, Object?>) {
+      throw const FormatException('Invalid slow-moving inventory response');
+    }
+    return parseApiPage(data, SlowMovingInventoryItemModel.fromJson);
   }
 
   List<dynamic> _readRequiredList(Object? data, String name) {

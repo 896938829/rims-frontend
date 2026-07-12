@@ -149,14 +149,19 @@ final class AdminRepositoryImpl implements AdminRepository {
   }
 
   @override
-  Future<Result<List<AdminUser>>> listWarehouseUsers(int warehouseId) async {
-    final result = await remoteDataSource.listWarehouseUsers(warehouseId);
+  Future<Result<PageData<AdminUser>>> listWarehouseUsers(
+    int warehouseId, {
+    int page = 1,
+  }) async {
+    final result = await remoteDataSource.listWarehouseUsers(
+      warehouseId,
+      page: page,
+    );
 
     return result.when(
-      success: (models) => Success<List<AdminUser>>(
-        models.map((model) => model.toEntity()).toList(growable: false),
-      ),
-      failure: FailureResult<List<AdminUser>>.new,
+      success: (models) =>
+          Success<PageData<AdminUser>>(models.map((model) => model.toEntity())),
+      failure: FailureResult<PageData<AdminUser>>.new,
     );
   }
 

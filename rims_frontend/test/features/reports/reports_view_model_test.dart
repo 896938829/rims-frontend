@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:rims_frontend/core/pagination/page_data.dart';
 import 'package:rims_frontend/core/result/failure.dart';
 import 'package:rims_frontend/core/result/result.dart';
 import 'package:rims_frontend/features/reports/domain/entities/report_data.dart';
@@ -56,6 +57,7 @@ void main() {
       expect(viewModel.slowMovingItems.first.name, '纸巾');
       expect(viewModel.slowMovingItems.first.detailLabel, '销量 0 / 库存 80');
       expect(viewModel.slowMovingItems.first.lastSaleLabel, '最近销售 2026-05-01');
+      expect(viewModel.slowMovingTotal, 8);
     },
   );
 
@@ -130,15 +132,22 @@ void main() {
         turnoverResult: const FailureResult<List<InventoryTurnoverItem>>(
           NetworkFailure(message: '库存周转不可用'),
         ),
-        slowMovingResult: const Success<List<SlowMovingInventoryItem>>([
-          SlowMovingInventoryItem(
-            productName: '纸巾',
-            sku: 'SKU-TI',
-            stockQuantity: 80,
-            salesQuantity: 0,
-            lastSaleAt: '2026-05-01',
+        slowMovingResult: Success<PageData<SlowMovingInventoryItem>>(
+          PageData(
+            items: const [
+              SlowMovingInventoryItem(
+                productName: '纸巾',
+                sku: 'SKU-TI',
+                stockQuantity: 80,
+                salesQuantity: 0,
+                lastSaleAt: '2026-05-01',
+              ),
+            ],
+            total: 1,
+            page: 1,
+            pageSize: 5,
           ),
-        ]),
+        ),
       );
       final viewModel = ReportsViewModel(
         repository: repository,
@@ -379,23 +388,32 @@ final class _FakeReportsRepository implements ReportsRepository {
         turnoverRate: 2.5,
       ),
     ]),
-    this.slowMovingResult = const Success<List<SlowMovingInventoryItem>>([
-      SlowMovingInventoryItem(
-        productName: '纸巾',
-        sku: 'SKU-TI',
-        stockQuantity: 80,
-        salesQuantity: 0,
-        lastSaleAt: '2026-05-01',
-      ),
-    ]),
-  });
+    Result<PageData<SlowMovingInventoryItem>>? slowMovingResult,
+  }) : slowMovingResult =
+           slowMovingResult ??
+           Success<PageData<SlowMovingInventoryItem>>(
+             PageData(
+               items: [
+                 const SlowMovingInventoryItem(
+                   productName: '纸巾',
+                   sku: 'SKU-TI',
+                   stockQuantity: 80,
+                   salesQuantity: 0,
+                   lastSaleAt: '2026-05-01',
+                 ),
+               ],
+               total: 8,
+               page: 1,
+               pageSize: 5,
+             ),
+           );
 
   final Result<SalesStats> statsResult;
   final Result<List<SalesTrendPoint>> trendResult;
   final Result<List<SalesRankingItem>> rankingResult;
   final Result<List<InventoryOverviewItem>> overviewResult;
   final Result<List<InventoryTurnoverItem>> turnoverResult;
-  final Result<List<SlowMovingInventoryItem>> slowMovingResult;
+  final Result<PageData<SlowMovingInventoryItem>> slowMovingResult;
   DateTime? lastStatsStartDate;
   DateTime? lastStatsEndDate;
   DateTime? lastStartDate;
@@ -452,7 +470,7 @@ final class _FakeReportsRepository implements ReportsRepository {
   }
 
   @override
-  Future<Result<List<SlowMovingInventoryItem>>> loadSlowMovingInventory({
+  Future<Result<PageData<SlowMovingInventoryItem>>> loadSlowMovingInventory({
     required DateTime startDate,
     required DateTime endDate,
     int maxSales = 1,

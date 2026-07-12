@@ -74,6 +74,7 @@ final class ReportsViewModel extends ChangeNotifier {
   List<InventoryBucket> _inventoryBuckets = const [];
   List<ReportTurnoverItem> _turnoverItems = const [];
   List<ReportSlowMovingItem> _slowMovingItems = const [];
+  int _slowMovingTotal = 0;
   bool _isLoading = false;
   String? _errorMessage;
   String? _inventoryReportErrorMessage;
@@ -114,6 +115,7 @@ final class ReportsViewModel extends ChangeNotifier {
   List<ReportTurnoverItem> get turnoverItems => _turnoverItems;
 
   List<ReportSlowMovingItem> get slowMovingItems => _slowMovingItems;
+  int get slowMovingTotal => _slowMovingTotal;
 
   Future<void> load() async {
     final repository = this.repository;
@@ -199,8 +201,12 @@ final class ReportsViewModel extends ChangeNotifier {
       endDate: range.end,
     );
     List<SlowMovingInventoryItem> slowMovingItems = const [];
+    var slowMovingTotal = 0;
     slowMovingResult.when(
-      success: (data) => slowMovingItems = data,
+      success: (data) {
+        slowMovingItems = data.items;
+        slowMovingTotal = data.total;
+      },
       failure: (value) => inventoryReportFailure ??= value,
     );
 
@@ -265,6 +271,7 @@ final class ReportsViewModel extends ChangeNotifier {
           ),
         )
         .toList(growable: false);
+    _slowMovingTotal = slowMovingTotal;
     _isLoading = false;
     _errorMessage = null;
     _inventoryReportErrorMessage = inventoryReportFailure?.message;
@@ -311,6 +318,7 @@ final class ReportsViewModel extends ChangeNotifier {
     _inventoryBuckets = const [];
     _turnoverItems = const [];
     _slowMovingItems = const [];
+    _slowMovingTotal = 0;
     _inventoryReportErrorMessage = null;
   }
 

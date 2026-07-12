@@ -57,6 +57,43 @@ void main() {
     },
   );
 
+  test(
+    'inventory history traverses transaction pages before filtering',
+    () async {
+      final documentsRepository = _FakeDocumentsRepository(
+        transactionResults: [
+          Success(
+            _transactionPage(
+              [_otherTransaction],
+              total: 2,
+              page: 1,
+              pageSize: 1,
+            ),
+          ),
+          Success(
+            _transactionPage(
+              [_standardTransaction],
+              total: 2,
+              page: 2,
+              pageSize: 1,
+            ),
+          ),
+        ],
+      );
+      final viewModel = InventoryViewModel(
+        repository: _FakeInventoryRepository(
+          result: Future.value(Success(_inventoryPage([_standardItem]))),
+        ),
+        documentsRepository: documentsRepository,
+      );
+
+      await viewModel.load();
+
+      expect(documentsRepository.transactionPages, [1, 2]);
+      expect(viewModel.transactionsFor(_standardItem), [_standardTransaction]);
+    },
+  );
+
   test('transaction failure does not clear loaded inventory items', () async {
     final viewModel = InventoryViewModel(
       repository: _FakeInventoryRepository(
@@ -686,8 +723,18 @@ PageData<NonStandardInventoryItem> _nonStandardInventoryPage(
   );
 }
 
-PageData<TransactionRecord> _transactionPage(List<TransactionRecord> items) {
-  return PageData(items: items, total: items.length, page: 1, pageSize: 10);
+PageData<TransactionRecord> _transactionPage(
+  List<TransactionRecord> items, {
+  int? total,
+  int page = 1,
+  int pageSize = 10,
+}) {
+  return PageData(
+    items: items,
+    total: total ?? items.length,
+    page: page,
+    pageSize: pageSize,
+  );
 }
 
 final class _FakeInventoryRepository implements InventoryRepository {
@@ -800,10 +847,14 @@ final class _SequentialInventoryRepository implements InventoryRepository {
 final class _FakeDocumentsRepository implements DocumentsRepository {
   _FakeDocumentsRepository({
     Result<PageData<TransactionRecord>>? transactionResult,
-  }) : transactionResult = transactionResult ?? Success(_transactionPage([]));
+    List<Result<PageData<TransactionRecord>>>? transactionResults,
+  }) : transactionResults =
+           transactionResults ??
+           [transactionResult ?? Success(_transactionPage([]))];
 
-  final Result<PageData<TransactionRecord>> transactionResult;
+  final List<Result<PageData<TransactionRecord>>> transactionResults;
   int listTransactionsCallCount = 0;
+  final List<int> transactionPages = [];
 
   @override
   Future<Result<PageData<DocumentRecord>>> listRecentDocuments({
@@ -825,8 +876,10 @@ final class _FakeDocumentsRepository implements DocumentsRepository {
     String keyword = '',
     int page = 1,
   }) async {
+    transactionPages.add(page);
+    final index = listTransactionsCallCount;
     listTransactionsCallCount += 1;
-    return transactionResult;
+    return transactionResults[index.clamp(0, transactionResults.length - 1)];
   }
 
   @override

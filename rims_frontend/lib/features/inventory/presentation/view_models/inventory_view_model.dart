@@ -1,6 +1,7 @@
 import 'package:flutter/foundation.dart';
 
 import '../../../../core/result/failure.dart';
+import '../../../../core/result/result.dart';
 import '../../../documents/domain/entities/document_data.dart';
 import '../../../documents/domain/repositories/documents_repository.dart';
 import '../../domain/entities/inventory_item.dart';
@@ -225,21 +226,38 @@ final class InventoryViewModel extends ChangeNotifier {
     _transactionError = null;
     notifyListeners();
 
-    final result = await repository.listTransactions();
-
-    result.when(
-      success: (page) {
-        _transactions = page.items;
-        _transactionError = null;
-      },
-      failure: (failure) {
-        _transactions = const [];
-        _transactionError = failure.message;
-      },
-    );
+    final transactions = <TransactionRecord>[];
+    var pageNumber = 1;
+    while (pageNumber > 0) {
+      final result = await repository.listTransactions(page: pageNumber);
+      switch (result) {
+        case Success(:final data):
+          transactions.addAll(data.items);
+          pageNumber = data.items.isEmpty || !data.hasNextPage
+              ? 0
+              : data.nextPage;
+        case FailureResult(:final failure):
+          _transactions = const [];
+          _transactionError = failure.message;
+          pageNumber = 0;
+      }
+    }
+    if (_transactionError == null) {
+      _transactions = _mergeTransactions(transactions);
+    }
 
     _isLoadingTransactions = false;
     notifyListeners();
+  }
+
+  List<TransactionRecord> _mergeTransactions(
+    List<TransactionRecord> transactions,
+  ) {
+    final byId = <int, TransactionRecord>{};
+    for (final transaction in transactions) {
+      byId[transaction.id] = transaction;
+    }
+    return List.unmodifiable(byId.values);
   }
 
   Future<void> updateQuery(String value) async {

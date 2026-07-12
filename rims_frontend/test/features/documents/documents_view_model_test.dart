@@ -541,6 +541,36 @@ void main() {
     },
   );
 
+  test('non-standard conversion selection traverses every page', () async {
+    final inventoryRepository = _FakeInventoryRepository(
+      nonStandardInventoryResults: [
+        Success(
+          _nonStandardPage([_nonStandardItem], total: 2, page: 1, pageSize: 1),
+        ),
+        Success(
+          _nonStandardPage(
+            [_secondNonStandardItem],
+            total: 2,
+            page: 2,
+            pageSize: 1,
+          ),
+        ),
+      ],
+    );
+    final viewModel = DocumentsViewModel(
+      repository: _FakeDocumentsRepository(),
+      inventoryRepository: inventoryRepository,
+    )..selectActionByLabel('转标准');
+
+    await viewModel.loadNonStandardInventory();
+
+    expect(inventoryRepository.nonStandardInventoryPages, [1, 2]);
+    expect(viewModel.nonStandardInventoryItems, [
+      _nonStandardItem,
+      _secondNonStandardItem,
+    ]);
+  });
+
   test(
     'conversion document submits source non-standard inventory id',
     () async {
@@ -1656,6 +1686,17 @@ const _nonStandardItem = NonStandardInventoryItem(
   status: 1,
 );
 
+const _secondNonStandardItem = NonStandardInventoryItem(
+  id: 12,
+  tempLabel: 'TMP-20260627-002',
+  description: '第二页临时集合',
+  unit: '件',
+  quantity: 3,
+  convertedQuantity: 0,
+  remainingQuantity: 3,
+  status: 1,
+);
+
 const _shanghaiWarehouse = Warehouse(
   id: 1,
   code: 'SH',
@@ -1951,9 +1992,17 @@ PageData<InventoryItem> _inventoryPage(List<InventoryItem> items) {
 }
 
 PageData<NonStandardInventoryItem> _nonStandardPage(
-  List<NonStandardInventoryItem> items,
-) {
-  return PageData(items: items, total: items.length, page: 1, pageSize: 20);
+  List<NonStandardInventoryItem> items, {
+  int? total,
+  int page = 1,
+  int pageSize = 20,
+}) {
+  return PageData(
+    items: items,
+    total: total ?? items.length,
+    page: page,
+    pageSize: pageSize,
+  );
 }
 
 final class _FakeInventoryRepository implements InventoryRepository {
@@ -1970,6 +2019,7 @@ final class _FakeInventoryRepository implements InventoryRepository {
   bool loadedNonStandardInventory = false;
   int inventorySearchCallCount = 0;
   int nonStandardInventoryCallCount = 0;
+  final List<int> nonStandardInventoryPages = [];
 
   @override
   Future<Result<PageData<InventoryItem>>> listInventory({
@@ -2013,6 +2063,7 @@ final class _FakeInventoryRepository implements InventoryRepository {
     int page = 1,
   }) async {
     loadedNonStandardInventory = true;
+    nonStandardInventoryPages.add(page);
     final callIndex = nonStandardInventoryCallCount;
     nonStandardInventoryCallCount += 1;
     if (callIndex < nonStandardInventoryResults.length) {

@@ -258,8 +258,10 @@ final class _PagingAdminRepository implements AdminRepository {
   @override
   Future<Result<void>> deleteWarehouse(int id) async => const Success(null);
   @override
-  Future<Result<List<AdminUser>>> listWarehouseUsers(int warehouseId) async =>
-      const Success([]);
+  Future<Result<PageData<AdminUser>>> listWarehouseUsers(
+    int warehouseId, {
+    int page = 1,
+  }) async => Success(adminPage(<AdminUser>[], page: page));
   @override
   Future<Result<void>> bindWarehouseUsers(
     BindWarehouseUsersRequest request,

@@ -43,7 +43,10 @@ abstract interface class AdminRepository {
 
   Future<Result<void>> deleteWarehouse(int id);
 
-  Future<Result<List<AdminUser>>> listWarehouseUsers(int warehouseId);
+  Future<Result<PageData<AdminUser>>> listWarehouseUsers(
+    int warehouseId, {
+    int page = 1,
+  });
 
   Future<Result<void>> bindWarehouseUsers(BindWarehouseUsersRequest request);
 

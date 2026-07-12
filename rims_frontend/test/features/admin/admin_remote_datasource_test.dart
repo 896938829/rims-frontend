@@ -57,7 +57,7 @@ void main() {
       );
       await _expectMissingListPayloadFailure(
         request: (dataSource) => dataSource.listWarehouseUsers(1),
-        expectedMessage: 'Invalid users response',
+        expectedMessage: 'Paged API data.list must be a JSON list.',
       );
       await _expectMissingListPayloadFailure(
         request: (dataSource) => dataSource.listRoles(),
@@ -87,7 +87,7 @@ void main() {
       );
       await _expectMalformedListItemFailure(
         request: (dataSource) => dataSource.listWarehouseUsers(1),
-        expectedMessage: 'Invalid users response',
+        expectedMessage: 'Every paged API list item must be a JSON object.',
       );
       await _expectMalformedListItemFailure(
         request: (dataSource) => dataSource.listRoles(),
@@ -717,23 +717,29 @@ void main() {
     expect(adapter.lastPath, '/warehouses/1');
   });
 
-  test('listWarehouseUsers loads backend warehouse users endpoint', () async {
+  test('listWarehouseUsers loads warehouse users page and metadata', () async {
     final adapter = _CapturingAdapter(
       body:
-          '{"code":0,"message":"ok","data":{"list":[{"id":2,"username":"alice","realName":"张三","roleId":2,"roleCode":"user","roleName":"普通用户","status":1}]}}',
+          '{"code":0,"message":"ok","data":{"list":[{"id":2,"username":"alice","realName":"张三","roleId":2,"roleCode":"user","roleName":"普通用户","status":1}],"total":41,"page":2,"pageSize":20}}',
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiAdminRemoteDataSource(
       ApiClient(dio: dio, enableLogging: false),
     );
 
-    final result = await dataSource.listWarehouseUsers(1);
+    final result = await dataSource.listWarehouseUsers(1, page: 2);
 
     expect(result.isSuccess, isTrue);
     expect(adapter.lastMethod, 'GET');
     expect(adapter.lastPath, '/warehouses/1/users');
+    expect(adapter.lastQuery, {'page': 2, 'pageSize': 20});
     result.when(
-      success: (users) => expect(users.single.username, 'alice'),
+      success: (page) {
+        expect(page.items.single.username, 'alice');
+        expect(page.total, 41);
+        expect(page.page, 2);
+        expect(page.pageSize, 20);
+      },
       failure: (failure) => fail(failure.message),
     );
   });

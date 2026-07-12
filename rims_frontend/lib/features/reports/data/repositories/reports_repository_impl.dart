@@ -1,4 +1,5 @@
 import '../../../../core/result/result.dart';
+import '../../../../core/pagination/page_data.dart';
 import '../../domain/entities/report_data.dart';
 import '../../domain/repositories/reports_repository.dart';
 import '../datasources/reports_remote_datasource.dart';
@@ -97,7 +98,7 @@ final class ReportsRepositoryImpl implements ReportsRepository {
   }
 
   @override
-  Future<Result<List<SlowMovingInventoryItem>>> loadSlowMovingInventory({
+  Future<Result<PageData<SlowMovingInventoryItem>>> loadSlowMovingInventory({
     required DateTime startDate,
     required DateTime endDate,
     int maxSales = 1,
@@ -113,10 +114,10 @@ final class ReportsRepositoryImpl implements ReportsRepository {
     );
 
     return result.when(
-      success: (models) => Success<List<SlowMovingInventoryItem>>(
-        models.map((model) => model.toEntity()).toList(growable: false),
+      success: (page) => Success<PageData<SlowMovingInventoryItem>>(
+        page.map((model) => model.toEntity()),
       ),
-      failure: FailureResult<List<SlowMovingInventoryItem>>.new,
+      failure: FailureResult<PageData<SlowMovingInventoryItem>>.new,
     );
   }
 }

@@ -187,7 +187,7 @@ void main() {
         endDate: DateTime(2026, 6, 26),
       ),
       expectedPath: '/reports/inventory/slow-moving',
-      expectedMessage: 'Invalid slow-moving inventory response',
+      expectedMessage: 'Every paged API list item must be a JSON object.',
     );
   });
 
@@ -306,7 +306,7 @@ void main() {
   test('loadSlowMovingInventory loads slow-moving endpoint', () async {
     final adapter = _CapturingAdapter(
       body:
-          '{"code":0,"message":"ok","data":{"list":[{"productName":"纸巾","sku":"SKU-TI","stockQty":80,"salesQty":0,"lastSaleAt":"2026-05-01"}]}}',
+          '{"code":0,"message":"ok","data":{"list":[{"productName":"纸巾","sku":"SKU-TI","stockQty":80,"salesQty":0,"lastSaleAt":"2026-05-01"}],"total":12,"page":2,"pageSize":5}}',
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiReportsRemoteDataSource(
@@ -327,12 +327,15 @@ void main() {
     expect(adapter.lastQuery?['page'], 2);
     expect(adapter.lastQuery?['pageSize'], 5);
     result.when(
-      success: (items) {
-        expect(items.single.productName, '纸巾');
-        expect(items.single.sku, 'SKU-TI');
-        expect(items.single.stockQuantity, 80);
-        expect(items.single.salesQuantity, 0);
-        expect(items.single.lastSaleAt, '2026-05-01');
+      success: (page) {
+        expect(page.total, 12);
+        expect(page.page, 2);
+        expect(page.pageSize, 5);
+        expect(page.items.single.productName, '纸巾');
+        expect(page.items.single.sku, 'SKU-TI');
+        expect(page.items.single.stockQuantity, 80);
+        expect(page.items.single.salesQuantity, 0);
+        expect(page.items.single.lastSaleAt, '2026-05-01');
       },
       failure: (failure) => fail(failure.message),
     );
@@ -340,7 +343,7 @@ void main() {
 }
 
 Future<void> _expectMissingListPayload<T>({
-  required Future<Result<List<T>>> Function(ApiReportsRemoteDataSource) load,
+  required Future<Result<T>> Function(ApiReportsRemoteDataSource) load,
   required String expectedPath,
   required String expectedMessage,
 }) async {
@@ -361,7 +364,7 @@ Future<void> _expectMissingListPayload<T>({
 }
 
 Future<void> _expectNonObjectListItem<T>({
-  required Future<Result<List<T>>> Function(ApiReportsRemoteDataSource) load,
+  required Future<Result<T>> Function(ApiReportsRemoteDataSource) load,
   required String expectedPath,
   required String expectedMessage,
 }) async {

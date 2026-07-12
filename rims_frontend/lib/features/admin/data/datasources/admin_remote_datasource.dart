@@ -60,7 +60,10 @@ abstract interface class AdminRemoteDataSource {
 
   Future<Result<void>> deleteWarehouse(int id);
 
-  Future<Result<List<AdminUserModel>>> listWarehouseUsers(int warehouseId);
+  Future<Result<PageData<AdminUserModel>>> listWarehouseUsers(
+    int warehouseId, {
+    int page = 1,
+  });
 
   Future<Result<void>> bindWarehouseUsers(BindWarehouseUsersRequest request);
 
@@ -235,14 +238,16 @@ final class ApiAdminRemoteDataSource implements AdminRemoteDataSource {
   }
 
   @override
-  Future<Result<List<AdminUserModel>>> listWarehouseUsers(
-    int warehouseId,
-  ) async {
+  Future<Result<PageData<AdminUserModel>>> listWarehouseUsers(
+    int warehouseId, {
+    int page = 1,
+  }) async {
     final result = await _apiClient.get<dynamic>(
       ApiEndpoints.warehouseUsers(warehouseId),
+      queryParameters: {'page': page, 'pageSize': _adminListPageSize},
     );
 
-    return _mapEnvelope(result, _parseUserList);
+    return _mapEnvelope(result, _parseUsers);
   }
 
   @override
@@ -379,14 +384,6 @@ final class ApiAdminRemoteDataSource implements AdminRemoteDataSource {
 
   PageData<AdminUserModel> _parseUsers(Object? data) {
     return parseApiPage(_requiredPageData(data), _parseUserMap);
-  }
-
-  List<AdminUserModel> _parseUserList(Object? data) {
-    final rawList = _requiredList(data, 'users');
-    return _requiredMapItems(
-      rawList,
-      'users',
-    ).map(_parseUserMap).toList(growable: false);
   }
 
   PageData<AdminProductModel> _parseProducts(Object? data) {

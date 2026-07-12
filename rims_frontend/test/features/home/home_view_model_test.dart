@@ -195,6 +195,50 @@ void main() {
     expect(warningCounts['非标库存'], 2);
   });
 
+  test('home previews retain server totals beyond the first page', () async {
+    final viewModel = HomeViewModel(
+      user: _user,
+      warehouse: _warehouse,
+      inventoryRepository: const _FakeInventoryRepository(
+        alertTotal: 7,
+        nonStandardItems: [_nonStandardItem],
+        nonStandardTotal: 9,
+      ),
+      documentsRepository: const _FakeDocumentsRepository(total: 11),
+      reportsRepository: const _FakeReportsRepository(),
+    );
+
+    await viewModel.load();
+
+    expect(viewModel.inventoryAlertTotal, 7);
+    expect(viewModel.nonStandardInventoryTotal, 9);
+    expect(viewModel.recentDocuments, [_recentDocument]);
+    expect(viewModel.recentDocumentsTotal, 11);
+  });
+
+  testWidgets('HomePage labels recent documents as a bounded preview', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: HomePage(
+          user: _user,
+          warehouse: _warehouse,
+          inventoryRepository: _FakeInventoryRepository(),
+          documentsRepository: _FakeDocumentsRepository(total: 11),
+          reportsRepository: _FakeReportsRepository(),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const Key('home-recent-documents-coverage')),
+      findsOneWidget,
+    );
+    expect(find.text('已显示 1 / 11'), findsOneWidget);
+  });
+
   testWidgets('RecentDocumentTile maps document status to semantic chip', (
     tester,
   ) async {
@@ -409,11 +453,13 @@ final class _FakeInventoryRepository implements InventoryRepository {
     this.nonStandardItems = const [],
     this.inventoryTotal = 2,
     this.alertTotal = 2,
+    this.nonStandardTotal,
   });
 
   final List<NonStandardInventoryItem> nonStandardItems;
   final int inventoryTotal;
   final int alertTotal;
+  final int? nonStandardTotal;
 
   @override
   Future<Result<PageData<InventoryItem>>> listInventory({
@@ -452,7 +498,7 @@ final class _FakeInventoryRepository implements InventoryRepository {
   Future<Result<PageData<NonStandardInventoryItem>>> listNonStandardInventory({
     int page = 1,
   }) async {
-    return Success(_homePage(nonStandardItems));
+    return Success(_homePage(nonStandardItems, total: nonStandardTotal));
   }
 }
 
@@ -711,14 +757,16 @@ final class _FakeReportsRepository implements ReportsRepository {
   }
 
   @override
-  Future<Result<List<SlowMovingInventoryItem>>> loadSlowMovingInventory({
+  Future<Result<PageData<SlowMovingInventoryItem>>> loadSlowMovingInventory({
     required DateTime startDate,
     required DateTime endDate,
     int maxSales = 1,
     int page = 1,
     int pageSize = 5,
   }) async {
-    return const Success<List<SlowMovingInventoryItem>>([]);
+    return Success(
+      PageData(items: const [], total: 0, page: page, pageSize: pageSize),
+    );
   }
 }
 
@@ -779,14 +827,16 @@ final class _SequentialHomeReportsRepository implements ReportsRepository {
   }
 
   @override
-  Future<Result<List<SlowMovingInventoryItem>>> loadSlowMovingInventory({
+  Future<Result<PageData<SlowMovingInventoryItem>>> loadSlowMovingInventory({
     required DateTime startDate,
     required DateTime endDate,
     int maxSales = 1,
     int page = 1,
     int pageSize = 5,
   }) async {
-    return const Success<List<SlowMovingInventoryItem>>([]);
+    return Success(
+      PageData(items: const [], total: 0, page: page, pageSize: pageSize),
+    );
   }
 }
 
@@ -838,26 +888,30 @@ final class _FailingOverviewReportsRepository implements ReportsRepository {
   }
 
   @override
-  Future<Result<List<SlowMovingInventoryItem>>> loadSlowMovingInventory({
+  Future<Result<PageData<SlowMovingInventoryItem>>> loadSlowMovingInventory({
     required DateTime startDate,
     required DateTime endDate,
     int maxSales = 1,
     int page = 1,
     int pageSize = 5,
   }) async {
-    return const Success<List<SlowMovingInventoryItem>>([]);
+    return Success(
+      PageData(items: const [], total: 0, page: page, pageSize: pageSize),
+    );
   }
 }
 
 final class _FakeDocumentsRepository implements DocumentsRepository {
-  const _FakeDocumentsRepository();
+  const _FakeDocumentsRepository({this.total = 1});
+
+  final int total;
 
   @override
   Future<Result<PageData<DocumentRecord>>> listRecentDocuments({
     int? docType,
     int page = 1,
   }) async {
-    return Success(_homePage([_recentDocument]));
+    return Success(_homePage([_recentDocument], total: total));
   }
 
   @override

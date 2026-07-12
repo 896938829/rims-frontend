@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import '../../../../core/events/app_event.dart';
 import '../../../../core/events/app_event_bus.dart';
 import '../../../../core/result/failure.dart';
+import '../../../../core/result/result.dart';
 import '../../domain/entities/admin_user.dart';
 import '../../domain/entities/admin_warehouse.dart';
 import '../../domain/repositories/admin_repository.dart';
@@ -344,16 +345,34 @@ final class AdminWarehousesViewModel extends ChangeNotifier {
     _userBindingError = null;
     notifyListeners();
 
-    final result = await repository.listWarehouseUsers(warehouse.id);
-    result.when(
-      success: (users) {
-        _warehouseUsers[warehouse.id] = users;
-        _userBindingError = null;
-      },
-      failure: (failure) {
-        _userBindingError = failure.message;
-      },
-    );
+    final users = <AdminUser>[];
+    var pageNumber = 1;
+    var completed = true;
+    while (pageNumber > 0) {
+      final result = await repository.listWarehouseUsers(
+        warehouse.id,
+        page: pageNumber,
+      );
+      switch (result) {
+        case Success(:final data):
+          users.addAll(data.items);
+          pageNumber = data.items.isEmpty || !data.hasNextPage
+              ? 0
+              : data.nextPage;
+        case FailureResult(:final failure):
+          _userBindingError = failure.message;
+          completed = false;
+          pageNumber = 0;
+      }
+    }
+    if (completed) {
+      final byId = <int, AdminUser>{};
+      for (final user in users) {
+        byId[user.id] = user;
+      }
+      _warehouseUsers[warehouse.id] = List.unmodifiable(byId.values);
+      _userBindingError = null;
+    }
 
     _isLoadingWarehouseUsers = false;
     notifyListeners();

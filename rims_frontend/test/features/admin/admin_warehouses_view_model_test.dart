@@ -281,6 +281,24 @@ void main() {
     expect(viewModel.usersForWarehouse(1), [_alice]);
   });
 
+  test('loadWarehouseUsers traverses every page and dedupes by id', () async {
+    final repository = _FakeAdminRepository(
+      listWarehousesResult: Future.value(
+        const Success<List<AdminWarehouse>>([_shanghai]),
+      ),
+      warehouseUserPageResults: [
+        Success(adminPage([_alice], total: 2, page: 1, pageSize: 1)),
+        Success(adminPage([_alice, _bob], total: 2, page: 2, pageSize: 1)),
+      ],
+    );
+    final viewModel = AdminWarehousesViewModel(repository: repository);
+
+    await viewModel.loadWarehouseUsers(_shanghai);
+
+    expect(repository.listWarehouseUserPages, [1, 2]);
+    expect(viewModel.usersForWarehouse(1), [_alice, _bob]);
+  });
+
   test('reload failure keeps previously loaded warehouse users', () async {
     final repository = _FakeAdminRepository(
       listWarehousesResult: Future.value(
@@ -545,6 +563,7 @@ final class _FakeAdminRepository implements AdminRepository {
     this.deleteWarehouseResult,
     this.listWarehouseUsersResult,
     this.listWarehouseUsersResults,
+    this.warehouseUserPageResults,
     this.bindWarehouseUsersResult,
     this.unbindWarehouseUserResult,
   });
@@ -556,10 +575,12 @@ final class _FakeAdminRepository implements AdminRepository {
   final Future<Result<void>>? deleteWarehouseResult;
   final Future<Result<List<AdminUser>>>? listWarehouseUsersResult;
   final List<Result<List<AdminUser>>>? listWarehouseUsersResults;
+  final List<Result<PageData<AdminUser>>>? warehouseUserPageResults;
   final Future<Result<void>>? bindWarehouseUsersResult;
   final Future<Result<void>>? unbindWarehouseUserResult;
   String? lastWarehouseKeyword;
   int? listWarehouseUsersId;
+  final List<int> listWarehouseUserPages = [];
   CreateAdminWarehouseRequest? createdWarehouseRequest;
   UpdateAdminWarehouseRequest? updatedWarehouseRequest;
   BindWarehouseUsersRequest? bindWarehouseUsersRequest;
@@ -652,14 +673,25 @@ final class _FakeAdminRepository implements AdminRepository {
   }
 
   @override
-  Future<Result<List<AdminUser>>> listWarehouseUsers(int warehouseId) {
+  Future<Result<PageData<AdminUser>>> listWarehouseUsers(
+    int warehouseId, {
+    int page = 1,
+  }) {
     listWarehouseUsersId = warehouseId;
+    listWarehouseUserPages.add(page);
+    final pageResults = warehouseUserPageResults;
+    if (pageResults != null && pageResults.isNotEmpty) {
+      return Future.value(pageResults.removeAt(0));
+    }
     final queuedResults = listWarehouseUsersResults;
     if (queuedResults != null && queuedResults.isNotEmpty) {
-      return Future.value(queuedResults.removeAt(0));
+      return Future.value(
+        adminPageResult(queuedResults.removeAt(0), page: page),
+      );
     }
-    return listWarehouseUsersResult ??
-        Future.value(const Success<List<AdminUser>>([]));
+    return listWarehouseUsersResult == null
+        ? Future.value(Success(adminPage(<AdminUser>[], page: page)))
+        : adminPageFuture(listWarehouseUsersResult!, page: page);
   }
 
   @override

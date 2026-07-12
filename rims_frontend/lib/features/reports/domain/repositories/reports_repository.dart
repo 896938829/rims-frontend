@@ -1,4 +1,5 @@
 import '../../../../core/result/result.dart';
+import '../../../../core/pagination/page_data.dart';
 import '../entities/report_data.dart';
 
 abstract interface class ReportsRepository {
@@ -27,7 +28,7 @@ abstract interface class ReportsRepository {
     int limit = 5,
   });
 
-  Future<Result<List<SlowMovingInventoryItem>>> loadSlowMovingInventory({
+  Future<Result<PageData<SlowMovingInventoryItem>>> loadSlowMovingInventory({
     required DateTime startDate,
     required DateTime endDate,
     int maxSales = 1,

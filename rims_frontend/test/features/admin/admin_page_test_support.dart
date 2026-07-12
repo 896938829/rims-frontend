@@ -1,12 +1,17 @@
 import 'package:rims_frontend/core/pagination/page_data.dart';
 import 'package:rims_frontend/core/result/result.dart';
 
-PageData<T> adminPage<T>(List<T> items, {int? total, int page = 1}) {
+PageData<T> adminPage<T>(
+  List<T> items, {
+  int? total,
+  int page = 1,
+  int pageSize = 20,
+}) {
   return PageData(
     items: items,
     total: total ?? items.length,
     page: page,
-    pageSize: 20,
+    pageSize: pageSize,
   );
 }
 
