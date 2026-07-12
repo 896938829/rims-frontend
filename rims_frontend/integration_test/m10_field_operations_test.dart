@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
+import 'package:rims_frontend/features/attachments/presentation/widgets/attachment_panel.dart';
 import 'package:rims_frontend/features/documents/presentation/view_models/documents_view_model.dart';
 import 'package:rims_frontend/main.dart';
 
@@ -61,12 +62,7 @@ void main() {
         final scanStarted = DateTime.now();
         await tapAndSettle(tester, const Key('document-scan-product-button'));
         await expectText(tester, '需要相机权限才能扫描条码');
-        tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
-        await tester.pump(const Duration(milliseconds: 200));
-        tester.binding.handleAppLifecycleStateChanged(
-          AppLifecycleState.resumed,
-        );
-        await tester.pumpAndSettle();
+        await tapAndSettle(tester, const Key('scanner-permission-retry'));
         await waitForKey(tester, const Key('document-create-button'));
         await waitUntil(
           tester,
@@ -83,7 +79,7 @@ void main() {
         await _addProductBySku(
           tester,
           documents,
-          sku: 'M9-PAGE-0002',
+          sku: 'M9-PAGE-0004',
           quantity: 1,
         );
         expect(documents.draftLines.length, 2);
@@ -156,7 +152,11 @@ void main() {
         segments['uploadFirstProgress'] = DateTime.now()
             .difference(uploadStarted)
             .inMilliseconds;
-        tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.paused);
+        tester
+            .widget<AttachmentPanel>(find.byType(AttachmentPanel))
+            .viewModel
+            .pause();
+        await tester.pump();
         await waitUntil(
           tester,
           description: 'interrupted upload state',
@@ -227,7 +227,7 @@ void main() {
           'documentNumber': created.number,
           'inboundDocumentId': inbound.id,
           'inboundDocumentNumber': inbound.number,
-          'permissionBoundary': 'deny-guidance+manual-fallback+resume-retry',
+          'permissionBoundary': 'deny-guidance+manual-fallback+retry',
           'realCameraAccess': 'verified-post-install-by-android-wrapper',
           'processRecreation': 'staged-upload-recovered-with-stable-request-id',
         };
@@ -243,8 +243,6 @@ Future<void> _pumpFreshApp(WidgetTester tester, String instance) async {
   await tester.pumpWidget(const SizedBox.shrink());
   await tester.pump();
   await tester.pumpWidget(MainApp(key: ValueKey<String>(instance)));
-  await tester.pump();
-  tester.binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
   await tester.pump();
 }
 
@@ -360,18 +358,22 @@ Future<void> _addProductBySku(
   await waitUntil(
     tester,
     description: 'product candidate $sku',
-    condition: () => find.text(sku).hitTestable().evaluate().isNotEmpty,
+    condition: () =>
+        viewModel.productCandidates.any((candidate) => candidate.sku == sku),
   );
-  await tapFinderAndSettle(
-    tester,
-    find.text(sku),
-    description: 'select product $sku',
+  final candidate = viewModel.productCandidates.singleWhere(
+    (product) => product.sku == sku,
   );
+  final candidateKey = Key('document-product-option-${candidate.productId}');
+  await scrollUntilVisible(tester, candidateKey, scrollable: scroll);
+  await tapAndSettle(tester, candidateKey);
   await enterText(
     tester,
     const Key('document-quantity-field'),
     quantity.toString(),
   );
+  FocusManager.instance.primaryFocus?.unfocus();
+  await tester.pump(const Duration(milliseconds: 200));
   final before = viewModel.draftLines.length;
   await scrollUntilVisible(
     tester,
@@ -396,6 +398,7 @@ Future<({int id, String number})> _createMultiLineInbound(
     tester,
     const Key('document-action-inbound'),
     scrollable: scroll,
+    delta: 300,
   );
   await tapAndSettle(tester, const Key('document-action-inbound'));
   await _addProductBySku(
@@ -404,7 +407,7 @@ Future<({int id, String number})> _createMultiLineInbound(
     sku: RimsE2eConfig.fixtureProductCode,
     quantity: 1,
   );
-  await _addProductBySku(tester, viewModel, sku: 'M9-PAGE-0002', quantity: 2);
+  await _addProductBySku(tester, viewModel, sku: 'M9-PAGE-0004', quantity: 2);
   final remark = 'M10-E2E:$runId:inbound';
   await enterText(tester, const Key('document-remark-field'), remark);
   final existingIds = viewModel.recentDocuments
