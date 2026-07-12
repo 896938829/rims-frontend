@@ -90,23 +90,26 @@ final class ApiDocumentsRemoteDataSource implements DocumentsRemoteDataSource {
   ) async {
     final result = await _apiClient.post<dynamic>(
       ApiEndpoints.documents,
+      options: Options(headers: {'Idempotency-Key': request.requestId}),
       data: {
         'docType': request.docType,
         if (request.remark.isNotEmpty) 'remark': request.remark,
         if (request.toWarehouseId != null)
           'toWarehouseId': request.toWarehouseId,
         if (request.refDocId != null) 'refDocId': request.refDocId,
-        'lines': [
-          {
-            if (request.nonStdInventoryId != null)
-              'nonStdInvId': request.nonStdInventoryId,
-            'productId': request.productId,
-            if (request.retailPrice != null) 'retailPrice': request.retailPrice,
-            if (request.actualQuantity == null) 'quantity': request.quantity,
-            if (request.actualQuantity != null)
-              'actualQty': request.actualQuantity,
-          },
-        ],
+        'lines': request.effectiveLines
+            .map(
+              (line) => {
+                if (line.nonStandardInventoryId != null)
+                  'nonStdInvId': line.nonStandardInventoryId,
+                'productId': line.productId,
+                if (line.retailPrice != null) 'retailPrice': line.retailPrice,
+                if (line.actualQuantity == null) 'quantity': line.quantity,
+                if (line.actualQuantity != null)
+                  'actualQty': line.actualQuantity,
+              },
+            )
+            .toList(growable: false),
       },
     );
 

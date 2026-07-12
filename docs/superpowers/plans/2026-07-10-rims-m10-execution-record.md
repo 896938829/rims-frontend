@@ -253,6 +253,21 @@ runtime ownership, cleanup, and business effects have been inspected.
 | Focused regression | product image synchronization/admin/inventory tests passed (92 tests) |
 | Full verification | Flutter analysis clean; all 508 Flutter tests passed |
 
+## Task 14 Scan-Driven Multi-Line Document Evidence
+
+| Probe | Observed result |
+| --- | --- |
+| Typed wire contract | document request carries typed line list and one stable `Idempotency-Key` |
+| Batch submission | multiple draft lines serialize into one backend document request, never one document per line |
+| Duplicate/edit/remove | repeated scans accumulate quantity; quantity update and line removal operate on the draft |
+| Lifecycle | failed submit retains lines/request ID; authoritative success atomically clears both |
+| Business variants | sales/inbound/transfer/stocktake retain multi-line support; zero stocktake remains valid |
+| Restrictions | return source/product/quantity and single-target non-standard conversion constraints remain enforced |
+| Scan entry | document form exposes scan icon; returned authoritative product enters draft immediately |
+| Home entry | `扫码销售` routes to sales with scanner requested instead of opening only text input |
+| Focused regression | document and static UI suites passed together (118 tests) |
+| Full verification | Flutter analysis clean; all 513 Flutter tests passed |
+
 ## Scanner Scenario Evidence
 
 | Scenario | Web/unit | Android | Real backend effect | Result |

@@ -660,7 +660,7 @@ git commit -m "feat: connect product image attachments"
 - Modify: `rims_frontend/test/features/documents/documents_view_model_test.dart`
 - Modify: `rims_frontend/test/app_static_ui_test.dart`
 
-- [ ] **Step 1: Write failing tests for typed `CreateDocumentLineRequest` lists and strict detail-line parsing.**
+- [x] **Step 1: Write failing tests for typed `CreateDocumentLineRequest` lists and strict detail-line parsing.**
 
 ```dart
 final class CreateDocumentRequest {
@@ -669,21 +669,21 @@ final class CreateDocumentRequest {
 }
 ```
 
-- [ ] **Step 2: Write failing ViewModel/widget tests for scan-to-sales, inbound, return, transfer, stocktake, and conversion; batch lines; duplicate quantity accumulation; line edit/remove; zero stocktake quantity; wrong source/batch; permission denial; and one-flight submit.**
+- [x] **Step 2: Write failing ViewModel/widget tests for scan-to-sales, inbound, return, transfer, stocktake, and conversion; batch lines; duplicate quantity accumulation; line edit/remove; zero stocktake quantity; wrong source/batch; permission denial; and one-flight submit.**
 
 Sales/inbound/transfer/stocktake support multiple product lines. Return lines
 must belong to the selected source document and cannot exceed source quantity.
 Conversion retains one non-standard source plus one scanned standard target.
 
-- [ ] **Step 3: Verify RED, implement typed lines, and send one backend document request with all lines.**
+- [x] **Step 3: Verify RED, implement typed lines, and send one backend document request with all lines.**
 
 Do not create one server document per scanned line. Preserve the same
 idempotency key across a retry and atomically clear the draft only after the
 authoritative create succeeds.
 
-- [ ] **Step 4: Add a scan icon to the document form and make home `扫码销售` open sales with scanner requested, not just a plain text form.**
+- [x] **Step 4: Add a scan icon to the document form and make home `扫码销售` open sales with scanner requested, not just a plain text form.**
 
-- [ ] **Step 5: Run document/static UI tests and commit.**
+- [x] **Step 5: Run document/static UI tests and commit.**
 
 ```powershell
 flutter test --no-pub test/features/documents test/app_static_ui_test.dart

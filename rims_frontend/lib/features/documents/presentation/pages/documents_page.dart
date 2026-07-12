@@ -42,6 +42,8 @@ final class DocumentsPage extends StatefulWidget {
     this.attachmentStagingStore,
     this.attachmentShareService,
     this.attachmentUserId,
+    this.onScanRequested,
+    this.requestScannerOnOpen = false,
     super.key,
   });
 
@@ -58,6 +60,8 @@ final class DocumentsPage extends StatefulWidget {
   final AttachmentStagingStore? attachmentStagingStore;
   final AttachmentShareService? attachmentShareService;
   final String? attachmentUserId;
+  final Future<InventoryItem?> Function(BuildContext context)? onScanRequested;
+  final bool requestScannerOnOpen;
 
   @override
   State<DocumentsPage> createState() => _DocumentsPageState();
@@ -83,6 +87,9 @@ final class _DocumentsPageState extends State<DocumentsPage> {
         );
 
     _selectInitialAction();
+    if (widget.requestScannerOnOpen) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _requestScan());
+    }
 
     if (_ownsViewModel) {
       unawaited(viewModel.load());
@@ -96,6 +103,9 @@ final class _DocumentsPageState extends State<DocumentsPage> {
 
     if (widget.initialActionLabel != oldWidget.initialActionLabel) {
       _selectInitialAction();
+    }
+    if (widget.requestScannerOnOpen && !oldWidget.requestScannerOnOpen) {
+      WidgetsBinding.instance.addPostFrameCallback((_) => _requestScan());
     }
     if (widget.eventBus != oldWidget.eventBus) {
       unawaited(_refreshSubscription?.cancel());
@@ -132,6 +142,13 @@ final class _DocumentsPageState extends State<DocumentsPage> {
     viewModel.selectAction(action);
     _loadNonStandardInventoryIfNeeded();
     _loadReturnSourceDocumentsIfNeeded();
+  }
+
+  Future<void> _requestScan() async {
+    final scan = widget.onScanRequested;
+    if (scan == null || !mounted) return;
+    final product = await scan(context);
+    if (product != null) viewModel.addScannedProduct(product);
   }
 
   void _loadNonStandardInventoryIfNeeded() {
@@ -214,7 +231,13 @@ final class _DocumentsPageState extends State<DocumentsPage> {
                 ],
               ),
               const SizedBox(height: 14),
-              _DocumentForm(viewModel: viewModel, eventBus: widget.eventBus),
+              _DocumentForm(
+                viewModel: viewModel,
+                eventBus: widget.eventBus,
+                onScanRequested: widget.onScanRequested == null
+                    ? null
+                    : _requestScan,
+              ),
               const SizedBox(height: 20),
               const RimsSectionHeader(title: '单据流程'),
               const SizedBox(height: 10),
@@ -1105,10 +1128,15 @@ final class _ParsedFilterDate {
 }
 
 final class _DocumentForm extends StatefulWidget {
-  const _DocumentForm({required this.viewModel, this.eventBus});
+  const _DocumentForm({
+    required this.viewModel,
+    this.eventBus,
+    this.onScanRequested,
+  });
 
   final DocumentsViewModel viewModel;
   final AppEventBus? eventBus;
+  final Future<void> Function()? onScanRequested;
 
   @override
   State<_DocumentForm> createState() => _DocumentFormState();
@@ -1195,18 +1223,35 @@ final class _DocumentFormState extends State<_DocumentForm> {
             _NonStandardInventorySelector(viewModel: viewModel),
             const SizedBox(height: 10),
           ],
-          TextField(
-            key: const Key('document-product-field'),
-            controller: _productController,
-            enabled: !viewModel.isSubmitting,
-            onChanged: viewModel.isSubmitting
-                ? null
-                : (value) => unawaited(viewModel.searchProducts(value)),
-            decoration: const InputDecoration(
-              labelText: '商品',
-              hintText: '输入商品名称或 SKU',
-              isDense: true,
-            ),
+          Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  key: const Key('document-product-field'),
+                  controller: _productController,
+                  enabled: !viewModel.isSubmitting,
+                  onChanged: viewModel.isSubmitting
+                      ? null
+                      : (value) => unawaited(viewModel.searchProducts(value)),
+                  decoration: const InputDecoration(
+                    labelText: '商品',
+                    hintText: '输入商品名称或 SKU',
+                    isDense: true,
+                  ),
+                ),
+              ),
+              if (widget.onScanRequested != null) ...[
+                const SizedBox(width: 6),
+                IconButton(
+                  key: const Key('document-scan-product-button'),
+                  tooltip: '扫码添加商品',
+                  onPressed: viewModel.isSubmitting
+                      ? null
+                      : () => unawaited(widget.onScanRequested!()),
+                  icon: const Icon(Icons.qr_code_scanner),
+                ),
+              ],
+            ],
           ),
           if (viewModel.isSearchingProducts ||
               viewModel.productSearchError != null ||
@@ -1239,6 +1284,42 @@ final class _DocumentFormState extends State<_DocumentForm> {
               isDense: true,
             ),
           ),
+          if (viewModel.selectedProduct != null) ...[
+            const SizedBox(height: 8),
+            OutlinedButton.icon(
+              key: const Key('document-add-line-button'),
+              onPressed: viewModel.isSubmitting
+                  ? null
+                  : () {
+                      final quantity = int.tryParse(_quantityController.text);
+                      final product = viewModel.selectedProduct;
+                      if (quantity != null && product != null) {
+                        viewModel.addProductToDraft(
+                          product,
+                          quantity: quantity,
+                        );
+                      }
+                    },
+              icon: const Icon(Icons.playlist_add),
+              label: const Text('添加明细'),
+            ),
+          ],
+          if (viewModel.draftLines.isNotEmpty) ...[
+            const SizedBox(height: 10),
+            for (final line in viewModel.draftLines)
+              ListTile(
+                key: Key('document-draft-line-${line.productId}'),
+                contentPadding: EdgeInsets.zero,
+                dense: true,
+                title: Text(line.productName),
+                subtitle: Text('数量 ${line.quantity}'),
+                trailing: IconButton(
+                  tooltip: '移除明细',
+                  onPressed: () => viewModel.removeDraftLine(line.productId),
+                  icon: const Icon(Icons.remove_circle_outline),
+                ),
+              ),
+          ],
           const SizedBox(height: 10),
           TextField(
             key: const Key('document-remark-field'),

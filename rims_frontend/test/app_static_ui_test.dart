@@ -12,6 +12,7 @@ import 'package:rims_frontend/features/auth/domain/entities/auth_session.dart';
 import 'package:rims_frontend/features/auth/domain/entities/warehouse.dart';
 import 'package:rims_frontend/features/auth/domain/repositories/auth_repository.dart';
 import 'package:rims_frontend/features/auth/presentation/view_models/auth_session_controller.dart';
+import 'package:rims_frontend/features/home/presentation/view_models/home_view_model.dart';
 import 'package:rims_frontend/features/reports/domain/entities/report_data.dart';
 import 'package:rims_frontend/features/reports/domain/repositories/reports_repository.dart';
 import 'package:rims_frontend/routes/app_router.dart';
@@ -183,6 +184,15 @@ void main() {
     expect(repository.restoreCallCount, 1);
     expect(sessionController.currentWarehouse?.id, 2);
     expect(find.text('北京仓'), findsWidgets);
+  });
+
+  test('home scan sale action requests scanner on document navigation', () {
+    final action = HomeViewModel().quickActions.firstWhere(
+      (item) => item.label == '扫码销售',
+    );
+
+    expect(action.documentActionLabel, '销售出库');
+    expect(action.requestsScanner, isTrue);
   });
 
   testWidgets('home quick action opens matching document workflow', (

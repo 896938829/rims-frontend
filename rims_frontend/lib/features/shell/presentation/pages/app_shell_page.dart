@@ -67,6 +67,7 @@ final class AppShellPage extends StatefulWidget {
 final class _AppShellPageState extends State<AppShellPage> {
   AppTab _currentTab = AppTab.home;
   String? _pendingDocumentActionLabel;
+  bool _pendingDocumentScanner = false;
   StreamSubscription<GlobalRefreshRequestedEvent>? _refreshSubscription;
   final StreamController<String> _wedgeBarcodes = StreamController.broadcast();
 
@@ -140,6 +141,8 @@ final class _AppShellPageState extends State<AppShellPage> {
         canManageAdminDocumentActions:
             widget.sessionController.currentUser?.isAdmin == true,
         initialActionLabel: _pendingDocumentActionLabel,
+        requestScannerOnOpen: _pendingDocumentScanner,
+        onScanRequested: _openInventoryScanner,
         eventBus: widget.eventBus,
         attachmentsRepository: widget.attachmentsRepository,
         attachmentPicker: widget.attachmentPicker,
@@ -212,6 +215,7 @@ final class _AppShellPageState extends State<AppShellPage> {
       _currentTab = tab;
       if (tab != AppTab.documents) {
         _pendingDocumentActionLabel = null;
+        _pendingDocumentScanner = false;
       }
     });
   }
@@ -220,6 +224,7 @@ final class _AppShellPageState extends State<AppShellPage> {
     setState(() {
       _currentTab = action.targetTab;
       _pendingDocumentActionLabel = action.documentActionLabel;
+      _pendingDocumentScanner = action.requestsScanner;
     });
   }
 

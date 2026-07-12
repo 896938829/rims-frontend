@@ -63,6 +63,46 @@ void main() {
     expect(viewModel.selectedAction.label, '采购入库');
   });
 
+  test(
+    'scan-driven draft accumulates duplicates and submits one multi-line request',
+    () async {
+      final repository = _FakeDocumentsRepository();
+      final viewModel = DocumentsViewModel(repository: repository);
+
+      viewModel.addScannedProduct(_standardItem);
+      viewModel.addScannedProduct(_standardItem);
+      viewModel.addProductToDraft(_staleItem, quantity: 3);
+
+      expect(viewModel.draftLines, hasLength(2));
+      expect(viewModel.draftLines.first.quantity, 2);
+      expect(await viewModel.createDocument(), isTrue);
+      expect(repository.createCallCount, 1);
+      expect(repository.createdRequest?.lines, hasLength(2));
+      expect(repository.createdRequest?.lines.last.quantity, 3);
+      expect(viewModel.draftLines, isEmpty);
+    },
+  );
+
+  test(
+    'failed multi-line submit retries with the same idempotency key',
+    () async {
+      final repository = _FakeDocumentsRepository(
+        createResult: Future.value(
+          const FailureResult(NetworkFailure(message: '暂时离线')),
+        ),
+      );
+      final viewModel = DocumentsViewModel(repository: repository);
+      viewModel.addScannedProduct(_standardItem);
+
+      expect(await viewModel.createDocument(), isFalse);
+      expect(await viewModel.createDocument(), isFalse);
+
+      expect(repository.createdRequestIds, hasLength(2));
+      expect(repository.createdRequestIds.toSet(), hasLength(1));
+      expect(viewModel.draftLines, isNotEmpty);
+    },
+  );
+
   test('operator cannot select admin-only document actions', () {
     final viewModel = DocumentsViewModel(canManageAdminDocumentActions: false);
 
@@ -849,6 +889,33 @@ void main() {
     expect(settled, isFalse);
     expect(repository.settledDocumentId, 501);
     expect(viewModel.documentActionError, '库存已变化，请重新盘点');
+  });
+
+  testWidgets('document scan button adds returned product to the draft', (
+    tester,
+  ) async {
+    final viewModel = DocumentsViewModel();
+    var scanCalls = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: DocumentsPage(
+            viewModel: viewModel,
+            onScanRequested: (_) async {
+              scanCalls += 1;
+              return _standardItem;
+            },
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.byKey(const Key('document-scan-product-button')));
+    await tester.pumpAndSettle();
+
+    expect(scanCalls, 1);
+    expect(find.byKey(const Key('document-draft-line-10')), findsOneWidget);
+    expect(find.text('数量 1'), findsOneWidget);
   });
 
   testWidgets(
@@ -1923,6 +1990,7 @@ final class _FakeDocumentsRepository
   final Result<List<TransactionRecord>> transactionResult;
   final List<Result<List<TransactionRecord>>> transactionResults;
   CreateDocumentRequest? createdRequest;
+  final List<String> createdRequestIds = [];
   int createCallCount = 0;
   int completeCallCount = 0;
   int? completedDocumentId;
@@ -1983,6 +2051,7 @@ final class _FakeDocumentsRepository
   ) async {
     createCallCount += 1;
     createdRequest = request;
+    createdRequestIds.add(request.requestId);
     return createResult;
   }
 

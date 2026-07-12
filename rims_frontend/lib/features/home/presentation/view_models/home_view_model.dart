@@ -26,12 +26,14 @@ final class HomeQuickAction {
     required this.icon,
     required this.targetTab,
     this.documentActionLabel,
+    this.requestsScanner = false,
   });
 
   final String label;
   final String icon;
   final AppTab targetTab;
   final String? documentActionLabel;
+  final bool requestsScanner;
 }
 
 final class InventoryWarning {
@@ -108,6 +110,7 @@ final class HomeViewModel extends ChangeNotifier {
       icon: AppIcons.actionScan,
       targetTab: AppTab.documents,
       documentActionLabel: '销售出库',
+      requestsScanner: true,
     ),
     HomeQuickAction(
       label: '退货',

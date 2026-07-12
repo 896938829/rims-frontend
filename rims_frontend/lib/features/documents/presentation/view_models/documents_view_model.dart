@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/foundation.dart';
+import 'package:uuid/uuid.dart';
 
 import '../../../../core/result/result.dart';
 import '../../../../core/result/failure.dart';
@@ -58,6 +59,8 @@ final class DocumentsViewModel extends ChangeNotifier {
   List<InventoryItem> _productCandidates = const [];
   List<NonStandardInventoryItem> _nonStandardInventoryItems = const [];
   List<DocumentRecord> _returnSourceDocuments = const [];
+  List<CreateDocumentLineRequest> _draftLines = const [];
+  String? _draftRequestId;
   Set<int> _completingDocumentIds = const {};
   DocumentAction _selectedAction;
   InventoryItem? _selectedProduct;
@@ -151,6 +154,8 @@ final class DocumentsViewModel extends ChangeNotifier {
       List<InventoryItem>.unmodifiable(_productCandidates);
   List<NonStandardInventoryItem> get nonStandardInventoryItems =>
       List<NonStandardInventoryItem>.unmodifiable(_nonStandardInventoryItems);
+  List<CreateDocumentLineRequest> get draftLines =>
+      List.unmodifiable(_draftLines);
   List<Warehouse> get targetWarehouses => warehouses
       .where((warehouse) => warehouse.id != currentWarehouse?.id)
       .toList(growable: false);
@@ -216,6 +221,8 @@ final class DocumentsViewModel extends ChangeNotifier {
     }
 
     _selectedAction = action;
+    _draftLines = const [];
+    _draftRequestId = null;
     _formError = null;
     if (!isTransferAction) {
       _selectedTargetWarehouse = null;
@@ -342,6 +349,86 @@ final class DocumentsViewModel extends ChangeNotifier {
     _productSearchError = null;
     _formError = null;
     notifyListeners();
+  }
+
+  void addScannedProduct(InventoryItem product) {
+    addProductToDraft(product, quantity: isStocktakeAction ? 0 : 1);
+  }
+
+  void addProductToDraft(InventoryItem product, {required int quantity}) {
+    if (isConversionAction && _draftLines.isNotEmpty) {
+      _formError = '转标准只能选择一个标准商品';
+      notifyListeners();
+      return;
+    }
+    if (isStocktakeAction ? quantity < 0 : quantity <= 0) {
+      _formError = isStocktakeAction ? '实盘数量不能为负数' : '数量必须大于 0';
+      notifyListeners();
+      return;
+    }
+    final index = _draftLines.indexWhere(
+      (line) => line.productId == product.productId,
+    );
+    final lines = List<CreateDocumentLineRequest>.of(_draftLines);
+    if (index >= 0) {
+      final current = lines[index];
+      final nextQuantity = isStocktakeAction
+          ? quantity
+          : current.quantity + quantity;
+      lines[index] = _lineFromProduct(product, nextQuantity);
+    } else {
+      lines.add(_lineFromProduct(product, quantity));
+    }
+    _draftLines = List.unmodifiable(lines);
+    _selectedProduct = null;
+    _productQuery = '';
+    _quantityText = '';
+    _formError = null;
+    notifyListeners();
+  }
+
+  void updateDraftLineQuantity(int productId, int quantity) {
+    if (isStocktakeAction ? quantity < 0 : quantity <= 0) {
+      _formError = isStocktakeAction ? '实盘数量不能为负数' : '数量必须大于 0';
+      notifyListeners();
+      return;
+    }
+    _draftLines = _draftLines
+        .map(
+          (line) => line.productId == productId
+              ? CreateDocumentLineRequest(
+                  productId: line.productId,
+                  productName: line.productName,
+                  quantity: quantity,
+                  actualQuantity: isStocktakeAction ? quantity : null,
+                  nonStandardInventoryId: line.nonStandardInventoryId,
+                  retailPrice: line.retailPrice,
+                )
+              : line,
+        )
+        .toList(growable: false);
+    _formError = null;
+    notifyListeners();
+  }
+
+  void removeDraftLine(int productId) {
+    _draftLines = _draftLines
+        .where((line) => line.productId != productId)
+        .toList(growable: false);
+    notifyListeners();
+  }
+
+  CreateDocumentLineRequest _lineFromProduct(
+    InventoryItem product,
+    int quantity,
+  ) {
+    return CreateDocumentLineRequest(
+      productId: product.productId,
+      productName: product.productName,
+      quantity: quantity,
+      actualQuantity: isStocktakeAction ? quantity : null,
+      retailPrice: _selectedAction.docType == 2 ? product.retailPrice : null,
+    );
   }
 
   Future<void> loadNonStandardInventory() async {
@@ -696,10 +783,33 @@ final class DocumentsViewModel extends ChangeNotifier {
 
     final selectedProduct = _selectedProduct;
     final quantity = int.tryParse(_quantityText.trim());
-
-    final invalidQuantity =
-        quantity == null || (isStocktakeAction ? quantity < 0 : quantity <= 0);
-    if (selectedProduct == null || invalidQuantity) {
+    var submissionLines = List<CreateDocumentLineRequest>.of(_draftLines);
+    if (selectedProduct != null && quantity != null) {
+      final invalidQuantity = isStocktakeAction ? quantity < 0 : quantity <= 0;
+      if (invalidQuantity) {
+        _formError = isStocktakeAction ? '实盘数量不能为负数' : '数量必须大于 0';
+        notifyListeners();
+        return false;
+      }
+      final manualLine = _lineFromProduct(selectedProduct, quantity);
+      final index = submissionLines.indexWhere(
+        (line) => line.productId == manualLine.productId,
+      );
+      if (index >= 0) {
+        final current = submissionLines[index];
+        submissionLines[index] = isStocktakeAction
+            ? manualLine
+            : CreateDocumentLineRequest(
+                productId: current.productId,
+                productName: current.productName,
+                quantity: current.quantity + quantity,
+                retailPrice: current.retailPrice,
+              );
+      } else {
+        submissionLines.add(manualLine);
+      }
+    }
+    if (submissionLines.isEmpty) {
       _formError = isStocktakeAction ? '请选择商品并输入实盘数量' : '请选择商品并输入数量';
       notifyListeners();
       return false;
@@ -718,12 +828,42 @@ final class DocumentsViewModel extends ChangeNotifier {
       notifyListeners();
       return false;
     }
+    if (isReturnAction && returnSourceDocument != null) {
+      final wrongProduct = submissionLines.any(
+        (line) => line.productName != returnSourceDocument.productName,
+      );
+      final totalQuantity = submissionLines.fold<int>(
+        0,
+        (total, line) => total + line.quantity,
+      );
+      if (wrongProduct || totalQuantity > returnSourceDocument.quantity) {
+        _formError = '退货商品必须来自原销售单且数量不能超过原单';
+        notifyListeners();
+        return false;
+      }
+    }
 
     final nonStandardInventory = _selectedNonStandardInventory;
     if (isConversionAction && nonStandardInventory == null) {
       _formError = '请选择非标库存';
       notifyListeners();
       return false;
+    }
+    if (isConversionAction && submissionLines.length != 1) {
+      _formError = '转标准需要一个非标来源和一个标准商品';
+      notifyListeners();
+      return false;
+    }
+    if (isConversionAction) {
+      final line = submissionLines.single;
+      submissionLines = [
+        CreateDocumentLineRequest(
+          productId: line.productId,
+          productName: line.productName,
+          quantity: line.quantity,
+          nonStandardInventoryId: nonStandardInventory?.id,
+        ),
+      ];
     }
 
     final repository = this.repository;
@@ -742,16 +882,10 @@ final class DocumentsViewModel extends ChangeNotifier {
       CreateDocumentRequest(
         docType: _selectedAction.docType,
         typeLabel: _selectedAction.label,
-        productId: selectedProduct.productId,
-        productName: selectedProduct.productName,
-        quantity: quantity,
-        retailPrice: _selectedAction.docType == 2
-            ? selectedProduct.retailPrice
-            : null,
+        requestId: _draftRequestId ??= const Uuid().v4(),
+        lines: submissionLines,
         toWarehouseId: isTransferAction ? targetWarehouse?.id : null,
         refDocId: isReturnAction ? returnSourceDocument?.id : null,
-        actualQuantity: isStocktakeAction ? quantity : null,
-        nonStdInventoryId: isConversionAction ? nonStandardInventory?.id : null,
         remark: _remark,
       ),
     );
@@ -763,8 +897,7 @@ final class DocumentsViewModel extends ChangeNotifier {
         _recentDocuments = [
           _withSubmittedLineSummary(
             document: document,
-            product: selectedProduct,
-            quantity: quantity,
+            line: submissionLines.first,
           ),
           ..._recentDocuments,
         ];
@@ -774,6 +907,8 @@ final class DocumentsViewModel extends ChangeNotifier {
         _selectedNonStandardInventory = null;
         _selectedTargetWarehouse = null;
         _selectedReturnSourceDocument = null;
+        _draftLines = const [];
+        _draftRequestId = null;
         _quantityText = '';
         _remark = '';
         _formError = null;
@@ -797,8 +932,7 @@ final class DocumentsViewModel extends ChangeNotifier {
 
   DocumentRecord _withSubmittedLineSummary({
     required DocumentRecord document,
-    required InventoryItem product,
-    required int quantity,
+    required CreateDocumentLineRequest line,
   }) {
     if (document.productName.isNotEmpty && document.quantity != 0) {
       return document;
@@ -811,9 +945,9 @@ final class DocumentsViewModel extends ChangeNotifier {
       number: document.number,
       status: document.status,
       productName: document.productName.isEmpty
-          ? product.productName
+          ? line.productName
           : document.productName,
-      quantity: document.quantity == 0 ? quantity : document.quantity,
+      quantity: document.quantity == 0 ? line.quantity : document.quantity,
       remark: document.remark,
       createdAt: document.createdAt,
     );

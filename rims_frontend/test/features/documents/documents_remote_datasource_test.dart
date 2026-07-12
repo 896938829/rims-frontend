@@ -169,6 +169,47 @@ void main() {
   });
 
   test(
+    'createDocument sends all typed lines with one stable request ID',
+    () async {
+      final adapter = _CapturingAdapter();
+      final dataSource = ApiDocumentsRemoteDataSource(
+        ApiClient(
+          dio: Dio()..httpClientAdapter = adapter,
+          enableLogging: false,
+        ),
+      );
+
+      await dataSource.createDocument(
+        const CreateDocumentRequest(
+          docType: 2,
+          typeLabel: '销售出库',
+          requestId: 'document-request-1',
+          lines: [
+            CreateDocumentLineRequest(
+              productId: 10,
+              productName: '矿泉水',
+              quantity: 2,
+              retailPrice: 6.5,
+            ),
+            CreateDocumentLineRequest(
+              productId: 11,
+              productName: '纸巾',
+              quantity: 3,
+              retailPrice: 12,
+            ),
+          ],
+        ),
+      );
+
+      expect(adapter.lastIdempotencyKey, 'document-request-1');
+      expect((adapter.lastData as Map<String, Object?>)['lines'], [
+        {'productId': 10, 'quantity': 2, 'retailPrice': 6.5},
+        {'productId': 11, 'quantity': 3, 'retailPrice': 12.0},
+      ]);
+    },
+  );
+
+  test(
     'createDocument rejects success envelope without document payload',
     () async {
       final adapter = _CapturingAdapter(
@@ -449,6 +490,7 @@ final class _CapturingAdapter implements HttpClientAdapter {
   Object? lastData;
   String? lastPath;
   Map<String, dynamic>? lastQueryParameters;
+  String? lastIdempotencyKey;
 
   @override
   Future<ResponseBody> fetch(
@@ -459,6 +501,7 @@ final class _CapturingAdapter implements HttpClientAdapter {
     lastPath = options.path;
     lastData = options.data;
     lastQueryParameters = options.queryParameters;
+    lastIdempotencyKey = options.headers['Idempotency-Key']?.toString();
 
     return ResponseBody.fromString(
       body,
