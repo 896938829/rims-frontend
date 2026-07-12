@@ -5,6 +5,7 @@ import 'package:rims_frontend/core/storage/app_secure_storage.dart';
 import 'package:rims_frontend/features/auth/data/datasources/auth_remote_datasource.dart';
 import 'package:rims_frontend/features/auth/data/models/auth_models.dart';
 import 'package:rims_frontend/features/auth/data/repositories/auth_repository_impl.dart';
+import 'package:rims_frontend/features/auth/domain/entities/auth_session.dart';
 
 void main() {
   group('AuthRepositoryImpl', () {
@@ -85,6 +86,27 @@ void main() {
       expect(storage.accessToken, isNull);
       expect(storage.clearCallCount, 1);
     });
+
+    test(
+      'restoreSession preserves token when backend is unreachable',
+      () async {
+        final storage = _FakeTokenStorage(accessToken: 'stored-token');
+        final repository = AuthRepositoryImpl(
+          remoteDataSource: _FakeAuthRemoteDataSource(
+            currentUserResult: const FailureResult<AppUserModel>(
+              NetworkFailure(message: 'offline'),
+            ),
+          ),
+          secureStorage: storage,
+        );
+
+        final result = await repository.restoreSession();
+
+        expect(result, isA<FailureResult<AuthSession?>>());
+        expect(storage.accessToken, 'stored-token');
+        expect(storage.clearCallCount, 0);
+      },
+    );
 
     test(
       'restoreSession clears token when current user has no username',

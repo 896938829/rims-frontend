@@ -37,16 +37,21 @@ final class AuthRepositoryImpl implements AuthRepository {
         final sessionResult = await _sessionFromUserAndToken(
           token: token,
           user: currentUser,
+          clearTokenOnAnyFailure: false,
         );
 
-        if (sessionResult.isFailure) {
+        if (sessionResult case FailureResult<AuthSession>(
+          :final failure,
+        ) when failure is AuthenticationFailure) {
           await secureStorage.clearAccessToken();
         }
 
         return sessionResult;
       },
       failure: (failure) async {
-        await secureStorage.clearAccessToken();
+        if (failure is AuthenticationFailure) {
+          await secureStorage.clearAccessToken();
+        }
         return FailureResult<AuthSession?>(failure);
       },
     );
@@ -110,7 +115,11 @@ final class AuthRepositoryImpl implements AuthRepository {
 
         await secureStorage.saveAccessToken(token);
 
-        return _sessionFromUserAndToken(token: token, user: user);
+        return _sessionFromUserAndToken(
+          token: token,
+          user: user,
+          clearTokenOnAnyFailure: true,
+        );
       },
       failure: (failure) async => FailureResult<AuthSession>(failure),
     );
@@ -119,6 +128,7 @@ final class AuthRepositoryImpl implements AuthRepository {
   Future<Result<AuthSession>> _sessionFromUserAndToken({
     required String token,
     required AppUser user,
+    required bool clearTokenOnAnyFailure,
   }) async {
     final warehouseResult = await remoteDataSource.loadWarehouses();
     return warehouseResult.when(
@@ -138,7 +148,9 @@ final class AuthRepositoryImpl implements AuthRepository {
         );
       },
       failure: (failure) async {
-        await secureStorage.clearAccessToken();
+        if (clearTokenOnAnyFailure || failure is AuthenticationFailure) {
+          await secureStorage.clearAccessToken();
+        }
         return FailureResult<AuthSession>(failure);
       },
     );

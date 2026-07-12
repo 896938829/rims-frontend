@@ -14,13 +14,25 @@ abstract interface class OfflineDatabaseKeyStorage {
   Future<String?> readOfflineDatabaseKey();
 }
 
+abstract interface class AuthenticatedAccountStorage {
+  Future<void> saveAuthenticatedAccountId(String accountId);
+
+  Future<String?> readAuthenticatedAccountId();
+
+  Future<void> clearAuthenticatedAccountId();
+}
+
 final class AppSecureStorage
-    implements TokenStorage, OfflineDatabaseKeyStorage {
+    implements
+        TokenStorage,
+        OfflineDatabaseKeyStorage,
+        AuthenticatedAccountStorage {
   const AppSecureStorage({FlutterSecureStorage? storage})
     : _storage = storage ?? const FlutterSecureStorage();
 
   static const String kAccessTokenKey = 'access_token';
   static const String kOfflineDatabaseKey = 'offline_database_key';
+  static const String kAuthenticatedAccountIdKey = 'authenticated_account_id';
 
   final FlutterSecureStorage _storage;
 
@@ -47,5 +59,20 @@ final class AppSecureStorage
   @override
   Future<String?> readOfflineDatabaseKey() {
     return _storage.read(key: kOfflineDatabaseKey);
+  }
+
+  @override
+  Future<void> saveAuthenticatedAccountId(String accountId) {
+    return _storage.write(key: kAuthenticatedAccountIdKey, value: accountId);
+  }
+
+  @override
+  Future<String?> readAuthenticatedAccountId() {
+    return _storage.read(key: kAuthenticatedAccountIdKey);
+  }
+
+  @override
+  Future<void> clearAuthenticatedAccountId() {
+    return _storage.delete(key: kAuthenticatedAccountIdKey);
   }
 }

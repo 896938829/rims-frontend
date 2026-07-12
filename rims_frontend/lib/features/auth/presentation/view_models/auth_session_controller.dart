@@ -1,5 +1,7 @@
 import 'package:flutter/foundation.dart';
 
+import '../../../../core/events/app_event.dart';
+import '../../../../core/events/app_event_bus.dart';
 import '../../../../core/result/failure.dart';
 import '../../domain/entities/app_user.dart';
 import '../../domain/entities/auth_session.dart';
@@ -7,12 +9,18 @@ import '../../domain/entities/warehouse.dart';
 import '../../domain/repositories/auth_repository.dart';
 
 final class AuthSessionController extends ChangeNotifier {
+  AuthSessionController({this.eventBus});
+
+  final AppEventBus? eventBus;
   AuthSession? _session;
   bool _isRestoring = false;
   bool _isSwitchingWarehouse = false;
   Failure? _restoreFailure;
   Failure? _switchWarehouseFailure;
   String? _sessionMessage;
+  AuthSessionSource? _sessionSource;
+  DateTime? _sessionFetchedAt;
+  DateTime? _sessionExpiresAt;
 
   AuthSession? get session => _session;
   AppUser? get currentUser => _session?.user;
@@ -25,6 +33,9 @@ final class AuthSessionController extends ChangeNotifier {
   Failure? get restoreFailure => _restoreFailure;
   Failure? get switchWarehouseFailure => _switchWarehouseFailure;
   String? get sessionMessage => _sessionMessage;
+  AuthSessionSource? get sessionSource => _sessionSource;
+  DateTime? get sessionFetchedAt => _sessionFetchedAt;
+  DateTime? get sessionExpiresAt => _sessionExpiresAt;
 
   Future<void> restoreSession(AuthRepository authRepository) async {
     await _restoreSession(
@@ -61,6 +72,19 @@ final class AuthSessionController extends ChangeNotifier {
         );
         _restoreFailure = null;
         _sessionMessage = null;
+        final AuthSessionRestoreMetadata? metadata =
+            authRepository is AuthSessionRestoreMetadata
+            ? authRepository as AuthSessionRestoreMetadata
+            : null;
+        _sessionSource = session == null
+            ? null
+            : metadata?.lastRestoreSource ?? AuthSessionSource.network;
+        _sessionFetchedAt = session == null
+            ? null
+            : metadata?.lastRestoreFetchedAt;
+        _sessionExpiresAt = session == null
+            ? null
+            : metadata?.lastRestoreExpiresAt;
       },
       failure: (failure) {
         if (!preserveActiveSessionOnFailure ||
@@ -72,18 +96,25 @@ final class AuthSessionController extends ChangeNotifier {
         }
         _restoreFailure = failure;
         _sessionMessage = failure.message;
+        if (_session == null) _clearSourceMetadata();
       },
     );
 
     _isRestoring = false;
+    _publishOwnershipChanges(activeSession, _session);
     notifyListeners();
   }
 
   void startSession(AuthSession session) {
+    final previous = _session;
     _session = session;
     _restoreFailure = null;
     _switchWarehouseFailure = null;
     _sessionMessage = null;
+    _sessionSource = AuthSessionSource.network;
+    _sessionFetchedAt = null;
+    _sessionExpiresAt = null;
+    _publishOwnershipChanges(previous, _session);
     notifyListeners();
   }
 
@@ -123,6 +154,7 @@ final class AuthSessionController extends ChangeNotifier {
           currentWarehouse: confirmedWarehouse,
           warehouses: updatedWarehouses,
         );
+        _publishOwnershipChanges(activeSession, _session);
         _switchWarehouseFailure = null;
         return true;
       },
@@ -138,10 +170,13 @@ final class AuthSessionController extends ChangeNotifier {
   }
 
   void expireSession({String message = '登录已过期，请重新登录'}) {
+    final previous = _session;
     _session = null;
     _restoreFailure = null;
     _switchWarehouseFailure = null;
     _sessionMessage = message;
+    _clearSourceMetadata();
+    _publishOwnershipChanges(previous, _session);
     notifyListeners();
   }
 
@@ -152,11 +187,44 @@ final class AuthSessionController extends ChangeNotifier {
       return;
     }
 
+    final previous = _session;
     _session = null;
     _restoreFailure = null;
     _switchWarehouseFailure = null;
     _sessionMessage = null;
+    _clearSourceMetadata();
+    _publishOwnershipChanges(previous, _session);
     notifyListeners();
+  }
+
+  void _clearSourceMetadata() {
+    _sessionSource = null;
+    _sessionFetchedAt = null;
+    _sessionExpiresAt = null;
+  }
+
+  void _publishOwnershipChanges(AuthSession? previous, AuthSession? current) {
+    final previousAccountId = previous?.user.id.toString();
+    final currentAccountId = current?.user.id.toString();
+    if (previousAccountId != currentAccountId) {
+      eventBus?.publish(
+        AccountOwnershipChangedEvent(
+          previousAccountId: previousAccountId,
+          currentAccountId: currentAccountId,
+        ),
+      );
+    }
+    if (currentAccountId != null &&
+        previousAccountId == currentAccountId &&
+        previous?.currentWarehouse?.id != current?.currentWarehouse?.id) {
+      eventBus?.publish(
+        WarehouseOwnershipChangedEvent(
+          accountId: currentAccountId,
+          previousWarehouseId: previous?.currentWarehouse?.id,
+          currentWarehouseId: current?.currentWarehouse?.id,
+        ),
+      );
+    }
   }
 
   AuthSession? _sessionWithActiveWarehouse({

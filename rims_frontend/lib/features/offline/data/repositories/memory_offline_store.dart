@@ -58,6 +58,18 @@ final class MemoryOfflineStore implements OfflineStore {
   }
 
   @override
+  Future<void> invalidateWarehouseCache({
+    required String accountId,
+    required int warehouseId,
+  }) async {
+    _cache.removeWhere(
+      (_, record) =>
+          record.key.accountId == accountId &&
+          record.key.warehouseId == warehouseId,
+    );
+  }
+
+  @override
   Future<void> saveDraft(DocumentDraft draft) async {
     _drafts[draft.id] = draft;
   }

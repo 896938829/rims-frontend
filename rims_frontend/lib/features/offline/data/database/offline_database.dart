@@ -136,6 +136,19 @@ final class OfflineDatabase extends _$OfflineDatabase implements OfflineStore {
   }
 
   @override
+  Future<void> invalidateWarehouseCache({
+    required String accountId,
+    required int warehouseId,
+  }) async {
+    await (delete(offlineCacheEntries)..where(
+          (entry) =>
+              entry.accountId.equals(accountId) &
+              entry.warehouseId.equals(warehouseId),
+        ))
+        .go();
+  }
+
+  @override
   Future<void> saveDraft(DocumentDraft draft) async {
     await into(offlineDocumentDrafts).insertOnConflictUpdate(
       OfflineDocumentDraftsCompanion.insert(

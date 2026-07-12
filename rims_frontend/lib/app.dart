@@ -25,6 +25,7 @@ import 'features/attachments/data/services/file_attachment_staging_store.dart';
 import 'features/attachments/domain/services/attachment_picker.dart';
 import 'features/auth/data/datasources/auth_remote_datasource.dart';
 import 'features/auth/data/repositories/auth_repository_impl.dart';
+import 'features/auth/domain/repositories/auth_repository.dart';
 import 'features/auth/presentation/view_models/auth_session_controller.dart';
 import 'features/documents/data/datasources/documents_remote_datasource.dart';
 import 'features/documents/data/repositories/documents_repository_impl.dart';
@@ -32,6 +33,7 @@ import 'features/inventory/data/datasources/inventory_remote_datasource.dart';
 import 'features/inventory/data/repositories/inventory_repository_impl.dart';
 import 'features/offline/domain/services/offline_store.dart';
 import 'features/offline/data/services/connectivity_network_status_service.dart';
+import 'features/offline/data/repositories/cached_auth_repository.dart';
 import 'features/offline/domain/services/network_status_service.dart';
 import 'features/reports/data/datasources/reports_remote_datasource.dart';
 import 'features/reports/data/repositories/reports_repository_impl.dart';
@@ -55,7 +57,7 @@ class MainApp extends StatefulWidget {
 }
 
 final class _MainAppState extends State<MainApp> {
-  final AuthSessionController _sessionController = AuthSessionController();
+  late final AuthSessionController _sessionController;
   final AppSecureStorage _secureStorage = const AppSecureStorage();
   final AppEventBus _eventBus = AppEventBus();
   final ScanLookupCache _scanLookupCache = ScanLookupCache();
@@ -65,8 +67,12 @@ final class _MainAppState extends State<MainApp> {
   late final AttachmentsRepositoryImpl _attachmentsRepository;
   late final PlatformAttachmentShareService _attachmentShareService;
   StreamSubscription<TokenExpiredEvent>? _tokenExpiredSubscription;
+  StreamSubscription<AccountOwnershipChangedEvent>?
+  _accountOwnershipSubscription;
+  StreamSubscription<WarehouseOwnershipChangedEvent>?
+  _warehouseOwnershipSubscription;
   late final ApiClient _apiClient;
-  late final AuthRepositoryImpl _authRepository;
+  late final AuthRepository _authRepository;
   late final DocumentsRepositoryImpl _documentsRepository;
   late final InventoryRepositoryImpl _inventoryRepository;
   late final ReportsRepositoryImpl _reportsRepository;
@@ -79,6 +85,7 @@ final class _MainAppState extends State<MainApp> {
   @override
   void initState() {
     super.initState();
+    _sessionController = AuthSessionController(eventBus: _eventBus);
     _sessionController.addListener(_handleSessionOwnership);
     _networkStatusService =
         widget.networkStatusService ?? _createNetworkStatusService();
@@ -131,9 +138,15 @@ final class _MainAppState extends State<MainApp> {
         );
       },
     );
-    _authRepository = AuthRepositoryImpl(
+    final authRepository = AuthRepositoryImpl(
       remoteDataSource: ApiAuthRemoteDataSource(_apiClient),
       secureStorage: _secureStorage,
+    );
+    _authRepository = CachedAuthRepository(
+      delegate: authRepository,
+      store: widget.offlineStore,
+      tokenStorage: _secureStorage,
+      accountStorage: _secureStorage,
     );
     _documentsRepository = DocumentsRepositoryImpl(
       remoteDataSource: ApiDocumentsRemoteDataSource(_apiClient),
@@ -164,6 +177,27 @@ final class _MainAppState extends State<MainApp> {
       unawaited(_authRepository.logout());
       _sessionController.expireSession();
     });
+    _accountOwnershipSubscription = _eventBus
+        .on<AccountOwnershipChangedEvent>()
+        .listen((event) {
+          final previous = event.previousAccountId;
+          if (previous != null && previous != event.currentAccountId) {
+            unawaited(widget.offlineStore.clearAccount(previous));
+          }
+        });
+    _warehouseOwnershipSubscription = _eventBus
+        .on<WarehouseOwnershipChangedEvent>()
+        .listen((event) {
+          final previous = event.previousWarehouseId;
+          if (previous != null && previous != event.currentWarehouseId) {
+            unawaited(
+              widget.offlineStore.invalidateWarehouseCache(
+                accountId: event.accountId,
+                warehouseId: previous,
+              ),
+            );
+          }
+        });
     unawaited(_sessionController.restoreSession(_authRepository));
     unawaited(_networkStatusService.verify());
   }
@@ -176,6 +210,8 @@ final class _MainAppState extends State<MainApp> {
       unawaited(picker.cleanup());
     }
     unawaited(_tokenExpiredSubscription?.cancel());
+    unawaited(_accountOwnershipSubscription?.cancel());
+    unawaited(_warehouseOwnershipSubscription?.cancel());
     unawaited(_eventBus.dispose());
     unawaited(_networkStatusService.dispose());
     _healthClient?.close(force: true);

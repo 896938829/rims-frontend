@@ -2,6 +2,16 @@ import '../../../../core/result/result.dart';
 import '../entities/auth_session.dart';
 import '../entities/warehouse.dart';
 
+enum AuthSessionSource { network, cache }
+
+abstract interface class AuthSessionRestoreMetadata {
+  AuthSessionSource? get lastRestoreSource;
+
+  DateTime? get lastRestoreFetchedAt;
+
+  DateTime? get lastRestoreExpiresAt;
+}
+
 abstract interface class AuthRepository {
   Future<Result<AuthSession?>> restoreSession();
 

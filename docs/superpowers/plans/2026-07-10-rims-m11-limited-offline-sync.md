@@ -333,17 +333,17 @@ feat: add scoped offline cache primitives
 - Test: `rims_frontend/test/features/offline/cached_auth_repository_test.dart`
 - Modify: `rims_frontend/test/features/auth/auth_repository_impl_test.dart`
 
-- [ ] **Step 1: Write failing tests for cached user/warehouse read, age metadata, account mismatch, warehouse switch invalidation, permission refresh invalidation, and offline login rejection.**
+- [x] **Step 1: Write failing tests for cached user/warehouse read, age metadata, account mismatch, warehouse switch invalidation, permission refresh invalidation, and offline login rejection.**
 
-- [ ] **Step 2: Cache only an already authenticated session projection.**
+- [x] **Step 2: Cache only an already authenticated session projection.**
 
 Offline startup may show cached identity and references only after secure token
 presence is confirmed. It must not create a new authenticated session or extend
 token expiry. Login always requires the backend.
 
-- [ ] **Step 3: Publish account and warehouse ownership changes to offline cleanup/invalidation services.**
+- [x] **Step 3: Publish account and warehouse ownership changes to offline cleanup/invalidation services.**
 
-- [ ] **Step 4: Run tests and commit.**
+- [x] **Step 4: Run tests and commit.**
 
 ```text
 feat: cache session warehouse references

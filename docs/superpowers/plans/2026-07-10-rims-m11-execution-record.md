@@ -21,7 +21,7 @@ counts, encrypted storage ownership, cleanup, and baseline restore are read.
 | Web regression adapter | 2, 17 | Web M9 journey with in-memory store | adapter/build PASS; M9 journey pending |
 | Verified network reachability | 3, 16 | captive/unreachable/switch probes | service PASS; fault harness pending |
 | Account/warehouse scoped cache | 4-7 | cache keys, invalidation, no cross-scope read | primitives PASS; repositories pending |
-| User/warehouse references | 5 | secure-token gate and cached projection | planned |
+| User/warehouse references | 5 | secure-token gate and cached projection | PASS |
 | Product/inventory/alerts/barcode | 6 | offline read, stale source/age, no mutation authority | planned |
 | Documents/details/reports | 7 | offline read and financial field boundary | planned |
 | Six document draft types | 8, 9 | autosave, reopen, recreation, ownership | planned |
@@ -101,6 +101,19 @@ counts, encrypted storage ownership, cleanup, and baseline restore are read.
 | Failure boundary | authentication, authorization, validation, conflict, and server failures remain unchanged |
 | Scope | schema-specific reads and oldest-first eviction preserve other accounts and warehouses in memory and Drift |
 | GREEN | strict analyze PASS; all offline plus architecture tests PASS (32 tests) |
+
+## Task 5 Session Reference Evidence
+
+| Probe | Observed result |
+| --- | --- |
+| RED | decorator and secure account reference were absent; base restore deleted token on NetworkFailure |
+| Token gate | cached projection is readable only with a non-empty secure token and matching secure account ID |
+| Payload | projection stores user and warehouse references but never stores the access token |
+| Login | login always delegates to the backend; NetworkFailure never returns an existing session cache |
+| Refresh | successful role/permission refresh replaces the projection; controller exposes source and age |
+| Failure | network restore preserves token; authentication/authorization failures clear account cache/reference |
+| Ownership | account and warehouse events drive account cleanup and old-warehouse cache invalidation |
+| GREEN | strict analyze PASS; auth, cached auth, widget, and Drift regression tests PASS (53 tests) |
 
 ## Final Android State Evidence
 

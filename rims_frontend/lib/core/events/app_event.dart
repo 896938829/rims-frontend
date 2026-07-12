@@ -19,3 +19,25 @@ final class UserProfileUpdatedEvent extends AppEvent {
 final class GlobalRefreshRequestedEvent extends AppEvent {
   const GlobalRefreshRequestedEvent();
 }
+
+final class AccountOwnershipChangedEvent extends AppEvent {
+  const AccountOwnershipChangedEvent({
+    required this.previousAccountId,
+    required this.currentAccountId,
+  });
+
+  final String? previousAccountId;
+  final String? currentAccountId;
+}
+
+final class WarehouseOwnershipChangedEvent extends AppEvent {
+  const WarehouseOwnershipChangedEvent({
+    required this.accountId,
+    required this.previousWarehouseId,
+    required this.currentWarehouseId,
+  });
+
+  final String accountId;
+  final int? previousWarehouseId;
+  final int? currentWarehouseId;
+}

@@ -15,6 +15,11 @@ abstract interface class OfflineStore {
     required int maxRecords,
   });
 
+  Future<void> invalidateWarehouseCache({
+    required String accountId,
+    required int warehouseId,
+  });
+
   Future<void> saveDraft(DocumentDraft draft);
 
   Future<List<DocumentDraft>> listDrafts(String accountId);
