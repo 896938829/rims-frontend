@@ -160,16 +160,17 @@ Internet access.
 - Modify: `docs/superpowers/plans/2026-07-10-rims-app-long-term-completion-master-plan.md`
 - Create: `rims_frontend/test/m11_architecture_test.dart`
 - Create: `rims_frontend/lib/features/offline/domain/entities/cache_snapshot.dart`
+- Create: `rims_frontend/lib/features/offline/domain/entities/document_draft.dart`
 - Create: `rims_frontend/lib/features/offline/domain/entities/network_reachability.dart`
 - Create: `rims_frontend/lib/features/offline/domain/entities/outbox_operation.dart`
 - Create: `rims_frontend/lib/features/offline/domain/services/offline_store.dart`
 - Create: `rims_frontend/lib/features/offline/domain/services/network_status_service.dart`
 
-- [ ] **Step 1: Record exact frontend/backend commits, tool versions, stopped runtime status, current storage implementations, current dependencies, and M10 inherited reports.**
+- [x] **Step 1: Record exact frontend/backend commits, tool versions, stopped runtime status, current storage implementations, current dependencies, and M10 inherited reports.**
 
-- [ ] **Step 2: Add a requirement matrix mapping every M11 and frontend requirement 6.1-6.4 row to a task and direct evidence source.**
+- [x] **Step 2: Add a requirement matrix mapping every M11 and frontend requirement 6.1-6.4 row to a task and direct evidence source.**
 
-- [ ] **Step 3: Write architecture tests that fail until cache, draft, outbox, network, encryption-key, and account-cleanup boundaries exist under feature-first ownership.**
+- [x] **Step 3: Write architecture tests that fail until cache, draft, outbox, network, encryption-key, and account-cleanup boundaries exist under feature-first ownership.**
 
 Run:
 
@@ -180,9 +181,9 @@ flutter test --no-pub test/m11_architecture_test.dart
 
 Expected: FAIL because M11 contracts do not exist.
 
-- [ ] **Step 4: Add the minimal typed domain contracts from Section 3 and verify the architecture test passes without adding persistence or sync behavior.**
+- [x] **Step 4: Add the minimal typed domain contracts from Section 3 and verify the architecture test passes without adding persistence or sync behavior.**
 
-- [ ] **Step 5: Verify stopped ownership before implementation.**
+- [x] **Step 5: Verify stopped ownership before implementation.**
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rims_local.ps1 -Command status
@@ -190,7 +191,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rims_local.ps1 -Co
 
 Expected: no managed state, listener, emulator, or bridge.
 
-- [ ] **Step 6: Commit the evidence skeleton and contracts.**
+- [x] **Step 6: Commit the evidence skeleton and contracts.**
 
 ```text
 docs: freeze M11 offline sync contracts
@@ -412,7 +413,7 @@ feat: cache recent documents and reports
 ## Task 8: Add Versioned Document Drafts
 
 **Files:**
-- Create: `rims_frontend/lib/features/offline/domain/entities/document_draft.dart`
+- Modify: `rims_frontend/lib/features/offline/domain/entities/document_draft.dart`
 - Create: `rims_frontend/lib/features/offline/domain/repositories/document_draft_repository.dart`
 - Create: `rims_frontend/lib/features/offline/data/repositories/drift_document_draft_repository.dart`
 - Modify: `rims_frontend/lib/features/documents/domain/entities/document_data.dart`

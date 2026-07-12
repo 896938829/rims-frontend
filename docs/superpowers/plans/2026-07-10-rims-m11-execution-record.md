@@ -1,6 +1,6 @@
 # RIMS M11 Execution Record
 
-Status: PLANNED
+Status: IN PROGRESS
 
 This record accepts only observed local output. Test names and implementation
 claims are not exit evidence until report identities, state effects, duplicate
@@ -48,8 +48,20 @@ counts, encrypted storage ownership, cleanup, and baseline restore are read.
 | Existing persistence | secure storage, preferences, scan cache/session, attachment staging; no structured database |
 | Existing connectivity | `connectivity_plus` dependency present but unused |
 | Existing idempotency | document create and attachment upload/replace send stable keys; backend stores processing/completed responses |
-| Managed runtime | to be captured from stopped state in Task 1 |
-| Tool versions | to be captured from local commands in Task 1 |
+| Managed runtime | no state, port 8080 not listening, no emulator/device |
+| Tool versions | Flutter 3.44.1, Dart 3.12.1, Go 1.25.0, Docker 29.4.0, Compose 5.1.1, ADB 1.0.41 |
+
+## Task 1 Contract Evidence
+
+| Probe | Observed result |
+| --- | --- |
+| RED | architecture test failed because all five M11 contract imports were absent |
+| Cache contract | typed network/cache source, deterministic expiry, account/warehouse cache key |
+| Network contract | stable offline/checking/online/unreachable states and verified service interface |
+| Draft contract | account/warehouse-owned versioned payload boundary |
+| Outbox contract | seven stable states, five operation kinds, stable wire strings, confirmation boundary |
+| Storage contract | cache, draft, dependency enqueue, ready query, transition, account clear, and prune methods |
+| GREEN | 4 architecture tests passed; focused analysis reported no issues |
 
 ## Final Android State Evidence
 
