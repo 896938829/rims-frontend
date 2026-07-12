@@ -8,11 +8,15 @@ import 'package:uuid/uuid.dart';
 import 'core/events/app_event.dart';
 import 'core/events/app_event_bus.dart';
 import 'core/network/api_client.dart';
+import 'core/network/api_endpoints.dart';
 import 'core/storage/app_secure_storage.dart';
 import 'core/theme/app_theme.dart';
 import 'features/admin/data/datasources/admin_remote_datasource.dart';
 import 'features/admin/data/repositories/admin_repository_impl.dart';
 import 'features/attachments/data/services/android_attachment_picker.dart';
+import 'features/attachments/data/datasources/attachments_remote_datasource.dart';
+import 'features/attachments/data/repositories/attachments_repository_impl.dart';
+import 'features/attachments/data/services/attachment_share_service.dart';
 import 'features/attachments/data/services/file_attachment_staging_store.dart';
 import 'features/auth/data/datasources/auth_remote_datasource.dart';
 import 'features/auth/data/repositories/auth_repository_impl.dart';
@@ -42,6 +46,8 @@ final class _MainAppState extends State<MainApp> {
   final ScanSessionStore _scanSessionStore = ScanSessionStore();
   late final AndroidAttachmentPicker _attachmentPicker;
   late final FileAttachmentStagingStore _attachmentStagingStore;
+  late final AttachmentsRepositoryImpl _attachmentsRepository;
+  late final PlatformAttachmentShareService _attachmentShareService;
   StreamSubscription<TokenExpiredEvent>? _tokenExpiredSubscription;
   late final ApiClient _apiClient;
   late final AuthRepositoryImpl _authRepository;
@@ -61,6 +67,7 @@ final class _MainAppState extends State<MainApp> {
       rootDirectory: getApplicationSupportDirectory,
       idFactory: const Uuid().v4,
     );
+    _attachmentShareService = PlatformAttachmentShareService();
     unawaited(_attachmentPicker.recoverLostData());
     unawaited(
       _attachmentStagingStore.cleanupStale(maxAge: const Duration(days: 7)),
@@ -71,6 +78,25 @@ final class _MainAppState extends State<MainApp> {
           await _secureStorage.readAccessToken(),
       warehouseIdReader: () async => _sessionController.currentWarehouse?.id,
       eventBus: _eventBus,
+    );
+    _attachmentsRepository = AttachmentsRepositoryImpl(
+      remoteDataSource: ApiAttachmentsRemoteDataSource(_apiClient),
+      apiBaseUri: Uri.parse(ApiEndpoints.baseUrl),
+      saveDownload: (attachment, bytes) async {
+        final userId = _sessionController.currentUser?.id.toString();
+        if (userId == null) {
+          throw StateError('Cannot save attachment without an active user.');
+        }
+        final result = await _attachmentStagingStore.saveDownload(
+          userId: userId,
+          originalName: attachment.originalName,
+          bytes: bytes,
+        );
+        return result.when(
+          success: (path) => path,
+          failure: (failure) => throw StateError(failure.message),
+        );
+      },
     );
     _authRepository = AuthRepositoryImpl(
       remoteDataSource: ApiAuthRemoteDataSource(_apiClient),
@@ -94,6 +120,10 @@ final class _MainAppState extends State<MainApp> {
       inventoryRepository: _inventoryRepository,
       reportsRepository: _reportsRepository,
       adminRepository: _adminRepository,
+      attachmentsRepository: _attachmentsRepository,
+      attachmentPicker: _attachmentPicker,
+      attachmentStagingStore: _attachmentStagingStore,
+      attachmentShareService: _attachmentShareService,
       eventBus: _eventBus,
       sessionController: _sessionController,
     );

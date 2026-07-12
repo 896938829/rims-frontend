@@ -7,6 +7,36 @@ import 'package:rims_frontend/features/documents/data/datasources/documents_remo
 import 'package:rims_frontend/features/documents/domain/entities/document_data.dart';
 
 void main() {
+  test('getDocument loads authoritative header and all lines', () async {
+    final adapter = _CapturingAdapter(
+      body:
+          '{"code":0,"message":"ok","data":{"id":42,"docNo":"RK20260713001","docType":1,"docTypeName":"入库单","statusName":"草稿","lines":[{"id":101,"productId":7,"productCode":"SKU-7","productName":"矿泉水","quantity":3,"unit":"箱","remark":""}]}}',
+    );
+    final dataSource = ApiDocumentsRemoteDataSource(
+      ApiClient(dio: Dio()..httpClientAdapter = adapter, enableLogging: false),
+    );
+
+    final result = await dataSource.getDocument(42);
+
+    expect(adapter.lastPath, '/documents/42');
+    result.when(
+      success: (detail) => expect(detail.lines.single.id, 101),
+      failure: (failure) => fail(failure.message),
+    );
+  });
+
+  test('getDocument rejects success without a lines array', () async {
+    final adapter = _CapturingAdapter(
+      body:
+          '{"code":0,"message":"ok","data":{"id":42,"docNo":"RK20260713001","docType":1,"docTypeName":"入库单","statusName":"草稿"}}',
+    );
+    final dataSource = ApiDocumentsRemoteDataSource(
+      ApiClient(dio: Dio()..httpClientAdapter = adapter, enableLogging: false),
+    );
+
+    expect((await dataSource.getDocument(42)).isFailure, isTrue);
+  });
+
   test('listRecentDocuments uses backend pageSize query parameter', () async {
     final adapter = _CapturingAdapter(
       body:

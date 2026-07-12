@@ -7,6 +7,10 @@ import '../../../../core/events/app_event.dart';
 import '../../../../core/events/app_event_bus.dart';
 import '../../../../core/widgets/rims_bottom_navigation.dart';
 import '../../../admin/domain/repositories/admin_repository.dart';
+import '../../../attachments/domain/repositories/attachments_repository.dart';
+import '../../../attachments/domain/services/attachment_picker.dart';
+import '../../../attachments/domain/services/attachment_share_service.dart';
+import '../../../attachments/domain/services/attachment_staging_store.dart';
 import '../../../auth/domain/entities/warehouse.dart';
 import '../../../auth/domain/repositories/auth_repository.dart';
 import '../../../auth/presentation/view_models/auth_session_controller.dart';
@@ -36,6 +40,10 @@ final class AppShellPage extends StatefulWidget {
     this.inventoryRepository,
     this.reportsRepository,
     this.adminRepository,
+    this.attachmentsRepository,
+    this.attachmentPicker,
+    this.attachmentStagingStore,
+    this.attachmentShareService,
     this.eventBus,
     super.key,
   });
@@ -46,6 +54,10 @@ final class AppShellPage extends StatefulWidget {
   final InventoryRepository? inventoryRepository;
   final ReportsRepository? reportsRepository;
   final AdminRepository? adminRepository;
+  final AttachmentsRepository? attachmentsRepository;
+  final AttachmentPicker? attachmentPicker;
+  final AttachmentStagingStore? attachmentStagingStore;
+  final AttachmentShareService? attachmentShareService;
   final AppEventBus? eventBus;
 
   @override
@@ -129,6 +141,11 @@ final class _AppShellPageState extends State<AppShellPage> {
             widget.sessionController.currentUser?.isAdmin == true,
         initialActionLabel: _pendingDocumentActionLabel,
         eventBus: widget.eventBus,
+        attachmentsRepository: widget.attachmentsRepository,
+        attachmentPicker: widget.attachmentPicker,
+        attachmentStagingStore: widget.attachmentStagingStore,
+        attachmentShareService: widget.attachmentShareService,
+        attachmentUserId: widget.sessionController.currentUser?.id.toString(),
       ),
       AppTab.reports => ReportsPage(
         repository: widget.reportsRepository,

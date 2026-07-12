@@ -39,6 +39,7 @@ abstract final class ApiEndpoints {
   }
 
   static const String documents = '/documents';
+  static String document(int id) => '$documents/$id';
   static const String transactions = '/transactions';
   static const String files = '/files';
   static const String fileUpload = '$files/upload';

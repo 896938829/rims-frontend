@@ -594,26 +594,26 @@ git commit -m "feat: stage and recover Android attachments"
 - Create: `rims_frontend/test/features/attachments/attachment_panel_test.dart`
 - Modify: `rims_frontend/test/features/documents/documents_view_model_test.dart`
 
-- [ ] **Step 1: Write failing ViewModel tests for load/empty/error, upload progress, one-flight guard, cancel, retry with the same request ID, interrupted upload recovery, background cancellation, resume, preview/download/share, delete confirmation, replace rollback feedback, and reorder rollback.**
+- [x] **Step 1: Write failing ViewModel tests for load/empty/error, upload progress, one-flight guard, cancel, retry with the same request ID, interrupted upload recovery, background cancellation, resume, preview/download/share, delete confirmation, replace rollback feedback, and reorder rollback.**
 
-- [ ] **Step 2: Write failing document-detail tests that load authoritative lines and an attachment panel for the selected document.**
+- [x] **Step 2: Write failing document-detail tests that load authoritative lines and an attachment panel for the selected document.**
 
-- [ ] **Step 3: Run focused tests and verify RED.**
+- [x] **Step 3: Run focused tests and verify RED.**
 
 ```powershell
 flutter test --no-pub test/features/attachments test/features/documents
 ```
 
-- [ ] **Step 4: Implement queue state and an ergonomic un-nested panel.**
+- [x] **Step 4: Implement queue state and an ergonomic un-nested panel.**
 
 Use icon buttons with tooltips for camera, gallery, file, retry, cancel,
 download/share, replace, reorder, and delete. Give every transfer a stable
 height/progress area so rows do not jump. Image preview uses local/downloaded
 bytes; other types show metadata and share/open actions.
 
-- [ ] **Step 5: Add authoritative document detail/line loading and inject the attachment repository/picker/staging/share capabilities through `AppShellPage`.**
+- [x] **Step 5: Add authoritative document detail/line loading and inject the attachment repository/picker/staging/share capabilities through `AppShellPage`.**
 
-- [ ] **Step 6: Commit.**
+- [x] **Step 6: Commit.**
 
 ```powershell
 git commit -m "feat: add document attachment workflow"

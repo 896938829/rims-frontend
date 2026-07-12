@@ -95,6 +95,112 @@ final class DocumentRecordModel {
   }
 }
 
+final class DocumentDetailModel {
+  DocumentDetailModel({
+    required this.record,
+    required List<DocumentLineModel> lines,
+  }) : lines = List.unmodifiable(lines);
+
+  factory DocumentDetailModel.fromJson(Map<dynamic, dynamic> json) {
+    final rawLines = json['lines'];
+    if (rawLines is! List<dynamic>) {
+      throw const FormatException('Document detail lines must be a list.');
+    }
+    final lines = <DocumentLineModel>[];
+    for (final rawLine in rawLines) {
+      if (rawLine is! Map<dynamic, dynamic>) {
+        throw const FormatException('Every document line must be an object.');
+      }
+      lines.add(DocumentLineModel.fromJson(rawLine));
+    }
+    final record = DocumentRecordModel.fromJson(json);
+    if (record.id <= 0 || record.number.isEmpty || record.docType <= 0) {
+      throw const FormatException('Invalid document detail header.');
+    }
+    return DocumentDetailModel(record: record, lines: lines);
+  }
+
+  final DocumentRecordModel record;
+  final List<DocumentLineModel> lines;
+
+  DocumentDetail toEntity() => DocumentDetail(
+    record: record.toEntity(),
+    lines: lines.map((line) => line.toEntity()).toList(growable: false),
+  );
+}
+
+final class DocumentLineModel {
+  const DocumentLineModel({
+    required this.id,
+    required this.productId,
+    required this.nonStandardInventoryId,
+    required this.productCode,
+    required this.productName,
+    required this.quantity,
+    required this.unit,
+    required this.costPrice,
+    required this.retailPrice,
+    required this.systemQuantity,
+    required this.actualQuantity,
+    required this.differenceQuantity,
+    required this.remark,
+  });
+
+  factory DocumentLineModel.fromJson(Map<dynamic, dynamic> json) {
+    final id = _strictInt(json, 'id');
+    final productId = _strictOptionalInt(json, 'productId');
+    final nonStandardId = _strictOptionalInt(json, 'nonStdInvId');
+    if (id <= 0 || (productId <= 0 && nonStandardId <= 0)) {
+      throw const FormatException('Invalid document line identity.');
+    }
+    return DocumentLineModel(
+      id: id,
+      productId: productId,
+      nonStandardInventoryId: nonStandardId,
+      productCode: _strictString(json, 'productCode'),
+      productName: _strictString(json, 'productName'),
+      quantity: _strictInt(json, 'quantity'),
+      unit: _strictString(json, 'unit'),
+      costPrice: _strictOptionalDouble(json, 'costPrice'),
+      retailPrice: _strictOptionalDouble(json, 'retailPrice'),
+      systemQuantity: _strictOptionalInt(json, 'systemQty'),
+      actualQuantity: _strictOptionalInt(json, 'actualQty'),
+      differenceQuantity: _strictOptionalInt(json, 'diffQty'),
+      remark: _strictString(json, 'remark'),
+    );
+  }
+
+  final int id;
+  final int productId;
+  final int nonStandardInventoryId;
+  final String productCode;
+  final String productName;
+  final int quantity;
+  final String unit;
+  final double costPrice;
+  final double retailPrice;
+  final int systemQuantity;
+  final int actualQuantity;
+  final int differenceQuantity;
+  final String remark;
+
+  DocumentLine toEntity() => DocumentLine(
+    id: id,
+    productId: productId,
+    nonStandardInventoryId: nonStandardInventoryId,
+    productCode: productCode,
+    productName: productName,
+    quantity: quantity,
+    unit: unit,
+    costPrice: costPrice,
+    retailPrice: retailPrice,
+    systemQuantity: systemQuantity,
+    actualQuantity: actualQuantity,
+    differenceQuantity: differenceQuantity,
+    remark: remark,
+  );
+}
+
 final class TransactionRecordModel {
   const TransactionRecordModel({
     required this.id,
@@ -240,4 +346,31 @@ String? _readString(Map<dynamic, dynamic> json, List<String> keys) {
   }
 
   return null;
+}
+
+int _strictInt(Map<dynamic, dynamic> json, String key) {
+  final value = json[key];
+  if (value is int) return value;
+  if (value is num && value.isFinite && value == value.truncate()) {
+    return value.toInt();
+  }
+  throw FormatException('Document line $key must be an integer.');
+}
+
+int _strictOptionalInt(Map<dynamic, dynamic> json, String key) {
+  if (!json.containsKey(key) || json[key] == null) return 0;
+  return _strictInt(json, key);
+}
+
+double _strictOptionalDouble(Map<dynamic, dynamic> json, String key) {
+  final value = json[key];
+  if (value == null) return 0;
+  if (value is num && value.isFinite) return value.toDouble();
+  throw FormatException('Document line $key must be numeric.');
+}
+
+String _strictString(Map<dynamic, dynamic> json, String key) {
+  final value = json[key];
+  if (value is String) return value;
+  throw FormatException('Document line $key must be a string.');
 }

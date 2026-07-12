@@ -2,6 +2,10 @@ import 'package:go_router/go_router.dart';
 
 import '../core/events/app_event_bus.dart';
 import '../features/admin/domain/repositories/admin_repository.dart';
+import '../features/attachments/domain/repositories/attachments_repository.dart';
+import '../features/attachments/domain/services/attachment_picker.dart';
+import '../features/attachments/domain/services/attachment_share_service.dart';
+import '../features/attachments/domain/services/attachment_staging_store.dart';
 import '../features/auth/domain/repositories/auth_repository.dart';
 import '../features/auth/presentation/pages/login_page.dart';
 import '../features/auth/presentation/view_models/auth_session_controller.dart';
@@ -18,6 +22,10 @@ GoRouter createAppRouter({
   InventoryRepository? inventoryRepository,
   ReportsRepository? reportsRepository,
   AdminRepository? adminRepository,
+  AttachmentsRepository? attachmentsRepository,
+  AttachmentPicker? attachmentPicker,
+  AttachmentStagingStore? attachmentStagingStore,
+  AttachmentShareService? attachmentShareService,
   AppEventBus? eventBus,
   String initialLocation = RoutePaths.login,
 }) {
@@ -62,6 +70,10 @@ GoRouter createAppRouter({
           inventoryRepository: inventoryRepository,
           reportsRepository: reportsRepository,
           adminRepository: adminRepository,
+          attachmentsRepository: attachmentsRepository,
+          attachmentPicker: attachmentPicker,
+          attachmentStagingStore: attachmentStagingStore,
+          attachmentShareService: attachmentShareService,
           eventBus: eventBus,
           sessionController: sessionController,
         ),

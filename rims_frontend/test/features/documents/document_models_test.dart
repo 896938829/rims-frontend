@@ -90,6 +90,59 @@ void main() {
     expect(model.toEntity().quantity, 3);
   });
 
+  test('DocumentDetailModel parses every authoritative backend line', () {
+    final detail = DocumentDetailModel.fromJson(const {
+      'id': 42,
+      'docNo': 'RK20260713001',
+      'docType': 1,
+      'docTypeName': '入库单',
+      'statusName': '草稿',
+      'lines': [
+        {
+          'id': 101,
+          'productId': 7,
+          'productCode': 'SKU-7',
+          'productName': '矿泉水',
+          'quantity': 3,
+          'unit': '箱',
+          'retailPrice': 12.5,
+          'remark': '',
+        },
+        {
+          'id': 102,
+          'nonStdInvId': 9,
+          'productCode': '',
+          'productName': '破损瓶',
+          'quantity': 2,
+          'unit': '件',
+          'actualQty': 1,
+          'diffQty': -1,
+          'remark': '盘点',
+        },
+      ],
+    }).toEntity();
+
+    expect(detail.record.id, 42);
+    expect(detail.lines, hasLength(2));
+    expect(detail.lines.first.productCode, 'SKU-7');
+    expect(detail.lines.last.nonStandardInventoryId, 9);
+    expect(detail.lines.last.differenceQuantity, -1);
+  });
+
+  test('DocumentDetailModel rejects a malformed line payload', () {
+    expect(
+      () => DocumentDetailModel.fromJson(const {
+        'id': 42,
+        'docNo': 'RK20260713001',
+        'docType': 1,
+        'docTypeName': '入库单',
+        'statusName': '草稿',
+        'lines': ['not-an-object'],
+      }),
+      throwsFormatException,
+    );
+  });
+
   test('TransactionRecordModel parses backend transaction fields', () {
     final model = TransactionRecordModel.fromJson({
       'id': 21,

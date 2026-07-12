@@ -11,6 +11,13 @@ import '../../../../core/widgets/rims_page_scaffold.dart';
 import '../../../../core/widgets/rims_section_header.dart';
 import '../../../../core/widgets/rims_status_chip.dart';
 import '../../../auth/domain/entities/warehouse.dart';
+import '../../../attachments/domain/repositories/attachments_repository.dart';
+import '../../../attachments/domain/services/attachment_picker.dart';
+import '../../../attachments/domain/services/attachment_share_service.dart';
+import '../../../attachments/domain/services/attachment_staging_store.dart';
+import '../../../attachments/domain/entities/attachment.dart';
+import '../../../attachments/presentation/view_models/attachments_view_model.dart';
+import '../../../attachments/presentation/widgets/attachment_panel.dart';
 import '../../domain/entities/document_data.dart';
 import '../../domain/repositories/documents_repository.dart';
 import '../../../inventory/domain/entities/inventory_item.dart';
@@ -30,6 +37,11 @@ final class DocumentsPage extends StatefulWidget {
     this.canManageAdminDocumentActions = true,
     this.initialActionLabel,
     this.eventBus,
+    this.attachmentsRepository,
+    this.attachmentPicker,
+    this.attachmentStagingStore,
+    this.attachmentShareService,
+    this.attachmentUserId,
     super.key,
   });
 
@@ -41,6 +53,11 @@ final class DocumentsPage extends StatefulWidget {
   final bool canManageAdminDocumentActions;
   final String? initialActionLabel;
   final AppEventBus? eventBus;
+  final AttachmentsRepository? attachmentsRepository;
+  final AttachmentPicker? attachmentPicker;
+  final AttachmentStagingStore? attachmentStagingStore;
+  final AttachmentShareService? attachmentShareService;
+  final String? attachmentUserId;
 
   @override
   State<DocumentsPage> createState() => _DocumentsPageState();
@@ -147,6 +164,12 @@ final class _DocumentsPageState extends State<DocumentsPage> {
               document: currentDocument,
               viewModel: viewModel,
               eventBus: widget.eventBus,
+              documentsRepository: widget.repository,
+              attachmentsRepository: widget.attachmentsRepository,
+              attachmentPicker: widget.attachmentPicker,
+              attachmentStagingStore: widget.attachmentStagingStore,
+              attachmentShareService: widget.attachmentShareService,
+              attachmentUserId: widget.attachmentUserId,
             );
           },
         );
@@ -440,16 +463,87 @@ final class _DocumentsRetryCard extends StatelessWidget {
   }
 }
 
-final class _DocumentDetailSheet extends StatelessWidget {
+final class _DocumentDetailSheet extends StatefulWidget {
   const _DocumentDetailSheet({
     required this.document,
     required this.viewModel,
     this.eventBus,
+    this.documentsRepository,
+    this.attachmentsRepository,
+    this.attachmentPicker,
+    this.attachmentStagingStore,
+    this.attachmentShareService,
+    this.attachmentUserId,
   });
 
   final DocumentRecord document;
   final DocumentsViewModel viewModel;
   final AppEventBus? eventBus;
+  final DocumentsRepository? documentsRepository;
+  final AttachmentsRepository? attachmentsRepository;
+  final AttachmentPicker? attachmentPicker;
+  final AttachmentStagingStore? attachmentStagingStore;
+  final AttachmentShareService? attachmentShareService;
+  final String? attachmentUserId;
+
+  @override
+  State<_DocumentDetailSheet> createState() => _DocumentDetailSheetState();
+}
+
+final class _DocumentDetailSheetState extends State<_DocumentDetailSheet> {
+  DocumentDetail? _detail;
+  String? _detailError;
+  bool _isLoadingDetail = false;
+  AttachmentsViewModel? _attachmentsViewModel;
+
+  DocumentRecord get document => _detail?.record ?? widget.document;
+  DocumentsViewModel get viewModel => widget.viewModel;
+  AppEventBus? get eventBus => widget.eventBus;
+
+  @override
+  void initState() {
+    super.initState();
+    final repository = widget.documentsRepository;
+    if (repository case final DocumentDetailsRepository detailsRepository) {
+      _isLoadingDetail = true;
+      unawaited(_loadDetail(detailsRepository));
+    }
+    final attachmentsRepository = widget.attachmentsRepository;
+    final picker = widget.attachmentPicker;
+    final stagingStore = widget.attachmentStagingStore;
+    final shareService = widget.attachmentShareService;
+    final userId = widget.attachmentUserId;
+    if (attachmentsRepository != null &&
+        picker != null &&
+        stagingStore != null &&
+        shareService != null &&
+        userId != null) {
+      _attachmentsViewModel = AttachmentsViewModel(
+        repository: attachmentsRepository,
+        picker: picker,
+        stagingStore: stagingStore,
+        shareService: shareService,
+        binding: AttachmentBinding.document(widget.document.id),
+        userId: userId,
+      );
+    }
+  }
+
+  Future<void> _loadDetail(DocumentDetailsRepository repository) async {
+    final result = await repository.getDocument(widget.document.id);
+    if (!mounted) return;
+    result.when(
+      success: (detail) => _detail = detail,
+      failure: (failure) => _detailError = failure.message,
+    );
+    setState(() => _isLoadingDetail = false);
+  }
+
+  @override
+  void dispose() {
+    _attachmentsViewModel?.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -504,10 +598,33 @@ final class _DocumentDetailSheet extends StatelessWidget {
                 const SizedBox(height: 8),
                 _DocumentDetailRow(label: '创建时间', value: document.createdAt),
               ],
+              if (_isLoadingDetail) ...[
+                const SizedBox(height: 12),
+                const LinearProgressIndicator(
+                  key: Key('document-detail-loading'),
+                ),
+              ],
+              if (_detailError != null) ...[
+                const SizedBox(height: 12),
+                Text(
+                  _detailError!,
+                  key: const Key('document-detail-error'),
+                  style: AppTextStyles.bodySmall.copyWith(
+                    color: AppColors.error,
+                  ),
+                ),
+              ],
               const SizedBox(height: 18),
               Text('商品明细', style: AppTextStyles.titleMedium),
               const SizedBox(height: 8),
-              _DocumentLineItem(document: document),
+              _DocumentLineItem(
+                document: document,
+                lines: _detail?.lines ?? const [],
+              ),
+              if (_attachmentsViewModel != null) ...[
+                const SizedBox(height: 18),
+                AttachmentPanel(viewModel: _attachmentsViewModel!),
+              ],
               const SizedBox(height: 18),
               Text('可执行动作', style: AppTextStyles.titleMedium),
               const SizedBox(height: 8),
@@ -549,9 +666,10 @@ final class _DocumentDetailRow extends StatelessWidget {
 }
 
 final class _DocumentLineItem extends StatelessWidget {
-  const _DocumentLineItem({required this.document});
+  const _DocumentLineItem({required this.document, required this.lines});
 
   final DocumentRecord document;
+  final List<DocumentLine> lines;
 
   @override
   Widget build(BuildContext context) {
@@ -563,7 +681,16 @@ final class _DocumentLineItem extends StatelessWidget {
       ),
       child: Padding(
         padding: const EdgeInsets.all(12),
-        child: document.productName.isEmpty
+        child: lines.isNotEmpty
+            ? Column(
+                children: [
+                  for (var index = 0; index < lines.length; index++) ...[
+                    _AuthoritativeDocumentLine(line: lines[index]),
+                    if (index != lines.length - 1) const Divider(height: 16),
+                  ],
+                ],
+              )
+            : document.productName.isEmpty
             ? Text('暂无商品明细', style: AppTextStyles.bodySmall)
             : Row(
                 children: [
@@ -585,6 +712,34 @@ final class _DocumentLineItem extends StatelessWidget {
                 ],
               ),
       ),
+    );
+  }
+}
+
+final class _AuthoritativeDocumentLine extends StatelessWidget {
+  const _AuthoritativeDocumentLine({required this.line});
+
+  final DocumentLine line;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Expanded(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(line.productName, style: AppTextStyles.bodyMedium),
+              if (line.productCode.isNotEmpty)
+                Text(line.productCode, style: AppTextStyles.bodySmall),
+            ],
+          ),
+        ),
+        Text(
+          '${line.quantity} ${line.unit}',
+          style: AppTextStyles.bodyMedium.copyWith(fontWeight: FontWeight.w700),
+        ),
+      ],
     );
   }
 }

@@ -225,6 +225,21 @@ runtime ownership, cleanup, and business effects have been inspected.
 | Focused regression | all 27 attachment tests passed, including 14 Task 11 service tests |
 | Full verification | Flutter analysis clean; all 490 Flutter tests passed |
 
+## Task 12 Document Attachment Workflow Evidence
+
+| Probe | Observed result |
+| --- | --- |
+| Queue state | load/empty/error, progress, one-flight, cancel, stable-ID retry, interruption, pause, and resume verified |
+| Recovery | manifest entries and retained Android lost selections enter the document-bound interrupted queue |
+| Mutations | delete, replace, and exact-set reorder restore the prior UI list on backend failure |
+| Download/share | authenticated repository bytes persist locally before the platform share sheet receives a path |
+| Panel ergonomics | icon tools with tooltips, fixed 76-pixel transfer rows, preview, progress, and confirmation controls verified |
+| Document detail | `GET /documents/:id` strictly parses authoritative header and every line; missing/malformed lines fail visibly |
+| Injection | repository, picker, staging, and share capabilities flow through app/router/shell into document detail |
+| Compatibility | legacy summary fallback remains when a test or host does not provide detail/attachment capabilities |
+| Focused regression | attachment, document, and app-entry suites passed together (148 tests) |
+| Full verification | Flutter analysis clean; all 503 Flutter tests passed |
+
 ## Scanner Scenario Evidence
 
 | Scenario | Web/unit | Android | Real backend effect | Result |

@@ -11,6 +11,8 @@ import '../../domain/entities/document_data.dart';
 import '../models/document_models.dart';
 
 abstract interface class DocumentsRemoteDataSource {
+  Future<Result<DocumentDetailModel>> getDocument(int id);
+
   Future<Result<PageData<DocumentRecordModel>>> listRecentDocuments({
     int? docType,
     int page = 1,
@@ -36,6 +38,15 @@ final class ApiDocumentsRemoteDataSource implements DocumentsRemoteDataSource {
   const ApiDocumentsRemoteDataSource(this._apiClient);
 
   final ApiClient _apiClient;
+
+  @override
+  Future<Result<DocumentDetailModel>> getDocument(int id) async {
+    final result = await _apiClient.get<dynamic>(ApiEndpoints.document(id));
+    return _mapEnvelope(
+      result,
+      (data) => DocumentDetailModel.fromJson(_requiredMap(data, 'document')),
+    );
+  }
 
   @override
   Future<Result<PageData<DocumentRecordModel>>> listRecentDocuments({

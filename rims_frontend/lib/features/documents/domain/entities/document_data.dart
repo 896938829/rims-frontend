@@ -50,6 +50,46 @@ final class DocumentRecord {
   final String createdAt;
 }
 
+final class DocumentLine {
+  const DocumentLine({
+    required this.id,
+    required this.productId,
+    required this.nonStandardInventoryId,
+    required this.productCode,
+    required this.productName,
+    required this.quantity,
+    required this.unit,
+    required this.costPrice,
+    required this.retailPrice,
+    required this.systemQuantity,
+    required this.actualQuantity,
+    required this.differenceQuantity,
+    required this.remark,
+  });
+
+  final int id;
+  final int productId;
+  final int nonStandardInventoryId;
+  final String productCode;
+  final String productName;
+  final int quantity;
+  final String unit;
+  final double costPrice;
+  final double retailPrice;
+  final int systemQuantity;
+  final int actualQuantity;
+  final int differenceQuantity;
+  final String remark;
+}
+
+final class DocumentDetail {
+  DocumentDetail({required this.record, required List<DocumentLine> lines})
+    : lines = List.unmodifiable(lines);
+
+  final DocumentRecord record;
+  final List<DocumentLine> lines;
+}
+
 final class TransactionRecord {
   const TransactionRecord({
     required this.id,

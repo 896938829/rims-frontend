@@ -1240,6 +1240,35 @@ void main() {
     expect(refreshCount, 1);
   });
 
+  testWidgets(
+    'DocumentsPage detail replaces list summary with authoritative lines',
+    (tester) async {
+      final repository = _FakeDocumentsRepository();
+      final viewModel = DocumentsViewModel(repository: repository);
+      await viewModel.load();
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: DocumentsPage(viewModel: viewModel, repository: repository),
+          ),
+        ),
+      );
+      await tester.scrollUntilVisible(
+        find.text('SO-20260626-001 · 矿泉水 550ml x3'),
+        300,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.tap(find.text('SO-20260626-001 · 矿泉水 550ml x3'));
+      await tester.pumpAndSettle();
+
+      expect(repository.detailDocumentId, 1);
+      expect(find.text('SKU-AUTH-1'), findsOneWidget);
+      expect(find.text('权威明细商品'), findsOneWidget);
+      expect(find.text('4 箱'), findsOneWidget);
+    },
+  );
+
   testWidgets('DocumentsPage keeps detail open and shows lifecycle failure', (
     tester,
   ) async {
@@ -1866,7 +1895,8 @@ const _beijingWarehouse = Warehouse(
   isDefault: false,
 );
 
-final class _FakeDocumentsRepository implements DocumentsRepository {
+final class _FakeDocumentsRepository
+    implements DocumentsRepository, DocumentDetailsRepository {
   _FakeDocumentsRepository({
     this.listResult = const Success<List<DocumentRecord>>([_remoteDocument]),
     this.listResults = const [],
@@ -1898,10 +1928,38 @@ final class _FakeDocumentsRepository implements DocumentsRepository {
   int? completedDocumentId;
   int? confirmedDocumentId;
   int? settledDocumentId;
+  int? detailDocumentId;
   int listCallCount = 0;
   int _transactionResultCallCount = 0;
   int? lastListDocType;
   final List<int?> listDocTypes = [];
+
+  @override
+  Future<Result<DocumentDetail>> getDocument(int id) async {
+    detailDocumentId = id;
+    return Success(
+      DocumentDetail(
+        record: _remoteDocument,
+        lines: const [
+          DocumentLine(
+            id: 501,
+            productId: 10,
+            nonStandardInventoryId: 0,
+            productCode: 'SKU-AUTH-1',
+            productName: '权威明细商品',
+            quantity: 4,
+            unit: '箱',
+            costPrice: 0,
+            retailPrice: 12,
+            systemQuantity: 0,
+            actualQuantity: 0,
+            differenceQuantity: 0,
+            remark: '',
+          ),
+        ],
+      ),
+    );
+  }
 
   @override
   Future<Result<PageData<DocumentRecord>>> listRecentDocuments({

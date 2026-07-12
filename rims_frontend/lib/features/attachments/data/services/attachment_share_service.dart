@@ -4,17 +4,12 @@ import 'package:share_plus/share_plus.dart';
 
 import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
+import '../../domain/services/attachment_share_service.dart';
+
+export '../../domain/services/attachment_share_service.dart';
 
 typedef ShareLocalFile =
     Future<void> Function(String path, String originalName, String mimeType);
-
-abstract interface class AttachmentShareService {
-  Future<Result<void>> share({
-    required String path,
-    required String originalName,
-    required String mimeType,
-  });
-}
 
 final class PlatformAttachmentShareService implements AttachmentShareService {
   PlatformAttachmentShareService({
