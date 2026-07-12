@@ -12,8 +12,54 @@ import 'package:rims_frontend/features/inventory/domain/entities/non_standard_in
 import 'package:rims_frontend/features/inventory/domain/repositories/inventory_repository.dart';
 import 'package:rims_frontend/features/inventory/presentation/pages/inventory_page.dart';
 import 'package:rims_frontend/features/inventory/presentation/view_models/inventory_view_model.dart';
+import 'package:rims_frontend/features/inventory/presentation/widgets/inventory_product_tile.dart';
 
 void main() {
+  testWidgets(
+    'inventory thumbnail uses same-origin image and external fallback',
+    (tester) async {
+      const sameOrigin = InventoryItem(
+        id: 70,
+        productId: 10,
+        productName: '有图商品',
+        sku: 'SKU-IMAGE',
+        availableQuantity: 1,
+        stockQuantity: 1,
+        statusLabel: '标准',
+        imageUrl: '/uploads/product-10.jpg',
+      );
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(body: InventoryProductTile(product: sameOrigin)),
+        ),
+      );
+      expect(
+        find.byKey(const Key('inventory-product-network-image')),
+        findsOneWidget,
+      );
+
+      const external = InventoryItem(
+        id: 71,
+        productId: 11,
+        productName: '外部图商品',
+        sku: 'SKU-EXTERNAL',
+        availableQuantity: 1,
+        stockQuantity: 1,
+        statusLabel: '标准',
+        imageUrl: 'https://external.example/product.jpg',
+      );
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(body: InventoryProductTile(product: external)),
+        ),
+      );
+      expect(
+        find.byKey(const Key('inventory-product-image-fallback')),
+        findsOneWidget,
+      );
+    },
+  );
+
   test(
     'InventoryViewModel ignores an async load completion after dispose',
     () async {

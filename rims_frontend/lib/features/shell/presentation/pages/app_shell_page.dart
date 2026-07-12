@@ -167,6 +167,11 @@ final class _AppShellPageState extends State<AppShellPage> {
           unawaited(_logout());
         },
         adminRepository: widget.adminRepository,
+        attachmentsRepository: widget.attachmentsRepository,
+        attachmentPicker: widget.attachmentPicker,
+        attachmentStagingStore: widget.attachmentStagingStore,
+        attachmentShareService: widget.attachmentShareService,
+        attachmentUserId: widget.sessionController.currentUser?.id.toString(),
         eventBus: widget.eventBus,
       ),
     };

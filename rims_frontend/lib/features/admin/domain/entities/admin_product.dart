@@ -65,7 +65,7 @@ final class UpdateAdminProductRequest {
     this.barcode = '',
     this.retailPrice,
     this.costPrice,
-    this.imageUrl = '',
+    this.imageUrl,
     this.status,
   });
 
@@ -78,6 +78,6 @@ final class UpdateAdminProductRequest {
   final String barcode;
   final double? retailPrice;
   final double? costPrice;
-  final String imageUrl;
+  final String? imageUrl;
   final int? status;
 }

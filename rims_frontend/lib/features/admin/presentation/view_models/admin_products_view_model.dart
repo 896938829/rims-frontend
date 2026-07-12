@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import '../../../../core/events/app_event.dart';
 import '../../../../core/events/app_event_bus.dart';
 import '../../../../core/result/failure.dart';
+import '../../../../core/result/result.dart';
 import '../../domain/entities/admin_product.dart';
 import '../../domain/repositories/admin_repository.dart';
 
@@ -246,7 +247,7 @@ final class AdminProductsViewModel extends ChangeNotifier {
       barcode: request.barcode.trim(),
       retailPrice: request.retailPrice,
       costPrice: request.costPrice,
-      imageUrl: request.imageUrl.trim(),
+      imageUrl: request.imageUrl?.trim(),
       status: request.status,
     );
 
@@ -304,6 +305,58 @@ final class AdminProductsViewModel extends ChangeNotifier {
     _isUpdatingProduct = false;
     notifyListeners();
     return updated;
+  }
+
+  Future<Result<void>> updateProductImage(
+    AdminProduct product,
+    String imageUrl,
+  ) async {
+    final repository = this.repository;
+    if (repository == null) {
+      const failure = StateFailure(message: '管理服务不可用');
+      _productActionError = failure.message;
+      notifyListeners();
+      return const FailureResult(failure);
+    }
+    if (_isUpdatingProduct) {
+      const failure = StateFailure(message: '商品正在更新');
+      return const FailureResult(failure);
+    }
+    _isUpdatingProduct = true;
+    _productActionError = null;
+    notifyListeners();
+    final result = await repository.updateProduct(
+      UpdateAdminProductRequest(
+        id: product.id,
+        code: product.code,
+        name: product.name,
+        unit: product.unit,
+        category: product.category,
+        spec: product.spec,
+        barcode: product.barcode,
+        retailPrice: product.retailPrice,
+        costPrice: product.costPrice,
+        imageUrl: imageUrl,
+        status: product.status,
+      ),
+    );
+    late final Result<void> mapped;
+    result.when(
+      success: (updated) {
+        _products = _products
+            .map((item) => item.id == updated.id ? updated : item)
+            .toList(growable: false);
+        _publishGlobalRefresh();
+        mapped = const Success(null);
+      },
+      failure: (failure) {
+        _productActionError = failure.message;
+        mapped = FailureResult(failure);
+      },
+    );
+    _isUpdatingProduct = false;
+    notifyListeners();
+    return mapped;
   }
 
   Future<bool> deleteProduct(AdminProduct product) async {

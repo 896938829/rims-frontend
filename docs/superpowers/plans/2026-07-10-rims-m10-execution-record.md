@@ -240,6 +240,19 @@ runtime ownership, cleanup, and business effects have been inspected.
 | Focused regression | attachment, document, and app-entry suites passed together (148 tests) |
 | Full verification | Flutter analysis clean; all 503 Flutter tests passed |
 
+## Task 13 Product Image Integration Evidence
+
+| Probe | Observed result |
+| --- | --- |
+| Shared workflow | admin product editor embeds the same attachment panel with `product_image` binding and count 1 |
+| Sources/mutations | shared camera, gallery, upload, replace, delete, retry, and staging paths are reused without duplication |
+| Product synchronization | upload/replace publishes the public same-origin URL through existing admin update API |
+| Clear semantics | nullable update `imageUrl` distinguishes omitted from explicit empty-string clear at the wire boundary |
+| Delete rollback | product URL clears before file deletion and restores when backend file deletion fails |
+| Inventory thumbnail | root-relative/absolute API same-origin URLs render; empty or external URLs use a visible fallback |
+| Focused regression | product image synchronization/admin/inventory tests passed (92 tests) |
+| Full verification | Flutter analysis clean; all 508 Flutter tests passed |
+
 ## Scanner Scenario Evidence
 
 | Scenario | Web/unit | Android | Real backend effect | Result |

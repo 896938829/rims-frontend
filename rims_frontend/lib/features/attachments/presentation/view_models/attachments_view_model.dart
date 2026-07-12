@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import '../../../../core/result/failure.dart';
+import '../../../../core/result/result.dart';
 import '../../domain/entities/attachment.dart';
 import '../../domain/repositories/attachments_repository.dart';
 import '../../domain/services/attachment_picker.dart';
@@ -16,6 +17,9 @@ enum AttachmentTransferState {
   interrupted,
   cancelled,
 }
+
+typedef AttachmentSynchronization =
+    Future<Result<void>> Function(Attachment attachment);
 
 final class AttachmentQueueItem {
   const AttachmentQueueItem({
@@ -74,6 +78,9 @@ final class AttachmentsViewModel extends ChangeNotifier {
     required this.shareService,
     required this.binding,
     required this.userId,
+    this.onAttachmentPublished,
+    this.beforeAttachmentDelete,
+    this.restoreAfterDeleteFailure,
   });
 
   final AttachmentsRepository repository;
@@ -82,6 +89,9 @@ final class AttachmentsViewModel extends ChangeNotifier {
   final AttachmentShareService shareService;
   final AttachmentBinding binding;
   final String userId;
+  final AttachmentSynchronization? onAttachmentPublished;
+  final AttachmentSynchronization? beforeAttachmentDelete;
+  final AttachmentSynchronization? restoreAfterDeleteFailure;
 
   final List<Attachment> _attachments = [];
   final List<AttachmentQueueItem> _queue = [];
@@ -288,6 +298,19 @@ final class AttachmentsViewModel extends ChangeNotifier {
   }
 
   Future<bool> delete(Attachment attachment) async {
+    final beforeDelete = beforeAttachmentDelete;
+    if (beforeDelete != null) {
+      final synchronized = await beforeDelete(attachment);
+      final canDelete = synchronized.when(
+        success: (_) => true,
+        failure: (failure) {
+          _errorMessage = failure.message;
+          _notify();
+          return false;
+        },
+      );
+      if (!canDelete) return false;
+    }
     final original = List<Attachment>.of(_attachments);
     _attachments.removeWhere((item) => item.id == attachment.id);
     _errorMessage = null;
@@ -302,6 +325,8 @@ final class AttachmentsViewModel extends ChangeNotifier {
           ..addAll(original);
         _errorMessage = failure.message;
         _notify();
+        final restore = restoreAfterDeleteFailure;
+        if (restore != null) unawaited(restore(attachment));
         return false;
       },
     );
@@ -375,6 +400,21 @@ final class AttachmentsViewModel extends ChangeNotifier {
       if (_disposed) return false;
       return await result.when(
         success: (replacement) async {
+          final synchronize = onAttachmentPublished;
+          if (synchronize != null) {
+            final synchronized = await synchronize(replacement);
+            final succeeded = synchronized.when(
+              success: (_) => true,
+              failure: (failure) {
+                _errorMessage = failure.message;
+                return false;
+              },
+            );
+            if (!succeeded) {
+              _notify();
+              return false;
+            }
+          }
           final index = _attachments.indexWhere(
             (item) => item.id == existing.id,
           );
@@ -426,6 +466,25 @@ final class AttachmentsViewModel extends ChangeNotifier {
     item = _queue[index];
     await result.when(
       success: (attachment) async {
+        final synchronize = onAttachmentPublished;
+        if (synchronize != null) {
+          final synchronized = await synchronize(attachment);
+          final succeeded = synchronized.when(
+            success: (_) => true,
+            failure: (failure) {
+              _queue[index] = item.copyWith(
+                state: AttachmentTransferState.failed,
+                failure: failure,
+              );
+              _errorMessage = failure.message;
+              return false;
+            },
+          );
+          if (!succeeded) {
+            await repository.delete(attachment.id);
+            return;
+          }
+        }
         _attachments.removeWhere((existing) => existing.id == attachment.id);
         _attachments.add(attachment);
         _sortAttachments();

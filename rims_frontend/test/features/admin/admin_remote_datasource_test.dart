@@ -12,6 +12,37 @@ import 'package:rims_frontend/features/admin/domain/entities/admin_warehouse.dar
 import 'package:rims_frontend/features/admin/domain/entities/admin_user.dart';
 
 void main() {
+  test(
+    'updateProduct sends an explicit empty imageUrl when clearing image',
+    () async {
+      final adapter = _CapturingAdapter(
+        body:
+            '{"code":0,"message":"ok","data":{"id":10,"code":"SKU-WA-550","name":"矿泉水","unit":"瓶","category":"","spec":"","barcode":"","retailPrice":3.5,"costPrice":1.2,"imageUrl":"","status":1}}',
+      );
+      final dataSource = ApiAdminRemoteDataSource(
+        ApiClient(
+          dio: Dio()..httpClientAdapter = adapter,
+          enableLogging: false,
+        ),
+      );
+
+      await dataSource.updateProduct(
+        const UpdateAdminProductRequest(
+          id: 10,
+          code: 'SKU-WA-550',
+          name: '矿泉水',
+          unit: '瓶',
+          imageUrl: '',
+        ),
+      );
+
+      expect(
+        (jsonDecode(adapter.lastBody!) as Map<String, dynamic>)['imageUrl'],
+        '',
+      );
+    },
+  );
+
   test('listUsers loads backend users endpoint with keyword and page', () async {
     final adapter = _CapturingAdapter(
       body:

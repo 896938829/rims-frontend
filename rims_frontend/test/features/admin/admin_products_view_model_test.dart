@@ -259,6 +259,43 @@ void main() {
     expect(callCountDuringPending, 1);
   });
 
+  test(
+    'updateProductImage preserves product fields and updates public URL',
+    () async {
+      const imaged = AdminProduct(
+        id: 10,
+        code: 'SKU-WA-550',
+        name: '矿泉水 550ml',
+        unit: '瓶',
+        category: '饮料',
+        spec: '550ml',
+        barcode: '6901234567890',
+        retailPrice: 3.5,
+        costPrice: 1.2,
+        imageUrl: 'http://localhost:8080/uploads/product-10.jpg',
+        status: 1,
+      );
+      final repository = _FakeAdminRepository(
+        listProductsResult: Future.value(
+          const Success<List<AdminProduct>>([_water]),
+        ),
+        updateProductResult: Future.value(const Success(imaged)),
+      );
+      final viewModel = AdminProductsViewModel(repository: repository);
+      await viewModel.load();
+
+      final result = await viewModel.updateProductImage(
+        _water,
+        imaged.imageUrl,
+      );
+
+      expect(result.isSuccess, isTrue);
+      expect(repository.updatedProductRequest?.code, _water.code);
+      expect(repository.updatedProductRequest?.imageUrl, imaged.imageUrl);
+      expect(viewModel.products.single.imageUrl, imaged.imageUrl);
+    },
+  );
+
   test('deleteProduct exposes backend conflict and keeps product', () async {
     final repository = _FakeAdminRepository(
       listProductsResult: Future.value(

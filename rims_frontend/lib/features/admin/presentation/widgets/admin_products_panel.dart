@@ -7,6 +7,13 @@ import '../../../../core/theme/app_text_styles.dart';
 import '../../../../core/events/app_event_bus.dart';
 import '../../../../core/widgets/rims_card.dart';
 import '../../../../core/widgets/rims_status_chip.dart';
+import '../../../attachments/domain/entities/attachment.dart';
+import '../../../attachments/domain/repositories/attachments_repository.dart';
+import '../../../attachments/domain/services/attachment_picker.dart';
+import '../../../attachments/domain/services/attachment_share_service.dart';
+import '../../../attachments/domain/services/attachment_staging_store.dart';
+import '../../../attachments/presentation/view_models/attachments_view_model.dart';
+import '../../../attachments/presentation/widgets/attachment_panel.dart';
 import '../../domain/entities/admin_product.dart';
 import '../../domain/repositories/admin_repository.dart';
 import '../view_models/admin_products_view_model.dart';
@@ -17,12 +24,22 @@ final class AdminProductsPanel extends StatefulWidget {
     this.repository,
     this.viewModel,
     this.eventBus,
+    this.attachmentsRepository,
+    this.attachmentPicker,
+    this.attachmentStagingStore,
+    this.attachmentShareService,
+    this.attachmentUserId,
     super.key,
   });
 
   final AdminRepository? repository;
   final AdminProductsViewModel? viewModel;
   final AppEventBus? eventBus;
+  final AttachmentsRepository? attachmentsRepository;
+  final AttachmentPicker? attachmentPicker;
+  final AttachmentStagingStore? attachmentStagingStore;
+  final AttachmentShareService? attachmentShareService;
+  final String? attachmentUserId;
 
   @override
   State<AdminProductsPanel> createState() => _AdminProductsPanelState();
@@ -173,8 +190,15 @@ final class _AdminProductsPanelState extends State<AdminProductsPanel> {
   }) {
     showDialog<void>(
       context: context,
-      builder: (context) =>
-          _EditAdminProductDialog(product: product, viewModel: viewModel),
+      builder: (context) => _EditAdminProductDialog(
+        product: product,
+        viewModel: viewModel,
+        attachmentsRepository: widget.attachmentsRepository,
+        attachmentPicker: widget.attachmentPicker,
+        attachmentStagingStore: widget.attachmentStagingStore,
+        attachmentShareService: widget.attachmentShareService,
+        attachmentUserId: widget.attachmentUserId,
+      ),
     );
   }
 
@@ -464,10 +488,20 @@ final class _EditAdminProductDialog extends StatefulWidget {
   const _EditAdminProductDialog({
     required this.product,
     required this.viewModel,
+    this.attachmentsRepository,
+    this.attachmentPicker,
+    this.attachmentStagingStore,
+    this.attachmentShareService,
+    this.attachmentUserId,
   });
 
   final AdminProduct product;
   final AdminProductsViewModel viewModel;
+  final AttachmentsRepository? attachmentsRepository;
+  final AttachmentPicker? attachmentPicker;
+  final AttachmentStagingStore? attachmentStagingStore;
+  final AttachmentShareService? attachmentShareService;
+  final String? attachmentUserId;
 
   @override
   State<_EditAdminProductDialog> createState() =>
@@ -486,6 +520,7 @@ final class _EditAdminProductDialogState
   late final TextEditingController _costPriceController;
   late bool _isActive;
   String? _priceInputError;
+  AttachmentsViewModel? _attachmentsViewModel;
 
   @override
   void initState() {
@@ -503,6 +538,37 @@ final class _EditAdminProductDialogState
       text: _formatPrice(widget.product.costPrice),
     );
     _isActive = widget.product.isActive;
+    final attachmentsRepository = widget.attachmentsRepository;
+    final picker = widget.attachmentPicker;
+    final stagingStore = widget.attachmentStagingStore;
+    final shareService = widget.attachmentShareService;
+    final userId = widget.attachmentUserId;
+    if (attachmentsRepository != null &&
+        picker != null &&
+        stagingStore != null &&
+        shareService != null &&
+        userId != null) {
+      _attachmentsViewModel = AttachmentsViewModel(
+        repository: attachmentsRepository,
+        picker: picker,
+        stagingStore: stagingStore,
+        shareService: shareService,
+        binding: AttachmentBinding.productImage(widget.product.id),
+        userId: userId,
+        onAttachmentPublished: (attachment) =>
+            widget.viewModel.updateProductImage(
+              widget.product,
+              attachment.downloadUri.toString(),
+            ),
+        beforeAttachmentDelete: (attachment) =>
+            widget.viewModel.updateProductImage(widget.product, ''),
+        restoreAfterDeleteFailure: (attachment) =>
+            widget.viewModel.updateProductImage(
+              widget.product,
+              attachment.downloadUri.toString(),
+            ),
+      );
+    }
   }
 
   @override
@@ -515,6 +581,7 @@ final class _EditAdminProductDialogState
     _barcodeController.dispose();
     _retailPriceController.dispose();
     _costPriceController.dispose();
+    _attachmentsViewModel?.dispose();
     super.dispose();
   }
 
@@ -591,6 +658,13 @@ final class _EditAdminProductDialogState
                       : (value) => setState(() => _isActive = value),
                   title: const Text('启用商品'),
                 ),
+                if (_attachmentsViewModel != null) ...[
+                  const SizedBox(height: 12),
+                  AttachmentPanel(
+                    viewModel: _attachmentsViewModel!,
+                    maximumCount: 1,
+                  ),
+                ],
                 if (_formError != null) ...[
                   const SizedBox(height: 10),
                   Text(

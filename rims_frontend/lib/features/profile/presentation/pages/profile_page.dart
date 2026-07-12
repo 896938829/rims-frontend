@@ -11,6 +11,10 @@ import '../../../admin/presentation/widgets/admin_products_panel.dart';
 import '../../../admin/presentation/widgets/admin_roles_panel.dart';
 import '../../../admin/presentation/widgets/admin_users_panel.dart';
 import '../../../admin/presentation/widgets/admin_warehouses_panel.dart';
+import '../../../attachments/domain/repositories/attachments_repository.dart';
+import '../../../attachments/domain/services/attachment_picker.dart';
+import '../../../attachments/domain/services/attachment_share_service.dart';
+import '../../../attachments/domain/services/attachment_staging_store.dart';
 import '../../../auth/domain/entities/app_user.dart';
 import '../../../auth/domain/entities/warehouse.dart';
 import '../view_models/profile_security_view_model.dart';
@@ -28,6 +32,11 @@ final class ProfilePage extends StatelessWidget {
     this.viewModel,
     this.adminRepository,
     this.eventBus,
+    this.attachmentsRepository,
+    this.attachmentPicker,
+    this.attachmentStagingStore,
+    this.attachmentShareService,
+    this.attachmentUserId,
     super.key,
   });
 
@@ -41,6 +50,11 @@ final class ProfilePage extends StatelessWidget {
   final ProfileViewModel? viewModel;
   final AdminRepository? adminRepository;
   final AppEventBus? eventBus;
+  final AttachmentsRepository? attachmentsRepository;
+  final AttachmentPicker? attachmentPicker;
+  final AttachmentStagingStore? attachmentStagingStore;
+  final AttachmentShareService? attachmentShareService;
+  final String? attachmentUserId;
 
   @override
   Widget build(BuildContext context) {
@@ -91,6 +105,11 @@ final class ProfilePage extends StatelessWidget {
               child: AdminProductsPanel(
                 repository: adminRepository,
                 eventBus: eventBus,
+                attachmentsRepository: attachmentsRepository,
+                attachmentPicker: attachmentPicker,
+                attachmentStagingStore: attachmentStagingStore,
+                attachmentShareService: attachmentShareService,
+                attachmentUserId: attachmentUserId,
               ),
             ),
             const SizedBox(height: 14),

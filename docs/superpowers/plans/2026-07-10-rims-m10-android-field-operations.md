@@ -630,15 +630,15 @@ git commit -m "feat: add document attachment workflow"
 - Modify: `rims_frontend/test/features/admin/admin_products_view_model_test.dart`
 - Modify: `rims_frontend/test/features/inventory/inventory_view_model_test.dart`
 
-- [ ] **Step 1: Write failing tests for admin product image capture/select/upload/replace/delete, product `imageUrl` update, and visible inventory thumbnail fallback.**
+- [x] **Step 1: Write failing tests for admin product image capture/select/upload/replace/delete, product `imageUrl` update, and visible inventory thumbnail fallback.**
 
-- [ ] **Step 2: Verify RED, then embed the shared `AttachmentPanel` in product edit detail with `product_image` binding and maximum count 1.**
+- [x] **Step 2: Verify RED, then embed the shared `AttachmentPanel` in product edit detail with `product_image` binding and maximum count 1.**
 
 After upload/replace, update the product through the existing admin repository so
 the public same-origin image URL is the product image. On delete, clear the
 product image URL before deleting the object or restore it if deletion fails.
 
-- [ ] **Step 3: Run admin/inventory tests and commit.**
+- [x] **Step 3: Run admin/inventory tests and commit.**
 
 ```powershell
 flutter test --no-pub test/features/admin test/features/inventory

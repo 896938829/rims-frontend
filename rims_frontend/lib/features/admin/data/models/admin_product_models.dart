@@ -89,7 +89,7 @@ Map<String, Object> updateAdminProductRequestToJson(
     if (request.barcode.trim().isNotEmpty) 'barcode': request.barcode.trim(),
     if (request.retailPrice != null) 'retailPrice': request.retailPrice!,
     if (request.costPrice != null) 'costPrice': request.costPrice!,
-    if (request.imageUrl.trim().isNotEmpty) 'imageUrl': request.imageUrl.trim(),
+    if (request.imageUrl != null) 'imageUrl': request.imageUrl!.trim(),
     if (request.status != null) 'status': request.status!,
   };
 }

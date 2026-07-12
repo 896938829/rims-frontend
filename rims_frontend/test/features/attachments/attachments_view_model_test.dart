@@ -123,6 +123,47 @@ void main() {
       expect(viewModel.errorMessage, isNotNull);
     },
   );
+
+  test(
+    'product synchronization publishes URL and restores after delete failure',
+    () async {
+      final repository = _FakeRepository()
+        ..listResult = Success(
+          PageData(items: [_attachment()], total: 1, page: 1, pageSize: 20),
+        )
+        ..deleteResult = const FailureResult(NetworkFailure());
+      final synchronized = <String>[];
+      final viewModel = AttachmentsViewModel(
+        repository: repository,
+        picker: _FakePicker(),
+        stagingStore: _FakeStaging(),
+        shareService: _FakeShare(),
+        binding: AttachmentBinding.productImage(42),
+        userId: '3',
+        onAttachmentPublished: (attachment) async {
+          synchronized.add('publish:${attachment.downloadUri}');
+          return const Success(null);
+        },
+        beforeAttachmentDelete: (attachment) async {
+          synchronized.add('clear');
+          return const Success(null);
+        },
+        restoreAfterDeleteFailure: (attachment) async {
+          synchronized.add('restore:${attachment.downloadUri}');
+          return const Success(null);
+        },
+      );
+      await viewModel.load();
+      await viewModel.pickAndUpload(AttachmentPickSource.gallery);
+      await viewModel.delete(_attachment());
+      await Future<void>.delayed(Duration.zero);
+
+      expect(synchronized.first, startsWith('publish:'));
+      expect(synchronized, contains('clear'));
+      expect(synchronized.last, startsWith('restore:'));
+      expect(viewModel.attachments, isNotEmpty);
+    },
+  );
 }
 
 AttachmentsViewModel _viewModel({

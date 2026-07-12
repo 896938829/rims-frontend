@@ -1,3 +1,5 @@
+import 'dart:typed_data';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rims_frontend/core/pagination/page_data.dart';
@@ -8,6 +10,11 @@ import 'package:rims_frontend/features/admin/domain/entities/admin_user.dart';
 import 'package:rims_frontend/features/admin/domain/entities/admin_warehouse.dart';
 import 'package:rims_frontend/features/admin/domain/repositories/admin_repository.dart';
 import 'package:rims_frontend/features/admin/presentation/widgets/admin_products_panel.dart';
+import 'package:rims_frontend/features/attachments/domain/entities/attachment.dart';
+import 'package:rims_frontend/features/attachments/domain/repositories/attachments_repository.dart';
+import 'package:rims_frontend/features/attachments/domain/services/attachment_picker.dart';
+import 'package:rims_frontend/features/attachments/domain/services/attachment_share_service.dart';
+import 'package:rims_frontend/features/attachments/domain/services/attachment_staging_store.dart';
 
 import 'admin_page_test_support.dart';
 
@@ -106,6 +113,35 @@ void main() {
     expect(find.text('价格只能填写数字'), findsOneWidget);
   });
 
+  testWidgets('product editor embeds shared single-image attachment panel', (
+    tester,
+  ) async {
+    final repository = _FakeAdminRepository();
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: AdminProductsPanel(
+            repository: repository,
+            attachmentsRepository: _ProductImageAttachmentsRepository(),
+            attachmentPicker: _ProductImagePicker(),
+            attachmentStagingStore: _ProductImageStagingStore(),
+            attachmentShareService: _ProductImageShareService(),
+            attachmentUserId: '1',
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('admin-edit-product-10-button')));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('attachment-panel')), findsOneWidget);
+    expect(find.text('附件 (0/1)'), findsOneWidget);
+    expect(find.byTooltip('拍照'), findsOneWidget);
+    expect(find.byTooltip('从相册选择'), findsOneWidget);
+  });
+
   testWidgets('AdminProductsPanel updates selected product', (tester) async {
     final repository = _FakeAdminRepository();
 
@@ -200,6 +236,87 @@ void main() {
       expect(find.text('矿泉水 550ml'), findsNothing);
     },
   );
+}
+
+final class _ProductImageAttachmentsRepository
+    implements AttachmentsRepository {
+  @override
+  Future<Result<PageData<Attachment>>> list({
+    required AttachmentBinding binding,
+    int page = 1,
+  }) async =>
+      Success(PageData(items: const [], total: 0, page: 1, pageSize: 20));
+  @override
+  Future<Result<Attachment>> upload(
+    PendingAttachment pending, {
+    required TransferProgress onProgress,
+    required TransferCancellation cancellation,
+  }) => throw UnimplementedError();
+  @override
+  Future<Result<Attachment>> replace(
+    Attachment existing,
+    PendingAttachment pending, {
+    required TransferProgress onProgress,
+    required TransferCancellation cancellation,
+  }) => throw UnimplementedError();
+  @override
+  Future<Result<void>> reorder(
+    AttachmentBinding binding,
+    List<int> fileIds,
+  ) async => const Success(null);
+  @override
+  Future<Result<String>> download(Attachment attachment) async =>
+      const Success('');
+  @override
+  Future<Result<void>> delete(int id) async => const Success(null);
+}
+
+final class _ProductImagePicker implements AttachmentPicker {
+  @override
+  Future<Result<SelectedAttachmentSource?>> pick(
+    AttachmentPickSource source,
+  ) async => const Success(null);
+  @override
+  Future<Result<List<SelectedAttachmentSource>>> recoverLostData() async =>
+      const Success([]);
+  @override
+  List<SelectedAttachmentSource> takeRecovered() => const [];
+}
+
+final class _ProductImageStagingStore implements AttachmentStagingStore {
+  @override
+  Future<Result<StagedAttachment>> stage({
+    required String userId,
+    required AttachmentBinding binding,
+    required SelectedAttachmentSource selection,
+    required int existingCount,
+  }) => throw UnimplementedError();
+  @override
+  Future<Result<List<StagedAttachment>>> recoverForUser(String userId) async =>
+      const Success([]);
+  @override
+  Future<Result<void>> remove(String userId, String requestId) async =>
+      const Success(null);
+  @override
+  Future<Result<void>> cleanupStale({required Duration maxAge}) async =>
+      const Success(null);
+  @override
+  Future<Result<void>> clearForUser(String userId) async => const Success(null);
+  @override
+  Future<Result<String>> saveDownload({
+    required String userId,
+    required String originalName,
+    required Uint8List bytes,
+  }) async => const Success('');
+}
+
+final class _ProductImageShareService implements AttachmentShareService {
+  @override
+  Future<Result<void>> share({
+    required String path,
+    required String originalName,
+    required String mimeType,
+  }) async => const Success(null);
 }
 
 const _water = AdminProduct(
