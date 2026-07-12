@@ -133,6 +133,9 @@ final class _ScannerPageState extends State<ScannerPage>
               ScannerViewport(
                 camera: widget.camera,
                 overlayMessage: _overlayMessage,
+                overlayKey: widget.viewModel.isLookingUp
+                    ? const Key('scanner-lookup-progress')
+                    : null,
                 overlayAction: _access == ScannerAccessState.ready
                     ? null
                     : _AccessActions(
@@ -256,12 +259,15 @@ final class _ScannerPageState extends State<ScannerPage>
     );
   }
 
-  String? get _overlayMessage => switch (_access) {
-    ScannerAccessState.ready => null,
-    ScannerAccessState.permissionDenied => '需要相机权限才能扫描条码',
-    ScannerAccessState.unsupported => '此设备不支持相机扫码',
-    ScannerAccessState.unavailable => '相机暂时不可用',
-  };
+  String? get _overlayMessage {
+    if (widget.viewModel.isLookingUp) return '正在查询条码...';
+    return switch (_access) {
+      ScannerAccessState.ready => null,
+      ScannerAccessState.permissionDenied => '需要相机权限才能扫描条码',
+      ScannerAccessState.unsupported => '此设备不支持相机扫码',
+      ScannerAccessState.unavailable => '相机暂时不可用',
+    };
+  }
 
   Future<void> _toggleTorch() async {
     final next = !_torchEnabled;

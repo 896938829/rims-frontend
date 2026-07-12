@@ -113,6 +113,25 @@ void main() {
     expect(find.byKey(const Key('scanner-feedback-message')), findsOneWidget);
   });
 
+  testWidgets('scan shows visible lookup feedback before backend completes', (
+    tester,
+  ) async {
+    final lookup = Completer<Result<InventoryItem>>();
+    final harness = _Harness(lookupResult: lookup);
+    await _pumpScannerPage(tester, harness);
+
+    harness.scanner.emit(_scan('100'));
+    await tester.pump();
+    await tester.pump();
+
+    expect(find.byKey(const Key('scanner-lookup-progress')), findsOneWidget);
+    expect(find.text('正在查询条码...'), findsOneWidget);
+
+    lookup.complete(Success(_item(100)));
+    await tester.pumpAndSettle();
+    expect(find.byKey(const Key('scanner-lookup-progress')), findsNothing);
+  });
+
   testWidgets('batch mode renders one row for each accepted product', (
     tester,
   ) async {
@@ -370,10 +389,12 @@ Future<void> _scrollBelowViewport(WidgetTester tester) async {
 }
 
 final class _Harness {
-  _Harness({List<Object>? startErrors})
-    : scanner = _FakeScanner(startErrors: startErrors),
-      repository = _FakeInventoryRepository(),
-      storage = _MemoryScanStorage() {
+  _Harness({
+    List<Object>? startErrors,
+    Completer<Result<InventoryItem>>? lookupResult,
+  }) : scanner = _FakeScanner(startErrors: startErrors),
+       repository = _FakeInventoryRepository(lookupResult: lookupResult),
+       storage = _MemoryScanStorage() {
     viewModel = ScanSessionViewModel(
       inventoryRepository: repository,
       userId: 'user-1',
@@ -453,11 +474,15 @@ final class _FakeScanner implements BarcodeScannerCapability {
 }
 
 final class _FakeInventoryRepository implements InventoryRepository {
+  _FakeInventoryRepository({this.lookupResult});
+
+  final Completer<Result<InventoryItem>>? lookupResult;
   final List<String> lookups = [];
 
   @override
   Future<Result<InventoryItem>> findProductByBarcode(String barcode) async {
     lookups.add(barcode);
+    if (lookupResult case final pending?) return pending.future;
     final id = int.tryParse(barcode) ?? 1;
     return Success(_item(id));
   }

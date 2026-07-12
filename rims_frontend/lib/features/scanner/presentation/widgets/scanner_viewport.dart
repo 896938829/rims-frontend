@@ -6,6 +6,7 @@ final class ScannerViewport extends StatelessWidget {
   const ScannerViewport({
     required this.camera,
     this.overlayMessage,
+    this.overlayKey,
     this.overlayAction,
     this.onFocus,
     super.key,
@@ -13,6 +14,7 @@ final class ScannerViewport extends StatelessWidget {
 
   final Widget camera;
   final String? overlayMessage;
+  final Key? overlayKey;
   final Widget? overlayAction;
   final ValueChanged<Offset>? onFocus;
 
@@ -57,6 +59,7 @@ final class ScannerViewport extends StatelessWidget {
                           children: [
                             Text(
                               message,
+                              key: overlayKey,
                               textAlign: TextAlign.center,
                               style: Theme.of(context).textTheme.titleMedium
                                   ?.copyWith(color: Colors.white),

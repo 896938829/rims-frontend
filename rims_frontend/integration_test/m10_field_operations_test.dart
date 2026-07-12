@@ -62,8 +62,26 @@ void main() {
         final scanStarted = DateTime.now();
         await tapAndSettle(tester, const Key('document-scan-product-button'));
         await expectText(tester, '需要相机权限才能扫描条码');
-        await tapAndSettle(tester, const Key('scanner-permission-retry'));
+        final lookupStarted = DateTime.now();
+        await tester.tap(find.byKey(const Key('scanner-permission-retry')));
+        await tester.pump();
+        await tester.pump();
+        expect(
+          find.byKey(const Key('scanner-lookup-progress')).hitTestable(),
+          findsOneWidget,
+        );
+        final scanFeedbackMs = DateTime.now()
+            .difference(lookupStarted)
+            .inMilliseconds;
+        expect(scanFeedbackMs, lessThanOrEqualTo(250));
+        segments['scanFeedback'] = scanFeedbackMs;
+        await settleBounded(tester);
         await waitForKey(tester, const Key('document-create-button'));
+        final barcodeLookupMs = DateTime.now()
+            .difference(lookupStarted)
+            .inMilliseconds;
+        expect(barcodeLookupMs, lessThanOrEqualTo(2000));
+        segments['barcodeLookup'] = barcodeLookupMs;
         await waitUntil(
           tester,
           description: 'duplicate scan quantity accumulation',
@@ -74,7 +92,6 @@ void main() {
         segments['cameraLifecycle'] = DateTime.now()
             .difference(scanStarted)
             .inMilliseconds;
-        segments['scanFeedback'] = segments['cameraLifecycle']!;
 
         await _addProductBySku(
           tester,
