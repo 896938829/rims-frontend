@@ -360,26 +360,26 @@ git commit -m "feat: add recoverable barcode scan sessions"
 - Create: `rims_frontend/test/features/scanner/mobile_scanner_capability_test.dart`
 - Create: `rims_frontend/test/features/scanner/scanner_page_test.dart`
 
-- [ ] **Step 1: Write failing adapter tests for plugin barcode mapping, `permissionDenied`, unsupported camera, start/stop serialization, revoke/resume, controller-disposed safety, torch, zoom, normalized tap-to-focus, and stream cleanup.**
+- [x] **Step 1: Write failing adapter tests for plugin barcode mapping, `permissionDenied`, unsupported camera, start/stop serialization, revoke/resume, controller-disposed safety, torch, zoom, normalized tap-to-focus, and stream cleanup.**
 
-- [ ] **Step 2: Write failing widget tests for mode segmented control, stable full-bleed viewport, torch/focus controls, visible feedback, batch lines, manual input, unsupported-code text, permission explanation/retry/settings guidance, system back, and narrow/large-font layouts.**
+- [x] **Step 2: Write failing widget tests for mode segmented control, stable full-bleed viewport, torch/focus controls, visible feedback, batch lines, manual input, unsupported-code text, permission explanation/retry/settings guidance, system back, and narrow/large-font layouts.**
 
-- [ ] **Step 3: Run tests and verify RED.**
+- [x] **Step 3: Run tests and verify RED.**
 
 ```powershell
 flutter test --no-pub test/features/scanner
 ```
 
-- [ ] **Step 4: Implement with `MobileScannerController(autoStart: false, detectionSpeed: DetectionSpeed.unrestricted)`.**
+- [x] **Step 4: Implement with `MobileScannerController(autoStart: false, detectionSpeed: DetectionSpeed.unrestricted)`.**
 
 Serialize all start/stop calls. Subscribe only while resumed. On inactive,
 cancel detection and await stop; on resumed, re-check state and restart. A
 permission dialog can cause lifecycle callbacks before initialization, so never
 start or stop based only on widget visibility.
 
-- [ ] **Step 5: Implement sound/vibration through `SystemSound` and `HapticFeedback`, both independently toggleable and failure-tolerant.**
+- [x] **Step 5: Implement sound/vibration through `SystemSound` and `HapticFeedback`, both independently toggleable and failure-tolerant.**
 
-- [ ] **Step 6: Commit.**
+- [x] **Step 6: Commit.**
 
 ```powershell
 git commit -m "feat: add lifecycle-safe Android scanner"

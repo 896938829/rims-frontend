@@ -32,7 +32,7 @@ runtime ownership, cleanup, and business effects have been inspected.
 
 | Requirement | Plan task(s) | Required direct evidence | Status |
 | --- | --- | --- | --- |
-| Camera capability boundary | 5, 6 | fake-adapter unit tests plus real Android initialization | pending |
+| Camera capability boundary | 5, 6 | fake-adapter unit tests plus real Android initialization | adapter verified; real Android initialization pending |
 | Manual barcode input | 6, 7 | widget and Android journey | pending |
 | Keyboard-wedge adapter | 7 | key timing/focus tests and Android journey | pending |
 | Single scan | 5-7 | domain, widget, integration result | pending |
@@ -48,7 +48,7 @@ runtime ownership, cleanup, and business effects have been inspected.
 | Scan-to-inbound/outbound | 14, 16 | multi-line stock and transaction effects | pending |
 | Scan-to-return/transfer/stocktake/conversion | 14, 16 | request shape, permission, and lifecycle tests | pending |
 | Bounded offline scan identity | 5 | schema/TTL/warehouse/logout tests | verified |
-| Camera permission explanation/revocation | 6, 15, 16 | deny/grant/revoke/resume evidence | pending |
+| Camera permission explanation/revocation | 6, 15, 16 | deny/grant/revoke/resume evidence | adapter/widget verified; Android journey pending |
 | Gallery/file/storage guidance | 11, 15 | system-picker and explanation tests | pending |
 | Notification guidance without premature permission | 15 | manifest and UI tests | pending |
 | Camera capture/gallery/file selection | 11, 12 | adapter/widget/Android journey | pending |
@@ -62,7 +62,7 @@ runtime ownership, cleanup, and business effects have been inspected.
 | Document attachment relationship | 12, 16 | current/wrong warehouse ACL journey | pending |
 | Approval/audit/feedback relationships | 9-12 | contract inheritance only; modules not activated | pending |
 | Local provider ownership/reset | 2, 17 | exact runtime path, reset, no residual objects | implementation verified; final audit pending |
-| Background/resume | 6, 12, 16 | HOME/resume and transfer state evidence | pending |
+| Background/resume | 6, 12, 16 | HOME/resume and transfer state evidence | scanner lifecycle verified; Android/transfer journey pending |
 | Low storage | 11, 12, 16 | injected disk failure preserves recoverable state | pending |
 | Portrait/landscape/tablet/font/dark/keyboard/back | 15-17 | compatibility tests and screenshots/report | pending |
 | Server authorization remains authoritative | 3, 8, 9, 16 | direct API and UI permission-denial evidence | pending |
@@ -142,6 +142,18 @@ runtime ownership, cleanup, and business effects have been inspected.
 | Logout | app root clears prior user's cache and drafts while warehouse scopes remain independent |
 | Integration defect | platform preferences initialization made lazy after focused widget failure |
 | Full verification | Flutter analysis clean; all 433 Flutter tests passed |
+
+## Task 6 Scanner Adapter And Page Evidence
+
+| Probe | Observed result |
+| --- | --- |
+| Plugin adapter | required controller configuration, barcode mapping, state mapping, and serialized lifecycle verified |
+| Hardware controls | torch, clamped zoom, and normalized native focus verified against plugin adapter |
+| Lifecycle safety | revoke/retry, late stop, dispose idempotence, and scan/access stream closure verified |
+| Feedback | sound and vibration independently toggleable and failure-tolerant |
+| Page | stable 4:3 viewport, four modes, manual input, batch rows, visible failures, permission actions, back navigation verified |
+| Compatibility | narrow viewport and large text rendered without overflow |
+| Real device gate | deferred to Task 16 Android smoke as planned |
 
 ## Scanner Scenario Evidence
 
