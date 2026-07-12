@@ -81,6 +81,7 @@ $plan = [pscustomobject][ordered]@{
   hostBridge = 'on-demand-owned-loopback-ipv4-to-wsl-ipv6-proxy'
   flutterLauncher = 'ProcessStartInfo.WorkingDirectory + cmd.exe -> resolved flutter.bat'
   flutterWorkingDirectory = 'rims_frontend'
+  e2eResultMarker = 'RIMS_E2E_RESULT'
   artifactDirectory = 'per-run-unique'
   command = @(
     'flutter', 'test', '--no-pub',
@@ -166,6 +167,7 @@ $androidSerial = $null
 $emulatorOwned = $false
 $emulatorIdentity = $null
 $fixtureCounts = $null
+$e2eData = $null
 $runtimeOwnedByRun = $false
 $fixturesMutated = $false
 $hostBridgeProcess = $null
@@ -645,6 +647,7 @@ function Write-AndroidReport {
     apiBaseUrl = $apiBaseUrl
     emulator = $script:emulatorIdentity
     fixtureCounts = $script:fixtureCounts
+    e2e = $script:e2eData
     hostBridge = $script:hostBridgeIdentity
     hostBridgeCleanup = $hostBridgeCleanup
     baselineRestore = $baselineRestore
@@ -775,6 +778,16 @@ try {
               -Message "Android integration test failed: $(Get-RimsExternalCommandSummary -Result $execution)" `
               -ExitCode $execution.ExitCode
           }
+          $resultLine = @(([string]$execution.StandardOutput -split '\r?\n') |
+              Where-Object { $_ -match '^RIMS_E2E_RESULT\s+\{' } |
+              Select-Object -Last 1)
+          if ($resultLine.Count -eq 0 -or
+              $resultLine[0] -notmatch '^RIMS_E2E_RESULT\s+(?<json>\{.*\})$') {
+            Throw-AndroidChildFailure `
+              -Message 'Android integration test omitted RIMS_E2E_RESULT data.' `
+              -ExitCode 1
+          }
+          $script:e2eData = $Matches.json | ConvertFrom-Json
         }
       }
       'runtime-status' {

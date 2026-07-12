@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
@@ -134,12 +136,14 @@ void main() {
           },
         );
         recordSegment('logout');
-        binding.reportData = <String, Object?>{
+        final reportData = <String, Object?>{
           'runId': runId,
           'durationMs': DateTime.now().difference(startedAt).inMilliseconds,
           'segmentsMs': segmentDurations,
           'documents': <String>[inboundNumber, salesNumber],
         };
+        binding.reportData = reportData;
+        debugPrint('RIMS_E2E_RESULT ${jsonEncode(reportData)}');
         await tester.pump(const Duration(seconds: 1));
         await settleBounded(tester);
       },

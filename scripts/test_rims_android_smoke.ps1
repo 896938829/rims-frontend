@@ -76,6 +76,17 @@ Assert-Equal `
   -Expected 'rims_frontend' `
   -Message 'Android Flutter working directory.'
 Assert-Equal `
+  -Actual $plan.e2eResultMarker `
+  -Expected 'RIMS_E2E_RESULT' `
+  -Message 'Android E2E result marker.'
+$e2eTestText = Get-Content `
+  -LiteralPath (Join-Path $scriptDir '..\rims_frontend\integration_test\app_e2e_test.dart') `
+  -Raw
+if (-not $e2eTestText.Contains("debugPrint('RIMS_E2E_RESULT `$") -or
+    -not $e2eTestText.Contains('jsonEncode(reportData)')) {
+  throw 'App E2E test does not emit machine-readable Android segment data.'
+}
+Assert-Equal `
   -Actual $plan.artifactDirectory `
   -Expected 'per-run-unique' `
   -Message 'Android artifact directory policy.'

@@ -87,33 +87,43 @@ defects, and external launch checks.
 
 ### Task 1: Execute M9 Local Autonomy And Acceptance Hardening
 
+**Status:** COMPLETE on 2026-07-12. Evidence:
+[`2026-07-10-rims-m9-execution-record.md`](2026-07-10-rims-m9-execution-record.md).
+
 **Plan:**
 `docs/superpowers/plans/2026-07-10-rims-m9-local-autonomy-acceptance-hardening.md`
 
 **Entry:**
 
-- [ ] Frontend `main` includes the M8 integration baseline.
-- [ ] Backend health can be established locally from the documented workspace.
-- [ ] Current frontend smoke passes before M9 code changes.
+- [x] Frontend `main` includes the M8 integration baseline.
+- [x] Backend health can be established locally from the documented workspace.
+- [x] Current frontend smoke passes before M9 code changes.
 
 **Exit:**
 
-- [ ] `doctor`, `up`, `status`, `logs`, `restart`, `smoke`, and `down` are
+- [x] `doctor`, `up`, `status`, `logs`, `restart`, `smoke`, and `down` are
   non-interactive and tested.
-- [ ] AI can start backend and frontend from a stopped state.
-- [ ] Inventory, document, transaction, alert, non-standard, user, product, and
+- [x] AI can start backend and frontend from a stopped state.
+- [x] Inventory, document, transaction, alert, non-standard, user, product, and
   warehouse lists expose reachable subsequent pages.
-- [ ] Critical UI integration flows and Android Emulator smoke pass.
-- [ ] M9 baseline timings and phase evidence are recorded.
-- [ ] P0/P1 are zero.
+- [x] Critical UI integration flows and Android Emulator smoke pass.
+- [x] M9 baseline timings and phase evidence are recorded.
+- [x] P0/P1 are zero.
 
 ### Task 2: Generate And Execute M10 Android Field Operations Plan
 
 **Target plan path:**
 `docs/superpowers/plans/2026-07-10-rims-m10-android-field-operations.md`
 
-**Entry:** M9 exit is verified and current scanner, attachment, Android manifest,
-permission, lifecycle, backend file, and storage-provider code has been remapped.
+**Entry:** M9 exit is verified by the linked execution record. M10 must remap
+the current scanner, attachment, Android manifest, permission, backend file, and
+storage-provider code before planning implementation. It must inherit:
+
+- `scripts/rims_local.ps1` as the only local service controller;
+- deterministic M9 fixtures and the shared `acceptance-smoke.lock`;
+- Web and Android `app_e2e_test.dart` smoke as regression gates;
+- feature-first MVVM and paged repository contracts;
+- `RIMS_E2E_RESULT` total/segment reporting and the M9 performance baseline.
 
 - [ ] Create the M10 plan from design Sections M10, 5.8, 5.9, and Android parts
   of Section 6.
