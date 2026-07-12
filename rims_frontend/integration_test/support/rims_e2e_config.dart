@@ -22,7 +22,7 @@ abstract final class RimsE2eConfig {
   );
   static const String injectedBarcode = String.fromEnvironment(
     'RIMS_E2E_BARCODE',
-    defaultValue: fixtureProductCode,
+    defaultValue: 'M10-ACTIVE-001',
   );
   static const String injectedPickedFile = String.fromEnvironment(
     'RIMS_E2E_PICKED_FILE',

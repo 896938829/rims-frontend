@@ -80,7 +80,7 @@ $integrationTestPath = if ($Phase -eq 'field-operations') {
 $fieldDefines = if ($Phase -eq 'field-operations') {
   @(
     '--dart-define=RIMS_E2E_FIELD_OPERATIONS=true',
-    '--dart-define=RIMS_E2E_BARCODE=M9-PAGE-0001',
+    '--dart-define=RIMS_E2E_BARCODE=M10-ACTIVE-001',
     '--dart-define=RIMS_E2E_PICKED_FILE=provider-file'
   )
 } else { @() }
