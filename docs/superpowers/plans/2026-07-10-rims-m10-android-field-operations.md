@@ -513,25 +513,25 @@ git commit -m "feat: add ordered replaceable attachments"
 - Create: `rims_frontend/test/features/attachments/attachments_remote_datasource_test.dart`
 - Create: `rims_frontend/test/features/attachments/attachments_repository_test.dart`
 
-- [ ] **Step 1: Write failing model/DataSource/repository tests for strict envelopes, pages, multipart fields, stable idempotency key, progress, cancel, reorder, replace, authorized byte download, delete, and malformed responses.**
+- [x] **Step 1: Write failing model/DataSource/repository tests for strict envelopes, pages, multipart fields, stable idempotency key, progress, cancel, reorder, replace, authorized byte download, delete, and malformed responses.**
 
 Use `AttachmentBinding.productImage(productId)` and
 `AttachmentBinding.document(documentId)` so raw backend strings do not leak
 into presentation code.
 
-- [ ] **Step 2: Run focused tests and verify RED.**
+- [x] **Step 2: Run focused tests and verify RED.**
 
 ```powershell
 flutter test --no-pub test/features/attachments
 ```
 
-- [ ] **Step 3: Implement strict models and remote DataSource.**
+- [x] **Step 3: Implement strict models and remote DataSource.**
 
 Resolve relative `fileUrl` against the API origin only after validating it is a
 same-origin path. Download private files through authenticated Dio and never
 hand bearer tokens to an external browser.
 
-- [ ] **Step 4: Implement repository mapping and commit.**
+- [x] **Step 4: Implement repository mapping and commit.**
 
 ```powershell
 flutter test --no-pub test/features/attachments

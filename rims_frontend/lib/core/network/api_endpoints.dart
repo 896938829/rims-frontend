@@ -40,6 +40,12 @@ abstract final class ApiEndpoints {
 
   static const String documents = '/documents';
   static const String transactions = '/transactions';
+  static const String files = '/files';
+  static const String fileUpload = '$files/upload';
+  static const String fileReorder = '$files/reorder';
+  static String file(int id) => '$files/$id';
+  static String fileReplace(int id) => '${file(id)}/replace';
+  static String fileDownload(int id) => '${file(id)}/download';
   static const String salesStats = '/reports/sales/stats';
   static const String salesTrend = '/reports/sales/trend';
   static const String salesRanking = '/reports/sales/ranking';

@@ -194,6 +194,20 @@ runtime ownership, cleanup, and business effects have been inspected.
 | Cleanup | test rows soft-deleted; managed backend stopped; exactly owned provider reset |
 | Regression | full Go tests, temporary server build, and M9 seed/reset passed |
 
+## Task 10 Frontend Attachment Data Boundary Evidence
+
+| Probe | Observed result |
+| --- | --- |
+| Domain boundary | typed product/document bindings keep backend business strings out of presentation code |
+| Strict parsing | required IDs, sizes, timestamps, positions, pages, envelopes, and attachment objects reject malformed values |
+| URL safety | only relative same-origin paths without query or fragment resolve against the configured API origin |
+| Multipart contract | upload binding fields and replace-only file payload match backend routes |
+| Retry/cancel | stable `Idempotency-Key`, progress callback, pre-cancel, and in-flight Dio cancellation verified |
+| Mutations | reorder exact ID payload, authenticated byte download, and delete endpoints verified |
+| Storage boundary | repository hands authenticated bytes to injected local storage and maps storage failures |
+| Focused regression | all 13 attachment boundary tests passed |
+| Full verification | Flutter analysis clean; all 476 Flutter tests passed |
+
 ## Scanner Scenario Evidence
 
 | Scenario | Web/unit | Android | Real backend effect | Result |
