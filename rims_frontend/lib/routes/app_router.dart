@@ -1,3 +1,4 @@
+import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import '../core/events/app_event_bus.dart';
@@ -11,6 +12,9 @@ import '../features/auth/presentation/pages/login_page.dart';
 import '../features/auth/presentation/view_models/auth_session_controller.dart';
 import '../features/documents/domain/repositories/documents_repository.dart';
 import '../features/inventory/domain/repositories/inventory_repository.dart';
+import '../features/offline/domain/repositories/document_draft_repository.dart';
+import '../features/offline/presentation/view_models/drafts_view_model.dart';
+import '../features/offline/presentation/widgets/draft_manager.dart';
 import '../features/reports/domain/repositories/reports_repository.dart';
 import '../features/scanner/domain/services/scan_lookup_cache.dart';
 import '../features/shell/presentation/pages/app_shell_page.dart';
@@ -29,6 +33,7 @@ GoRouter createAppRouter({
   AttachmentShareService? attachmentShareService,
   AppEventBus? eventBus,
   ScanLookupCache? scanLookupCache,
+  DocumentDraftRepository? documentDraftRepository,
   String initialLocation = RoutePaths.login,
 }) {
   return GoRouter(
@@ -65,6 +70,13 @@ GoRouter createAppRouter({
         ),
       ),
       GoRoute(
+        path: RoutePaths.drafts,
+        builder: (context, state) => _DraftManagerRoute(
+          repository: documentDraftRepository,
+          sessionController: sessionController,
+        ),
+      ),
+      GoRoute(
         path: RoutePaths.shell,
         builder: (context, state) => AppShellPage(
           authRepository: authRepository,
@@ -79,8 +91,73 @@ GoRouter createAppRouter({
           eventBus: eventBus,
           sessionController: sessionController,
           scanLookupCache: scanLookupCache,
+          documentDraftRepository: documentDraftRepository,
+          initialDraftId: state.uri.queryParameters['draft'],
         ),
       ),
     ],
   );
+}
+
+final class _DraftManagerRoute extends StatefulWidget {
+  const _DraftManagerRoute({
+    required this.repository,
+    required this.sessionController,
+  });
+
+  final DocumentDraftRepository? repository;
+  final AuthSessionController sessionController;
+
+  @override
+  State<_DraftManagerRoute> createState() => _DraftManagerRouteState();
+}
+
+final class _DraftManagerRouteState extends State<_DraftManagerRoute> {
+  DraftsViewModel? _viewModel;
+
+  @override
+  void initState() {
+    super.initState();
+    final repository = widget.repository;
+    final user = widget.sessionController.currentUser;
+    final warehouse = widget.sessionController.currentWarehouse;
+    if (repository != null && user != null && warehouse != null) {
+      _viewModel = DraftsViewModel(
+        repository: repository,
+        accountId: user.id.toString(),
+        roleCode: user.roleCode,
+        warehouseId: warehouse.id,
+      );
+    }
+  }
+
+  @override
+  void dispose() {
+    _viewModel?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final viewModel = _viewModel;
+    return Scaffold(
+      appBar: AppBar(title: const Text('草稿管理')),
+      body: viewModel == null
+          ? const Center(child: Text('草稿服务不可用'))
+          : SafeArea(
+              child: DraftManager(
+                viewModel: viewModel,
+                warehouseName: _warehouseName,
+                onOpen: (draft) => context.go(RoutePaths.openDraft(draft.id)),
+              ),
+            ),
+    );
+  }
+
+  String _warehouseName(int warehouseId) {
+    for (final warehouse in widget.sessionController.warehouses) {
+      if (warehouse.id == warehouseId) return warehouse.name;
+    }
+    return '仓库 $warehouseId';
+  }
 }

@@ -20,6 +20,7 @@ import '../../../home/presentation/pages/home_page.dart';
 import '../../../home/presentation/view_models/home_view_model.dart';
 import '../../../inventory/domain/repositories/inventory_repository.dart';
 import '../../../inventory/presentation/pages/inventory_page.dart';
+import '../../../offline/domain/repositories/document_draft_repository.dart';
 import '../../../inventory/domain/entities/inventory_item.dart';
 import '../../../profile/presentation/pages/profile_page.dart';
 import '../../../reports/domain/repositories/reports_repository.dart';
@@ -49,6 +50,8 @@ final class AppShellPage extends StatefulWidget {
     this.attachmentShareService,
     this.eventBus,
     this.scanLookupCache,
+    this.documentDraftRepository,
+    this.initialDraftId,
     super.key,
   });
 
@@ -64,13 +67,15 @@ final class AppShellPage extends StatefulWidget {
   final AttachmentShareService? attachmentShareService;
   final AppEventBus? eventBus;
   final ScanLookupCache? scanLookupCache;
+  final DocumentDraftRepository? documentDraftRepository;
+  final String? initialDraftId;
 
   @override
   State<AppShellPage> createState() => _AppShellPageState();
 }
 
 final class _AppShellPageState extends State<AppShellPage> {
-  AppTab _currentTab = AppTab.home;
+  late AppTab _currentTab;
   String? _pendingDocumentActionLabel;
   bool _pendingDocumentScanner = false;
   StreamSubscription<GlobalRefreshRequestedEvent>? _refreshSubscription;
@@ -79,6 +84,9 @@ final class _AppShellPageState extends State<AppShellPage> {
   @override
   void initState() {
     super.initState();
+    _currentTab = widget.initialDraftId == null
+        ? AppTab.home
+        : AppTab.documents;
     _subscribeToRefreshEvents();
   }
 
@@ -139,6 +147,10 @@ final class _AppShellPageState extends State<AppShellPage> {
         barcodeInputs: _wedgeBarcodes.stream,
       ),
       AppTab.documents => DocumentsPage(
+        key: ValueKey(
+          'documents-${widget.sessionController.currentUser?.id}-'
+          '${widget.sessionController.currentWarehouse?.id}',
+        ),
         repository: widget.documentsRepository,
         inventoryRepository: widget.inventoryRepository,
         currentWarehouse: widget.sessionController.currentWarehouse,
@@ -154,6 +166,10 @@ final class _AppShellPageState extends State<AppShellPage> {
         attachmentStagingStore: widget.attachmentStagingStore,
         attachmentShareService: widget.attachmentShareService,
         attachmentUserId: widget.sessionController.currentUser?.id.toString(),
+        draftRepository: widget.documentDraftRepository,
+        accountId: widget.sessionController.currentUser?.id.toString(),
+        observedRoleCode: widget.sessionController.currentUser?.roleCode ?? '',
+        initialDraftId: widget.initialDraftId,
       ),
       AppTab.reports => ReportsPage(
         repository: widget.reportsRepository,

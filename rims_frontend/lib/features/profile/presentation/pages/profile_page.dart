@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 
 import '../../../../core/events/app_event_bus.dart';
 import '../../../../core/theme/app_colors.dart';
@@ -6,6 +7,7 @@ import '../../../../core/theme/app_text_styles.dart';
 import '../../../../core/widgets/rims_card.dart';
 import '../../../../core/widgets/rims_page_scaffold.dart';
 import '../../../../core/widgets/rims_status_chip.dart';
+import '../../../../routes/route_paths.dart';
 import '../../../admin/domain/repositories/admin_repository.dart';
 import '../../../admin/presentation/widgets/admin_products_panel.dart';
 import '../../../admin/presentation/widgets/admin_roles_panel.dart';
@@ -85,6 +87,10 @@ final class ProfilePage extends StatelessWidget {
               isSwitchingWarehouse: isSwitchingWarehouse,
               warehouseSwitchMessage: warehouseSwitchMessage,
             ),
+          if (effectiveViewModel != null) ...[
+            const SizedBox(height: 14),
+            const _DataAndCacheCard(),
+          ],
           if (effectiveViewModel != null && adminRepository != null) ...[
             const SizedBox(height: 14),
             _AccountSecurityCard(repository: adminRepository!),
@@ -128,6 +134,35 @@ final class ProfilePage extends StatelessWidget {
           _LogoutCard(onLogout: onLogout),
           const SizedBox(height: 14),
           const DevicePermissionsPanel(),
+        ],
+      ),
+    );
+  }
+}
+
+final class _DataAndCacheCard extends StatelessWidget {
+  const _DataAndCacheCard();
+
+  @override
+  Widget build(BuildContext context) {
+    return RimsCard(
+      padding: const EdgeInsets.fromLTRB(14, 12, 6, 6),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Text('数据与缓存', style: AppTextStyles.titleMedium),
+          Material(
+            type: MaterialType.transparency,
+            child: ListTile(
+              key: const Key('profile-draft-manager-entry'),
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.drafts_outlined),
+              title: const Text('草稿管理'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => context.push(RoutePaths.drafts),
+            ),
+          ),
         ],
       ),
     );

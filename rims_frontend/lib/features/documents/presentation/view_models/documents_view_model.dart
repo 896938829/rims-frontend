@@ -12,6 +12,8 @@ import '../../domain/repositories/documents_repository.dart';
 import '../../../inventory/domain/entities/inventory_item.dart';
 import '../../../inventory/domain/entities/non_standard_inventory_item.dart';
 import '../../../inventory/domain/repositories/inventory_repository.dart';
+import '../../../offline/domain/entities/document_draft.dart';
+import '../../../offline/domain/repositories/document_draft_repository.dart';
 
 final class DocumentAction {
   const DocumentAction({
@@ -32,9 +34,17 @@ final class DocumentsViewModel extends ChangeNotifier {
     this.currentWarehouse,
     this.warehouses = const [],
     this.canManageAdminDocumentActions = true,
+    this.draftRepository,
+    this.accountId,
+    this.observedRoleCode = '',
+    String Function()? draftIdFactory,
+    DateTime Function()? now,
+    this.autosaveDelay = const Duration(milliseconds: 300),
   }) : _selectedAction = _actions.first,
        _recentDocuments = const [],
-       _transactions = const [];
+       _transactions = const [],
+       draftIdFactory = draftIdFactory ?? const Uuid().v4,
+       now = now ?? DateTime.now;
 
   static const List<DocumentAction> _actions = [
     DocumentAction(label: '销售出库', docType: 2, iconPath: AppIcons.actionInbound),
@@ -54,6 +64,12 @@ final class DocumentsViewModel extends ChangeNotifier {
   final Warehouse? currentWarehouse;
   final List<Warehouse> warehouses;
   final bool canManageAdminDocumentActions;
+  final DocumentDraftRepository? draftRepository;
+  final String? accountId;
+  final String observedRoleCode;
+  final String Function() draftIdFactory;
+  final DateTime Function() now;
+  final Duration autosaveDelay;
   List<DocumentRecord> _recentDocuments;
   List<TransactionRecord> _transactions;
   List<InventoryItem> _productCandidates = const [];
@@ -103,10 +119,18 @@ final class DocumentsViewModel extends ChangeNotifier {
   Failure? _transactionLoadMoreFailure;
   bool _isDisposed = false;
   DocumentReadStatus? _readStatus;
+  Timer? _draftSaveTimer;
+  Future<void>? _draftSaveInFlight;
+  bool _draftSaveQueued = false;
+  String? _activeDraftId;
+  DateTime? _draftCreatedAt;
+  int _draftVersion = 0;
+  String? _draftSaveError;
 
   @override
   void dispose() {
     _isDisposed = true;
+    _draftSaveTimer?.cancel();
     super.dispose();
   }
 
@@ -194,6 +218,8 @@ final class DocumentsViewModel extends ChangeNotifier {
   String? get productSearchError => _productSearchError;
   String? get nonStandardInventoryError => _nonStandardInventoryError;
   String? get returnSourceError => _returnSourceError;
+  String? get activeDraftId => _activeDraftId;
+  String? get draftSaveError => _draftSaveError;
   bool get isLoading => _isLoading;
   bool get isSearchingProducts => _isSearchingProducts;
   bool get isLoadingNonStandardInventory => _isLoadingNonStandardInventory;
@@ -242,6 +268,7 @@ final class DocumentsViewModel extends ChangeNotifier {
     if (!isConversionAction) {
       _selectedNonStandardInventory = null;
     }
+    _scheduleDraftSave();
     notifyListeners();
   }
 
@@ -260,6 +287,7 @@ final class DocumentsViewModel extends ChangeNotifier {
       _selectedProduct = null;
     }
     _formError = null;
+    _scheduleDraftSave();
     notifyListeners();
   }
 
@@ -389,6 +417,7 @@ final class DocumentsViewModel extends ChangeNotifier {
     _productQuery = '';
     _quantityText = '';
     _formError = null;
+    _scheduleDraftSave();
     notifyListeners();
   }
 
@@ -413,6 +442,7 @@ final class DocumentsViewModel extends ChangeNotifier {
         )
         .toList(growable: false);
     _formError = null;
+    _scheduleDraftSave();
     notifyListeners();
   }
 
@@ -420,6 +450,7 @@ final class DocumentsViewModel extends ChangeNotifier {
     _draftLines = _draftLines
         .where((line) => line.productId != productId)
         .toList(growable: false);
+    _scheduleDraftSave();
     notifyListeners();
   }
 
@@ -564,18 +595,21 @@ final class DocumentsViewModel extends ChangeNotifier {
   void selectNonStandardInventory(NonStandardInventoryItem item) {
     _selectedNonStandardInventory = item;
     _formError = null;
+    _scheduleDraftSave();
     notifyListeners();
   }
 
   void selectTargetWarehouse(Warehouse warehouse) {
     _selectedTargetWarehouse = warehouse;
     _formError = null;
+    _scheduleDraftSave();
     notifyListeners();
   }
 
   void selectReturnSourceDocument(DocumentRecord document) {
     _selectedReturnSourceDocument = document;
     _formError = null;
+    _scheduleDraftSave();
     notifyListeners();
   }
 
@@ -588,7 +622,169 @@ final class DocumentsViewModel extends ChangeNotifier {
   void updateRemark(String value) {
     _remark = value;
     _formError = null;
+    _scheduleDraftSave();
     notifyListeners();
+  }
+
+  Future<void> saveDraft() async {
+    _draftSaveTimer?.cancel();
+    if (!_canPersistDraft) return;
+    _ensureDraftIdentity();
+    final inFlight = _draftSaveInFlight;
+    if (inFlight != null) {
+      _draftSaveQueued = true;
+      await inFlight;
+      if (_draftSaveInFlight case final queuedSave?) {
+        await queuedSave;
+      }
+      return;
+    }
+
+    final save = _persistDraft();
+    _draftSaveInFlight = save;
+    await save;
+    _draftSaveInFlight = null;
+    if (_draftSaveQueued && !_isDisposed) {
+      _draftSaveQueued = false;
+      unawaited(saveDraft());
+    }
+  }
+
+  Future<bool> openDraft(String draftId) async {
+    final repository = draftRepository;
+    final activeAccountId = accountId;
+    final warehouseId = currentWarehouse?.id;
+    if (repository == null || activeAccountId == null || warehouseId == null) {
+      return false;
+    }
+    final draft = await repository.load(
+      accountId: activeAccountId,
+      draftId: draftId,
+    );
+    if (draft == null) {
+      _draftSaveError = '草稿不存在或不属于当前账号';
+      notifyListeners();
+      return false;
+    }
+    if (draft.warehouseId != warehouseId) {
+      _draftSaveError = '请切换到草稿所属仓库后再打开';
+      notifyListeners();
+      return false;
+    }
+
+    _draftSaveTimer?.cancel();
+    _activeDraftId = draft.id;
+    _draftCreatedAt = draft.createdAt;
+    _draftVersion = draft.version;
+    _draftSaveError = null;
+    _selectedAction = _actions.firstWhere(
+      (action) => action.docType == draft.docType,
+      orElse: () => _actions.first,
+    );
+    _draftLines = _linesFromDraft(draft.payload['lines']);
+    _remark = draft.payload['remark']?.toString() ?? '';
+    final targetWarehouseId = _intValue(draft.payload['target_warehouse_id']);
+    _selectedTargetWarehouse = targetWarehouseId == null
+        ? null
+        : _warehouseById(targetWarehouseId);
+    final sourceDocumentId = _intValue(draft.payload['source_document_id']);
+    _selectedReturnSourceDocument = sourceDocumentId == null
+        ? null
+        : _documentById(sourceDocumentId);
+    _formError = null;
+    notifyListeners();
+    return true;
+  }
+
+  bool get _canPersistDraft =>
+      draftRepository != null &&
+      accountId != null &&
+      accountId!.isNotEmpty &&
+      currentWarehouse != null;
+
+  void _scheduleDraftSave() {
+    if (!_canPersistDraft || _isDisposed) return;
+    _ensureDraftIdentity();
+    _draftSaveTimer?.cancel();
+    _draftSaveTimer = Timer(autosaveDelay, () => unawaited(saveDraft()));
+  }
+
+  void _ensureDraftIdentity() {
+    if (_activeDraftId != null) return;
+    _activeDraftId = draftIdFactory();
+    _draftCreatedAt = now().toUtc();
+    _draftVersion = 0;
+  }
+
+  Future<void> _persistDraft() async {
+    final repository = draftRepository!;
+    final timestamp = now().toUtc();
+    final request = CreateDocumentRequest(
+      docType: _selectedAction.docType,
+      typeLabel: _selectedAction.label,
+      lines: _draftLines,
+      toWarehouseId: _selectedTargetWarehouse?.id,
+      refDocId: _selectedReturnSourceDocument?.id,
+      remark: _remark,
+    );
+    final draft = DocumentDraft(
+      id: _activeDraftId!,
+      accountId: accountId!,
+      warehouseId: currentWarehouse!.id,
+      docType: _selectedAction.docType,
+      observedRoleCode: observedRoleCode,
+      payload: request.toDraftPayload(),
+      createdAt: _draftCreatedAt ?? timestamp,
+      updatedAt: timestamp,
+      version: _draftVersion,
+    );
+    final result = await repository.save(draft, expectedVersion: _draftVersion);
+    if (_isDisposed) return;
+    result.when(
+      success: (saved) {
+        _draftVersion = saved.version;
+        _draftCreatedAt = saved.createdAt;
+        _draftSaveError = null;
+      },
+      failure: (failure) => _draftSaveError = failure.message,
+    );
+    notifyListeners();
+  }
+
+  List<CreateDocumentLineRequest> _linesFromDraft(Object? value) {
+    if (value is! List) return const [];
+    return value
+        .whereType<Map>()
+        .map((line) {
+          return CreateDocumentLineRequest(
+            productId: _intValue(line['product_id']) ?? 0,
+            productName: line['product_name']?.toString() ?? '',
+            quantity: _intValue(line['quantity']) ?? 0,
+            actualQuantity: _intValue(line['actual_quantity']),
+            nonStandardInventoryId: _intValue(
+              line['non_standard_inventory_id'],
+            ),
+            retailPrice: _doubleValue(line['retail_price']),
+          );
+        })
+        .toList(growable: false);
+  }
+
+  int? _intValue(Object? value) => value is num ? value.toInt() : null;
+  double? _doubleValue(Object? value) => value is num ? value.toDouble() : null;
+
+  Warehouse? _warehouseById(int id) {
+    for (final warehouse in warehouses) {
+      if (warehouse.id == id) return warehouse;
+    }
+    return null;
+  }
+
+  DocumentRecord? _documentById(int id) {
+    for (final document in [..._returnSourceDocuments, ..._recentDocuments]) {
+      if (document.id == id) return document;
+    }
+    return null;
   }
 
   Future<void> load() async {
@@ -895,6 +1091,12 @@ final class DocumentsViewModel extends ChangeNotifier {
       return false;
     }
 
+    _draftSaveTimer?.cancel();
+    if (_draftSaveInFlight case final save?) {
+      await save;
+      if (_isDisposed) return false;
+    }
+
     _isSubmitting = true;
     final hadLoadedDocumentPage = _documentPage > 0;
     _formError = null;
@@ -914,6 +1116,8 @@ final class DocumentsViewModel extends ChangeNotifier {
     if (_isDisposed) return false;
 
     var created = false;
+    final submittedDraftId = _activeDraftId;
+    final submittedAccountId = accountId;
     result.when(
       success: (document) {
         _recentDocuments = [
@@ -941,6 +1145,25 @@ final class DocumentsViewModel extends ChangeNotifier {
         _formError = failure.message;
       },
     );
+
+    if (created &&
+        submittedDraftId != null &&
+        submittedAccountId != null &&
+        draftRepository != null) {
+      try {
+        await draftRepository!.delete(
+          accountId: submittedAccountId,
+          draftId: submittedDraftId,
+        );
+        _activeDraftId = null;
+        _draftCreatedAt = null;
+        _draftVersion = 0;
+        _draftSaveError = null;
+      } on Object {
+        _draftSaveError = '单据已提交，但本地草稿清理失败';
+      }
+      if (_isDisposed) return false;
+    }
 
     if (created && hadLoadedDocumentPage) {
       await _loadDocumentsFirstPage();

@@ -15,8 +15,165 @@ import 'package:rims_frontend/features/documents/presentation/view_models/docume
 import 'package:rims_frontend/features/inventory/domain/entities/inventory_item.dart';
 import 'package:rims_frontend/features/inventory/domain/entities/non_standard_inventory_item.dart';
 import 'package:rims_frontend/features/inventory/domain/repositories/inventory_repository.dart';
+import 'package:rims_frontend/features/offline/domain/entities/document_draft.dart';
+import 'package:rims_frontend/features/offline/domain/repositories/document_draft_repository.dart';
 
 void main() {
+  test(
+    'document changes debounce autosave for 300ms with a stable draft id',
+    () async {
+      final drafts = _FakeDocumentDraftRepository();
+      final viewModel = DocumentsViewModel(
+        draftRepository: drafts,
+        accountId: '7',
+        observedRoleCode: 'operator',
+        currentWarehouse: const Warehouse(
+          id: 11,
+          code: 'MAIN',
+          name: 'Main',
+          isDefault: true,
+        ),
+        draftIdFactory: () => 'draft-stable',
+      );
+
+      viewModel.updateRemark('first');
+      viewModel.updateRemark('latest');
+
+      expect(viewModel.activeDraftId, 'draft-stable');
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+      expect(drafts.saved, isEmpty);
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+
+      expect(drafts.saved, hasLength(1));
+      expect(drafts.saved.single.id, 'draft-stable');
+      expect(drafts.saved.single.payload['remark'], 'latest');
+      viewModel.dispose();
+    },
+  );
+
+  test(
+    'explicit save flushes immediately and autosave remains one-flight',
+    () async {
+      final firstSave = Completer<Result<DocumentDraft>>();
+      final drafts = _FakeDocumentDraftRepository(
+        saveResults: [firstSave.future],
+      );
+      final viewModel = DocumentsViewModel(
+        draftRepository: drafts,
+        accountId: '7',
+        observedRoleCode: 'operator',
+        currentWarehouse: const Warehouse(
+          id: 11,
+          code: 'MAIN',
+          name: 'Main',
+          isDefault: true,
+        ),
+        draftIdFactory: () => 'draft-one-flight',
+      );
+
+      viewModel.updateRemark('first');
+      final save = viewModel.saveDraft();
+      await Future<void>.delayed(Duration.zero);
+      viewModel.updateRemark('second');
+      await Future<void>.delayed(const Duration(milliseconds: 320));
+      expect(drafts.saveCallCount, 1);
+
+      firstSave.complete(
+        Success(_savedDraft('draft-one-flight', remark: 'first')),
+      );
+      await save;
+      await Future<void>.delayed(Duration.zero);
+
+      expect(drafts.saveCallCount, 2);
+      expect(drafts.saved.last.payload['remark'], 'second');
+      viewModel.dispose();
+    },
+  );
+
+  test(
+    'autosave failure stays visible and preserves the in-memory form',
+    () async {
+      final drafts = _FakeDocumentDraftRepository(
+        saveResults: [
+          Future.value(
+            const FailureResult<DocumentDraft>(
+              LocalStorageFailure(message: '草稿保存失败'),
+            ),
+          ),
+        ],
+      );
+      final viewModel = DocumentsViewModel(
+        draftRepository: drafts,
+        accountId: '7',
+        observedRoleCode: 'operator',
+        currentWarehouse: const Warehouse(
+          id: 11,
+          code: 'MAIN',
+          name: 'Main',
+          isDefault: true,
+        ),
+      );
+
+      viewModel.addScannedProduct(_standardItem);
+      viewModel.updateRemark('keep me');
+      await viewModel.saveDraft();
+
+      expect(viewModel.draftSaveError, '草稿保存失败');
+      expect(viewModel.draftLines, isNotEmpty);
+      expect(viewModel.remark, 'keep me');
+      viewModel.dispose();
+    },
+  );
+
+  test('reopens a scoped draft into the document form', () async {
+    final draft = _savedDraft('recoverable', remark: 'recovered');
+    final drafts = _FakeDocumentDraftRepository(loaded: draft);
+    final viewModel = DocumentsViewModel(
+      draftRepository: drafts,
+      accountId: '7',
+      observedRoleCode: 'operator',
+      currentWarehouse: const Warehouse(
+        id: 11,
+        code: 'MAIN',
+        name: 'Main',
+        isDefault: true,
+      ),
+    );
+
+    expect(await viewModel.openDraft('recoverable'), isTrue);
+
+    expect(viewModel.activeDraftId, 'recoverable');
+    expect(viewModel.remark, 'recovered');
+    expect(viewModel.draftLines.single.productId, 10);
+    expect(viewModel.draftLines.single.quantity, 2);
+    viewModel.dispose();
+  });
+
+  test('successful submit deletes only the active account draft', () async {
+    final drafts = _FakeDocumentDraftRepository();
+    final viewModel = DocumentsViewModel(
+      repository: _FakeDocumentsRepository(),
+      draftRepository: drafts,
+      accountId: '7',
+      observedRoleCode: 'operator',
+      currentWarehouse: const Warehouse(
+        id: 11,
+        code: 'MAIN',
+        name: 'Main',
+        isDefault: true,
+      ),
+      draftIdFactory: () => 'submitted-draft',
+    );
+    viewModel.addScannedProduct(_standardItem);
+    await viewModel.saveDraft();
+
+    expect(await viewModel.createDocument(), isTrue);
+
+    expect(drafts.deleted, [('7', 'submitted-draft')]);
+    expect(viewModel.activeDraftId, isNull);
+    viewModel.dispose();
+  });
+
   test(
     'DocumentsViewModel ignores an async load completion after dispose',
     () async {
@@ -1742,6 +1899,73 @@ void main() {
     expect(repository.listCallCount, 2);
     expect(viewModel.recentDocuments, [_completedInboundDocument]);
   });
+}
+
+DocumentDraft _savedDraft(String id, {String remark = ''}) {
+  final now = DateTime.utc(2026, 7, 13);
+  return DocumentDraft(
+    id: id,
+    accountId: '7',
+    warehouseId: 11,
+    docType: 2,
+    observedRoleCode: 'operator',
+    payload: {
+      'lines': [
+        {
+          'product_id': 10,
+          'product_name': '标准商品',
+          'quantity': 2,
+          'retail_price': 12.5,
+        },
+      ],
+      'remark': remark,
+    },
+    createdAt: now,
+    updatedAt: now,
+    version: 1,
+  );
+}
+
+final class _FakeDocumentDraftRepository implements DocumentDraftRepository {
+  _FakeDocumentDraftRepository({this.loaded, this.saveResults = const []});
+
+  final DocumentDraft? loaded;
+  final List<Future<Result<DocumentDraft>>> saveResults;
+  final List<DocumentDraft> saved = [];
+  final List<(String, String)> deleted = [];
+  int saveCallCount = 0;
+
+  @override
+  Future<Result<DocumentDraft>> save(
+    DocumentDraft draft, {
+    required int expectedVersion,
+  }) async {
+    saved.add(draft);
+    final index = saveCallCount++;
+    if (index < saveResults.length) return saveResults[index];
+    return Success(draft.copyWith(version: expectedVersion + 1));
+  }
+
+  @override
+  Future<DocumentDraft?> load({
+    required String accountId,
+    required String draftId,
+  }) async =>
+      loaded?.accountId == accountId && loaded?.id == draftId ? loaded : null;
+
+  @override
+  Future<List<DocumentDraft>> list(String accountId) async => const [];
+
+  @override
+  Future<void> delete({
+    required String accountId,
+    required String draftId,
+  }) async {
+    deleted.add((accountId, draftId));
+  }
+
+  @override
+  Future<void> prune() async {}
 }
 
 const _remoteDocument = DocumentRecord(

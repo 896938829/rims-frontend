@@ -22,6 +22,7 @@ import '../../domain/entities/document_data.dart';
 import '../../domain/repositories/documents_repository.dart';
 import '../../../inventory/domain/entities/inventory_item.dart';
 import '../../../inventory/domain/repositories/inventory_repository.dart';
+import '../../../offline/domain/repositories/document_draft_repository.dart';
 import '../view_models/documents_view_model.dart';
 import '../widgets/document_action_card.dart';
 import '../widgets/document_flow_strip.dart';
@@ -44,6 +45,10 @@ final class DocumentsPage extends StatefulWidget {
     this.attachmentUserId,
     this.onScanRequested,
     this.requestScannerOnOpen = false,
+    this.draftRepository,
+    this.accountId,
+    this.observedRoleCode = '',
+    this.initialDraftId,
     super.key,
   });
 
@@ -62,6 +67,10 @@ final class DocumentsPage extends StatefulWidget {
   final String? attachmentUserId;
   final Future<InventoryItem?> Function(BuildContext context)? onScanRequested;
   final bool requestScannerOnOpen;
+  final DocumentDraftRepository? draftRepository;
+  final String? accountId;
+  final String observedRoleCode;
+  final String? initialDraftId;
 
   @override
   State<DocumentsPage> createState() => _DocumentsPageState();
@@ -84,9 +93,15 @@ final class _DocumentsPageState extends State<DocumentsPage> {
           currentWarehouse: widget.currentWarehouse,
           warehouses: widget.warehouses,
           canManageAdminDocumentActions: widget.canManageAdminDocumentActions,
+          draftRepository: widget.draftRepository,
+          accountId: widget.accountId,
+          observedRoleCode: widget.observedRoleCode,
         );
 
     _selectInitialAction();
+    if (widget.initialDraftId case final draftId?) {
+      unawaited(viewModel.openDraft(draftId));
+    }
     if (widget.requestScannerOnOpen) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _requestScan());
     }
@@ -103,6 +118,10 @@ final class _DocumentsPageState extends State<DocumentsPage> {
 
     if (widget.initialActionLabel != oldWidget.initialActionLabel) {
       _selectInitialAction();
+    }
+    final nextDraftId = widget.initialDraftId;
+    if (nextDraftId != null && nextDraftId != oldWidget.initialDraftId) {
+      unawaited(viewModel.openDraft(nextDraftId));
     }
     if (widget.requestScannerOnOpen && !oldWidget.requestScannerOnOpen) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _requestScan());
@@ -1251,8 +1270,33 @@ final class _DocumentFormState extends State<_DocumentForm> {
                   style: AppTextStyles.titleMedium,
                 ),
               ),
+              SizedBox.square(
+                dimension: 24,
+                child: IconButton(
+                  key: const Key('document-save-draft-button'),
+                  tooltip: '保存草稿',
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints.tightFor(
+                    width: 24,
+                    height: 24,
+                  ),
+                  iconSize: 20,
+                  onPressed: viewModel.isSubmitting
+                      ? null
+                      : () => unawaited(viewModel.saveDraft()),
+                  icon: const Icon(Icons.save_outlined),
+                ),
+              ),
             ],
           ),
+          if (viewModel.draftSaveError case final error?) ...[
+            const SizedBox(height: 6),
+            Text(
+              error,
+              key: const Key('document-draft-save-error'),
+              style: AppTextStyles.bodySmall.copyWith(color: AppColors.error),
+            ),
+          ],
           const SizedBox(height: 12),
           if (viewModel.isConversionAction) ...[
             _NonStandardInventorySelector(viewModel: viewModel),

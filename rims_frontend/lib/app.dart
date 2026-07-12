@@ -39,6 +39,8 @@ import 'features/offline/data/repositories/cached_auth_repository.dart';
 import 'features/offline/data/repositories/cached_inventory_repository.dart';
 import 'features/offline/data/repositories/cached_documents_repository.dart';
 import 'features/offline/data/repositories/cached_reports_repository.dart';
+import 'features/offline/data/repositories/drift_document_draft_repository.dart';
+import 'features/offline/domain/repositories/document_draft_repository.dart';
 import 'features/offline/domain/services/network_status_service.dart';
 import 'features/reports/data/datasources/reports_remote_datasource.dart';
 import 'features/reports/data/repositories/reports_repository_impl.dart';
@@ -82,6 +84,7 @@ final class _MainAppState extends State<MainApp> {
   late final DocumentsRepository _documentsRepository;
   late final InventoryRepository _inventoryRepository;
   late final ReportsRepository _reportsRepository;
+  late final DocumentDraftRepository _documentDraftRepository;
   late final AdminRepositoryImpl _adminRepository;
   late final GoRouter _router;
   late final NetworkStatusService _networkStatusService;
@@ -184,6 +187,9 @@ final class _MainAppState extends State<MainApp> {
       canViewFinancialMetricsReader: () =>
           _sessionController.currentUser?.isAdmin == true,
     );
+    _documentDraftRepository = DriftDocumentDraftRepository(
+      store: widget.offlineStore,
+    );
     _adminRepository = AdminRepositoryImpl(
       remoteDataSource: ApiAdminRemoteDataSource(_apiClient),
     );
@@ -200,6 +206,7 @@ final class _MainAppState extends State<MainApp> {
       eventBus: _eventBus,
       sessionController: _sessionController,
       scanLookupCache: _scanLookupCache,
+      documentDraftRepository: _documentDraftRepository,
     );
     _tokenExpiredSubscription = _eventBus.on<TokenExpiredEvent>().listen((_) {
       unawaited(_authRepository.logout());
