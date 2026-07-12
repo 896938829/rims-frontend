@@ -732,16 +732,16 @@ git commit -m "test: cover Android field compatibility"
 - Create: `scripts/rims_m10_smoke.ps1`
 - Create: `scripts/test_rims_m10_smoke.ps1`
 
-- [ ] **Step 1: Write wrapper self-tests for a new `field-operations` phase, camera grant/deny setup, HOME/resume hook, process recreation, network interruption, upload artifact capture, provider cleanup, and first-failure propagation.**
+- [x] **Step 1: Write wrapper self-tests for a new `field-operations` phase, camera grant/deny setup, HOME/resume hook, process recreation, network interruption, upload artifact capture, provider cleanup, and first-failure propagation.**
 
-- [ ] **Step 2: Verify RED, then add deterministic test capability injection for barcode detections and picked local files.**
+- [x] **Step 2: Verify RED, then add deterministic test capability injection for barcode detections and picked local files.**
 
 Injection is enabled only by explicit integration-test defines. Production
 paths still initialize the real camera/pickers. Android acceptance must include
 one real camera initialization/permission/lifecycle probe in addition to
 deterministic barcode delivery.
 
-- [ ] **Step 3: Implement the real-backend journey.**
+- [x] **Step 3: Implement the real-backend journey.**
 
 Required scenarios:
 
@@ -760,9 +760,9 @@ operator wrong-warehouse file list/get/download denied
 logout -> scanner stopped and staged/download cache cleared
 ```
 
-- [ ] **Step 4: Emit `RIMS_E2E_RESULT` M10 segments for camera lifecycle, scan feedback, document submission, upload first-progress, upload total, and permission boundary.**
+- [x] **Step 4: Emit `RIMS_E2E_RESULT` M10 segments for camera lifecycle, scan feedback, document submission, upload first-progress, upload total, and permission boundary.**
 
-- [ ] **Step 5: Run script self-tests and commit.**
+- [x] **Step 5: Run script self-tests and commit.**
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test_rims_android_smoke.ps1

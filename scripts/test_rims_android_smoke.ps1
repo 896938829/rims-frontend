@@ -107,6 +107,57 @@ Assert-Equal `
   -Expected 'stop-only-on-pid-and-start-time-match' `
   -Message 'Owned device cleanup policy.'
 
+$fieldPlan = (& $wrapper `
+    -ListPlan `
+    -Phase 'field-operations' `
+    -AndroidDevice 'Medium_Phone_API_36.1' `
+    -BackendPort 18080 `
+    -Output Json) -join "`n" | ConvertFrom-Json
+Assert-Equal `
+  -Actual $fieldPlan.phase `
+  -Expected 'field-operations' `
+  -Message 'M10 Android phase.'
+if (@($fieldPlan.command | Where-Object {
+      $_ -eq 'integration_test/m10_field_operations_test.dart'
+    }).Count -ne 1) {
+  throw 'M10 Android command omitted the field-operations integration test.'
+}
+foreach ($define in @(
+    '--dart-define=RIMS_E2E_FIELD_OPERATIONS=true',
+    '--dart-define=RIMS_E2E_BARCODE=M9-PAGE-0001',
+    '--dart-define=RIMS_E2E_PICKED_FILE=<provider-file>'
+  )) {
+  if (@($fieldPlan.command | Where-Object { $_ -eq $define }).Count -ne 1) {
+    throw "M10 Android command omitted '$define'."
+  }
+}
+Assert-Equal `
+  -Actual (@($fieldPlan.deviceActions) -join '|') `
+  -Expected 'camera-deny|camera-grant|home-resume|process-recreation|network-disable-enable|provider-cleanup' `
+  -Message 'M10 device action contract.'
+Assert-Equal `
+  -Actual (@($fieldPlan.failureArtifacts) -join '|') `
+  -Expected 'device-screenshot|filtered-logcat|backend-log-tails|flutter-output|upload-provider-log' `
+  -Message 'M10 upload failure evidence.'
+$fieldTestText = Get-Content `
+  -LiteralPath (Join-Path $scriptDir '..\rims_frontend\integration_test\m10_field_operations_test.dart') `
+  -Raw
+foreach ($segment in @(
+    'cameraLifecycle',
+    'scanFeedback',
+    'documentSubmission',
+    'uploadFirstProgress',
+    'uploadTotal',
+    'permissionBoundary'
+  )) {
+  if (-not $fieldTestText.Contains("segments['$segment']")) {
+    throw "M10 integration test omitted segment '$segment'."
+  }
+}
+if (-not $fieldTestText.Contains("debugPrint('RIMS_E2E_RESULT `$")) {
+  throw 'M10 integration test omitted the machine-readable result marker.'
+}
+
 $previousDevice = $env:RIMS_ANDROID_DEVICE
 try {
   $env:RIMS_ANDROID_DEVICE = $null

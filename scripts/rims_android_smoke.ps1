@@ -15,7 +15,9 @@ param(
   [ValidateSet('pre-existing', 'controller-started')]
   [string]$TestEmulatorOwnership = 'pre-existing',
   [switch]$TestPreExistingRuntime,
-  [string]$CleanupRecordPath
+  [string]$CleanupRecordPath,
+  [ValidateSet('baseline', 'field-operations')]
+  [string]$Phase = 'baseline'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -72,9 +74,29 @@ if ($KeepRunning) {
 }
 
 $apiBaseUrl = "http://10.0.2.2:$BackendPort/api/v1"
+$integrationTestPath = if ($Phase -eq 'field-operations') {
+  'integration_test/m10_field_operations_test.dart'
+} else { 'integration_test/app_e2e_test.dart' }
+$fieldDefines = if ($Phase -eq 'field-operations') {
+  @(
+    '--dart-define=RIMS_E2E_FIELD_OPERATIONS=true',
+    '--dart-define=RIMS_E2E_BARCODE=M9-PAGE-0001',
+    '--dart-define=RIMS_E2E_PICKED_FILE=<provider-file>'
+  )
+} else { @() }
+$failureArtifactNames = @(
+  'device-screenshot',
+  'filtered-logcat',
+  'backend-log-tails',
+  'flutter-output'
+)
+if ($Phase -eq 'field-operations') {
+  $failureArtifactNames += 'upload-provider-log'
+}
 $plan = [pscustomobject][ordered]@{
   schemaVersion = 1
   target = 'android'
+  phase = $Phase
   androidDevice = $AndroidDevice
   apiBaseUrl = $apiBaseUrl
   preparation = 'backend-only-lifecycle+managed-emulator-helper'
@@ -85,17 +107,22 @@ $plan = [pscustomobject][ordered]@{
   artifactDirectory = 'per-run-unique'
   command = @(
     'flutter', 'test', '--no-pub',
-    'integration_test/app_e2e_test.dart',
+    $integrationTestPath,
     '-d', '<resolved-serial>',
     "--dart-define=API_BASE_URL=$apiBaseUrl"
-  )
+  ) + $fieldDefines
+  deviceActions = if ($Phase -eq 'field-operations') {
+    @(
+      'camera-deny',
+      'camera-grant',
+      'home-resume',
+      'process-recreation',
+      'network-disable-enable',
+      'provider-cleanup'
+    )
+  } else { @() }
   readinessChecks = @('windows-healthz', 'emulator-healthz')
-  failureArtifacts = @(
-    'device-screenshot',
-    'filtered-logcat',
-    'backend-log-tails',
-    'flutter-output'
-  )
+  failureArtifacts = $failureArtifactNames
   cleanup = [pscustomobject][ordered]@{
     preExistingDevice = 'preserve'
     controllerStartedDevice = 'stop-only-on-pid-and-start-time-match'
@@ -173,11 +200,18 @@ $fixturesMutated = $false
 $hostBridgeProcess = $null
 $hostBridgeIdentity = $null
 $flutterOutputPath = Join-Path $ArtifactRoot 'flutter-output.log'
+$uploadProviderLogPath = Join-Path $ArtifactRoot 'upload-provider.log'
 $failureArtifacts = [pscustomobject][ordered]@{
   deviceScreenshot = $null
   filteredLogcat = $null
   backendLogTails = $null
   flutterOutput = $flutterOutputPath
+}
+if ($Phase -eq 'field-operations') {
+  $failureArtifacts | Add-Member `
+    -MemberType NoteProperty `
+    -Name uploadProviderLog `
+    -Value $uploadProviderLogPath
 }
 $baselineRestore = [pscustomobject][ordered]@{
   attempted = $false
@@ -304,10 +338,10 @@ function Invoke-AndroidFlutterTest {
     throw 'flutter was not found on PATH.'
   }
   $flutterArguments = @(
-    'test', '--no-pub', 'integration_test/app_e2e_test.dart',
+    'test', '--no-pub', $integrationTestPath,
     '-d', $androidSerial,
     "--dart-define=API_BASE_URL=$apiBaseUrl"
-  )
+  ) + $fieldDefines
   $flutterCommand = (@($flutter) + $flutterArguments | ForEach-Object {
       ConvertTo-RimsWindowsCommandLineArgument -Value "$_"
     }) -join ' '
@@ -481,6 +515,12 @@ function Collect-AndroidFailureArtifacts {
     Set-Content -LiteralPath $logcat -Value 'test logcat' -Encoding UTF8
     Set-Content -LiteralPath $backendTails -Value 'test backend tails' -Encoding UTF8
     Set-Content -LiteralPath $flutterOutputPath -Value 'test flutter output' -Encoding UTF8
+    if ($Phase -eq 'field-operations') {
+      Set-Content `
+        -LiteralPath $uploadProviderLogPath `
+        -Value 'test upload provider' `
+        -Encoding UTF8
+    }
   } else {
     if (-not [string]::IsNullOrWhiteSpace($androidSerial)) {
       $remoteScreenshot = '/sdcard/rims-android-smoke-failure.png'
@@ -530,6 +570,12 @@ function Collect-AndroidFailureArtifacts {
       }
     }
     $tailLines | Set-Content -LiteralPath $backendTails -Encoding UTF8
+    if ($Phase -eq 'field-operations') {
+      @(
+        'provider=compile-time deterministic selection',
+        'cleanup=owned by integration process and baseline restore'
+      ) | Set-Content -LiteralPath $uploadProviderLogPath -Encoding UTF8
+    }
   }
   if (-not (Test-Path -LiteralPath $screenshot -PathType Leaf)) {
     $screenshot = Join-Path $ArtifactRoot 'device-screenshot-unavailable.txt'
@@ -556,6 +602,51 @@ function Collect-AndroidFailureArtifacts {
   $script:failureArtifacts.deviceScreenshot = $screenshot
   $script:failureArtifacts.filteredLogcat = $logcat
   $script:failureArtifacts.backendLogTails = $backendTails
+}
+
+function Invoke-FieldOperationsDeviceSetup {
+  if ($Phase -ne 'field-operations') { return }
+  $commands = [Collections.Generic.List[string[]]]::new()
+  $commands.Add(@('shell', 'am', 'force-stop', 'com.example.rims_frontend'))
+  $commands.Add(@(
+      'shell', 'pm', 'revoke', 'com.example.rims_frontend',
+      'android.permission.CAMERA'
+    ))
+  $commands.Add(@('shell', 'input', 'keyevent', 'HOME'))
+  $commands.Add(@(
+      'shell', 'pm', 'grant', 'com.example.rims_frontend',
+      'android.permission.CAMERA'
+    ))
+  $commands.Add(@('shell', 'svc', 'wifi', 'disable'))
+  $commands.Add(@('shell', 'svc', 'wifi', 'enable'))
+  $lines = [Collections.Generic.List[string]]::new()
+  foreach ($command in $commands) {
+    $result = Invoke-Adb `
+      -Arguments (@('-s', $androidSerial) + $command) `
+      -TimeoutSeconds 30
+    [void]$lines.Add(
+      "$($command -join ' ') exit=$($result.ExitCode) $($result.StandardError)"
+    )
+  }
+  $lines | Set-Content -LiteralPath $uploadProviderLogPath -Encoding UTF8
+  Start-Sleep -Seconds 2
+}
+
+function Remove-FieldOperationsProvider {
+  if ($Phase -ne 'field-operations' -or
+      [string]::IsNullOrWhiteSpace($androidSerial)) {
+    return
+  }
+  $result = Invoke-Adb `
+    -Arguments @(
+      '-s', $androidSerial, 'shell', 'run-as', 'com.example.rims_frontend',
+      'rm', '-rf', 'cache/.rims-e2e-provider'
+    ) `
+    -TimeoutSeconds 30
+  Add-Content `
+    -LiteralPath $uploadProviderLogPath `
+    -Value "provider-cleanup exit=$($result.ExitCode) $($result.StandardError)" `
+    -Encoding UTF8
 }
 
 function Invoke-AndroidArtifactCollection {
@@ -594,6 +685,11 @@ function Restore-AndroidBaseline {
     return
   }
   $cleanupErrors = [Collections.Generic.List[string]]::new()
+  try {
+    Remove-FieldOperationsProvider
+  } catch {
+    [void]$cleanupErrors.Add("field provider: $($_.Exception.Message)")
+  }
   try {
     Stop-AndroidHostBridge
   } catch {
@@ -769,10 +865,18 @@ try {
         {
           New-Item -ItemType Directory -Force -Path $ArtifactRoot | Out-Null
           [void](Invoke-Adb -Arguments @('-s', $androidSerial, 'logcat', '-c'))
+          Invoke-FieldOperationsDeviceSetup
           $execution = Invoke-AndroidFlutterTest
           @($execution.StandardOutput, $execution.StandardError) | Set-Content `
             -LiteralPath $flutterOutputPath `
             -Encoding UTF8
+          if ($Phase -eq 'field-operations') {
+            @(([string]$execution.StandardOutput -split '\r?\n') | Where-Object {
+                $_ -match 'attachment|upload|progress|RIMS_E2E_RESULT'
+              }) | Add-Content `
+              -LiteralPath $uploadProviderLogPath `
+              -Encoding UTF8
+          }
           if ($execution.ExitCode -ne 0) {
             Throw-AndroidChildFailure `
               -Message "Android integration test failed: $(Get-RimsExternalCommandSummary -Result $execution)" `

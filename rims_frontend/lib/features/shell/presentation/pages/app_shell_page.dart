@@ -25,8 +25,10 @@ import '../../../profile/presentation/pages/profile_page.dart';
 import '../../../reports/domain/repositories/reports_repository.dart';
 import '../../../reports/presentation/pages/reports_page.dart';
 import '../../../scanner/data/mobile_scanner_capability.dart';
+import '../../../scanner/data/field_operations_scanner.dart';
 import '../../../scanner/data/system_scan_feedback.dart';
 import '../../../scanner/domain/entities/scan_data.dart';
+import '../../../scanner/domain/services/barcode_scanner_capability.dart';
 import '../../../scanner/presentation/pages/scanner_page.dart';
 import '../../../scanner/presentation/view_models/scan_session_view_model.dart';
 import '../../../scanner/presentation/widgets/keyboard_wedge_listener.dart';
@@ -186,7 +188,20 @@ final class _AppShellPageState extends State<AppShellPage> {
     final warehouse = widget.sessionController.currentWarehouse;
     if (repository == null || user == null || warehouse == null) return null;
 
-    final scanner = MobileScannerCapability();
+    final config = FieldOperationsTestConfig.current;
+    final BarcodeScannerCapability scanner;
+    final Widget camera;
+    if (config.enabled) {
+      scanner = FieldOperationsScanner(barcode: config.barcode);
+      camera = const ColoredBox(
+        key: Key('field-operations-camera'),
+        color: Colors.black,
+      );
+    } else {
+      final mobileScanner = MobileScannerCapability();
+      scanner = mobileScanner;
+      camera = MobileScanner(controller: mobileScanner.controller);
+    }
     final viewModel = ScanSessionViewModel(
       inventoryRepository: repository,
       userId: user.id.toString(),
@@ -200,7 +215,7 @@ final class _AppShellPageState extends State<AppShellPage> {
           builder: (context) => ScannerPage(
             viewModel: viewModel,
             scanner: scanner,
-            camera: MobileScanner(controller: scanner.controller),
+            camera: camera,
             returnSingleResult: true,
           ),
         ),

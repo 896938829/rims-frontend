@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../../../../core/result/failure.dart';
 import '../../../../core/theme/app_colors.dart';
+import '../../../inventory/domain/entities/inventory_item.dart';
 import '../../domain/entities/scan_data.dart';
 import '../../domain/services/barcode_scanner_capability.dart';
 import '../view_models/scan_session_view_model.dart';
@@ -36,6 +37,7 @@ final class _ScannerPageState extends State<ScannerPage>
   StreamSubscription<ScannerAccessState>? _accessSubscription;
   late ScannerAccessState _access;
   bool _torchEnabled = false;
+  bool _isReturning = false;
   double _zoom = 0;
 
   @override
@@ -94,7 +96,8 @@ final class _ScannerPageState extends State<ScannerPage>
   }
 
   void _returnSingleResult() {
-    if (!widget.returnSingleResult ||
+    if (_isReturning ||
+        !widget.returnSingleResult ||
         !mounted ||
         widget.viewModel.mode != ScanMode.single ||
         !widget.viewModel.isComplete ||
@@ -102,7 +105,18 @@ final class _ScannerPageState extends State<ScannerPage>
         widget.viewModel.lines.single.isStale) {
       return;
     }
-    Navigator.of(context).pop(widget.viewModel.lines.single.item);
+    _isReturning = true;
+    final item = widget.viewModel.lines.single.item;
+    unawaited(_clearAndReturn(item));
+  }
+
+  Future<void> _clearAndReturn(InventoryItem item) async {
+    try {
+      await widget.viewModel.clear();
+    } on Object {
+      // Returning a consumed result must not be blocked by local cleanup.
+    }
+    if (mounted) Navigator.of(context).pop(item);
   }
 
   @override

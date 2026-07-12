@@ -14,10 +14,12 @@ import 'core/theme/app_theme.dart';
 import 'features/admin/data/datasources/admin_remote_datasource.dart';
 import 'features/admin/data/repositories/admin_repository_impl.dart';
 import 'features/attachments/data/services/android_attachment_picker.dart';
+import 'features/attachments/data/services/field_operations_attachment_picker.dart';
 import 'features/attachments/data/datasources/attachments_remote_datasource.dart';
 import 'features/attachments/data/repositories/attachments_repository_impl.dart';
 import 'features/attachments/data/services/attachment_share_service.dart';
 import 'features/attachments/data/services/file_attachment_staging_store.dart';
+import 'features/attachments/domain/services/attachment_picker.dart';
 import 'features/auth/data/datasources/auth_remote_datasource.dart';
 import 'features/auth/data/repositories/auth_repository_impl.dart';
 import 'features/auth/presentation/view_models/auth_session_controller.dart';
@@ -29,6 +31,7 @@ import 'features/reports/data/datasources/reports_remote_datasource.dart';
 import 'features/reports/data/repositories/reports_repository_impl.dart';
 import 'features/scanner/domain/services/scan_lookup_cache.dart';
 import 'features/scanner/domain/services/scan_session_store.dart';
+import 'features/scanner/data/field_operations_scanner.dart';
 import 'routes/app_router.dart';
 
 class MainApp extends StatefulWidget {
@@ -44,7 +47,7 @@ final class _MainAppState extends State<MainApp> {
   final AppEventBus _eventBus = AppEventBus();
   final ScanLookupCache _scanLookupCache = ScanLookupCache();
   final ScanSessionStore _scanSessionStore = ScanSessionStore();
-  late final AndroidAttachmentPicker _attachmentPicker;
+  late final AttachmentPicker _attachmentPicker;
   late final FileAttachmentStagingStore _attachmentStagingStore;
   late final AttachmentsRepositoryImpl _attachmentsRepository;
   late final PlatformAttachmentShareService _attachmentShareService;
@@ -62,7 +65,13 @@ final class _MainAppState extends State<MainApp> {
   void initState() {
     super.initState();
     _sessionController.addListener(_handleSessionOwnership);
-    _attachmentPicker = AndroidAttachmentPicker();
+    final fieldConfig = FieldOperationsTestConfig.current;
+    _attachmentPicker = fieldConfig.enabled
+        ? FieldOperationsAttachmentPicker(
+            rootDirectory: getTemporaryDirectory,
+            providerToken: fieldConfig.pickedFile,
+          )
+        : AndroidAttachmentPicker();
     _attachmentStagingStore = FileAttachmentStagingStore(
       rootDirectory: getApplicationSupportDirectory,
       idFactory: const Uuid().v4,
@@ -137,6 +146,10 @@ final class _MainAppState extends State<MainApp> {
   @override
   void dispose() {
     _sessionController.removeListener(_handleSessionOwnership);
+    final picker = _attachmentPicker;
+    if (picker is FieldOperationsAttachmentPicker) {
+      unawaited(picker.cleanup());
+    }
     unawaited(_tokenExpiredSubscription?.cancel());
     unawaited(_eventBus.dispose());
     _router.dispose();

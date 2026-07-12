@@ -266,6 +266,52 @@ void main() {
 
     expect(harness.repository.lookups, ['301']);
     expect(find.text('Inventory page'), findsOneWidget);
+    expect(
+      harness.storage.values.keys.where(
+        (key) => key.startsWith('rims.scanner.session.v1.'),
+      ),
+      isEmpty,
+    );
+  });
+
+  testWidgets('single manual fallback returns to the requesting page', (
+    tester,
+  ) async {
+    final harness = _Harness();
+    await tester.pumpWidget(
+      MaterialApp(
+        initialRoute: '/scanner',
+        routes: {
+          '/': (_) => const Scaffold(body: Text('Document page')),
+          '/scanner': (_) => ScannerPage(
+            viewModel: harness.viewModel,
+            scanner: harness.scanner,
+            camera: const ColoredBox(color: Colors.black),
+            returnSingleResult: true,
+          ),
+        },
+      ),
+    );
+    await tester.pump();
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('scanner-manual-input')),
+      300,
+    );
+    await tester.enterText(
+      find.byKey(const Key('scanner-manual-input')),
+      ' 302 ',
+    );
+    await tester.tap(find.byKey(const Key('scanner-manual-submit')));
+    await tester.pumpAndSettle();
+
+    expect(harness.repository.lookups, ['302']);
+    expect(find.text('Document page'), findsOneWidget);
+    expect(
+      harness.storage.values.keys.where(
+        (key) => key.startsWith('rims.scanner.session.v1.'),
+      ),
+      isEmpty,
+    );
   });
 
   testWidgets('narrow screen and large text render without overflow', (

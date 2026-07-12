@@ -281,6 +281,22 @@ runtime ownership, cleanup, and business effects have been inspected.
 | Full verification | Flutter analysis clean; all 524 Flutter tests passed |
 | Android artifact | offline debug build produced `build/app/outputs/flutter-apk/app-debug.apk` |
 
+## Task 16 M10 Android Acceptance Automation Evidence
+
+| Probe | Observed result |
+| --- | --- |
+| Local ownership | M10 wrapper delegates to the Android wrapper that starts backend/emulator, owns the host bridge, resets fixtures, and restores baseline |
+| Fault hooks | camera revoke/grant, HOME, old-process stop, Wi-Fi disable/enable, and provider cleanup are explicit field-operation actions |
+| First failure | injected network-interruption failure exits 23, stops later scenarios, still runs provider cleanup, and preserves the first failed step |
+| Injection boundary | barcode and picked-file providers require `RIMS_E2E_FIELD_OPERATIONS=true`; normal builds retain real camera and Android pickers |
+| Real camera | M10 journey mounts the real camera capability for initialization/permission/lifecycle probing before deterministic delivery |
+| Scan lifecycle | permission guidance, manual fallback, pause/resume retry, duplicate accumulation, and consumed-session cleanup are automated |
+| Documents | two-product sales and inbound documents are created, completed, and matched to inventory transactions |
+| Attachments | deterministic file upload, list, replace, delete, process recreation, and owned provider cleanup are automated |
+| Result contract | six required timing segments plus document IDs, permission boundary, camera state, and recreation state emit in `RIMS_E2E_RESULT` |
+| Deterministic gates | Flutter analysis clean; all 528 Flutter tests and both PowerShell wrapper self-tests passed |
+| Runtime status | Android and real-backend execution remains pending Task 17; no acceptance PASS is claimed here |
+
 ## Scanner Scenario Evidence
 
 | Scenario | Web/unit | Android | Real backend effect | Result |

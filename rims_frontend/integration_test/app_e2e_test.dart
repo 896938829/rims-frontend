@@ -137,6 +137,7 @@ void main() {
         );
         recordSegment('logout');
         final reportData = <String, Object?>{
+          'phase': 'baseline',
           'runId': runId,
           'durationMs': DateTime.now().difference(startedAt).inMilliseconds,
           'segmentsMs': segmentDurations,
