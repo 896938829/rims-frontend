@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../../inventory/domain/entities/inventory_item.dart';
+import '../../../offline/domain/entities/cache_snapshot.dart';
+import '../../../offline/domain/services/offline_store.dart';
 import '../entities/scan_data.dart';
 
 abstract interface class AsyncScanStorage {
@@ -145,6 +147,7 @@ final class CachedScanLookup {
 final class ScanLookupCache {
   ScanLookupCache({
     AsyncScanStorage? storage,
+    this.offlineStore,
     this.ttl = const Duration(hours: 24),
     this.maxEntries = 500,
     DateTime Function()? now,
@@ -153,8 +156,10 @@ final class ScanLookupCache {
 
   static const int schemaVersion = 1;
   static const String _keyPrefix = 'rims.scanner.lookup.v1.';
+  static const String _offlineNamespace = 'scanner.lookup';
 
   final AsyncScanStorage storage;
+  final OfflineStore? offlineStore;
   final Duration ttl;
   final int maxEntries;
   final DateTime Function() _now;
@@ -171,6 +176,15 @@ final class ScanLookupCache {
   }) async {
     final normalizedBarcode = barcode.trim();
     if (normalizedBarcode.isEmpty || maxEntries <= 0) {
+      return;
+    }
+    if (offlineStore != null) {
+      await _putOffline(
+        userId: userId,
+        warehouseId: warehouseId,
+        barcode: normalizedBarcode,
+        item: item,
+      );
       return;
     }
 
@@ -209,6 +223,13 @@ final class ScanLookupCache {
     required int warehouseId,
     required String barcode,
   }) async {
+    if (offlineStore != null) {
+      return _getOffline(
+        userId: userId,
+        warehouseId: warehouseId,
+        barcode: barcode.trim(),
+      );
+    }
     final envelope = await _readEnvelope(
       userId: userId,
       warehouseId: warehouseId,
@@ -241,9 +262,138 @@ final class ScanLookupCache {
   }
 
   Future<void> clearForUser(String userId) async {
+    await offlineStore?.deleteCacheNamespace(
+      accountId: userId,
+      namespace: _offlineNamespace,
+    );
     final prefix = '$_keyPrefix${Uri.encodeComponent(userId)}.';
     final matchingKeys = await storage.keys(prefix: prefix);
     await Future.wait(matchingKeys.map(storage.delete));
+  }
+
+  Future<void> _putOffline({
+    required String userId,
+    required int warehouseId,
+    required String barcode,
+    required InventoryItem item,
+  }) async {
+    final current = _now().toUtc();
+    final legacy = await _readEnvelope(
+      userId: userId,
+      warehouseId: warehouseId,
+    );
+    final entries =
+        (legacy?.entries ?? <_LookupEntry>[])
+            .where(
+              (entry) =>
+                  !_isExpired(entry, current) && entry.barcode != barcode,
+            )
+            .toList()
+          ..add(
+            _LookupEntry(
+              barcode: barcode,
+              product: ScanProductIdentity.fromInventoryItem(item),
+              cachedAt: current,
+            ),
+          )
+          ..sort((left, right) => left.cachedAt.compareTo(right.cachedAt));
+    if (entries.length > maxEntries) {
+      entries.removeRange(0, entries.length - maxEntries);
+    }
+    await _writeOfflineEntries(
+      userId: userId,
+      warehouseId: warehouseId,
+      entries: entries,
+    );
+    if (legacy != null) {
+      await storage.delete(
+        storageKey(userId: userId, warehouseId: warehouseId),
+      );
+    }
+  }
+
+  Future<CachedScanLookup?> _getOffline({
+    required String userId,
+    required int warehouseId,
+    required String barcode,
+  }) async {
+    final current = _now().toUtc();
+    final record = await offlineStore!.readCache(
+      _offlineKey(userId, warehouseId, barcode),
+      schemaVersion: schemaVersion,
+    );
+    if (record != null && record.expiresAt.isAfter(current)) {
+      return _lookupFromPayload(record.payload);
+    }
+
+    final legacy = await _readEnvelope(
+      userId: userId,
+      warehouseId: warehouseId,
+    );
+    if (legacy == null) return null;
+    final entries = legacy.entries
+        .where((entry) => !_isExpired(entry, current))
+        .toList(growable: false);
+    await _writeOfflineEntries(
+      userId: userId,
+      warehouseId: warehouseId,
+      entries: entries,
+    );
+    await storage.delete(storageKey(userId: userId, warehouseId: warehouseId));
+    for (final entry in entries) {
+      if (entry.barcode == barcode) {
+        return CachedScanLookup(
+          identity: entry.product,
+          cachedAt: entry.cachedAt,
+        );
+      }
+    }
+    return null;
+  }
+
+  Future<void> _writeOfflineEntries({
+    required String userId,
+    required int warehouseId,
+    required List<_LookupEntry> entries,
+  }) async {
+    for (final entry in entries) {
+      await offlineStore!.writeCache(
+        CacheRecord(
+          key: _offlineKey(userId, warehouseId, entry.barcode),
+          payload: {
+            'product': entry.product.toJson(),
+            'cached_at': entry.cachedAt.toIso8601String(),
+          },
+          schemaVersion: schemaVersion,
+          fetchedAt: entry.cachedAt,
+          expiresAt: entry.cachedAt.add(ttl),
+        ),
+      );
+    }
+    await offlineStore!.enforceCacheLimit(
+      accountId: userId,
+      warehouseId: warehouseId,
+      namespace: _offlineNamespace,
+      maxRecords: maxEntries,
+    );
+  }
+
+  CachedScanLookup _lookupFromPayload(Map<String, Object?> payload) {
+    return CachedScanLookup(
+      identity: ScanProductIdentity.fromJson(
+        Map<String, Object?>.from(payload['product']! as Map),
+      ),
+      cachedAt: DateTime.parse(payload['cached_at']! as String).toUtc(),
+    );
+  }
+
+  CacheKey _offlineKey(String userId, int warehouseId, String barcode) {
+    return CacheKey(
+      accountId: userId,
+      warehouseId: warehouseId,
+      namespace: _offlineNamespace,
+      entityKey: barcode,
+    );
   }
 
   bool _isExpired(_LookupEntry entry, DateTime now) {

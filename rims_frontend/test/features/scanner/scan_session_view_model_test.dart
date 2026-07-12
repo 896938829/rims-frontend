@@ -338,6 +338,32 @@ void main() {
     expect(harness.viewModel.issue, isNull);
     expect(harness.feedback.kinds.single, ScanFeedbackKind.accepted);
   });
+
+  test(
+    'repository cache success remains stale and non-authoritative',
+    () async {
+      final harness = _Harness(
+        repository: _FakeInventoryRepository(
+          onFind: (_) async =>
+              Success(_item(9, availableQuantity: 0, stockQuantity: 0)),
+          readStatus: InventoryReadStatus(
+            source: InventoryDataSource.cache,
+            fetchedAt: DateTime.utc(2026, 7, 13),
+            expiresAt: DateTime.utc(2026, 7, 14),
+          ),
+        ),
+        mode: ScanMode.batch,
+      );
+
+      await harness.viewModel.accept(_scan('A'));
+
+      expect(harness.viewModel.lines.single.isStale, isTrue);
+      await expectLater(
+        harness.cache.storage.keys(prefix: 'rims.scanner.lookup.'),
+        completion(isEmpty),
+      );
+    },
+  );
 }
 
 final class _Harness {
@@ -376,11 +402,16 @@ final class _Harness {
   late final ScanSessionViewModel viewModel;
 }
 
-final class _FakeInventoryRepository implements InventoryRepository {
-  _FakeInventoryRepository({required this.onFind});
+final class _FakeInventoryRepository
+    implements InventoryRepository, InventoryReadMetadata {
+  _FakeInventoryRepository({required this.onFind, this.readStatus});
 
   final Future<Result<InventoryItem>> Function(String barcode) onFind;
   final List<String> lookups = <String>[];
+  final InventoryReadStatus? readStatus;
+
+  @override
+  InventoryReadStatus? get lastReadStatus => readStatus;
 
   @override
   Future<Result<InventoryItem>> findProductByBarcode(String barcode) {

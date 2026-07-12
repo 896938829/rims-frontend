@@ -149,6 +149,19 @@ final class OfflineDatabase extends _$OfflineDatabase implements OfflineStore {
   }
 
   @override
+  Future<void> deleteCacheNamespace({
+    required String accountId,
+    required String namespace,
+  }) async {
+    await (delete(offlineCacheEntries)..where(
+          (entry) =>
+              entry.accountId.equals(accountId) &
+              entry.namespace.equals(namespace),
+        ))
+        .go();
+  }
+
+  @override
   Future<void> saveDraft(DocumentDraft draft) async {
     await into(offlineDocumentDrafts).insertOnConflictUpdate(
       OfflineDocumentDraftsCompanion.insert(

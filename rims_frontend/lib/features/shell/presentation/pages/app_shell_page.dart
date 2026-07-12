@@ -29,6 +29,7 @@ import '../../../scanner/data/field_operations_scanner.dart';
 import '../../../scanner/data/system_scan_feedback.dart';
 import '../../../scanner/domain/entities/scan_data.dart';
 import '../../../scanner/domain/services/barcode_scanner_capability.dart';
+import '../../../scanner/domain/services/scan_lookup_cache.dart';
 import '../../../scanner/presentation/pages/scanner_page.dart';
 import '../../../scanner/presentation/view_models/scan_session_view_model.dart';
 import '../../../scanner/presentation/widgets/keyboard_wedge_listener.dart';
@@ -47,6 +48,7 @@ final class AppShellPage extends StatefulWidget {
     this.attachmentStagingStore,
     this.attachmentShareService,
     this.eventBus,
+    this.scanLookupCache,
     super.key,
   });
 
@@ -61,6 +63,7 @@ final class AppShellPage extends StatefulWidget {
   final AttachmentStagingStore? attachmentStagingStore;
   final AttachmentShareService? attachmentShareService;
   final AppEventBus? eventBus;
+  final ScanLookupCache? scanLookupCache;
 
   @override
   State<AppShellPage> createState() => _AppShellPageState();
@@ -207,6 +210,7 @@ final class _AppShellPageState extends State<AppShellPage> {
       userId: user.id.toString(),
       warehouseId: warehouse.id,
       feedback: SystemScanFeedback(),
+      cache: widget.scanLookupCache,
       mode: ScanMode.single,
     );
     try {

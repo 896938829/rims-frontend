@@ -20,6 +20,11 @@ abstract interface class OfflineStore {
     required int warehouseId,
   });
 
+  Future<void> deleteCacheNamespace({
+    required String accountId,
+    required String namespace,
+  });
+
   Future<void> saveDraft(DocumentDraft draft);
 
   Future<List<DocumentDraft>> listDrafts(String accountId);

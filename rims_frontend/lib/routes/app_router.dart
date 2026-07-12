@@ -12,6 +12,7 @@ import '../features/auth/presentation/view_models/auth_session_controller.dart';
 import '../features/documents/domain/repositories/documents_repository.dart';
 import '../features/inventory/domain/repositories/inventory_repository.dart';
 import '../features/reports/domain/repositories/reports_repository.dart';
+import '../features/scanner/domain/services/scan_lookup_cache.dart';
 import '../features/shell/presentation/pages/app_shell_page.dart';
 import 'route_paths.dart';
 
@@ -27,6 +28,7 @@ GoRouter createAppRouter({
   AttachmentStagingStore? attachmentStagingStore,
   AttachmentShareService? attachmentShareService,
   AppEventBus? eventBus,
+  ScanLookupCache? scanLookupCache,
   String initialLocation = RoutePaths.login,
 }) {
   return GoRouter(
@@ -76,6 +78,7 @@ GoRouter createAppRouter({
           attachmentShareService: attachmentShareService,
           eventBus: eventBus,
           sessionController: sessionController,
+          scanLookupCache: scanLookupCache,
         ),
       ),
     ],

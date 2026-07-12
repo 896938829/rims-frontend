@@ -112,6 +112,31 @@ final class _InventoryPageState extends State<InventoryPage> {
           child: ListView(
             children: [
               _InventoryHeader(warehouseName: viewModel.warehouseName),
+              if (viewModel.cacheStatusLabel case final label?) ...[
+                const SizedBox(height: 10),
+                Semantics(
+                  label: label,
+                  child: Row(
+                    key: const Key('inventory-cache-status'),
+                    children: [
+                      const Icon(
+                        Icons.cloud_off_outlined,
+                        size: 16,
+                        color: AppColors.warning,
+                      ),
+                      const SizedBox(width: 6),
+                      Expanded(
+                        child: Text(
+                          label,
+                          style: AppTextStyles.bodySmall.copyWith(
+                            color: AppColors.textSecondary,
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
               const SizedBox(height: 14),
               _InventorySearchBar(
                 onChanged: (value) => unawaited(viewModel.updateQuery(value)),

@@ -2,6 +2,9 @@ import 'dart:convert';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rims_frontend/features/inventory/domain/entities/inventory_item.dart';
+import 'package:rims_frontend/features/offline/data/repositories/memory_offline_store.dart';
+import 'package:rims_frontend/features/offline/domain/entities/cache_snapshot.dart';
+import 'package:rims_frontend/features/offline/domain/services/offline_store.dart';
 import 'package:rims_frontend/features/scanner/domain/entities/scan_data.dart';
 import 'package:rims_frontend/features/scanner/domain/services/scan_lookup_cache.dart';
 import 'package:rims_frontend/features/scanner/domain/services/scan_session_store.dart';
@@ -180,6 +183,61 @@ void main() {
         expect(line.item.stockQuantity, 0);
       },
     );
+
+    test('legacy lookup migrates to Drift before deleting old key', () async {
+      final legacy = MemoryScanStorage();
+      await ScanLookupCache(storage: legacy).put(
+        userId: 'user-1',
+        warehouseId: 1,
+        barcode: 'A',
+        item: _item(productId: 1),
+      );
+      final offlineStore = MemoryOfflineStore();
+      final migrated = ScanLookupCache(
+        storage: legacy,
+        offlineStore: offlineStore,
+      );
+
+      final lookup = await migrated.get(
+        userId: 'user-1',
+        warehouseId: 1,
+        barcode: 'A',
+      );
+
+      expect(lookup?.identity.productId, 1);
+      expect(legacy.values, isEmpty);
+      expect(
+        await offlineStore.readCache(
+          const CacheKey(
+            accountId: 'user-1',
+            warehouseId: 1,
+            namespace: 'scanner.lookup',
+            entityKey: 'A',
+          ),
+        ),
+        isNotNull,
+      );
+    });
+
+    test('failed Drift migration preserves the legacy lookup key', () async {
+      final legacy = MemoryScanStorage();
+      await ScanLookupCache(storage: legacy).put(
+        userId: 'user-1',
+        warehouseId: 1,
+        barcode: 'A',
+        item: _item(productId: 1),
+      );
+      final migrated = ScanLookupCache(
+        storage: legacy,
+        offlineStore: _FailingOfflineStore(),
+      );
+
+      await expectLater(
+        migrated.get(userId: 'user-1', warehouseId: 1, barcode: 'A'),
+        throwsStateError,
+      );
+      expect(legacy.values, isNotEmpty);
+    });
   });
 
   group('ScanSessionStore', () {
@@ -360,4 +418,18 @@ final class MemoryScanStorage implements AsyncScanStorage {
   Future<void> write(String key, String value) async {
     values[key] = value;
   }
+}
+
+final class _FailingOfflineStore implements OfflineStore {
+  @override
+  Future<CacheRecord?> readCache(CacheKey key, {int? schemaVersion}) async =>
+      null;
+
+  @override
+  Future<void> writeCache(CacheRecord record) async {
+    throw StateError('disk full');
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }

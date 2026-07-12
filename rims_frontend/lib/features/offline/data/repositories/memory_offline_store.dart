@@ -70,6 +70,18 @@ final class MemoryOfflineStore implements OfflineStore {
   }
 
   @override
+  Future<void> deleteCacheNamespace({
+    required String accountId,
+    required String namespace,
+  }) async {
+    _cache.removeWhere(
+      (_, record) =>
+          record.key.accountId == accountId &&
+          record.key.namespace == namespace,
+    );
+  }
+
+  @override
   Future<void> saveDraft(DocumentDraft draft) async {
     _drafts[draft.id] = draft;
   }

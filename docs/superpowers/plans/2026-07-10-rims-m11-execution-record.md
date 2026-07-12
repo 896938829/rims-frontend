@@ -22,7 +22,7 @@ counts, encrypted storage ownership, cleanup, and baseline restore are read.
 | Verified network reachability | 3, 16 | captive/unreachable/switch probes | service PASS; fault harness pending |
 | Account/warehouse scoped cache | 4-7 | cache keys, invalidation, no cross-scope read | primitives PASS; repositories pending |
 | User/warehouse references | 5 | secure-token gate and cached projection | PASS |
-| Product/inventory/alerts/barcode | 6 | offline read, stale source/age, no mutation authority | planned |
+| Product/inventory/alerts/barcode | 6 | offline read, stale source/age, no mutation authority | PASS |
 | Documents/details/reports | 7 | offline read and financial field boundary | planned |
 | Six document draft types | 8, 9 | autosave, reopen, recreation, ownership | planned |
 | Explicit reviewed queueing | 11-13 | confirmation and immutable payload | planned |
@@ -114,6 +114,20 @@ counts, encrypted storage ownership, cleanup, and baseline restore are read.
 | Failure | network restore preserves token; authentication/authorization failures clear account cache/reference |
 | Ownership | account and warehouse events drive account cleanup and old-warehouse cache invalidation |
 | GREEN | strict analyze PASS; auth, cached auth, widget, and Drift regression tests PASS (53 tests) |
+
+## Task 6 Inventory Read Evidence
+
+| Probe | Observed result |
+| --- | --- |
+| RED | cached inventory repository, metadata, pagination-gap handling, and Drift scan migration were absent |
+| Scope | exact keyword/page keys are isolated by secure account and current warehouse |
+| Pagination | cached pages remain contiguous; a missing next page clamps total and disables hasMore |
+| Inventory | successful refresh replaces quantities and preserves disabled/status fields; alerts and non-standard pages use separate namespaces |
+| Barcode | cached barcode data preserves identity only and forces available/stock quantities to zero |
+| UI/authority | page renders `离线缓存 · 更新于 <time>`; cached data cannot authorize inventory-setting mutation |
+| Migration | complete legacy scan envelope is written to Drift before old key deletion; write failure preserves legacy data |
+| Scanner | repository cache success remains visibly stale and is not rewritten as authoritative scan data |
+| GREEN | strict analyze PASS; inventory, scanner, offline, and widget regression suites PASS (163 tests); release Web build PASS |
 
 ## Final Android State Evidence
 

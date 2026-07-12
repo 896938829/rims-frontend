@@ -91,13 +91,21 @@ final class ScanSessionViewModel extends ChangeNotifier {
     isLookingUp = false;
     await result.when(
       success: (item) async {
-        await _cache.put(
-          userId: userId,
-          warehouseId: warehouseId,
-          barcode: barcode,
-          item: item,
-        );
-        await _acceptItem(item, isStale: false);
+        final isCached =
+            inventoryRepository is InventoryReadMetadata &&
+            (inventoryRepository as InventoryReadMetadata)
+                    .lastReadStatus
+                    ?.isCached ==
+                true;
+        if (!isCached) {
+          await _cache.put(
+            userId: userId,
+            warehouseId: warehouseId,
+            barcode: barcode,
+            item: item,
+          );
+        }
+        await _acceptItem(item, isStale: isCached);
       },
       failure: (failure) async {
         if (failure is NetworkFailure) {

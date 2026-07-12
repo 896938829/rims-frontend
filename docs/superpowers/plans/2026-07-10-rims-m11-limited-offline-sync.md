@@ -361,22 +361,22 @@ feat: cache session warehouse references
 - Modify: `rims_frontend/test/features/inventory/inventory_view_model_test.dart`
 - Modify: `rims_frontend/test/features/scanner/scan_session_view_model_test.dart`
 
-- [ ] **Step 1: Write failing tests for page snapshots, exact query keys, warehouse isolation, barcode fallback, stale quantity labels, disabled products, pagination gaps, and successful refresh replacement.**
+- [x] **Step 1: Write failing tests for page snapshots, exact query keys, warehouse isolation, barcode fallback, stale quantity labels, disabled products, pagination gaps, and successful refresh replacement.**
 
-- [ ] **Step 2: Implement cached inventory repository decoration.**
+- [x] **Step 2: Implement cached inventory repository decoration.**
 
 Cache each authoritative page plus query/filter identity. Offline pagination may
 return only contiguous cached pages and must expose `hasMore=false` at the first
 gap. Barcode cache reuses Drift instead of shared preferences after migration.
 
-- [ ] **Step 3: Render explicit source and age.**
+- [x] **Step 3: Render explicit source and age.**
 
 Cached stock must show `离线缓存 · 更新于 <time>` and must never enable a stock
 mutation solely because cached quantity appears sufficient.
 
-- [ ] **Step 4: Migrate and remove old barcode preference keys only after Drift write succeeds.**
+- [x] **Step 4: Migrate and remove old barcode preference keys only after Drift write succeeds.**
 
-- [ ] **Step 5: Run focused tests and commit.**
+- [x] **Step 5: Run focused tests and commit.**
 
 ```text
 feat: add offline inventory reads

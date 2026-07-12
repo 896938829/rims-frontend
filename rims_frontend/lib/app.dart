@@ -31,9 +31,11 @@ import 'features/documents/data/datasources/documents_remote_datasource.dart';
 import 'features/documents/data/repositories/documents_repository_impl.dart';
 import 'features/inventory/data/datasources/inventory_remote_datasource.dart';
 import 'features/inventory/data/repositories/inventory_repository_impl.dart';
+import 'features/inventory/domain/repositories/inventory_repository.dart';
 import 'features/offline/domain/services/offline_store.dart';
 import 'features/offline/data/services/connectivity_network_status_service.dart';
 import 'features/offline/data/repositories/cached_auth_repository.dart';
+import 'features/offline/data/repositories/cached_inventory_repository.dart';
 import 'features/offline/domain/services/network_status_service.dart';
 import 'features/reports/data/datasources/reports_remote_datasource.dart';
 import 'features/reports/data/repositories/reports_repository_impl.dart';
@@ -60,7 +62,7 @@ final class _MainAppState extends State<MainApp> {
   late final AuthSessionController _sessionController;
   final AppSecureStorage _secureStorage = const AppSecureStorage();
   final AppEventBus _eventBus = AppEventBus();
-  final ScanLookupCache _scanLookupCache = ScanLookupCache();
+  late final ScanLookupCache _scanLookupCache;
   final ScanSessionStore _scanSessionStore = ScanSessionStore();
   late final AttachmentPicker _attachmentPicker;
   late final FileAttachmentStagingStore _attachmentStagingStore;
@@ -74,7 +76,7 @@ final class _MainAppState extends State<MainApp> {
   late final ApiClient _apiClient;
   late final AuthRepository _authRepository;
   late final DocumentsRepositoryImpl _documentsRepository;
-  late final InventoryRepositoryImpl _inventoryRepository;
+  late final InventoryRepository _inventoryRepository;
   late final ReportsRepositoryImpl _reportsRepository;
   late final AdminRepositoryImpl _adminRepository;
   late final GoRouter _router;
@@ -86,6 +88,7 @@ final class _MainAppState extends State<MainApp> {
   void initState() {
     super.initState();
     _sessionController = AuthSessionController(eventBus: _eventBus);
+    _scanLookupCache = ScanLookupCache(offlineStore: widget.offlineStore);
     _sessionController.addListener(_handleSessionOwnership);
     _networkStatusService =
         widget.networkStatusService ?? _createNetworkStatusService();
@@ -151,8 +154,14 @@ final class _MainAppState extends State<MainApp> {
     _documentsRepository = DocumentsRepositoryImpl(
       remoteDataSource: ApiDocumentsRemoteDataSource(_apiClient),
     );
-    _inventoryRepository = InventoryRepositoryImpl(
+    final inventoryRepository = InventoryRepositoryImpl(
       remoteDataSource: ApiInventoryRemoteDataSource(_apiClient),
+    );
+    _inventoryRepository = CachedInventoryRepository(
+      delegate: inventoryRepository,
+      store: widget.offlineStore,
+      accountIdReader: () => _sessionController.currentUser?.id.toString(),
+      warehouseIdReader: () => _sessionController.currentWarehouse?.id,
     );
     _reportsRepository = ReportsRepositoryImpl(
       remoteDataSource: ApiReportsRemoteDataSource(_apiClient),
@@ -172,6 +181,7 @@ final class _MainAppState extends State<MainApp> {
       attachmentShareService: _attachmentShareService,
       eventBus: _eventBus,
       sessionController: _sessionController,
+      scanLookupCache: _scanLookupCache,
     );
     _tokenExpiredSubscription = _eventBus.on<TokenExpiredEvent>().listen((_) {
       unawaited(_authRepository.logout());

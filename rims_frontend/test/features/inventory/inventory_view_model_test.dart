@@ -660,6 +660,55 @@ void main() {
     expect(viewModel.items, [_standardItem]);
     expect(viewModel.hasMore, isFalse);
   });
+
+  testWidgets('cached inventory renders explicit source and update time', (
+    tester,
+  ) async {
+    final repository = _MetadataInventoryRepository(
+      status: InventoryReadStatus(
+        source: InventoryDataSource.cache,
+        fetchedAt: DateTime(2026, 7, 13, 12),
+        expiresAt: DateTime(2026, 7, 14, 12),
+      ),
+    );
+    final viewModel = InventoryViewModel(repository: repository);
+    await viewModel.load();
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: InventoryPage(viewModel: viewModel)),
+      ),
+    );
+
+    expect(viewModel.isShowingCachedData, isTrue);
+    expect(find.text('离线缓存 · 更新于 2026-07-13 12:00'), findsOneWidget);
+  });
+
+  test(
+    'cached quantities cannot authorize inventory setting mutation',
+    () async {
+      final repository = _MetadataInventoryRepository(
+        status: InventoryReadStatus(
+          source: InventoryDataSource.cache,
+          fetchedAt: DateTime(2026, 7, 13, 12),
+          expiresAt: DateTime(2026, 7, 14, 12),
+        ),
+      );
+      final viewModel = InventoryViewModel(
+        repository: repository,
+        canManageInventorySettings: true,
+      );
+      await viewModel.load();
+      viewModel.selectItem(_standardItem);
+
+      expect(
+        await viewModel.updateSelectedItemSettings(alertThreshold: 3),
+        isFalse,
+      );
+      expect(repository.settingsCalls, 0);
+      expect(viewModel.settingsError, '离线缓存不可用于库存设置变更');
+    },
+  );
 }
 
 const _standardItem = InventoryItem(
@@ -1077,6 +1126,47 @@ final class _QueuedInventoryRepository implements InventoryRepository {
     int? alertThreshold,
     int? status,
   }) async {
+    return const Success(_updatedStandardItem);
+  }
+}
+
+final class _MetadataInventoryRepository
+    implements InventoryRepository, InventoryReadMetadata {
+  _MetadataInventoryRepository({required this.status});
+
+  final InventoryReadStatus status;
+  int settingsCalls = 0;
+
+  @override
+  InventoryReadStatus? get lastReadStatus => status;
+
+  @override
+  Future<Result<PageData<InventoryItem>>> listInventory({
+    String keyword = '',
+    int page = 1,
+  }) async => Success(_inventoryPage([_standardItem]));
+
+  @override
+  Future<Result<PageData<InventoryItem>>> listInventoryAlerts({
+    int page = 1,
+  }) async => Success(_inventoryPage([_standardItem]));
+
+  @override
+  Future<Result<InventoryItem>> findProductByBarcode(String barcode) async =>
+      const Success(_barcodeItem);
+
+  @override
+  Future<Result<PageData<NonStandardInventoryItem>>> listNonStandardInventory({
+    int page = 1,
+  }) async => Success(_nonStandardInventoryPage([]));
+
+  @override
+  Future<Result<InventoryItem>> updateInventorySettings({
+    required int inventoryId,
+    int? alertThreshold,
+    int? status,
+  }) async {
+    settingsCalls += 1;
     return const Success(_updatedStandardItem);
   }
 }

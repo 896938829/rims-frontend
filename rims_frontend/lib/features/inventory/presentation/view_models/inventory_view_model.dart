@@ -49,6 +49,7 @@ final class InventoryViewModel extends ChangeNotifier {
   int _queryGeneration = 0;
   int? _loadingMoreGeneration;
   bool _reachedEnd = false;
+  InventoryReadStatus? _readStatus;
 
   String get query => _query;
   String get selectedTab => _selectedTab;
@@ -70,6 +71,21 @@ final class InventoryViewModel extends ChangeNotifier {
   List<TransactionRecord> get transactions =>
       List<TransactionRecord>.unmodifiable(_transactions);
   InventoryItem? get selectedItem => _selectedItem;
+  InventoryReadStatus? get readStatus => _readStatus;
+  bool get isShowingCachedData => _readStatus?.isCached ?? false;
+  String? get cacheStatusLabel {
+    final status = _readStatus;
+    if (status == null || !status.isCached) return null;
+    final value = status.fetchedAt.toLocal();
+    final date =
+        '${value.year.toString().padLeft(4, '0')}-'
+        '${value.month.toString().padLeft(2, '0')}-'
+        '${value.day.toString().padLeft(2, '0')}';
+    final time =
+        '${value.hour.toString().padLeft(2, '0')}:'
+        '${value.minute.toString().padLeft(2, '0')}';
+    return '离线缓存 · 更新于 $date $time';
+  }
 
   List<String> get tabs => const ['商品', '标准', '低库存', '非标', '停用'];
 
@@ -160,6 +176,7 @@ final class InventoryViewModel extends ChangeNotifier {
         _total = pageData.total;
         _reachedEnd = pageData.items.isEmpty || !pageData.hasNextPage;
         _errorMessage = null;
+        _captureReadStatus(repository);
       },
       failure: (failure) {
         _errorMessage = failure.message;
@@ -207,6 +224,7 @@ final class InventoryViewModel extends ChangeNotifier {
         _total = pageData.total;
         _reachedEnd = pageData.items.isEmpty || !pageData.hasNextPage;
         _loadMoreFailure = null;
+        _captureReadStatus(repository);
       },
       failure: (failure) {
         _loadMoreFailure = failure;
@@ -368,6 +386,12 @@ final class InventoryViewModel extends ChangeNotifier {
       return false;
     }
 
+    if (isShowingCachedData) {
+      _settingsError = '离线缓存不可用于库存设置变更';
+      notifyListeners();
+      return false;
+    }
+
     final item = _selectedItem;
     if (item == null) {
       _settingsError = '请选择库存商品';
@@ -441,6 +465,12 @@ final class InventoryViewModel extends ChangeNotifier {
 
     _selectedItem = null;
     notifyListeners();
+  }
+
+  void _captureReadStatus(InventoryRepository repository) {
+    _readStatus = repository is InventoryReadMetadata
+        ? (repository as InventoryReadMetadata).lastReadStatus
+        : null;
   }
 
   String _formatInt(int value) {
