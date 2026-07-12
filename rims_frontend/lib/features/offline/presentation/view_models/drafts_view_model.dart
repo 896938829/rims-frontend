@@ -1,6 +1,8 @@
 import 'package:flutter/foundation.dart';
 import 'package:uuid/uuid.dart';
 
+import '../../../../core/result/result.dart';
+import '../../../attachments/domain/services/attachment_staging_store.dart';
 import '../../domain/entities/document_draft.dart';
 import '../../domain/repositories/document_draft_repository.dart';
 
@@ -21,6 +23,8 @@ final class DraftsViewModel extends ChangeNotifier {
     required this.accountId,
     required this.roleCode,
     required this.warehouseId,
+    this.attachmentStagingStore,
+    this.attachmentUserId,
     String Function()? draftIdFactory,
     DateTime Function()? now,
   }) : draftIdFactory = draftIdFactory ?? const Uuid().v4,
@@ -29,6 +33,8 @@ final class DraftsViewModel extends ChangeNotifier {
   final DocumentDraftRepository repository;
   final String Function() draftIdFactory;
   final DateTime Function() now;
+  final DraftAttachmentStagingStore? attachmentStagingStore;
+  final String? attachmentUserId;
   String accountId;
   String roleCode;
   int warehouseId;
@@ -100,28 +106,64 @@ final class DraftsViewModel extends ChangeNotifier {
     final source = await open(draftId);
     if (source == null) return null;
     final timestamp = now().toUtc();
+    final targetDraftId = draftIdFactory();
+    var duplicatedAttachmentIds = const <String>[];
+    if (source.attachmentStagingIds.isNotEmpty) {
+      final stagingStore = attachmentStagingStore;
+      final userId = attachmentUserId;
+      if (stagingStore == null || userId == null) {
+        _errorMessage = 'Draft attachment copy is unavailable.';
+        _notify();
+        return null;
+      }
+      final duplicated = await stagingStore.duplicateDraftAttachments(
+        userId: userId,
+        sourceDraftId: source.id,
+        targetDraftId: targetDraftId,
+        requestIds: source.attachmentStagingIds,
+      );
+      switch (duplicated) {
+        case Success(:final data):
+          duplicatedAttachmentIds = data
+              .map((item) => item.pending.requestId)
+              .toList(growable: false);
+        case FailureResult(:final failure):
+          _errorMessage = failure.message;
+          _notify();
+          return null;
+      }
+    }
     final duplicate = DocumentDraft(
-      id: draftIdFactory(),
+      id: targetDraftId,
       accountId: accountId,
       warehouseId: source.warehouseId,
       docType: source.docType,
       observedRoleCode: roleCode,
       payload: source.payload,
+      attachmentStagingIds: duplicatedAttachmentIds,
       createdAt: timestamp,
       updatedAt: timestamp,
     );
     final result = await repository.save(duplicate, expectedVersion: 0);
-    return result.when(
-      success: (saved) {
-        _replaceOrAdd(saved);
-        return saved;
-      },
-      failure: (failure) {
+    switch (result) {
+      case Success(:final data):
+        _replaceOrAdd(data);
+        return data;
+      case FailureResult(:final failure):
+        final stagingStore = attachmentStagingStore;
+        final userId = attachmentUserId;
+        if (stagingStore != null &&
+            userId != null &&
+            duplicatedAttachmentIds.isNotEmpty) {
+          await stagingStore.removeStagedAttachments(
+            userId: userId,
+            requestIds: duplicatedAttachmentIds,
+          );
+        }
         _errorMessage = failure.message;
         _notify();
         return null;
-      },
-    );
+    }
   }
 
   Future<bool> renameRemark(String draftId, String remark) async {

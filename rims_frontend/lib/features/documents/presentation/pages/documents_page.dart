@@ -102,7 +102,7 @@ final class _DocumentsPageState extends State<DocumentsPage> {
 
     _selectInitialAction();
     if (widget.initialDraftId case final draftId?) {
-      unawaited(viewModel.openDraft(draftId));
+      unawaited(_openDraft(draftId));
     }
     if (widget.requestScannerOnOpen) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _requestScan());
@@ -123,7 +123,7 @@ final class _DocumentsPageState extends State<DocumentsPage> {
     }
     final nextDraftId = widget.initialDraftId;
     if (nextDraftId != null && nextDraftId != oldWidget.initialDraftId) {
-      unawaited(viewModel.openDraft(nextDraftId));
+      unawaited(_openDraft(nextDraftId));
     }
     if (widget.requestScannerOnOpen && !oldWidget.requestScannerOnOpen) {
       WidgetsBinding.instance.addPostFrameCallback((_) => _requestScan());
@@ -161,6 +161,13 @@ final class _DocumentsPageState extends State<DocumentsPage> {
 
   void _selectAction(DocumentAction action) {
     viewModel.selectAction(action);
+    _loadNonStandardInventoryIfNeeded();
+    _loadReturnSourceDocumentsIfNeeded();
+  }
+
+  Future<void> _openDraft(String draftId) async {
+    final opened = await viewModel.openDraft(draftId);
+    if (!mounted || !opened) return;
     _loadNonStandardInventoryIfNeeded();
     _loadReturnSourceDocumentsIfNeeded();
   }

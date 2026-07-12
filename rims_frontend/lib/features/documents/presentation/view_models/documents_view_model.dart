@@ -83,6 +83,7 @@ final class DocumentsViewModel extends ChangeNotifier {
   NonStandardInventoryItem? _selectedNonStandardInventory;
   Warehouse? _selectedTargetWarehouse;
   DocumentRecord? _selectedReturnSourceDocument;
+  int? _pendingReturnSourceDocumentId;
   String _productQuery = '';
   String _documentKeyword = '';
   String _quantityText = '';
@@ -207,6 +208,7 @@ final class DocumentsViewModel extends ChangeNotifier {
   Warehouse? get selectedTargetWarehouse => _selectedTargetWarehouse;
   DocumentRecord? get selectedReturnSourceDocument =>
       _selectedReturnSourceDocument;
+  int? get pendingReturnSourceDocumentId => _pendingReturnSourceDocumentId;
   String get productName => _selectedProduct?.productName ?? _productQuery;
   String get productQuery => _productQuery;
   String get documentKeyword => _documentKeyword;
@@ -269,6 +271,7 @@ final class DocumentsViewModel extends ChangeNotifier {
     }
     if (!isReturnAction) {
       _selectedReturnSourceDocument = null;
+      _pendingReturnSourceDocumentId = null;
       _returnSourceDocuments = const [];
       _returnSourceError = null;
       _hasLoadedReturnSourceDocuments = false;
@@ -535,6 +538,7 @@ final class DocumentsViewModel extends ChangeNotifier {
       _returnSourceDocuments = const [];
       _returnSourceError = null;
       _isLoadingReturnSources = false;
+      _resolvePendingReturnSourceDocument();
       _clearStaleReturnSourceDocument();
       notifyListeners();
       return;
@@ -571,6 +575,9 @@ final class DocumentsViewModel extends ChangeNotifier {
           pageNumber = 0;
       }
       if (pageNumber == 0) break;
+    }
+    if (_returnSourceError == null) {
+      _resolvePendingReturnSourceDocument();
     }
     _clearStaleReturnSourceDocument();
 
@@ -622,6 +629,8 @@ final class DocumentsViewModel extends ChangeNotifier {
 
   void selectReturnSourceDocument(DocumentRecord document) {
     _selectedReturnSourceDocument = document;
+    _pendingReturnSourceDocumentId = null;
+    _returnSourceError = null;
     _formError = null;
     _scheduleDraftSave();
     notifyListeners();
@@ -747,6 +756,13 @@ final class DocumentsViewModel extends ChangeNotifier {
     _selectedReturnSourceDocument = sourceDocumentId == null
         ? null
         : _documentById(sourceDocumentId);
+    _pendingReturnSourceDocumentId = _selectedReturnSourceDocument == null
+        ? sourceDocumentId
+        : null;
+    _returnSourceError = null;
+    if (_hasLoadedReturnSourceDocuments) {
+      _resolvePendingReturnSourceDocument();
+    }
     _formError = null;
     notifyListeners();
     return true;
@@ -782,7 +798,8 @@ final class DocumentsViewModel extends ChangeNotifier {
       typeLabel: _selectedAction.label,
       lines: _draftLines,
       toWarehouseId: _selectedTargetWarehouse?.id,
-      refDocId: _selectedReturnSourceDocument?.id,
+      refDocId:
+          _selectedReturnSourceDocument?.id ?? _pendingReturnSourceDocumentId,
       remark: _remark,
     );
     final payload = Map<String, Object?>.from(request.toDraftPayload())
@@ -1084,6 +1101,26 @@ final class DocumentsViewModel extends ChangeNotifier {
     if (!sourceStillAvailable) {
       _selectedReturnSourceDocument = null;
     }
+  }
+
+  void _resolvePendingReturnSourceDocument() {
+    final sourceDocumentId = _pendingReturnSourceDocumentId;
+    if (sourceDocumentId == null || !_hasLoadedReturnSourceDocuments) {
+      return;
+    }
+
+    for (final document in _returnSourceDocuments) {
+      if (document.id == sourceDocumentId) {
+        _selectedReturnSourceDocument = document;
+        _pendingReturnSourceDocumentId = null;
+        _returnSourceError = null;
+        return;
+      }
+    }
+
+    _selectedReturnSourceDocument = null;
+    _pendingReturnSourceDocumentId = null;
+    _returnSourceError = '原销售单已失效，请重新选择';
   }
 
   Future<bool> createDocument() async {

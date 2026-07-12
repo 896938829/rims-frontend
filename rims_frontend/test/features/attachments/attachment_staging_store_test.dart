@@ -20,10 +20,14 @@ void main() {
 
   tearDown(() => root.delete(recursive: true));
 
-  FileAttachmentStagingStore store({FileCopier? copyFile, DateTime? now}) {
+  FileAttachmentStagingStore store({
+    FileCopier? copyFile,
+    DateTime? now,
+    String Function()? idFactory,
+  }) {
     return FileAttachmentStagingStore(
       rootDirectory: () async => root,
-      idFactory: () => 'request-1',
+      idFactory: idFactory ?? () => 'request-1',
       clock: () => now ?? DateTime.utc(2026, 7, 13),
       copyFile: copyFile,
       thumbnailBuilder: (sourcePath, destinationPath) async {
@@ -94,6 +98,134 @@ void main() {
         success: (items) {
           expect(items.single.pending.binding.businessType, 'document_draft');
           expect(items.single.pending.binding.localDraftId, 'stable-draft-id');
+        },
+        failure: (failure) => fail(failure.message),
+      );
+    },
+  );
+
+  test(
+    'duplicates draft files with new ids and independent lifecycle',
+    () async {
+      final ids = [
+        'source-request',
+        'manifest-source',
+        'copy-request',
+        'manifest-copy',
+        'manifest-remove',
+      ].iterator;
+      final staging = store(
+        idFactory: () {
+          ids.moveNext();
+          return ids.current;
+        },
+      );
+      final sourceResult = await staging.stage(
+        userId: '42',
+        binding: AttachmentBinding.documentDraft('draft-source'),
+        selection: selection(),
+        existingCount: 0,
+      );
+      final sourceItem = sourceResult.when(
+        success: (item) => item,
+        failure: (failure) => throw TestFailure(failure.message),
+      );
+
+      final duplicated = await staging.duplicateDraftAttachments(
+        userId: '42',
+        sourceDraftId: 'draft-source',
+        targetDraftId: 'draft-copy',
+        requestIds: [sourceItem.pending.requestId],
+      );
+
+      final copyItem = duplicated.when(
+        success: (items) => items.single,
+        failure: (failure) => throw TestFailure(failure.message),
+      );
+      expect(copyItem.pending.requestId, isNot(sourceItem.pending.requestId));
+      expect(copyItem.pending.binding.localDraftId, 'draft-copy');
+      expect(copyItem.pending.stagedPath, isNot(sourceItem.pending.stagedPath));
+      final reopened = await store().recoverForUser('42');
+      final reopenedCopy = reopened.when(
+        success: (items) => items.singleWhere(
+          (item) => item.pending.binding.localDraftId == 'draft-copy',
+        ),
+        failure: (failure) => throw TestFailure(failure.message),
+      );
+      expect(reopenedCopy.pending.requestId, copyItem.pending.requestId);
+      await File(reopenedCopy.pending.stagedPath).writeAsBytes([8, 8, 8]);
+      expect(File(sourceItem.pending.stagedPath).readAsBytesSync(), [
+        1,
+        2,
+        3,
+        4,
+      ]);
+
+      await staging.remove('42', copyItem.pending.requestId);
+      final recovered = await staging.recoverForUser('42');
+      recovered.when(
+        success: (items) {
+          expect(items.map((item) => item.pending.requestId), [
+            sourceItem.pending.requestId,
+          ]);
+          expect(File(sourceItem.pending.stagedPath).existsSync(), isTrue);
+        },
+        failure: (failure) => fail(failure.message),
+      );
+    },
+  );
+
+  test(
+    'failed draft duplication leaves no partial files or manifest rows',
+    () async {
+      final sourceIds = ['source-request', 'manifest-source'].iterator;
+      final sourceStore = store(
+        idFactory: () {
+          sourceIds.moveNext();
+          return sourceIds.current;
+        },
+      );
+      await sourceStore.stage(
+        userId: '42',
+        binding: AttachmentBinding.documentDraft('draft-source'),
+        selection: selection(),
+        existingCount: 0,
+      );
+      final failingStore = store(
+        idFactory: () => 'failed-copy',
+        copyFile: (_, destination) async {
+          await File(destination).writeAsBytes([1, 2]);
+          throw const FileSystemException('copy failed');
+        },
+      );
+
+      final result = await failingStore.duplicateDraftAttachments(
+        userId: '42',
+        sourceDraftId: 'draft-source',
+        targetDraftId: 'draft-copy',
+        requestIds: const ['source-request'],
+      );
+
+      expect(result.isFailure, isTrue);
+      expect(
+        root
+            .listSync(recursive: true)
+            .whereType<File>()
+            .where((file) => file.path.contains('failed-copy')),
+        isEmpty,
+      );
+      final recovered = await sourceStore.recoverForUser('42');
+      recovered.when(
+        success: (items) {
+          expect(items.map((item) => item.pending.requestId), [
+            'source-request',
+          ]);
+          expect(
+            items.where(
+              (item) => item.pending.binding.localDraftId == 'draft-copy',
+            ),
+            isEmpty,
+          );
         },
         failure: (failure) => fail(failure.message),
       );

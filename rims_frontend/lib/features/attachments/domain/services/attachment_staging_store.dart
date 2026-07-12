@@ -34,3 +34,17 @@ abstract interface class AttachmentStagingStore {
     required Uint8List bytes,
   });
 }
+
+abstract interface class DraftAttachmentStagingStore {
+  Future<Result<List<StagedAttachment>>> duplicateDraftAttachments({
+    required String userId,
+    required String sourceDraftId,
+    required String targetDraftId,
+    required List<String> requestIds,
+  });
+
+  Future<Result<void>> removeStagedAttachments({
+    required String userId,
+    required List<String> requestIds,
+  });
+}

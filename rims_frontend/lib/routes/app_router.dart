@@ -76,6 +76,7 @@ GoRouter createAppRouter({
         builder: (context, state) => _DraftManagerRoute(
           repository: documentDraftRepository,
           sessionController: sessionController,
+          attachmentStagingStore: attachmentStagingStore,
         ),
       ),
       GoRoute(
@@ -105,10 +106,12 @@ final class _DraftManagerRoute extends StatefulWidget {
   const _DraftManagerRoute({
     required this.repository,
     required this.sessionController,
+    required this.attachmentStagingStore,
   });
 
   final DocumentDraftRepository? repository;
   final AuthSessionController sessionController;
+  final AttachmentStagingStore? attachmentStagingStore;
 
   @override
   State<_DraftManagerRoute> createState() => _DraftManagerRouteState();
@@ -140,6 +143,11 @@ final class _DraftManagerRouteState extends State<_DraftManagerRoute> {
         accountId: _accountId!,
         roleCode: _roleCode!,
         warehouseId: _warehouseId!,
+        attachmentStagingStore:
+            widget.attachmentStagingStore is DraftAttachmentStagingStore
+            ? widget.attachmentStagingStore! as DraftAttachmentStagingStore
+            : null,
+        attachmentUserId: _accountId,
       );
     }
   }

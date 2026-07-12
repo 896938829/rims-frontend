@@ -20,7 +20,8 @@ typedef FileCopier = Future<void> Function(String source, String destination);
 typedef ThumbnailBuilder =
     Future<String?> Function(String source, String destination);
 
-final class FileAttachmentStagingStore implements AttachmentStagingStore {
+final class FileAttachmentStagingStore
+    implements AttachmentStagingStore, DraftAttachmentStagingStore {
   FileAttachmentStagingStore({
     required DirectoryProvider rootDirectory,
     required String Function() idFactory,
@@ -137,6 +138,140 @@ final class FileAttachmentStagingStore implements AttachmentStagingStore {
       return FailureResult(
         LocalStorageFailure(
           message: 'Unable to recover staged attachments.',
+          cause: error,
+        ),
+      );
+    }
+  }
+
+  @override
+  Future<Result<List<StagedAttachment>>> duplicateDraftAttachments({
+    required String userId,
+    required String sourceDraftId,
+    required String targetDraftId,
+    required List<String> requestIds,
+  }) async {
+    if (requestIds.isEmpty) return const Success([]);
+    final createdFiles = <File>[];
+    try {
+      final directory = await _userDirectory(userId, create: false);
+      if (!await directory.exists()) {
+        throw const FileSystemException('Attachment owner directory missing.');
+      }
+      final current = await _readManifest(directory);
+      final requested = requestIds.toSet();
+      if (requested.length != requestIds.length) {
+        throw const FormatException('Duplicate attachment request IDs.');
+      }
+      final sources = current
+          .where(
+            (item) =>
+                requested.contains(item.pending.requestId) &&
+                item.pending.binding.localDraftId == sourceDraftId,
+          )
+          .toList(growable: false);
+      if (sources.length != requestIds.length) {
+        throw const FileSystemException('Draft attachment source missing.');
+      }
+      final targetCount = current
+          .where((item) => item.pending.binding.localDraftId == targetDraftId)
+          .length;
+      if (targetCount + sources.length > _maximumAttachmentCount) {
+        throw const FileSystemException('Attachment count limit reached.');
+      }
+      final stagedDirectory = Directory(
+        '${directory.path}${Platform.pathSeparator}staged',
+      );
+      final thumbnailsDirectory = Directory(
+        '${directory.path}${Platform.pathSeparator}thumbnails',
+      );
+      await stagedDirectory.create(recursive: true);
+      final knownIds = current.map((item) => item.pending.requestId).toSet();
+      final duplicates = <StagedAttachment>[];
+      for (final source in sources) {
+        final requestId = _idFactory();
+        if (!knownIds.add(requestId)) {
+          throw const FileSystemException(
+            'Attachment staging identifier collision.',
+          );
+        }
+        final stagedPath =
+            '${stagedDirectory.path}${Platform.pathSeparator}$requestId.${_extension(source.pending.originalName)}';
+        final stagedFile = File(stagedPath);
+        if (await stagedFile.exists()) {
+          throw const FileSystemException(
+            'Attachment staging identifier collision.',
+          );
+        }
+        createdFiles.add(stagedFile);
+        await _copyFile(source.pending.stagedPath, stagedPath);
+        String? thumbnailPath;
+        final sourceThumbnail = source.thumbnailPath;
+        if (sourceThumbnail != null && await File(sourceThumbnail).exists()) {
+          await thumbnailsDirectory.create(recursive: true);
+          thumbnailPath =
+              '${thumbnailsDirectory.path}${Platform.pathSeparator}$requestId.png';
+          final thumbnail = File(thumbnailPath);
+          createdFiles.add(thumbnail);
+          await _copyFile(sourceThumbnail, thumbnailPath);
+        }
+        duplicates.add(
+          StagedAttachment(
+            pending: PendingAttachment(
+              requestId: requestId,
+              binding: AttachmentBinding.documentDraft(targetDraftId),
+              stagedPath: stagedPath,
+              originalName: source.pending.originalName,
+              mimeType: source.pending.mimeType,
+              fileSize: await stagedFile.length(),
+            ),
+            thumbnailPath: thumbnailPath,
+            createdAt: _clock().toUtc(),
+          ),
+        );
+      }
+      await _writeManifest(directory, [...current, ...duplicates]);
+      return Success(List.unmodifiable(duplicates));
+    } catch (error) {
+      for (final file in createdFiles.reversed) {
+        await _deleteIfExists(file);
+      }
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to duplicate draft attachments.',
+          cause: error,
+        ),
+      );
+    }
+  }
+
+  @override
+  Future<Result<void>> removeStagedAttachments({
+    required String userId,
+    required List<String> requestIds,
+  }) async {
+    if (requestIds.isEmpty) return const Success(null);
+    try {
+      final directory = await _userDirectory(userId, create: false);
+      if (!await directory.exists()) return const Success(null);
+      final requested = requestIds.toSet();
+      final items = await _readManifest(directory);
+      final retained = <StagedAttachment>[];
+      for (final item in items) {
+        if (requested.contains(item.pending.requestId)) {
+          await _deleteIfExists(File(item.pending.stagedPath));
+          final thumbnail = item.thumbnailPath;
+          if (thumbnail != null) await _deleteIfExists(File(thumbnail));
+        } else {
+          retained.add(item);
+        }
+      }
+      await _writeManifest(directory, retained);
+      return const Success(null);
+    } catch (error) {
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to remove duplicated draft attachments.',
           cause: error,
         ),
       );

@@ -1,7 +1,10 @@
 import 'dart:async';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:rims_frontend/core/result/failure.dart';
 import 'package:rims_frontend/core/result/result.dart';
+import 'package:rims_frontend/features/attachments/domain/entities/attachment.dart';
+import 'package:rims_frontend/features/attachments/domain/services/attachment_staging_store.dart';
 import 'package:rims_frontend/features/offline/domain/entities/document_draft.dart';
 import 'package:rims_frontend/features/offline/domain/repositories/document_draft_repository.dart';
 import 'package:rims_frontend/features/offline/presentation/view_models/drafts_view_model.dart';
@@ -31,11 +34,14 @@ void main() {
     final repository = _MemoryDraftRepository([
       _draft('original', attachmentIds: ['original-file']),
     ]);
+    final staging = _FakeDraftAttachmentStagingStore();
     final viewModel = DraftsViewModel(
       repository: repository,
       accountId: '7',
       roleCode: 'operator',
       warehouseId: 11,
+      attachmentStagingStore: staging,
+      attachmentUserId: '7',
       draftIdFactory: () => 'copy-id',
       now: () => now,
     );
@@ -48,7 +54,10 @@ void main() {
     expect(copy?.id, 'copy-id');
     expect(copy?.version, 1);
     expect(repository.byId('copy-id')?.payload['remark'], 'original remark');
-    expect(repository.byId('copy-id')?.attachmentStagingIds, isEmpty);
+    expect(repository.byId('copy-id')?.attachmentStagingIds, ['copy-file']);
+    expect(staging.requests.single.$1, 'original');
+    expect(staging.requests.single.$2, 'copy-id');
+    expect(staging.requests.single.$3, ['original-file']);
     expect(repository.byId('original')?.payload['remark'], 'renamed');
   });
 
@@ -67,6 +76,31 @@ void main() {
     expect(await viewModel.discard('kept', confirmed: true), isTrue);
     expect(repository.byId('kept'), isNull);
   });
+
+  test(
+    'duplicate failure is visible and rolls back copied attachments',
+    () async {
+      final repository = _MemoryDraftRepository([
+        _draft('original', attachmentIds: ['original-file']),
+      ], failingDraftId: 'copy-id');
+      final staging = _FakeDraftAttachmentStagingStore();
+      final viewModel = DraftsViewModel(
+        repository: repository,
+        accountId: '7',
+        roleCode: 'operator',
+        warehouseId: 11,
+        attachmentStagingStore: staging,
+        attachmentUserId: '7',
+        draftIdFactory: () => 'copy-id',
+      );
+
+      expect(await viewModel.duplicate('original'), isNull);
+
+      expect(viewModel.errorMessage, 'copy draft failed');
+      expect(repository.byId('copy-id'), isNull);
+      expect(staging.removedRequestIds, ['copy-file']);
+    },
+  );
 
   test(
     'account switch replaces visible drafts without cross-account access',
@@ -170,10 +204,11 @@ DocumentDraft _draft(
 }
 
 final class _MemoryDraftRepository implements DocumentDraftRepository {
-  _MemoryDraftRepository(List<DocumentDraft> drafts)
+  _MemoryDraftRepository(List<DocumentDraft> drafts, {this.failingDraftId})
     : _drafts = {for (final draft in drafts) draft.id: draft};
 
   final Map<String, DocumentDraft> _drafts;
+  final String? failingDraftId;
 
   DocumentDraft? byId(String id) => _drafts[id];
 
@@ -182,6 +217,11 @@ final class _MemoryDraftRepository implements DocumentDraftRepository {
     DocumentDraft draft, {
     required int expectedVersion,
   }) async {
+    if (draft.id == failingDraftId) {
+      return const FailureResult(
+        LocalStorageFailure(message: 'copy draft failed'),
+      );
+    }
     final saved = draft.copyWith(version: expectedVersion + 1);
     _drafts[draft.id] = saved;
     return Success(saved);
@@ -211,6 +251,45 @@ final class _MemoryDraftRepository implements DocumentDraftRepository {
 
   @override
   Future<void> prune() async {}
+}
+
+final class _FakeDraftAttachmentStagingStore
+    implements DraftAttachmentStagingStore {
+  final List<(String, String, List<String>)> requests = [];
+  final List<String> removedRequestIds = [];
+
+  @override
+  Future<Result<List<StagedAttachment>>> duplicateDraftAttachments({
+    required String userId,
+    required String sourceDraftId,
+    required String targetDraftId,
+    required List<String> requestIds,
+  }) async {
+    requests.add((sourceDraftId, targetDraftId, requestIds));
+    return Success([
+      StagedAttachment(
+        pending: PendingAttachment(
+          requestId: 'copy-file',
+          binding: AttachmentBinding.documentDraft(targetDraftId),
+          stagedPath: '/copy/copy-file.pdf',
+          originalName: 'copy.pdf',
+          mimeType: 'application/pdf',
+          fileSize: 10,
+        ),
+        thumbnailPath: null,
+        createdAt: DateTime.utc(2026, 7, 13),
+      ),
+    ]);
+  }
+
+  @override
+  Future<Result<void>> removeStagedAttachments({
+    required String userId,
+    required List<String> requestIds,
+  }) async {
+    removedRequestIds.addAll(requestIds);
+    return const Success(null);
+  }
 }
 
 final class _DelayedListDraftRepository implements DocumentDraftRepository {

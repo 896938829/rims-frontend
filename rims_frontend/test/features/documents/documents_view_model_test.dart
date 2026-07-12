@@ -938,6 +938,55 @@ void main() {
     },
   );
 
+  testWidgets(
+    'page startup restores pending return source after delayed load',
+    (tester) async {
+      final sourceResult = Completer<Result<List<DocumentRecord>>>();
+      final draft = _returnDraft('delayed-return', sourceDocumentId: 136);
+      final viewModel = _draftEnabledViewModel(
+        drafts: _FakeDocumentDraftRepository(loaded: draft),
+        documents: _FakeDocumentsRepository(listFuture: sourceResult.future),
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: DocumentsPage(viewModel: viewModel, initialDraftId: draft.id),
+          ),
+        ),
+      );
+      await tester.pump();
+
+      expect(viewModel.pendingReturnSourceDocumentId, 136);
+      expect(viewModel.selectedReturnSourceDocument, isNull);
+      sourceResult.complete(
+        const Success<List<DocumentRecord>>([_completedSalesDocument]),
+      );
+      await tester.pumpAndSettle();
+
+      expect(viewModel.pendingReturnSourceDocumentId, isNull);
+      expect(viewModel.selectedReturnSourceDocument?.id, 136);
+      expect(viewModel.returnSourceError, isNull);
+    },
+  );
+
+  test('expired pending return source is cleared with visible error', () async {
+    final draft = _returnDraft('expired-return', sourceDocumentId: 999);
+    final viewModel = _draftEnabledViewModel(
+      drafts: _FakeDocumentDraftRepository(loaded: draft),
+      documents: _FakeDocumentsRepository(
+        listResult: const Success<List<DocumentRecord>>([]),
+      ),
+    );
+    await viewModel.openDraft(draft.id);
+
+    await viewModel.loadReturnSourceDocuments();
+
+    expect(viewModel.pendingReturnSourceDocumentId, isNull);
+    expect(viewModel.selectedReturnSourceDocument, isNull);
+    expect(viewModel.returnSourceError, '原销售单已失效，请重新选择');
+  });
+
   test('stocktake document submits actual quantity and allows zero', () async {
     final repository = _FakeDocumentsRepository();
     final viewModel = DocumentsViewModel(repository: repository)
@@ -2165,6 +2214,31 @@ DocumentDraft _savedDraft(String id, {String remark = ''}) {
   );
 }
 
+DocumentDraft _returnDraft(String id, {required int sourceDocumentId}) {
+  final timestamp = DateTime.utc(2026, 7, 13);
+  return DocumentDraft(
+    id: id,
+    accountId: '7',
+    warehouseId: 11,
+    docType: 3,
+    observedRoleCode: 'operator',
+    payload: {
+      'lines': [
+        {
+          'product_id': 10,
+          'product_name': _completedSalesDocument.productName,
+          'quantity': 1,
+        },
+      ],
+      'source_document_id': sourceDocumentId,
+      'remark': '',
+    },
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    version: 1,
+  );
+}
+
 final class _FakeDocumentDraftRepository implements DocumentDraftRepository {
   _FakeDocumentDraftRepository({this.loaded, this.saveResults = const []});
 
@@ -2565,6 +2639,7 @@ final class _FakeDocumentsRepository
       _transactionRecord,
     ]),
     this.transactionResults = const [],
+    this.listFuture,
   }) : createResult =
            createResult ??
            Future.value(const Success<DocumentRecord>(_remoteDocument)),
@@ -2579,6 +2654,7 @@ final class _FakeDocumentsRepository
   final Result<void> settleResult;
   final Result<List<TransactionRecord>> transactionResult;
   final List<Result<List<TransactionRecord>>> transactionResults;
+  final Future<Result<List<DocumentRecord>>>? listFuture;
   CreateDocumentRequest? createdRequest;
   final List<String> createdRequestIds = [];
   int createCallCount = 0;
@@ -2628,6 +2704,10 @@ final class _FakeDocumentsRepository
     listDocTypes.add(docType);
     final callIndex = listCallCount;
     listCallCount += 1;
+    final delayed = listFuture;
+    if (delayed != null) {
+      return _pageResult(await delayed, page: page);
+    }
     if (callIndex < listResults.length) {
       return _pageResult(listResults[callIndex], page: page);
     }
