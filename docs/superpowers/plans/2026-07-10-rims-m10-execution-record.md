@@ -53,7 +53,7 @@ runtime ownership, cleanup, and business effects have been inspected.
 | Notification guidance without premature permission | 15 | manifest and UI tests | pending |
 | Camera capture/gallery/file selection | 11, 12 | adapter/widget/Android journey | pending |
 | Compression/orientation/metadata/thumbnail | 11 | rotated fixture and bounds evidence | pending |
-| Attachment type/size/count validation | 8, 11 | backend and frontend boundary tests | pending |
+| Attachment type/size/count validation | 8, 11 | backend and frontend boundary tests | backend verified; frontend pending |
 | Upload progress/cancel/retry | 4, 12, 16 | first-progress/total timing and same request ID | transport primitives verified; attachment journey pending |
 | Interrupted upload/process recreation | 11, 12, 16 | staged manifest recovery and one server object | pending |
 | Preview/download/share | 10-12, 16 | authenticated bytes/hash and UI action evidence | pending |
@@ -168,6 +168,17 @@ runtime ownership, cleanup, and business effects have been inspected.
 | Focused regression | all 103 inventory/scanner tests passed including post-mount activation |
 | Full verification | Flutter analysis clean; all 463 Flutter tests passed |
 
+## Task 8 Backend Attachment Hardening Evidence
+
+| Probe | Observed result |
+| --- | --- |
+| Count limit | ninth-bound attachment rejected before reader, storage, or metadata mutation |
+| MIME families | image/PDF/CSV/XLSX allow families verified; HTML and executable disguises rejected |
+| Atomic storage | owner-only sibling temp, context-aware copy, sync/close/rename, and cleanup verified |
+| Failure preservation | cancellation and source errors leave an existing target unchanged with no temp residue |
+| Configuration | default 9 wired to production router; non-positive value rejected by direct config test |
+| Backend regression | `go test ./... -count=1`, temporary server build, and M9 seed/reset passed |
+
 ## Scanner Scenario Evidence
 
 | Scenario | Web/unit | Android | Real backend effect | Result |
@@ -209,8 +220,9 @@ Entry open counts are not exit evidence. Final P0/P1 counts remain pending.
 
 ## Plan Deviations
 
-None recorded at entry. Every deviation must state the observed constraint, the
-chosen local substitute, affected requirements, and verification impact.
+| Task | Observed constraint | Decision | Verification impact |
+| --- | --- | --- | --- |
+| 8 | `position` does not exist before Task 9 migration | Keep count enforcement in Task 8; add max-position query atomically with Task 9 schema | None for Task 8 count/MIME/atomic-write gates; Task 9 tests must directly cover max position |
 
 ## Final Verification
 

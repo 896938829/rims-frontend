@@ -421,27 +421,31 @@ git commit -m "feat: connect scanning to inventory lookup"
 - Create: backend `rims-goProgect/internal/modules/file/service_validation_test.go`
 - Modify: backend `.env.example`
 
-- [ ] **Step 1: Write failing Go tests for maximum attachment count, extension/MIME mismatch, cancellation during copy, temporary-file cleanup, atomic rename, and partial-write preservation.**
+- [x] **Step 1: Write failing Go tests for maximum attachment count, extension/MIME mismatch, cancellation during copy, temporary-file cleanup, atomic rename, and partial-write preservation.**
 
 `LocalStorage.Save` must write an owner-only temporary file beside the target,
 honor `ctx.Done()`, sync/close, then rename. Failure must remove the temporary
 file and leave an existing target untouched.
 
-- [ ] **Step 2: Run focused tests and verify RED.**
+- [x] **Step 2: Run focused tests and verify RED.**
 
 ```bash
 go test ./internal/modules/file -run 'Test(LocalStorage|FileServiceUpload)' -count=1
 ```
 
-- [ ] **Step 3: Add `MAX_ATTACHMENTS_PER_OBJECT` with default 9 and validate it is positive. Add repository count/max-position methods and enforce binding count before storage.**
+- [x] **Step 3: Add `MAX_ATTACHMENTS_PER_OBJECT` with default 9, validate it is positive, add repository binding count, and enforce the limit before storage.**
 
-- [ ] **Step 4: Validate detected MIME against extension families and preserve current 10 MiB bounded read.**
+`MaxPositionByBinding` lands in Task 9 together with the `position` column and
+migration; querying a column before that schema exists would break Task 8
+deployability.
+
+- [x] **Step 4: Validate detected MIME against extension families and preserve current 10 MiB bounded read.**
 
 JPEG/PNG/GIF must match image MIME; PDF must match PDF; CSV permits text/CSV;
 XLSX permits ZIP/Office MIME. Do not accept executable or HTML content under an
 allowed extension.
 
-- [ ] **Step 5: Run backend tests/build and commit.**
+- [x] **Step 5: Run backend tests/build and commit.**
 
 ```bash
 go test ./...
