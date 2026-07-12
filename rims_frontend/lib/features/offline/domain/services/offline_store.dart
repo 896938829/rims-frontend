@@ -25,9 +25,16 @@ abstract interface class OfflineStore {
     required String namespace,
   });
 
-  Future<void> saveDraft(DocumentDraft draft);
+  Future<void> saveDraft(DocumentDraft draft, {int? expectedVersion});
 
   Future<List<DocumentDraft>> listDrafts(String accountId);
+
+  Future<void> deleteDraft({
+    required String accountId,
+    required String draftId,
+  });
+
+  Future<void> pruneDrafts(DateTime updatedBefore);
 
   Future<void> enqueue(OutboxOperation operation, Set<String> dependencies);
 

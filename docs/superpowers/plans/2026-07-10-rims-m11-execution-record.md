@@ -24,7 +24,7 @@ counts, encrypted storage ownership, cleanup, and baseline restore are read.
 | User/warehouse references | 5 | secure-token gate and cached projection | PASS |
 | Product/inventory/alerts/barcode | 6 | offline read, stale source/age, no mutation authority | PASS |
 | Documents/details/reports | 7 | offline read and financial field boundary | PASS |
-| Six document draft types | 8, 9 | autosave, reopen, recreation, ownership | planned |
+| Six document draft types | 8, 9 | autosave, reopen, recreation, ownership | persistence PASS; UI pending |
 | Explicit reviewed queueing | 11-13 | confirmation and immutable payload | planned |
 | Outbox states and legal transitions | 11 | complete state matrix | planned |
 | Operation dependency ordering | 11, 13 | attachment -> create -> lifecycle | planned |
@@ -141,6 +141,19 @@ counts, encrypted storage ownership, cleanup, and baseline restore are read.
 | Error boundary | authorization and other non-network failures remain visible despite matching cache |
 | UI | document and report pages show explicit cache source/time without replacing business status labels |
 | GREEN | strict analyze PASS; document, report, offline, and widget suites PASS (169 tests); release Web build PASS |
+
+## Task 8 Versioned Document Draft Evidence
+
+| Probe | Observed result |
+| --- | --- |
+| RED | repository contract, six-type intent codec, immutable snapshot, review, retention, migration, and conflict behavior were absent |
+| Intent | all six document types preserve lines, zero stocktake counts, target/source IDs, non-standard source IDs, remarks, and attachment staging IDs |
+| Authority | recursive validation rejects cached stock authority fields; draft payloads contain user-entered intent only |
+| Ownership | account-scoped reads reject cross-account access; role or warehouse changes produce explicit review reasons |
+| Versioning | optimistic expected-version writes increment deterministically and map stale writes to conflict failures |
+| Immutability | document requests produce unmodifiable payloads and draft construction snapshots nested maps, lists, and attachment IDs |
+| Lifecycle | 30-day retention keeps the exact boundary; schema-zero product/quantity payloads migrate to version one lines on read |
+| GREEN | strict analyze PASS; offline and document regression suites PASS (153 tests) |
 
 ## Final Android State Evidence
 

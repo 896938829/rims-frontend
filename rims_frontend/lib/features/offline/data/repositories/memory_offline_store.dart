@@ -82,7 +82,13 @@ final class MemoryOfflineStore implements OfflineStore {
   }
 
   @override
-  Future<void> saveDraft(DocumentDraft draft) async {
+  Future<void> saveDraft(DocumentDraft draft, {int? expectedVersion}) async {
+    final existing = _drafts[draft.id];
+    if (expectedVersion != null &&
+        ((existing == null && expectedVersion != 0) ||
+            (existing != null && existing.version != expectedVersion))) {
+      throw StateError('Document draft version conflict.');
+    }
     _drafts[draft.id] = draft;
   }
 
@@ -92,6 +98,20 @@ final class MemoryOfflineStore implements OfflineStore {
         _drafts.values.where((draft) => draft.accountId == accountId).toList()
           ..sort((left, right) => right.updatedAt.compareTo(left.updatedAt));
     return List.unmodifiable(result);
+  }
+
+  @override
+  Future<void> deleteDraft({
+    required String accountId,
+    required String draftId,
+  }) async {
+    final draft = _drafts[draftId];
+    if (draft?.accountId == accountId) _drafts.remove(draftId);
+  }
+
+  @override
+  Future<void> pruneDrafts(DateTime updatedBefore) async {
+    _drafts.removeWhere((_, draft) => draft.updatedAt.isBefore(updatedBefore));
   }
 
   @override

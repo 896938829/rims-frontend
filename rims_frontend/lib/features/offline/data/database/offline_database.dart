@@ -162,18 +162,35 @@ final class OfflineDatabase extends _$OfflineDatabase implements OfflineStore {
   }
 
   @override
-  Future<void> saveDraft(DocumentDraft draft) async {
-    await into(offlineDocumentDrafts).insertOnConflictUpdate(
-      OfflineDocumentDraftsCompanion.insert(
-        draftId: draft.id,
-        accountId: draft.accountId,
-        warehouseId: draft.warehouseId,
-        payload: CacheRecordModel.canonicalJson(draft.payload),
-        draftVersion: draft.version,
-        createdAt: draft.createdAt.toUtc(),
-        updatedAt: draft.updatedAt.toUtc(),
-      ),
-    );
+  Future<void> saveDraft(DocumentDraft draft, {int? expectedVersion}) async {
+    await transaction(() async {
+      if (expectedVersion != null) {
+        final existing = await (select(
+          offlineDocumentDrafts,
+        )..where((row) => row.draftId.equals(draft.id))).getSingleOrNull();
+        if ((existing == null && expectedVersion != 0) ||
+            (existing != null && existing.draftVersion != expectedVersion)) {
+          throw StateError('Document draft version conflict.');
+        }
+      }
+      await into(offlineDocumentDrafts).insertOnConflictUpdate(
+        OfflineDocumentDraftsCompanion.insert(
+          draftId: draft.id,
+          accountId: draft.accountId,
+          warehouseId: draft.warehouseId,
+          payload: CacheRecordModel.canonicalJson({
+            'draft_schema_version': draft.schemaVersion,
+            'doc_type': draft.docType,
+            'observed_role_code': draft.observedRoleCode,
+            'attachment_staging_ids': draft.attachmentStagingIds,
+            'intent': draft.payload,
+          }),
+          draftVersion: draft.version,
+          createdAt: draft.createdAt.toUtc(),
+          updatedAt: draft.updatedAt.toUtc(),
+        ),
+      );
+    });
   }
 
   @override
@@ -183,18 +200,49 @@ final class OfflineDatabase extends _$OfflineDatabase implements OfflineStore {
       ..orderBy([(draft) => OrderingTerm.desc(draft.updatedAt)]);
     final rows = await query.get();
     return rows
-        .map(
-          (row) => DocumentDraft(
+        .map((row) {
+          final envelope = CacheRecordModel.decodePayload(row.payload);
+          final intent = envelope['intent'];
+          return DocumentDraft(
             id: row.draftId,
             accountId: row.accountId,
             warehouseId: row.warehouseId,
-            payload: CacheRecordModel.decodePayload(row.payload),
+            docType: (envelope['doc_type'] as num?)?.toInt() ?? 0,
+            observedRoleCode: envelope['observed_role_code'] as String? ?? '',
+            attachmentStagingIds:
+                (envelope['attachment_staging_ids'] as List?)?.cast<String>() ??
+                const [],
+            schemaVersion:
+                (envelope['draft_schema_version'] as num?)?.toInt() ?? 0,
+            payload: intent is Map
+                ? Map<String, Object?>.from(intent)
+                : envelope,
             createdAt: row.createdAt,
             updatedAt: row.updatedAt,
             version: row.draftVersion,
-          ),
-        )
+          );
+        })
         .toList(growable: false);
+  }
+
+  @override
+  Future<void> deleteDraft({
+    required String accountId,
+    required String draftId,
+  }) async {
+    await (delete(offlineDocumentDrafts)..where(
+          (draft) =>
+              draft.accountId.equals(accountId) & draft.draftId.equals(draftId),
+        ))
+        .go();
+  }
+
+  @override
+  Future<void> pruneDrafts(DateTime updatedBefore) async {
+    await (delete(offlineDocumentDrafts)..where(
+          (draft) => draft.updatedAt.isSmallerThanValue(updatedBefore.toUtc()),
+        ))
+        .go();
   }
 
   @override

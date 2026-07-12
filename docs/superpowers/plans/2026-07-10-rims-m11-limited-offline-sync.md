@@ -419,16 +419,16 @@ feat: cache recent documents and reports
 - Modify: `rims_frontend/lib/features/documents/domain/entities/document_data.dart`
 - Test: `rims_frontend/test/features/offline/document_draft_repository_test.dart`
 
-- [ ] **Step 1: Write failing tests for all six document types, lines, target/source IDs, stocktake zero, non-standard source, attachment staging IDs, role/warehouse ownership, optimistic draft version, retention, and migration.**
+- [x] **Step 1: Write failing tests for all six document types, lines, target/source IDs, stocktake zero, non-standard source, attachment staging IDs, role/warehouse ownership, optimistic draft version, retention, and migration.**
 
-- [ ] **Step 2: Implement immutable versioned draft records.**
+- [x] **Step 2: Implement immutable versioned draft records.**
 
 Store user-entered intent, never cached stock authorization. A draft records the
 role and warehouse observed at save time so reopening can require revalidation.
 
-- [ ] **Step 3: Reject cross-account load and mark stale-role/stale-warehouse drafts as requiring review.**
+- [x] **Step 3: Reject cross-account load and mark stale-role/stale-warehouse drafts as requiring review.**
 
-- [ ] **Step 4: Run tests and commit.**
+- [x] **Step 4: Run tests and commit.**
 
 ```text
 feat: persist versioned document drafts

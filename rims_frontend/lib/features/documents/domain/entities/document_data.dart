@@ -53,6 +53,29 @@ final class CreateDocumentRequest {
   int? get actualQuantity => effectiveLines.first.actualQuantity;
   int? get nonStdInventoryId => effectiveLines.first.nonStandardInventoryId;
   double? get retailPrice => effectiveLines.first.retailPrice;
+
+  Map<String, Object?> toDraftPayload() {
+    final draftLines = effectiveLines
+        .map(
+          (line) => Map<String, Object?>.unmodifiable({
+            'product_id': line.productId,
+            'product_name': line.productName,
+            'quantity': line.quantity,
+            if (line.actualQuantity != null)
+              'actual_quantity': line.actualQuantity,
+            if (line.nonStandardInventoryId != null)
+              'non_standard_inventory_id': line.nonStandardInventoryId,
+            if (line.retailPrice != null) 'retail_price': line.retailPrice,
+          }),
+        )
+        .toList(growable: false);
+    return Map.unmodifiable({
+      'lines': List.unmodifiable(draftLines),
+      if (toWarehouseId != null) 'target_warehouse_id': toWarehouseId,
+      if (refDocId != null) 'source_document_id': refDocId,
+      'remark': remark,
+    });
+  }
 }
 
 final class CreateDocumentLineRequest {
