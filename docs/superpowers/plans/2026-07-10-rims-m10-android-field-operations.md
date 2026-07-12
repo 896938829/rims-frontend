@@ -327,24 +327,24 @@ git commit -m "feat: add safe cancellable transfer primitives"
 - Create: `rims_frontend/test/features/scanner/scan_session_view_model_test.dart`
 - Create: `rims_frontend/test/features/scanner/scan_session_store_test.dart`
 
-- [ ] **Step 1: Write failing tests for single/continuous/batch/quantity modes, duplicate window, quantity increment/decrement, max lines, empty/unsupported codes, unknown/disabled/wrong-warehouse/wrong-batch/permission errors, feedback calls, stale request suppression, and submit/clear.**
+- [x] **Step 1: Write failing tests for single/continuous/batch/quantity modes, duplicate window, quantity increment/decrement, max lines, empty/unsupported codes, unknown/disabled/wrong-warehouse/wrong-batch/permission errors, feedback calls, stale request suppression, and submit/clear.**
 
 Duplicate policy: single closes after first accepted result; continuous reports
 each product once per configurable cooldown; batch keeps one line per product;
 quantity accumulation increments an existing line for every accepted scan.
 
-- [ ] **Step 2: Write failing cache/store tests for schema, user, warehouse, TTL, 500-entry bound, corruption recovery, restart restoration, warehouse switch, logout, and network-failure fallback.**
+- [x] **Step 2: Write failing cache/store tests for schema, user, warehouse, TTL, 500-entry bound, corruption recovery, restart restoration, warehouse switch, logout, and network-failure fallback.**
 
 Cached lookup may supply product identity only and must set `isStale=true`.
 Document submission still calls the server and cannot succeed offline.
 
-- [ ] **Step 3: Run focused tests and verify RED.**
+- [x] **Step 3: Run focused tests and verify RED.**
 
 ```powershell
 flutter test --no-pub test/features/scanner
 ```
 
-- [ ] **Step 4: Implement domain-only rules and commit.**
+- [x] **Step 4: Implement domain-only rules and commit.**
 
 ```powershell
 git commit -m "feat: add recoverable barcode scan sessions"

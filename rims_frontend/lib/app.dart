@@ -19,6 +19,8 @@ import 'features/inventory/data/datasources/inventory_remote_datasource.dart';
 import 'features/inventory/data/repositories/inventory_repository_impl.dart';
 import 'features/reports/data/datasources/reports_remote_datasource.dart';
 import 'features/reports/data/repositories/reports_repository_impl.dart';
+import 'features/scanner/domain/services/scan_lookup_cache.dart';
+import 'features/scanner/domain/services/scan_session_store.dart';
 import 'routes/app_router.dart';
 
 class MainApp extends StatefulWidget {
@@ -32,6 +34,8 @@ final class _MainAppState extends State<MainApp> {
   final AuthSessionController _sessionController = AuthSessionController();
   final AppSecureStorage _secureStorage = const AppSecureStorage();
   final AppEventBus _eventBus = AppEventBus();
+  final ScanLookupCache _scanLookupCache = ScanLookupCache();
+  final ScanSessionStore _scanSessionStore = ScanSessionStore();
   StreamSubscription<TokenExpiredEvent>? _tokenExpiredSubscription;
   late final ApiClient _apiClient;
   late final AuthRepositoryImpl _authRepository;
@@ -40,10 +44,12 @@ final class _MainAppState extends State<MainApp> {
   late final ReportsRepositoryImpl _reportsRepository;
   late final AdminRepositoryImpl _adminRepository;
   late final GoRouter _router;
+  String? _activeScanUserId;
 
   @override
   void initState() {
     super.initState();
+    _sessionController.addListener(_handleScanSessionOwnership);
     _apiClient = ApiClient(
       tokenReader: () async =>
           _sessionController.accessToken ??
@@ -85,11 +91,23 @@ final class _MainAppState extends State<MainApp> {
 
   @override
   void dispose() {
+    _sessionController.removeListener(_handleScanSessionOwnership);
     unawaited(_tokenExpiredSubscription?.cancel());
     unawaited(_eventBus.dispose());
     _router.dispose();
     _sessionController.dispose();
     super.dispose();
+  }
+
+  void _handleScanSessionOwnership() {
+    final nextUserId = _sessionController.session?.user.id.toString();
+    final previousUserId = _activeScanUserId;
+    _activeScanUserId = nextUserId;
+    if (previousUserId == null || previousUserId == nextUserId) {
+      return;
+    }
+    unawaited(_scanLookupCache.clearForUser(previousUserId));
+    unawaited(_scanSessionStore.clearForUser(previousUserId));
   }
 
   @override

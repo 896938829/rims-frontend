@@ -47,7 +47,7 @@ runtime ownership, cleanup, and business effects have been inspected.
 | Scan-to-search | 3, 7 | authoritative current-warehouse detail | authoritative lookup verified; UI journey pending |
 | Scan-to-inbound/outbound | 14, 16 | multi-line stock and transaction effects | pending |
 | Scan-to-return/transfer/stocktake/conversion | 14, 16 | request shape, permission, and lifecycle tests | pending |
-| Bounded offline scan identity | 5 | schema/TTL/warehouse/logout tests | pending |
+| Bounded offline scan identity | 5 | schema/TTL/warehouse/logout tests | verified |
 | Camera permission explanation/revocation | 6, 15, 16 | deny/grant/revoke/resume evidence | pending |
 | Gallery/file/storage guidance | 11, 15 | system-picker and explanation tests | pending |
 | Notification guidance without premature permission | 15 | manifest and UI tests | pending |
@@ -129,6 +129,19 @@ runtime ownership, cleanup, and business effects have been inspected.
 | Response bytes | `ResponseType.bytes` preserved exact response bytes `[4,5,6]` |
 | Safe logging | method/path/status/duration/trace ID/sizes retained; bearer token, query token, password, multipart filename, and local path absent |
 | Core verification | Flutter analysis clean; all 48 `test/core` tests passed |
+
+## Task 5 Scan Domain Evidence
+
+| Probe | Observed result |
+| --- | --- |
+| Session modes | single, continuous cooldown, batch uniqueness, and quantity accumulation verified |
+| Boundary rules | empty/unsupported input, max lines, quantity controls, stale request suppression, submit/clear verified |
+| Server failures | unknown, disabled, real Chinese wrong-warehouse, wrong-batch, permission, and network states classified |
+| Recovery | schema/owner validation, TTL, 500-entry bound, corrupt JSON recovery, restart and warehouse-scoped drafts verified |
+| Offline boundary | cache restores identity only with zero quantities and `isStale=true`; submission remains server-backed |
+| Logout | app root clears prior user's cache and drafts while warehouse scopes remain independent |
+| Integration defect | platform preferences initialization made lazy after focused widget failure |
+| Full verification | Flutter analysis clean; all 433 Flutter tests passed |
 
 ## Scanner Scenario Evidence
 
