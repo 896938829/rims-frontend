@@ -208,6 +208,23 @@ runtime ownership, cleanup, and business effects have been inspected.
 | Focused regression | all 13 attachment boundary tests passed |
 | Full verification | Flutter analysis clean; all 476 Flutter tests passed |
 
+## Task 11 Media Staging And Recovery Evidence
+
+| Probe | Observed result |
+| --- | --- |
+| Media options | camera/gallery enforce 1920 x 1920, quality 82, and full metadata disabled |
+| Picker behavior | camera/gallery/file, neutral cancellation, permission mapping, and lost-data retention verified |
+| Validation | extension/MIME family, actual 10 MiB size, and maximum count checks run before queueing |
+| Owned staging | source copied under account-scoped application support storage with stable request ID |
+| Collision/failure | request-ID collision cannot overwrite; copy/no-space failures leave no manifest entry or partial file |
+| Manifest | versioned path/metadata-only JSON is replaced atomically and recovered without source bytes or tokens |
+| Thumbnail | Flutter decoder produces orientation-preserving PNG with longest side bounded to 512 pixels |
+| Cleanup | stale staged, thumbnail, and download files cleaned; logout removes only the prior account directory |
+| Sharing | only an existing local authenticated download is handed to the platform share sheet |
+| Startup | app starts lost-image recovery and stale cleanup before session restore completes |
+| Focused regression | all 27 attachment tests passed, including 14 Task 11 service tests |
+| Full verification | Flutter analysis clean; all 490 Flutter tests passed |
+
 ## Scanner Scenario Evidence
 
 | Scenario | Web/unit | Android | Real backend effect | Result |

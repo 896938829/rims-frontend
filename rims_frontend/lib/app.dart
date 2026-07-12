@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:uuid/uuid.dart';
 
 import 'core/events/app_event.dart';
 import 'core/events/app_event_bus.dart';
@@ -10,6 +12,8 @@ import 'core/storage/app_secure_storage.dart';
 import 'core/theme/app_theme.dart';
 import 'features/admin/data/datasources/admin_remote_datasource.dart';
 import 'features/admin/data/repositories/admin_repository_impl.dart';
+import 'features/attachments/data/services/android_attachment_picker.dart';
+import 'features/attachments/data/services/file_attachment_staging_store.dart';
 import 'features/auth/data/datasources/auth_remote_datasource.dart';
 import 'features/auth/data/repositories/auth_repository_impl.dart';
 import 'features/auth/presentation/view_models/auth_session_controller.dart';
@@ -36,6 +40,8 @@ final class _MainAppState extends State<MainApp> {
   final AppEventBus _eventBus = AppEventBus();
   final ScanLookupCache _scanLookupCache = ScanLookupCache();
   final ScanSessionStore _scanSessionStore = ScanSessionStore();
+  late final AndroidAttachmentPicker _attachmentPicker;
+  late final FileAttachmentStagingStore _attachmentStagingStore;
   StreamSubscription<TokenExpiredEvent>? _tokenExpiredSubscription;
   late final ApiClient _apiClient;
   late final AuthRepositoryImpl _authRepository;
@@ -44,12 +50,21 @@ final class _MainAppState extends State<MainApp> {
   late final ReportsRepositoryImpl _reportsRepository;
   late final AdminRepositoryImpl _adminRepository;
   late final GoRouter _router;
-  String? _activeScanUserId;
+  String? _activeUserId;
 
   @override
   void initState() {
     super.initState();
-    _sessionController.addListener(_handleScanSessionOwnership);
+    _sessionController.addListener(_handleSessionOwnership);
+    _attachmentPicker = AndroidAttachmentPicker();
+    _attachmentStagingStore = FileAttachmentStagingStore(
+      rootDirectory: getApplicationSupportDirectory,
+      idFactory: const Uuid().v4,
+    );
+    unawaited(_attachmentPicker.recoverLostData());
+    unawaited(
+      _attachmentStagingStore.cleanupStale(maxAge: const Duration(days: 7)),
+    );
     _apiClient = ApiClient(
       tokenReader: () async =>
           _sessionController.accessToken ??
@@ -91,7 +106,7 @@ final class _MainAppState extends State<MainApp> {
 
   @override
   void dispose() {
-    _sessionController.removeListener(_handleScanSessionOwnership);
+    _sessionController.removeListener(_handleSessionOwnership);
     unawaited(_tokenExpiredSubscription?.cancel());
     unawaited(_eventBus.dispose());
     _router.dispose();
@@ -99,15 +114,16 @@ final class _MainAppState extends State<MainApp> {
     super.dispose();
   }
 
-  void _handleScanSessionOwnership() {
+  void _handleSessionOwnership() {
     final nextUserId = _sessionController.session?.user.id.toString();
-    final previousUserId = _activeScanUserId;
-    _activeScanUserId = nextUserId;
+    final previousUserId = _activeUserId;
+    _activeUserId = nextUserId;
     if (previousUserId == null || previousUserId == nextUserId) {
       return;
     }
     unawaited(_scanLookupCache.clearForUser(previousUserId));
     unawaited(_scanSessionStore.clearForUser(previousUserId));
+    unawaited(_attachmentStagingStore.clearForUser(previousUserId));
   }
 
   @override

@@ -551,15 +551,15 @@ git commit -m "feat: add attachment repository contracts"
 - Create: `rims_frontend/test/features/attachments/attachment_staging_store_test.dart`
 - Create: `rims_frontend/test/features/attachments/attachment_share_service_test.dart`
 
-- [ ] **Step 1: Write failing tests for camera/gallery/file selection, cancellation, permission errors, 1920/quality-82 picker options, metadata disabled, EXIF-rotated image preview orientation, bounded thumbnails, size/type/count validation, collision-safe staging, no-space failure, manifest recovery, lost image-picker data, stale cache cleanup, and share/download behavior.**
+- [x] **Step 1: Write failing tests for camera/gallery/file selection, cancellation, permission errors, 1920/quality-82 picker options, metadata disabled, EXIF-rotated image preview orientation, bounded thumbnails, size/type/count validation, collision-safe staging, no-space failure, manifest recovery, lost image-picker data, stale cache cleanup, and share/download behavior.**
 
-- [ ] **Step 2: Run tests and verify RED.**
+- [x] **Step 2: Run tests and verify RED.**
 
 ```powershell
 flutter test --no-pub test/features/attachments/attachment_picker_test.dart test/features/attachments/attachment_staging_store_test.dart
 ```
 
-- [ ] **Step 3: Implement adapters using existing dependencies only.**
+- [x] **Step 3: Implement adapters using existing dependencies only.**
 
 Copy every accepted source into app support storage before upload. Image picker
 resizing must preserve the orientation tag and the preview must honor it; create
@@ -568,9 +568,9 @@ versioned JSON manifest atomically. Never persist source bytes or bearer tokens
 in preferences. Treat Android system picker/SAF cancellation as a neutral user
 action, not an error.
 
-- [ ] **Step 4: Recover `ImagePicker.retrieveLostData()` at application startup and make logout delete staged/downloaded attachment files owned by the session.**
+- [x] **Step 4: Recover `ImagePicker.retrieveLostData()` at application startup and make logout delete staged/downloaded attachment files owned by the session.**
 
-- [ ] **Step 5: Commit.**
+- [x] **Step 5: Commit.**
 
 ```powershell
 git commit -m "feat: stage and recover Android attachments"
