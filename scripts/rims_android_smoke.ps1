@@ -576,7 +576,7 @@ function Collect-AndroidFailureArtifacts {
       @(
         'provider=compile-time deterministic selection',
         'cleanup=owned by integration process and baseline restore'
-      ) | Set-Content -LiteralPath $uploadProviderLogPath -Encoding UTF8
+      ) | Add-Content -LiteralPath $uploadProviderLogPath -Encoding UTF8
     }
   }
   if (-not (Test-Path -LiteralPath $screenshot -PathType Leaf)) {
@@ -648,6 +648,14 @@ for ($attempt = 0; $attempt -lt 240; $attempt += 1) {
     Start-Sleep -Milliseconds 300
     $grant = (& $Adb -s $Serial shell pm grant com.example.rims_frontend android.permission.CAMERA 2>&1) -join ' '
     "post-install-camera-grant pid=$pidText exit=$LASTEXITCODE $grant" |
+      Add-Content -LiteralPath $LogPath -Encoding UTF8
+    $packageEvidence = (& $Adb -s $Serial shell dumpsys package com.example.rims_frontend 2>&1 |
+        Select-String 'android.permission.CAMERA: granted=') -join ' '
+    $cameraFeatures = (& $Adb -s $Serial shell pm list features 2>&1 |
+        Select-String 'camera') -join ' '
+    "camera-permission-evidence $packageEvidence" |
+      Add-Content -LiteralPath $LogPath -Encoding UTF8
+    "camera-feature-evidence $cameraFeatures" |
       Add-Content -LiteralPath $LogPath -Encoding UTF8
     exit $LASTEXITCODE
   }

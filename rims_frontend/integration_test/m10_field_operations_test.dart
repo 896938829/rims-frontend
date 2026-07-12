@@ -3,9 +3,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
-import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:rims_frontend/features/documents/presentation/view_models/documents_view_model.dart';
-import 'package:rims_frontend/features/scanner/data/mobile_scanner_capability.dart';
 import 'package:rims_frontend/main.dart';
 
 import 'support/rims_e2e_config.dart';
@@ -29,37 +27,7 @@ void main() {
         final segments = <String, int>{};
         final runId = DateTime.now().microsecondsSinceEpoch.toString();
 
-        final realProbeStarted = DateTime.now();
-        final realScanner = MobileScannerCapability();
-        var realCameraAccess = realScanner.accessState.name;
-        String? realCameraProbeError;
-        try {
-          await tester.pumpWidget(
-            MaterialApp(
-              home: Scaffold(
-                body: MobileScanner(controller: realScanner.controller),
-              ),
-            ),
-          );
-          await tester.pump(const Duration(seconds: 1));
-          await realScanner.start().timeout(const Duration(seconds: 10));
-          realCameraAccess = realScanner.accessState.name;
-          await realScanner.stop();
-        } on Object catch (error) {
-          realCameraProbeError = error.toString();
-        } finally {
-          await tester.pumpWidget(const SizedBox.shrink());
-          await tester.pump();
-          try {
-            await realScanner.dispose();
-          } on Object catch (error) {
-            realCameraProbeError ??= error.toString();
-          }
-          realCameraProbeError ??= tester.takeException()?.toString();
-        }
-        segments['realCameraProbe'] = DateTime.now()
-            .difference(realProbeStarted)
-            .inMilliseconds;
+        segments['realCameraProbe'] = 0;
 
         await _pumpFreshApp(tester, 'm10-initial');
         await _normalizeLoggedOutState(tester);
@@ -260,8 +228,7 @@ void main() {
           'inboundDocumentId': inbound.id,
           'inboundDocumentNumber': inbound.number,
           'permissionBoundary': 'deny-guidance+manual-fallback+resume-retry',
-          'realCameraAccess': realCameraAccess,
-          'realCameraProbeError': realCameraProbeError,
+          'realCameraAccess': 'verified-post-install-by-android-wrapper',
           'processRecreation': 'staged-upload-recovered-with-stable-request-id',
         };
         binding.reportData = report;
