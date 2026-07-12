@@ -702,18 +702,18 @@ git commit -m "feat: add scan-driven multi-line documents"
 - Create: `rims_frontend/test/features/scanner/scanner_compatibility_test.dart`
 - Create: `rims_frontend/test/features/attachments/attachment_compatibility_test.dart`
 
-- [ ] **Step 1: Write failing manifest/static tests for optional camera feature, camera permission, no broad storage permission, no premature notification permission, explicit minimum API evidence, and cleartext limited to debug/local behavior.**
+- [x] **Step 1: Write failing manifest/static tests for optional camera feature, camera permission, no broad storage permission, no premature notification permission, explicit minimum API evidence, and cleartext limited to debug/local behavior.**
 
-- [ ] **Step 2: Write failing UI tests for camera, gallery, file, notification, and storage explanations.**
+- [x] **Step 2: Write failing UI tests for camera, gallery, file, notification, and storage explanations.**
 
 The UI must explain why camera is requested, that gallery/file use Android
 system pickers, that notifications are not activated yet, and how low storage
 or revoked permission affects pending work. It must not claim a permission is
 granted without platform evidence.
 
-- [ ] **Step 3: Add compatibility tests at phone/tablet widths, portrait/landscape, text scale 1.0/2.0, light/dark mode, keyboard insets, and system back.**
+- [x] **Step 3: Add compatibility tests at phone/tablet widths, portrait/landscape, text scale 1.0/2.0, light/dark mode, keyboard insets, and system back.**
 
-- [ ] **Step 4: Run tests, build a debug APK offline, inspect merged manifest, and commit.**
+- [x] **Step 4: Run tests, build a debug APK offline, inspect merged manifest, and commit.**
 
 ```powershell
 flutter test --no-pub test/features/profile test/features/scanner test/features/attachments

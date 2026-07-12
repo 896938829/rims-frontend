@@ -268,6 +268,19 @@ runtime ownership, cleanup, and business effects have been inspected.
 | Focused regression | document and static UI suites passed together (118 tests) |
 | Full verification | Flutter analysis clean; all 513 Flutter tests passed |
 
+## Task 15 Android Permission And Compatibility Evidence
+
+| Probe | Observed result |
+| --- | --- |
+| Minimum platform | source and merged debug manifest agree on Android API 24 |
+| Camera boundary | `CAMERA` declared with camera hardware optional; manual and picker fallbacks remain available |
+| Storage/notification | no read/write/manage external storage or notification permission appears in source or merged manifest |
+| Network boundary | release manifest denies cleartext; debug overlay alone enables local HTTP development |
+| User guidance | profile explains camera, gallery, file, notification, and low-storage effects without claiming unknown grant state |
+| Responsive coverage | phone/tablet, portrait/landscape, text scale 2.0, light/dark, keyboard inset, and system back tests passed |
+| Full verification | Flutter analysis clean; all 524 Flutter tests passed |
+| Android artifact | offline debug build produced `build/app/outputs/flutter-apk/app-debug.apk` |
+
 ## Scanner Scenario Evidence
 
 | Scenario | Web/unit | Android | Real backend effect | Result |

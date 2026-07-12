@@ -141,11 +141,8 @@ void main() {
     );
     expect(find.byKey(const Key('profile-admin-warehouses')), findsOneWidget);
     expect(find.text('仓库管理'), findsOneWidget);
-    await tester.scrollUntilVisible(
-      find.byKey(const Key('profile-admin-roles-panel')),
-      500,
-      scrollable: find.byType(Scrollable).first,
-    );
+    await tester.drag(find.byType(ListView), const Offset(0, -700));
+    await tester.pumpAndSettle();
     expect(find.byKey(const Key('profile-admin-roles-panel')), findsOneWidget);
     expect(find.text('角色权限'), findsOneWidget);
   });

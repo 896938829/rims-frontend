@@ -19,6 +19,7 @@ import '../../../auth/domain/entities/app_user.dart';
 import '../../../auth/domain/entities/warehouse.dart';
 import '../view_models/profile_security_view_model.dart';
 import '../view_models/profile_view_model.dart';
+import '../widgets/device_permissions_panel.dart';
 
 final class ProfilePage extends StatelessWidget {
   const ProfilePage({
@@ -125,6 +126,8 @@ final class ProfilePage extends StatelessWidget {
           ],
           const SizedBox(height: 14),
           _LogoutCard(onLogout: onLogout),
+          const SizedBox(height: 14),
+          const DevicePermissionsPanel(),
         ],
       ),
     );
