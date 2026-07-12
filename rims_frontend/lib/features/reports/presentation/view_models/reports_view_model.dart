@@ -79,6 +79,7 @@ final class ReportsViewModel extends ChangeNotifier {
   String? _errorMessage;
   String? _inventoryReportErrorMessage;
   bool _isDisposed = false;
+  ReportReadStatus? _readStatus;
 
   final ReportsRepository? repository;
   final bool canViewFinancialMetrics;
@@ -123,6 +124,10 @@ final class ReportsViewModel extends ChangeNotifier {
 
   List<ReportSlowMovingItem> get slowMovingItems => _slowMovingItems;
   int get slowMovingTotal => _slowMovingTotal;
+  ReportReadStatus? get readStatus => _readStatus;
+  String? get cacheStatusLabel => _readStatus?.isCached == true
+      ? '离线缓存 · 更新于 ${_formatCacheTime(_readStatus!.fetchedAt)}'
+      : null;
 
   Future<void> load() async {
     final repository = this.repository;
@@ -135,6 +140,7 @@ final class ReportsViewModel extends ChangeNotifier {
     _isLoading = true;
     _errorMessage = null;
     _inventoryReportErrorMessage = null;
+    _readStatus = null;
     notifyListeners();
 
     final range = _currentRange;
@@ -151,6 +157,7 @@ final class ReportsViewModel extends ChangeNotifier {
         success: (data) => salesStats = data,
         failure: (value) => failure = value,
       );
+      _captureReadStatus(repository);
       if (failure != null) {
         _finishFailure(failure!);
         return;
@@ -169,6 +176,7 @@ final class ReportsViewModel extends ChangeNotifier {
         success: (data) => trendPoints = data,
         failure: (value) => failure = value,
       );
+      _captureReadStatus(repository);
       if (failure != null) {
         _finishFailure(failure!);
         return;
@@ -183,6 +191,7 @@ final class ReportsViewModel extends ChangeNotifier {
         success: (data) => rankingItems = data,
         failure: (value) => failure = value,
       );
+      _captureReadStatus(repository);
       if (failure != null) {
         _finishFailure(failure!);
         return;
@@ -196,6 +205,7 @@ final class ReportsViewModel extends ChangeNotifier {
       success: (data) => overviewItems = data,
       failure: (value) => inventoryReportFailure ??= value,
     );
+    _captureReadStatus(repository);
 
     final turnoverResult = await repository.loadInventoryTurnover(
       startDate: range.start,
@@ -207,6 +217,7 @@ final class ReportsViewModel extends ChangeNotifier {
       success: (data) => turnoverItems = data,
       failure: (value) => inventoryReportFailure ??= value,
     );
+    _captureReadStatus(repository);
 
     final slowMovingResult = await repository.loadSlowMovingInventory(
       startDate: range.start,
@@ -222,6 +233,7 @@ final class ReportsViewModel extends ChangeNotifier {
       },
       failure: (value) => inventoryReportFailure ??= value,
     );
+    _captureReadStatus(repository);
 
     _summaryMetrics = salesStats == null
         ? const []
@@ -333,6 +345,22 @@ final class ReportsViewModel extends ChangeNotifier {
     _slowMovingItems = const [];
     _slowMovingTotal = 0;
     _inventoryReportErrorMessage = null;
+  }
+
+  void _captureReadStatus(ReportsRepository repository) {
+    if (repository is! ReportReadMetadata) return;
+    final status = (repository as ReportReadMetadata).lastReadStatus;
+    if (status == null) return;
+    if (_readStatus == null || status.isCached) _readStatus = status;
+  }
+
+  String _formatCacheTime(DateTime dateTime) {
+    final value = dateTime.toLocal();
+    return '${value.year.toString().padLeft(4, '0')}-'
+        '${value.month.toString().padLeft(2, '0')}-'
+        '${value.day.toString().padLeft(2, '0')} '
+        '${value.hour.toString().padLeft(2, '0')}:'
+        '${value.minute.toString().padLeft(2, '0')}';
   }
 
   Color _bucketColor(String label) {

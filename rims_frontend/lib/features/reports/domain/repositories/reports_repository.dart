@@ -2,6 +2,24 @@ import '../../../../core/result/result.dart';
 import '../../../../core/pagination/page_data.dart';
 import '../entities/report_data.dart';
 
+enum ReportDataSource { network, cache }
+
+final class ReportReadStatus {
+  const ReportReadStatus({
+    required this.source,
+    required this.fetchedAt,
+    required this.expiresAt,
+  });
+  final ReportDataSource source;
+  final DateTime fetchedAt;
+  final DateTime expiresAt;
+  bool get isCached => source == ReportDataSource.cache;
+}
+
+abstract interface class ReportReadMetadata {
+  ReportReadStatus? get lastReadStatus;
+}
+
 abstract interface class ReportsRepository {
   Future<Result<SalesStats>> loadSalesStats({
     required DateTime startDate,

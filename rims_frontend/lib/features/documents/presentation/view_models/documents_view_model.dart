@@ -102,6 +102,7 @@ final class DocumentsViewModel extends ChangeNotifier {
   bool _transactionsReachedEnd = false;
   Failure? _transactionLoadMoreFailure;
   bool _isDisposed = false;
+  DocumentReadStatus? _readStatus;
 
   @override
   void dispose() {
@@ -212,6 +213,10 @@ final class DocumentsViewModel extends ChangeNotifier {
       _transactions.length < _transactionTotal;
   bool get isLoadingMoreTransactions => _isLoadingMoreTransactions;
   Failure? get transactionLoadMoreFailure => _transactionLoadMoreFailure;
+  DocumentReadStatus? get readStatus => _readStatus;
+  String? get cacheStatusLabel => _readStatus?.isCached == true
+      ? '离线缓存 · 更新于 ${_formatCacheTime(_readStatus!.fetchedAt)}'
+      : null;
   String get quantityInputLabel => isStocktakeAction ? '实盘数量' : '数量';
   String get quantityInputHint => isStocktakeAction ? '输入实盘数量' : '输入数量';
 
@@ -635,6 +640,7 @@ final class DocumentsViewModel extends ChangeNotifier {
         _documentsReachedEnd = page.items.isEmpty || !page.hasNextPage;
         _clearStaleReturnSourceDocument();
         _errorMessage = null;
+        _captureReadStatus(repository);
       },
       failure: (failure) => _errorMessage = failure.message,
     );
@@ -695,6 +701,7 @@ final class DocumentsViewModel extends ChangeNotifier {
         _documentPage = page.page;
         _documentTotal = page.total;
         _documentsReachedEnd = page.items.isEmpty || !page.hasNextPage;
+        _captureReadStatus(repository);
       },
       failure: (failure) => _documentLoadMoreFailure = failure,
     );
@@ -703,6 +710,21 @@ final class DocumentsViewModel extends ChangeNotifier {
   }
 
   Future<void> retryLoadMoreDocuments() => loadMoreDocuments();
+
+  void _captureReadStatus(DocumentsRepository repository) {
+    _readStatus = repository is DocumentReadMetadata
+        ? (repository as DocumentReadMetadata).lastReadStatus
+        : null;
+  }
+
+  String _formatCacheTime(DateTime dateTime) {
+    final value = dateTime.toLocal();
+    return '${value.year.toString().padLeft(4, '0')}-'
+        '${value.month.toString().padLeft(2, '0')}-'
+        '${value.day.toString().padLeft(2, '0')} '
+        '${value.hour.toString().padLeft(2, '0')}:'
+        '${value.minute.toString().padLeft(2, '0')}';
+  }
 
   Future<void> loadMoreTransactions() async {
     final repository = this.repository;

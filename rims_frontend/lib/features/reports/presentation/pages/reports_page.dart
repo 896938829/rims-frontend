@@ -92,6 +92,28 @@ final class _ReportsPageState extends State<ReportsPage> {
               Text('报表', style: AppTextStyles.headingLarge),
               const SizedBox(height: 4),
               Text(viewModel.dateRangeLabel, style: AppTextStyles.bodySmall),
+              if (viewModel.cacheStatusLabel case final label?) ...[
+                const SizedBox(height: 8),
+                Row(
+                  key: const Key('reports-cache-status'),
+                  children: [
+                    const Icon(
+                      Icons.cloud_off_outlined,
+                      size: 16,
+                      color: AppColors.warning,
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        label,
+                        style: AppTextStyles.bodySmall.copyWith(
+                          color: AppColors.textSecondary,
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
               const SizedBox(height: 12),
               _PeriodSelector(viewModel: viewModel),
               const SizedBox(height: 18),

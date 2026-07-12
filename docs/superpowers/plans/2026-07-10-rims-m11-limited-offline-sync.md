@@ -394,17 +394,17 @@ feat: add offline inventory reads
 - Test: `rims_frontend/test/features/offline/cached_documents_repository_test.dart`
 - Test: `rims_frontend/test/features/offline/cached_reports_repository_test.dart`
 
-- [ ] **Step 1: Write failing tests for recent-page and selected-detail fallback, query-specific report summaries, source/age, no cached financial leakage, and non-network error preservation.**
+- [x] **Step 1: Write failing tests for recent-page and selected-detail fallback, query-specific report summaries, source/age, no cached financial leakage, and non-network error preservation.**
 
-- [ ] **Step 2: Implement decorators with typed model codecs.**
+- [x] **Step 2: Implement decorators with typed model codecs.**
 
 Do not cache transaction history beyond the recent document summary needed by
 the app. Ordinary-user report cache must contain only fields returned by that
 ordinary-user request; never reuse an admin cache namespace.
 
-- [ ] **Step 3: Add stale/offline status to document and report screens without replacing authoritative business status chips.**
+- [x] **Step 3: Add stale/offline status to document and report screens without replacing authoritative business status chips.**
 
-- [ ] **Step 4: Run tests and commit.**
+- [x] **Step 4: Run tests and commit.**
 
 ```text
 feat: cache recent documents and reports

@@ -29,6 +29,7 @@ import 'features/auth/domain/repositories/auth_repository.dart';
 import 'features/auth/presentation/view_models/auth_session_controller.dart';
 import 'features/documents/data/datasources/documents_remote_datasource.dart';
 import 'features/documents/data/repositories/documents_repository_impl.dart';
+import 'features/documents/domain/repositories/documents_repository.dart';
 import 'features/inventory/data/datasources/inventory_remote_datasource.dart';
 import 'features/inventory/data/repositories/inventory_repository_impl.dart';
 import 'features/inventory/domain/repositories/inventory_repository.dart';
@@ -36,9 +37,12 @@ import 'features/offline/domain/services/offline_store.dart';
 import 'features/offline/data/services/connectivity_network_status_service.dart';
 import 'features/offline/data/repositories/cached_auth_repository.dart';
 import 'features/offline/data/repositories/cached_inventory_repository.dart';
+import 'features/offline/data/repositories/cached_documents_repository.dart';
+import 'features/offline/data/repositories/cached_reports_repository.dart';
 import 'features/offline/domain/services/network_status_service.dart';
 import 'features/reports/data/datasources/reports_remote_datasource.dart';
 import 'features/reports/data/repositories/reports_repository_impl.dart';
+import 'features/reports/domain/repositories/reports_repository.dart';
 import 'features/scanner/domain/services/scan_lookup_cache.dart';
 import 'features/scanner/domain/services/scan_session_store.dart';
 import 'features/scanner/data/field_operations_scanner.dart';
@@ -75,9 +79,9 @@ final class _MainAppState extends State<MainApp> {
   _warehouseOwnershipSubscription;
   late final ApiClient _apiClient;
   late final AuthRepository _authRepository;
-  late final DocumentsRepositoryImpl _documentsRepository;
+  late final DocumentsRepository _documentsRepository;
   late final InventoryRepository _inventoryRepository;
-  late final ReportsRepositoryImpl _reportsRepository;
+  late final ReportsRepository _reportsRepository;
   late final AdminRepositoryImpl _adminRepository;
   late final GoRouter _router;
   late final NetworkStatusService _networkStatusService;
@@ -151,8 +155,14 @@ final class _MainAppState extends State<MainApp> {
       tokenStorage: _secureStorage,
       accountStorage: _secureStorage,
     );
-    _documentsRepository = DocumentsRepositoryImpl(
+    final documentsRepository = DocumentsRepositoryImpl(
       remoteDataSource: ApiDocumentsRemoteDataSource(_apiClient),
+    );
+    _documentsRepository = CachedDocumentsRepository(
+      delegate: documentsRepository,
+      store: widget.offlineStore,
+      accountIdReader: () => _sessionController.currentUser?.id.toString(),
+      warehouseIdReader: () => _sessionController.currentWarehouse?.id,
     );
     final inventoryRepository = InventoryRepositoryImpl(
       remoteDataSource: ApiInventoryRemoteDataSource(_apiClient),
@@ -163,8 +173,16 @@ final class _MainAppState extends State<MainApp> {
       accountIdReader: () => _sessionController.currentUser?.id.toString(),
       warehouseIdReader: () => _sessionController.currentWarehouse?.id,
     );
-    _reportsRepository = ReportsRepositoryImpl(
+    final reportsRepository = ReportsRepositoryImpl(
       remoteDataSource: ApiReportsRemoteDataSource(_apiClient),
+    );
+    _reportsRepository = CachedReportsRepository(
+      delegate: reportsRepository,
+      store: widget.offlineStore,
+      accountIdReader: () => _sessionController.currentUser?.id.toString(),
+      warehouseIdReader: () => _sessionController.currentWarehouse?.id,
+      canViewFinancialMetricsReader: () =>
+          _sessionController.currentUser?.isAdmin == true,
     );
     _adminRepository = AdminRepositoryImpl(
       remoteDataSource: ApiAdminRemoteDataSource(_apiClient),

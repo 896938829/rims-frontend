@@ -207,6 +207,13 @@ final class _DocumentsPageState extends State<DocumentsPage> {
             key: const Key('documents-scroll-view'),
             children: [
               Text('单据', style: AppTextStyles.headingLarge),
+              if (viewModel.cacheStatusLabel case final label?) ...[
+                const SizedBox(height: 8),
+                _OfflineReadStatus(
+                  key: const Key('documents-cache-status'),
+                  label: label,
+                ),
+              ],
               const SizedBox(height: 14),
               GridView.count(
                 crossAxisCount: 2,
@@ -375,6 +382,34 @@ final class _DocumentsPageState extends State<DocumentsPage> {
           ),
         );
       },
+    );
+  }
+}
+
+final class _OfflineReadStatus extends StatelessWidget {
+  const _OfflineReadStatus({required this.label, super.key});
+
+  final String label;
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        const Icon(
+          Icons.cloud_off_outlined,
+          size: 16,
+          color: AppColors.warning,
+        ),
+        const SizedBox(width: 6),
+        Expanded(
+          child: Text(
+            label,
+            style: AppTextStyles.bodySmall.copyWith(
+              color: AppColors.textSecondary,
+            ),
+          ),
+        ),
+      ],
     );
   }
 }

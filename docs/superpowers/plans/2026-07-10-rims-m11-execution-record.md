@@ -23,7 +23,7 @@ counts, encrypted storage ownership, cleanup, and baseline restore are read.
 | Account/warehouse scoped cache | 4-7 | cache keys, invalidation, no cross-scope read | primitives PASS; repositories pending |
 | User/warehouse references | 5 | secure-token gate and cached projection | PASS |
 | Product/inventory/alerts/barcode | 6 | offline read, stale source/age, no mutation authority | PASS |
-| Documents/details/reports | 7 | offline read and financial field boundary | planned |
+| Documents/details/reports | 7 | offline read and financial field boundary | PASS |
 | Six document draft types | 8, 9 | autosave, reopen, recreation, ownership | planned |
 | Explicit reviewed queueing | 11-13 | confirmation and immutable payload | planned |
 | Outbox states and legal transitions | 11 | complete state matrix | planned |
@@ -128,6 +128,19 @@ counts, encrypted storage ownership, cleanup, and baseline restore are read.
 | Migration | complete legacy scan envelope is written to Drift before old key deletion; write failure preserves legacy data |
 | Scanner | repository cache success remains visibly stale and is not rewritten as authoritative scan data |
 | GREEN | strict analyze PASS; inventory, scanner, offline, and widget regression suites PASS (163 tests); release Web build PASS |
+
+## Task 7 Document And Report Evidence
+
+| Probe | Observed result |
+| --- | --- |
+| RED | document/report decorators and read metadata were absent |
+| Documents | recent pages and selected details use typed codecs and scoped fallback; transaction history is never cached |
+| Mutations | create and lifecycle calls always use backend and invalidate current warehouse cache only after success |
+| Reports | all six report queries include exact parameters, account, warehouse, and financial/basic view namespace |
+| Financial boundary | ordinary users cannot read financial/admin cache and render no sales financial sections |
+| Error boundary | authorization and other non-network failures remain visible despite matching cache |
+| UI | document and report pages show explicit cache source/time without replacing business status labels |
+| GREEN | strict analyze PASS; document, report, offline, and widget suites PASS (169 tests); release Web build PASS |
 
 ## Final Android State Evidence
 

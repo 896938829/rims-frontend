@@ -3,6 +3,24 @@ import '../../../../core/result/failure.dart';
 import '../../../../core/pagination/page_data.dart';
 import '../entities/document_data.dart';
 
+enum DocumentDataSource { network, cache }
+
+final class DocumentReadStatus {
+  const DocumentReadStatus({
+    required this.source,
+    required this.fetchedAt,
+    required this.expiresAt,
+  });
+  final DocumentDataSource source;
+  final DateTime fetchedAt;
+  final DateTime expiresAt;
+  bool get isCached => source == DocumentDataSource.cache;
+}
+
+abstract interface class DocumentReadMetadata {
+  DocumentReadStatus? get lastReadStatus;
+}
+
 abstract interface class DocumentsRepository {
   Future<Result<PageData<DocumentRecord>>> listRecentDocuments({
     int? docType,
