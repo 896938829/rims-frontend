@@ -50,6 +50,25 @@ final class NetworkFailure extends Failure {
   });
 }
 
+final class CancellationFailure extends Failure {
+  const CancellationFailure({
+    super.message = 'Operation cancelled',
+    super.cause,
+  });
+}
+
+final class DevicePermissionFailure extends Failure {
+  const DevicePermissionFailure({required super.message, super.cause});
+}
+
+final class LocalStorageFailure extends Failure {
+  const LocalStorageFailure({required super.message, super.cause});
+}
+
+final class AttachmentFailure extends Failure {
+  const AttachmentFailure({required super.message, super.cause});
+}
+
 final class AuthenticationFailure extends Failure {
   const AuthenticationFailure({
     super.message = 'Authentication required',

@@ -71,11 +71,18 @@ final class ApiClient {
     String path, {
     Map<String, dynamic>? queryParameters,
     Options? options,
+    CancelToken? cancelToken,
+    ProgressCallback? onReceiveProgress,
   }) {
     return _request(
       path,
-      () =>
-          _dio.get<T>(path, queryParameters: queryParameters, options: options),
+      () => _dio.get<T>(
+        path,
+        queryParameters: queryParameters,
+        options: options,
+        cancelToken: cancelToken,
+        onReceiveProgress: onReceiveProgress,
+      ),
     );
   }
 
@@ -84,6 +91,9 @@ final class ApiClient {
     Object? data,
     Map<String, dynamic>? queryParameters,
     Options? options,
+    CancelToken? cancelToken,
+    ProgressCallback? onSendProgress,
+    ProgressCallback? onReceiveProgress,
   }) {
     return _request(
       path,
@@ -92,6 +102,9 @@ final class ApiClient {
         data: data,
         queryParameters: queryParameters,
         options: options,
+        cancelToken: cancelToken,
+        onSendProgress: onSendProgress,
+        onReceiveProgress: onReceiveProgress,
       ),
     );
   }
@@ -101,6 +114,9 @@ final class ApiClient {
     Object? data,
     Map<String, dynamic>? queryParameters,
     Options? options,
+    CancelToken? cancelToken,
+    ProgressCallback? onSendProgress,
+    ProgressCallback? onReceiveProgress,
   }) {
     return _request(
       path,
@@ -109,6 +125,9 @@ final class ApiClient {
         data: data,
         queryParameters: queryParameters,
         options: options,
+        cancelToken: cancelToken,
+        onSendProgress: onSendProgress,
+        onReceiveProgress: onReceiveProgress,
       ),
     );
   }
@@ -118,6 +137,9 @@ final class ApiClient {
     Object? data,
     Map<String, dynamic>? queryParameters,
     Options? options,
+    CancelToken? cancelToken,
+    ProgressCallback? onSendProgress,
+    ProgressCallback? onReceiveProgress,
   }) {
     return _request(
       path,
@@ -126,6 +148,9 @@ final class ApiClient {
         data: data,
         queryParameters: queryParameters,
         options: options,
+        cancelToken: cancelToken,
+        onSendProgress: onSendProgress,
+        onReceiveProgress: onReceiveProgress,
       ),
     );
   }
@@ -135,6 +160,7 @@ final class ApiClient {
     Object? data,
     Map<String, dynamic>? queryParameters,
     Options? options,
+    CancelToken? cancelToken,
   }) {
     return _request(
       path,
@@ -143,6 +169,7 @@ final class ApiClient {
         data: data,
         queryParameters: queryParameters,
         options: options,
+        cancelToken: cancelToken,
       ),
     );
   }

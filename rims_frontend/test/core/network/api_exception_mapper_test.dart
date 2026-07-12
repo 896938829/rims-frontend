@@ -87,5 +87,16 @@ void main() {
 
       expect(failure, isA<NetworkFailure>());
     });
+
+    test('maps request cancellation without treating it as authentication', () {
+      final failure = const ApiExceptionMapper().map(
+        DioException(
+          requestOptions: RequestOptions(path: '/upload'),
+          type: DioExceptionType.cancel,
+        ),
+      );
+
+      expect(failure, isA<CancellationFailure>());
+    });
   });
 }

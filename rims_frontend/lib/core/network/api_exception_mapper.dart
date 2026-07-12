@@ -11,6 +11,10 @@ final class ApiExceptionMapper {
       return UnknownFailure(cause: error);
     }
 
+    if (error.type == DioExceptionType.cancel) {
+      return CancellationFailure(cause: error);
+    }
+
     final statusCode = error.response?.statusCode;
     final envelope = _envelopeFrom(error.response?.data);
     final message = envelope?.message ?? _messageFrom(error);

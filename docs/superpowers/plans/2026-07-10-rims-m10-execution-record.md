@@ -54,7 +54,7 @@ runtime ownership, cleanup, and business effects have been inspected.
 | Camera capture/gallery/file selection | 11, 12 | adapter/widget/Android journey | pending |
 | Compression/orientation/metadata/thumbnail | 11 | rotated fixture and bounds evidence | pending |
 | Attachment type/size/count validation | 8, 11 | backend and frontend boundary tests | pending |
-| Upload progress/cancel/retry | 4, 12, 16 | first-progress/total timing and same request ID | pending |
+| Upload progress/cancel/retry | 4, 12, 16 | first-progress/total timing and same request ID | transport primitives verified; attachment journey pending |
 | Interrupted upload/process recreation | 11, 12, 16 | staged manifest recovery and one server object | pending |
 | Preview/download/share | 10-12, 16 | authenticated bytes/hash and UI action evidence | pending |
 | Replace/reorder/delete | 9, 12, 16 | contract, ACL, rollback, and object evidence | pending |
@@ -66,7 +66,7 @@ runtime ownership, cleanup, and business effects have been inspected.
 | Low storage | 11, 12, 16 | injected disk failure preserves recoverable state | pending |
 | Portrait/landscape/tablet/font/dark/keyboard/back | 15-17 | compatibility tests and screenshots/report | pending |
 | Server authorization remains authoritative | 3, 8, 9, 16 | direct API and UI permission-denial evidence | pending |
-| Sensitive logging redaction | 4 | token/multipart/path/password redaction tests | pending |
+| Sensitive logging redaction | 4 | token/multipart/path/password redaction tests | verified |
 | M9 regression preserved | 16, 17 | Web and Android M9 reports on current commits | pending |
 | M10 performance thresholds | 16, 17 | strict numeric report and threshold result | pending |
 | P0/P1 zero | 17 | final defect audit | pending |
@@ -118,6 +118,17 @@ runtime ownership, cleanup, and business effects have been inspected.
 | Warehouse isolation | `M10-WH001-ONLY-001` returned quantity 2 in WH001 and HTTP 422/code 20002 in `M9-WH-02` |
 | Unknown barcode | `M10-UNKNOWN-001` returned HTTP 404/code 10004 with no inventory payload |
 | Runtime cleanup | exactly owned backend stopped; pre-existing healthy PostgreSQL remained user-managed |
+
+## Task 4 Transfer Primitive Evidence
+
+| Probe | Observed result |
+| --- | --- |
+| RED | tests failed for absent failure types, cancellation/progress parameters, and safe interceptor |
+| Cancellation | cancelled Dio request mapped to `CancellationFailure`, not authentication |
+| Transfer callbacks | upload and byte-response download progress callbacks both observed |
+| Response bytes | `ResponseType.bytes` preserved exact response bytes `[4,5,6]` |
+| Safe logging | method/path/status/duration/trace ID/sizes retained; bearer token, query token, password, multipart filename, and local path absent |
+| Core verification | Flutter analysis clean; all 48 `test/core` tests passed |
 
 ## Scanner Scenario Evidence
 

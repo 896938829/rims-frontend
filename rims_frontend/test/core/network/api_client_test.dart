@@ -8,6 +8,7 @@ import 'package:rims_frontend/core/events/app_event_bus.dart';
 import 'package:rims_frontend/core/network/api_client.dart';
 import 'package:rims_frontend/core/network/api_endpoints.dart';
 import 'package:rims_frontend/core/network/interceptors/auth_interceptor.dart';
+import 'package:rims_frontend/core/network/interceptors/logging_interceptor.dart';
 import 'package:rims_frontend/core/network/interceptors/warehouse_interceptor.dart';
 
 void main() {
@@ -20,7 +21,7 @@ void main() {
 
     ApiClient(dio: dio);
 
-    expect(dio.interceptors.whereType<LogInterceptor>(), hasLength(1));
+    expect(dio.interceptors.whereType<SafeLoggingInterceptor>(), hasLength(1));
   });
 
   test('does not attach logging interceptor when logging is disabled', () {
@@ -28,7 +29,7 @@ void main() {
 
     ApiClient(dio: dio, enableLogging: false);
 
-    expect(dio.interceptors.whereType<LogInterceptor>(), isEmpty);
+    expect(dio.interceptors.whereType<SafeLoggingInterceptor>(), isEmpty);
   });
 
   test('attaches auth interceptor when token reader is provided', () {

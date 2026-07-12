@@ -267,7 +267,7 @@ feat: add warehouse-scoped barcode lookup
 - Create: `rims_frontend/test/core/network/api_transfer_test.dart`
 - Create: `rims_frontend/test/core/network/logging_interceptor_test.dart`
 
-- [ ] **Step 1: Write failing tests for transfer cancellation, local storage/media failures, upload progress forwarding, response-byte downloads, and log redaction.**
+- [x] **Step 1: Write failing tests for transfer cancellation, local storage/media failures, upload progress forwarding, response-byte downloads, and log redaction.**
 
 Required new failures:
 
@@ -293,21 +293,21 @@ The logger test must prove bearer tokens, multipart bytes, passwords, and local
 file paths are absent while method, sanitized path, status, duration, trace ID,
 and safe sizes remain available.
 
-- [ ] **Step 2: Run focused tests and verify RED.**
+- [x] **Step 2: Run focused tests and verify RED.**
 
 ```powershell
 flutter test --no-pub test/core/network/api_exception_mapper_test.dart test/core/network/api_transfer_test.dart test/core/network/logging_interceptor_test.dart
 ```
 
-- [ ] **Step 3: Extend `ApiClient` with optional `CancelToken`, send/receive progress callbacks, per-request timeouts, and response options.**
+- [x] **Step 3: Extend `ApiClient` with optional `CancelToken`, send/receive progress callbacks, per-request timeouts, and response options.**
 
 Keep Dio types in `core/network` and DataSources only. Map
 `DioExceptionType.cancel` to `CancellationFailure`; never publish token expiry
 for cancellation.
 
-- [ ] **Step 4: Replace debug `LogInterceptor` body/header dumping with a redacting interceptor.**
+- [x] **Step 4: Replace debug `LogInterceptor` body/header dumping with a redacting interceptor.**
 
-- [ ] **Step 5: Run all core tests and commit.**
+- [x] **Step 5: Run all core tests and commit.**
 
 ```powershell
 flutter test --no-pub test/core
