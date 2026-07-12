@@ -199,6 +199,8 @@ $runtimeOwnedByRun = $false
 $fixturesMutated = $false
 $hostBridgeProcess = $null
 $hostBridgeIdentity = $null
+$fieldPermissionHelper = $null
+$fieldPermissionHelperPath = Join-Path $ArtifactRoot 'grant-camera-after-launch.ps1'
 $flutterOutputPath = Join-Path $ArtifactRoot 'flutter-output.log'
 $uploadProviderLogPath = Join-Path $ArtifactRoot 'upload-provider.log'
 $failureArtifacts = [pscustomobject][ordered]@{
@@ -632,6 +634,63 @@ function Invoke-FieldOperationsDeviceSetup {
   Start-Sleep -Seconds 2
 }
 
+function Start-FieldPermissionGrantHelper {
+  if ($Phase -ne 'field-operations') { return }
+  $adb = Resolve-RimsAndroidTool `
+    -CommandName 'adb.exe' `
+    -SdkRelativePath 'platform-tools\adb.exe'
+  $source = @'
+param([string]$Adb, [string]$Serial, [string]$LogPath)
+$ErrorActionPreference = 'Continue'
+for ($attempt = 0; $attempt -lt 240; $attempt += 1) {
+  $pidText = (& $Adb -s $Serial shell 'pidof' 'com.example.rims_frontend' 2>&1) -join ' '
+  if (-not [string]::IsNullOrWhiteSpace($pidText)) {
+    Start-Sleep -Milliseconds 300
+    $grant = (& $Adb -s $Serial shell pm grant com.example.rims_frontend android.permission.CAMERA 2>&1) -join ' '
+    "post-install-camera-grant pid=$pidText exit=$LASTEXITCODE $grant" |
+      Add-Content -LiteralPath $LogPath -Encoding UTF8
+    exit $LASTEXITCODE
+  }
+  Start-Sleep -Milliseconds 250
+}
+'post-install-camera-grant timed out waiting for app process' |
+  Add-Content -LiteralPath $LogPath -Encoding UTF8
+exit 124
+'@
+  Set-Content `
+    -LiteralPath $fieldPermissionHelperPath `
+    -Value $source `
+    -Encoding UTF8
+  $helperArguments = @(
+    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
+    $fieldPermissionHelperPath, '-Adb', $adb, '-Serial', $androidSerial,
+    '-LogPath', $uploadProviderLogPath
+  ) | ForEach-Object {
+    ConvertTo-RimsWindowsCommandLineArgument -Value "$_"
+  }
+  $script:fieldPermissionHelper = Start-Process `
+    -FilePath (Join-Path $PSHOME 'powershell.exe') `
+    -ArgumentList ($helperArguments -join ' ') `
+    -WindowStyle Hidden `
+    -PassThru
+}
+
+function Stop-FieldPermissionGrantHelper {
+  if ($null -ne $script:fieldPermissionHelper -and
+      -not $script:fieldPermissionHelper.HasExited) {
+    $script:fieldPermissionHelper.Kill()
+    [void]$script:fieldPermissionHelper.WaitForExit(5000)
+  }
+  if ($null -ne $script:fieldPermissionHelper) {
+    $script:fieldPermissionHelper.Dispose()
+    $script:fieldPermissionHelper = $null
+  }
+  Remove-Item `
+    -LiteralPath $fieldPermissionHelperPath `
+    -Force `
+    -ErrorAction SilentlyContinue
+}
+
 function Remove-FieldOperationsProvider {
   if ($Phase -ne 'field-operations' -or
       [string]::IsNullOrWhiteSpace($androidSerial)) {
@@ -685,6 +744,11 @@ function Restore-AndroidBaseline {
     return
   }
   $cleanupErrors = [Collections.Generic.List[string]]::new()
+  try {
+    Stop-FieldPermissionGrantHelper
+  } catch {
+    [void]$cleanupErrors.Add("camera grant helper: $($_.Exception.Message)")
+  }
   try {
     Remove-FieldOperationsProvider
   } catch {
@@ -866,6 +930,7 @@ try {
           New-Item -ItemType Directory -Force -Path $ArtifactRoot | Out-Null
           [void](Invoke-Adb -Arguments @('-s', $androidSerial, 'logcat', '-c'))
           Invoke-FieldOperationsDeviceSetup
+          Start-FieldPermissionGrantHelper
           $execution = Invoke-AndroidFlutterTest
           @($execution.StandardOutput, $execution.StandardError) | Set-Content `
             -LiteralPath $flutterOutputPath `

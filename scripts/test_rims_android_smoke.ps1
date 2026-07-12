@@ -157,6 +157,11 @@ foreach ($segment in @(
 if (-not $fieldTestText.Contains("debugPrint('RIMS_E2E_RESULT `$")) {
   throw 'M10 integration test omitted the machine-readable result marker.'
 }
+$androidWrapperText = Get-Content -LiteralPath $wrapper -Raw
+if (-not $androidWrapperText.Contains("shell 'pidof' 'com.example.rims_frontend'") -or
+    -not $androidWrapperText.Contains('Start-FieldPermissionGrantHelper')) {
+  throw 'M10 wrapper does not grant camera permission after app launch.'
+}
 
 $previousDevice = $env:RIMS_ANDROID_DEVICE
 try {

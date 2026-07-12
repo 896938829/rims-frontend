@@ -31,20 +31,32 @@ void main() {
 
         final realProbeStarted = DateTime.now();
         final realScanner = MobileScannerCapability();
-        await tester.pumpWidget(
-          MaterialApp(
-            home: Scaffold(
-              body: MobileScanner(controller: realScanner.controller),
+        var realCameraAccess = realScanner.accessState.name;
+        String? realCameraProbeError;
+        try {
+          await tester.pumpWidget(
+            MaterialApp(
+              home: Scaffold(
+                body: MobileScanner(controller: realScanner.controller),
+              ),
             ),
-          ),
-        );
-        await tester.pump(const Duration(milliseconds: 500));
-        await realScanner.start();
-        final realCameraAccess = realScanner.accessState.name;
-        await realScanner.stop();
-        await realScanner.start();
-        await realScanner.stop();
-        await realScanner.dispose();
+          );
+          await tester.pump(const Duration(seconds: 1));
+          await realScanner.start().timeout(const Duration(seconds: 10));
+          realCameraAccess = realScanner.accessState.name;
+          await realScanner.stop();
+        } on Object catch (error) {
+          realCameraProbeError = error.toString();
+        } finally {
+          await tester.pumpWidget(const SizedBox.shrink());
+          await tester.pump();
+          try {
+            await realScanner.dispose();
+          } on Object catch (error) {
+            realCameraProbeError ??= error.toString();
+          }
+          realCameraProbeError ??= tester.takeException()?.toString();
+        }
         segments['realCameraProbe'] = DateTime.now()
             .difference(realProbeStarted)
             .inMilliseconds;
@@ -249,6 +261,7 @@ void main() {
           'inboundDocumentNumber': inbound.number,
           'permissionBoundary': 'deny-guidance+manual-fallback+resume-retry',
           'realCameraAccess': realCameraAccess,
+          'realCameraProbeError': realCameraProbeError,
           'processRecreation': 'staged-upload-recovered-with-stable-request-id',
         };
         binding.reportData = report;
