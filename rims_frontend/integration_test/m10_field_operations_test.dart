@@ -50,6 +50,7 @@ void main() {
         await tapAndSettle(tester, const Key('scanner-manual-submit'));
         await waitForKey(tester, const Key('document-create-button'));
         final documents = await _documentsViewModel(tester);
+        final stockBefore = await _stockQuantities(documents);
         await waitUntil(
           tester,
           description: 'manual scan draft line',
@@ -145,11 +146,29 @@ void main() {
         segments['documentSubmission'] = DateTime.now()
             .difference(documentStarted)
             .inMilliseconds;
+        final stockAfterSales = await _stockQuantities(documents);
+        expect(
+          stockAfterSales['M9-PAGE-0001'],
+          stockBefore['M9-PAGE-0001']! - 2,
+        );
+        expect(
+          stockAfterSales['M9-PAGE-0004'],
+          stockBefore['M9-PAGE-0004']! - 1,
+        );
 
         final inbound = await _createMultiLineInbound(
           tester,
           documents,
           runId: runId,
+        );
+        final stockAfterInbound = await _stockQuantities(documents);
+        expect(
+          stockAfterInbound['M9-PAGE-0001'],
+          stockAfterSales['M9-PAGE-0001']! + 1,
+        );
+        expect(
+          stockAfterInbound['M9-PAGE-0004'],
+          stockAfterSales['M9-PAGE-0004']! + 2,
         );
 
         final itemKey = Key('document-list-item-${created.id}');
@@ -201,6 +220,12 @@ void main() {
           description: 'uploaded document attachment',
           condition: () => find.byTooltip('附件操作').evaluate().isNotEmpty,
         );
+        final attachments = tester
+            .widget<AttachmentPanel>(find.byType(AttachmentPanel))
+            .viewModel;
+        expect(attachments.attachments, hasLength(1));
+        final uploadedHash = attachments.attachments.single.fileHash;
+        expect(uploadedHash, matches(RegExp(r'^[0-9a-f]{64}$')));
         final uploadTotal = DateTime.now()
             .difference(uploadStarted)
             .inMilliseconds;
@@ -216,8 +241,11 @@ void main() {
         await waitUntil(
           tester,
           description: 'replacement upload settled',
-          condition: () => find.byTooltip('附件操作').evaluate().isNotEmpty,
+          condition: () => !attachments.isBusy,
         );
+        expect(attachments.attachments, hasLength(1));
+        final replacementHash = attachments.attachments.single.fileHash;
+        expect(replacementHash, matches(RegExp(r'^[0-9a-f]{64}$')));
         await tester.tap(find.byTooltip('附件操作'));
         await tester.pumpAndSettle();
         await tapFinderAndSettle(
@@ -235,6 +263,7 @@ void main() {
           description: 'attachment deletion',
           condition: () => find.byTooltip('附件操作').evaluate().isEmpty,
         );
+        expect(attachments.attachments, isEmpty);
 
         final report = <String, Object?>{
           'runId': runId,
@@ -244,6 +273,18 @@ void main() {
           'documentNumber': created.number,
           'inboundDocumentId': inbound.id,
           'inboundDocumentNumber': inbound.number,
+          'stockEffects': {
+            'before': stockBefore,
+            'afterSales': stockAfterSales,
+            'afterInbound': stockAfterInbound,
+          },
+          'attachmentEvidence': {
+            'uploadedCount': 1,
+            'uploadedHash': uploadedHash,
+            'replacementCount': 1,
+            'replacementHash': replacementHash,
+            'finalCount': attachments.attachments.length,
+          },
           'permissionBoundary': 'deny-guidance+manual-fallback+retry',
           'realCameraAccess': 'verified-post-install-by-android-wrapper',
           'processRecreation': 'staged-upload-recovered-with-stable-request-id',
@@ -254,6 +295,29 @@ void main() {
       },
     );
   });
+}
+
+Future<Map<String, int>> _stockQuantities(DocumentsViewModel viewModel) async {
+  const skus = ['M9-PAGE-0001', 'M9-PAGE-0004'];
+  final repository = viewModel.inventoryRepository;
+  if (repository == null) throw TestFailure('Inventory repository is missing.');
+  final quantities = <String, int>{};
+  for (final sku in skus) {
+    final result = await repository.listInventory(keyword: sku);
+    result.when(
+      success: (page) {
+        quantities[sku] = page.items
+            .singleWhere((item) => item.sku == sku)
+            .stockQuantity;
+      },
+      failure: (failure) {
+        throw TestFailure(
+          'Inventory lookup failed for $sku: ${failure.message}',
+        );
+      },
+    );
+  }
+  return quantities;
 }
 
 Future<void> _pumpFreshApp(WidgetTester tester, String instance) async {
