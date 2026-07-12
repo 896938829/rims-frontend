@@ -36,10 +36,7 @@ void main() {
     test('when returns success callback result for Success', () {
       const result = Success<int>(1);
 
-      final value = result.when(
-        success: (data) => data + 1,
-        failure: (_) => 0,
-      );
+      final value = result.when(success: (data) => data + 1, failure: (_) => 0);
 
       expect(value, 2);
     });

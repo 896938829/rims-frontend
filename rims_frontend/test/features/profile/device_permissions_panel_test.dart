@@ -22,7 +22,7 @@ void main() {
       expect(mainManifest, contains('android:required="false"'));
       expect(mainManifest, contains('android:usesCleartextTraffic="false"'));
       expect(debugManifest, contains('android:usesCleartextTraffic="true"'));
-    expect(gradle, contains('minSdk = 24'));
+      expect(gradle, contains('minSdk = 24'));
 
       for (final broadPermission in const [
         'READ_EXTERNAL_STORAGE',

@@ -110,10 +110,7 @@ final class AuthRepositoryImpl implements AuthRepository {
 
         await secureStorage.saveAccessToken(token);
 
-        return _sessionFromUserAndToken(
-          token: token,
-          user: user,
-        );
+        return _sessionFromUserAndToken(token: token, user: user);
       },
       failure: (failure) async => FailureResult<AuthSession>(failure),
     );

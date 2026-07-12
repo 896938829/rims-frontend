@@ -168,49 +168,46 @@ void main() {
       },
     );
 
-    test(
-      'login rejects user without username before saving token',
-      () async {
-        final storage = _FakeTokenStorage();
-        final remoteDataSource = _FakeAuthRemoteDataSource(
-          loginResult: const Success<LoginResponseModel>(
-            LoginResponseModel(
-              token: 'token-123',
-              user: AppUserModel(
-                id: 7,
-                username: '',
-                realName: 'Alice',
-                roleCode: 'user',
-                roleName: '普通用户',
-              ),
+    test('login rejects user without username before saving token', () async {
+      final storage = _FakeTokenStorage();
+      final remoteDataSource = _FakeAuthRemoteDataSource(
+        loginResult: const Success<LoginResponseModel>(
+          LoginResponseModel(
+            token: 'token-123',
+            user: AppUserModel(
+              id: 7,
+              username: '',
+              realName: 'Alice',
+              roleCode: 'user',
+              roleName: '普通用户',
             ),
           ),
-          warehousesResult: const Success<List<WarehouseModel>>([
-            WarehouseModel(id: 1, code: 'WH001', name: '默认仓库', isDefault: true),
-          ]),
-        );
-        final repository = AuthRepositoryImpl(
-          remoteDataSource: remoteDataSource,
-          secureStorage: storage,
-        );
+        ),
+        warehousesResult: const Success<List<WarehouseModel>>([
+          WarehouseModel(id: 1, code: 'WH001', name: '默认仓库', isDefault: true),
+        ]),
+      );
+      final repository = AuthRepositoryImpl(
+        remoteDataSource: remoteDataSource,
+        secureStorage: storage,
+      );
 
-        final result = await repository.login(
-          username: 'alice',
-          password: 'secret',
-        );
+      final result = await repository.login(
+        username: 'alice',
+        password: 'secret',
+      );
 
-        expect(result.isFailure, isTrue);
-        final failure = result.when(
-          success: (_) => throw TestFailure('login should fail'),
-          failure: (failure) => failure,
-        );
-        expect(failure, isA<UnknownFailure>());
-        expect(failure.message, '用户信息缺少账号');
-        expect(storage.accessToken, isNull);
-        expect(storage.saveCallCount, 0);
-        expect(remoteDataSource.loadWarehousesCallCount, 0);
-      },
-    );
+      expect(result.isFailure, isTrue);
+      final failure = result.when(
+        success: (_) => throw TestFailure('login should fail'),
+        failure: (failure) => failure,
+      );
+      expect(failure, isA<UnknownFailure>());
+      expect(failure.message, '用户信息缺少账号');
+      expect(storage.accessToken, isNull);
+      expect(storage.saveCallCount, 0);
+      expect(remoteDataSource.loadWarehousesCallCount, 0);
+    });
 
     test(
       'switchCurrentWarehouse confirms target warehouse with backend',
@@ -341,7 +338,9 @@ final class _FakeAuthRemoteDataSource implements AuthRemoteDataSource {
   }
 
   @override
-  Future<Result<WarehouseModel?>> switchCurrentWarehouse(int warehouseId) async {
+  Future<Result<WarehouseModel?>> switchCurrentWarehouse(
+    int warehouseId,
+  ) async {
     lastSwitchWarehouseId = warehouseId;
     return switchWarehouseResult;
   }

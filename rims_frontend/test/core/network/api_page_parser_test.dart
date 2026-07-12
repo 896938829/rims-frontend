@@ -14,17 +14,14 @@ final class _Item {
 void main() {
   group('parseApiPage', () {
     test('parses the backend page payload and converts every item', () {
-      final page = parseApiPage<_Item>(
-        <String, Object?>{
-          'list': <Object?>[
-            <String, Object?>{'id': 7},
-          ],
-          'total': 21,
-          'page': 2,
-          'pageSize': 20,
-        },
-        _Item.fromJson,
-      );
+      final page = parseApiPage<_Item>(<String, Object?>{
+        'list': <Object?>[
+          <String, Object?>{'id': 7},
+        ],
+        'total': 21,
+        'page': 2,
+        'pageSize': 20,
+      }, _Item.fromJson);
 
       expect(page.items.single.id, 7);
       expect(page.total, 21);
@@ -34,15 +31,12 @@ void main() {
     });
 
     test('accepts integral numeric metadata', () {
-      final page = parseApiPage<_Item>(
-        <String, Object?>{
-          'list': <Object?>[],
-          'total': 21.0,
-          'page': 1.0,
-          'pageSize': 20.0,
-        },
-        _Item.fromJson,
-      );
+      final page = parseApiPage<_Item>(<String, Object?>{
+        'list': <Object?>[],
+        'total': 21.0,
+        'page': 1.0,
+        'pageSize': 20.0,
+      }, _Item.fromJson);
 
       expect(page.total, 21);
       expect(page.page, 1);
@@ -51,17 +45,20 @@ void main() {
 
     test('rejects a missing or non-list item collection', () {
       expect(
-        () => parseApiPage<_Item>(
-          {'total': 0, 'page': 1, 'pageSize': 20},
-          _Item.fromJson,
-        ),
+        () => parseApiPage<_Item>({
+          'total': 0,
+          'page': 1,
+          'pageSize': 20,
+        }, _Item.fromJson),
         throwsFormatException,
       );
       expect(
-        () => parseApiPage<_Item>(
-          {'list': {}, 'total': 0, 'page': 1, 'pageSize': 20},
-          _Item.fromJson,
-        ),
+        () => parseApiPage<_Item>({
+          'list': {},
+          'total': 0,
+          'page': 1,
+          'pageSize': 20,
+        }, _Item.fromJson),
         throwsFormatException,
       );
     });
@@ -95,10 +92,12 @@ void main() {
 
     test('rejects an item that is not a JSON object', () {
       expect(
-        () => parseApiPage<_Item>(
-          {'list': [7], 'total': 1, 'page': 1, 'pageSize': 20},
-          _Item.fromJson,
-        ),
+        () => parseApiPage<_Item>({
+          'list': [7],
+          'total': 1,
+          'page': 1,
+          'pageSize': 20,
+        }, _Item.fromJson),
         throwsFormatException,
       );
     });

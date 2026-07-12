@@ -61,22 +61,21 @@ final class ApiAuthRemoteDataSource implements AuthRemoteDataSource {
   }
 
   @override
-  Future<Result<WarehouseModel?>> switchCurrentWarehouse(int warehouseId) async {
+  Future<Result<WarehouseModel?>> switchCurrentWarehouse(
+    int warehouseId,
+  ) async {
     final result = await _apiClient.put<dynamic>(
       ApiEndpoints.currentUserCurrentWarehouse,
       data: {'warehouseId': warehouseId},
     );
 
-    return _mapEnvelope<WarehouseModel?>(
-      result,
-      (data) {
-        if (data == null) {
-          return null;
-        }
+    return _mapEnvelope<WarehouseModel?>(result, (data) {
+      if (data == null) {
+        return null;
+      }
 
-        return WarehouseModel.fromJson(_requiredMap(data, 'warehouse'));
-      },
-    );
+      return WarehouseModel.fromJson(_requiredMap(data, 'warehouse'));
+    });
   }
 
   Result<T> _mapEnvelope<T>(

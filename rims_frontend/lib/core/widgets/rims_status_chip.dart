@@ -6,11 +6,7 @@ import '../theme/app_text_styles.dart';
 enum RimsStatusKind { success, warning, error, info, pending }
 
 final class RimsStatusChip extends StatelessWidget {
-  const RimsStatusChip({
-    required this.label,
-    required this.kind,
-    super.key,
-  });
+  const RimsStatusChip({required this.label, required this.kind, super.key});
 
   final String label;
   final RimsStatusKind kind;

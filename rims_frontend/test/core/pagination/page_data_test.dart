@@ -4,12 +4,7 @@ import 'package:rims_frontend/core/pagination/page_data.dart';
 void main() {
   group('PageData', () {
     test('maps items without losing server metadata', () {
-      final page = PageData<int>(
-        items: [1, 2],
-        total: 5,
-        page: 2,
-        pageSize: 2,
-      );
+      final page = PageData<int>(items: [1, 2], total: 5, page: 2, pageSize: 2);
 
       final mapped = page.map((value) => 'item-$value');
 

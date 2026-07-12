@@ -27,7 +27,10 @@ final class AuthSessionController extends ChangeNotifier {
   String? get sessionMessage => _sessionMessage;
 
   Future<void> restoreSession(AuthRepository authRepository) async {
-    await _restoreSession(authRepository, preserveActiveSessionOnFailure: false);
+    await _restoreSession(
+      authRepository,
+      preserveActiveSessionOnFailure: false,
+    );
   }
 
   Future<void> refreshSession(AuthRepository authRepository) async {

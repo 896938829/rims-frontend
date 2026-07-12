@@ -24,7 +24,7 @@ void main() {
       expect(selection, isNotNull);
       expect(selection!.originalName, 'm10-field-operations.png');
       expect(selection.mimeType, 'image/png');
-    expect(selection.fileSize, 5 * 1024 * 1024);
+      expect(selection.fileSize, 5 * 1024 * 1024);
       expect(await File(selection.path).exists(), isTrue);
       expect(await picker.recoverLostData(), isA<Object>());
 

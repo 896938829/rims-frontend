@@ -30,25 +30,29 @@ void main() {
     );
   });
 
-  test('loadCurrentUser rejects success envelope with non-object payload', () async {
-    final adapter = _CapturingAdapter(
-      body: '{"code":0,"message":"ok","data":["bad-user-payload"]}',
-    );
-    final dio = Dio()..httpClientAdapter = adapter;
-    final dataSource = ApiAuthRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
-    );
+  test(
+    'loadCurrentUser rejects success envelope with non-object payload',
+    () async {
+      final adapter = _CapturingAdapter(
+        body: '{"code":0,"message":"ok","data":["bad-user-payload"]}',
+      );
+      final dio = Dio()..httpClientAdapter = adapter;
+      final dataSource = ApiAuthRemoteDataSource(
+        ApiClient(dio: dio, enableLogging: false),
+      );
 
-    final result = await dataSource.loadCurrentUser();
+      final result = await dataSource.loadCurrentUser();
 
-    expect(result.isFailure, isTrue);
-    expect(adapter.lastPath, '/users/me');
-    result.when(
-      success: (_) => fail('Expected current user payload validation failure'),
-      failure: (failure) =>
-          expect(failure.message, 'Invalid current user response'),
-    );
-  });
+      expect(result.isFailure, isTrue);
+      expect(adapter.lastPath, '/users/me');
+      result.when(
+        success: (_) =>
+            fail('Expected current user payload validation failure'),
+        failure: (failure) =>
+            expect(failure.message, 'Invalid current user response'),
+      );
+    },
+  );
 
   for (final listKey in const ['items', 'records', 'rows']) {
     test('loadWarehouses maps backend $listKey list response', () async {
@@ -78,44 +82,53 @@ void main() {
     });
   }
 
-  test('loadWarehouses maps string warehouse ids from backend response', () async {
-    final adapter = _CapturingAdapter(
-      body:
-          '{"code":0,"message":"ok","data":{"warehouses":[{"warehouseId":"2","isDefaultWarehouse":true,"warehouse":{"id":"2","code":1001,"name":"北京仓"}}]}}',
-    );
-    final dio = Dio()..httpClientAdapter = adapter;
-    final dataSource = ApiAuthRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
-    );
+  test(
+    'loadWarehouses maps string warehouse ids from backend response',
+    () async {
+      final adapter = _CapturingAdapter(
+        body:
+            '{"code":0,"message":"ok","data":{"warehouses":[{"warehouseId":"2","isDefaultWarehouse":true,"warehouse":{"id":"2","code":1001,"name":"北京仓"}}]}}',
+      );
+      final dio = Dio()..httpClientAdapter = adapter;
+      final dataSource = ApiAuthRemoteDataSource(
+        ApiClient(dio: dio, enableLogging: false),
+      );
 
-    final result = await dataSource.loadWarehouses();
+      final result = await dataSource.loadWarehouses();
 
-    expect(result.isSuccess, isTrue);
-    expect(adapter.lastPath, '/users/me/warehouses');
-    result.when(
-      success: (warehouses) {
-        expect(warehouses.single.id, 2);
-        expect(warehouses.single.code, '1001');
-        expect(warehouses.single.name, '北京仓');
-        expect(warehouses.single.isDefault, isTrue);
-      },
-      failure: (failure) => fail(failure.message),
-    );
-  });
+      expect(result.isSuccess, isTrue);
+      expect(adapter.lastPath, '/users/me/warehouses');
+      result.when(
+        success: (warehouses) {
+          expect(warehouses.single.id, 2);
+          expect(warehouses.single.code, '1001');
+          expect(warehouses.single.name, '北京仓');
+          expect(warehouses.single.isDefault, isTrue);
+        },
+        failure: (failure) => fail(failure.message),
+      );
+    },
+  );
 
-  test('loadWarehouses rejects success envelope without list payload', () async {
-    await _expectWarehouseListFailure(
-      body: '{"code":0,"message":"ok","data":null}',
-      expectedMessage: 'Invalid warehouses response',
-    );
-  });
+  test(
+    'loadWarehouses rejects success envelope without list payload',
+    () async {
+      await _expectWarehouseListFailure(
+        body: '{"code":0,"message":"ok","data":null}',
+        expectedMessage: 'Invalid warehouses response',
+      );
+    },
+  );
 
-  test('loadWarehouses rejects success envelope with non-object item', () async {
-    await _expectWarehouseListFailure(
-      body: '{"code":0,"message":"ok","data":{"list":["bad-item"]}}',
-      expectedMessage: 'Invalid warehouses response',
-    );
-  });
+  test(
+    'loadWarehouses rejects success envelope with non-object item',
+    () async {
+      await _expectWarehouseListFailure(
+        body: '{"code":0,"message":"ok","data":{"list":["bad-item"]}}',
+        expectedMessage: 'Invalid warehouses response',
+      );
+    },
+  );
 
   test(
     'switchCurrentWarehouse accepts success envelope without warehouse payload',

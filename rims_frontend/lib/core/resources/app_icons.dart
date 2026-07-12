@@ -10,7 +10,8 @@ abstract final class AppIcons {
   static const String actionTransfer =
       'assets/icons/actions/action_transfer.png';
 
-  static const String badgeNewMarker = 'assets/icons/hints/badge_new_marker.png';
+  static const String badgeNewMarker =
+      'assets/icons/hints/badge_new_marker.png';
   static const String bottomHomeIndicator =
       'assets/icons/hints/bottom_home_indicator.png';
   static const String bottomNavActivePill =
@@ -33,7 +34,8 @@ abstract final class AppIcons {
   static const String navDocumentsInactive =
       'assets/icons/nav/nav_documents_inactive.png';
   static const String navHomeActive = 'assets/icons/nav/nav_home_active.png';
-  static const String navHomeInactive = 'assets/icons/nav/nav_home_inactive.png';
+  static const String navHomeInactive =
+      'assets/icons/nav/nav_home_inactive.png';
   static const String navInventoryActive =
       'assets/icons/nav/nav_inventory_active.png';
   static const String navInventoryInactive =

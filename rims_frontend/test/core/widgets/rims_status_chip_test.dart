@@ -7,10 +7,7 @@ void main() {
     await tester.pumpWidget(
       const MaterialApp(
         home: Scaffold(
-          body: RimsStatusChip(
-            label: '低库存',
-            kind: RimsStatusKind.warning,
-          ),
+          body: RimsStatusChip(label: '低库存', kind: RimsStatusKind.warning),
         ),
       ),
     );

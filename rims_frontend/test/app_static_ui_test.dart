@@ -152,39 +152,40 @@ void main() {
     expect(sessionController.currentWarehouse?.id, 2);
   });
 
-  testWidgets('profile warehouse switch keeps selection when refresh lacks current marker', (
-    tester,
-  ) async {
-    final eventBus = AppEventBus();
-    addTearDown(eventBus.dispose);
-    final sessionController = AuthSessionController()
-      ..startSession(_multiWarehouseSession);
-    final repository = _FakeAuthRepository(
-      restoreFuture: Future.value(
-        const Success<AuthSession?>(_multiWarehouseSession),
-      ),
-      switchWarehouseResult: const Success<Warehouse>(_beijingWarehouse),
-    );
-    await _pumpApp(
-      tester,
-      initialLocation: RoutePaths.shell,
-      sessionController: sessionController,
-      authRepository: repository,
-      eventBus: eventBus,
-    );
+  testWidgets(
+    'profile warehouse switch keeps selection when refresh lacks current marker',
+    (tester) async {
+      final eventBus = AppEventBus();
+      addTearDown(eventBus.dispose);
+      final sessionController = AuthSessionController()
+        ..startSession(_multiWarehouseSession);
+      final repository = _FakeAuthRepository(
+        restoreFuture: Future.value(
+          const Success<AuthSession?>(_multiWarehouseSession),
+        ),
+        switchWarehouseResult: const Success<Warehouse>(_beijingWarehouse),
+      );
+      await _pumpApp(
+        tester,
+        initialLocation: RoutePaths.shell,
+        sessionController: sessionController,
+        authRepository: repository,
+        eventBus: eventBus,
+      );
 
-    await tester.tap(find.text('我的'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.byKey(const Key('profile-warehouse-selector')));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('北京仓').last);
-    await tester.pumpAndSettle();
+      await tester.tap(find.text('我的'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('profile-warehouse-selector')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('北京仓').last);
+      await tester.pumpAndSettle();
 
-    expect(repository.lastSwitchWarehouseId, 2);
-    expect(repository.restoreCallCount, 1);
-    expect(sessionController.currentWarehouse?.id, 2);
-    expect(find.text('北京仓'), findsWidgets);
-  });
+      expect(repository.lastSwitchWarehouseId, 2);
+      expect(repository.restoreCallCount, 1);
+      expect(sessionController.currentWarehouse?.id, 2);
+      expect(find.text('北京仓'), findsWidgets);
+    },
+  );
 
   test('home scan sale action requests scanner on document navigation', () {
     final action = HomeViewModel().quickActions.firstWhere(
@@ -391,9 +392,7 @@ void main() {
     final sessionController = AuthSessionController()..startSession(_session);
     final authRepository = _FakeAuthRepository(
       restoreFuture: Future.value(
-        const FailureResult<AuthSession?>(
-          NetworkFailure(message: '刷新失败'),
-        ),
+        const FailureResult<AuthSession?>(NetworkFailure(message: '刷新失败')),
       ),
     );
 
