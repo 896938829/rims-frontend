@@ -214,6 +214,13 @@ final class _SettingsCard extends StatelessWidget {
             )
           else
             _SettingRow(label: '当前仓库', value: viewModel.warehouseName),
+          if (viewModel.showsAssignedWarehouses)
+            KeyedSubtree(
+              key: const Key('profile-assigned-warehouses'),
+              child: _AssignedWarehousesRow(
+                value: viewModel.assignedWarehouseNames,
+              ),
+            ),
         ],
       ),
     );
@@ -549,6 +556,27 @@ final class _SettingRow extends StatelessWidget {
               style: AppTextStyles.bodySmall,
             ),
           ),
+        ],
+      ),
+    );
+  }
+}
+
+final class _AssignedWarehousesRow extends StatelessWidget {
+  const _AssignedWarehousesRow({required this.value});
+
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 11),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text('可用仓库', style: AppTextStyles.bodyMedium),
+          const SizedBox(height: 6),
+          Text(value, style: AppTextStyles.bodySmall),
         ],
       ),
     );

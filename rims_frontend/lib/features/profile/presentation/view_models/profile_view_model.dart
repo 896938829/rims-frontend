@@ -18,4 +18,7 @@ final class ProfileViewModel {
   String get roleName => user.roleName;
   String get warehouseName => warehouse?.name ?? '未选择仓库';
   bool get canSwitchWarehouse => user.isAdmin && warehouses.length > 1;
+  bool get showsAssignedWarehouses => !user.isAdmin && warehouses.length > 1;
+  String get assignedWarehouseNames =>
+      warehouses.map((warehouse) => warehouse.name).toSet().join('、');
 }

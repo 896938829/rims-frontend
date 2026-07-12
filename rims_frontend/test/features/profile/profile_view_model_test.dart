@@ -179,26 +179,57 @@ void main() {
     expect(find.text('角色权限'), findsNothing);
   });
 
-  testWidgets('ProfilePage hides warehouse selector for ordinary user', (
+  testWidgets(
+    'ProfilePage shows assigned warehouses without ordinary switching',
+    (tester) async {
+      await tester.pumpWidget(
+        const MaterialApp(
+          home: Scaffold(
+            body: ProfilePage(
+              user: _ordinaryUser,
+              warehouse: _warehouse,
+              warehouses: [
+                _warehouse,
+                Warehouse(id: 3, code: 'SH-2', name: '上海仓', isDefault: false),
+                _beijingWarehouse,
+              ],
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.byKey(const Key('profile-warehouse-selector')), findsNothing);
+      expect(
+        find.byKey(const Key('profile-assigned-warehouses')),
+        findsOneWidget,
+      );
+      expect(find.text('当前仓库'), findsOneWidget);
+      expect(find.text('上海仓'), findsOneWidget);
+      expect(find.text('可用仓库'), findsOneWidget);
+      expect(find.text('上海仓、北京仓'), findsOneWidget);
+      expect(tester.widget<Text>(find.text('上海仓、北京仓')).maxLines, isNull);
+      expect(find.text('切换仓库'), findsNothing);
+    },
+  );
+
+  testWidgets('ProfilePage keeps admin multi-warehouse selector', (
     tester,
   ) async {
     await tester.pumpWidget(
       const MaterialApp(
         home: Scaffold(
           body: ProfilePage(
-            user: _ordinaryUser,
+            user: _adminUser,
             warehouse: _warehouse,
             warehouses: [_warehouse, _beijingWarehouse],
           ),
         ),
       ),
     );
-    await tester.pumpAndSettle();
 
-    expect(find.byKey(const Key('profile-warehouse-selector')), findsNothing);
-    expect(find.text('当前仓库'), findsOneWidget);
-    expect(find.text('上海仓'), findsOneWidget);
-    expect(find.text('切换仓库'), findsNothing);
+    expect(find.byKey(const Key('profile-warehouse-selector')), findsOneWidget);
+    expect(find.byKey(const Key('profile-assigned-warehouses')), findsNothing);
   });
 
   testWidgets('ProfilePage does not show unsupported notification status', (
