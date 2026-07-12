@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -8,6 +9,9 @@ import 'package:rims_frontend/core/result/failure.dart';
 import 'package:rims_frontend/core/result/result.dart';
 import 'package:rims_frontend/core/pagination/page_data.dart';
 import 'package:rims_frontend/features/auth/domain/entities/warehouse.dart';
+import 'package:rims_frontend/features/attachments/domain/entities/attachment.dart';
+import 'package:rims_frontend/features/attachments/domain/services/attachment_picker.dart';
+import 'package:rims_frontend/features/attachments/domain/services/attachment_staging_store.dart';
 import 'package:rims_frontend/features/documents/domain/entities/document_data.dart';
 import 'package:rims_frontend/features/documents/domain/repositories/documents_repository.dart';
 import 'package:rims_frontend/features/documents/presentation/pages/documents_page.dart';
@@ -17,6 +21,8 @@ import 'package:rims_frontend/features/inventory/domain/entities/non_standard_in
 import 'package:rims_frontend/features/inventory/domain/repositories/inventory_repository.dart';
 import 'package:rims_frontend/features/offline/domain/entities/document_draft.dart';
 import 'package:rims_frontend/features/offline/domain/repositories/document_draft_repository.dart';
+import 'package:rims_frontend/features/offline/data/repositories/drift_document_draft_repository.dart';
+import 'package:rims_frontend/features/offline/data/repositories/memory_offline_store.dart';
 
 void main() {
   test(
@@ -171,6 +177,209 @@ void main() {
 
     expect(drafts.deleted, [('7', 'submitted-draft')]);
     expect(viewModel.activeDraftId, isNull);
+    viewModel.dispose();
+  });
+
+  test(
+    'draft save and reopen preserve staged attachment request ids',
+    () async {
+      final drafts = _FakeDocumentDraftRepository();
+      final viewModel = _draftEnabledViewModel(
+        drafts: drafts,
+        draftIdFactory: () => 'draft-attachments',
+      );
+
+      expect(viewModel.ensureDraftId(), 'draft-attachments');
+      viewModel.updateAttachmentStagingIds(['staged-a', 'staged-b']);
+      await viewModel.saveDraft();
+
+      expect(drafts.saved.single.attachmentStagingIds, [
+        'staged-a',
+        'staged-b',
+      ]);
+      final reopened = _draftEnabledViewModel(
+        drafts: _FakeDocumentDraftRepository(loaded: drafts.saved.single),
+      );
+      expect(await reopened.openDraft('draft-attachments'), isTrue);
+      expect(reopened.attachmentStagingIds, ['staged-a', 'staged-b']);
+    },
+  );
+
+  test(
+    'submit drains queued saves before delete and cannot recreate draft',
+    () async {
+      final drafts = _ControlledDraftRepository();
+      final viewModel = _draftEnabledViewModel(
+        drafts: drafts,
+        documents: _FakeDocumentsRepository(),
+        draftIdFactory: () => 'submit-barrier',
+      );
+      viewModel.addScannedProduct(_standardItem);
+      final firstSave = viewModel.saveDraft();
+      await Future<void>.delayed(Duration.zero);
+      viewModel.updateRemark('queued-latest');
+      await Future<void>.delayed(const Duration(milliseconds: 320));
+
+      final submit = viewModel.createDocument();
+      drafts.completeNextSave();
+      await _waitFor(() => drafts.saveCallCount == 2);
+      await Future<void>.delayed(const Duration(milliseconds: 20));
+      expect(drafts.deleted, isEmpty);
+      drafts.completeNextSave();
+      await firstSave;
+      expect(await submit, isTrue);
+
+      expect(drafts.deleted, [('7', 'submit-barrier')]);
+      expect(drafts.persistedDraftIds, isEmpty);
+      await Future<void>.delayed(const Duration(milliseconds: 350));
+      expect(drafts.persistedDraftIds, isEmpty);
+    },
+  );
+
+  test(
+    'conversion source id saves, reopens, revalidates, and submits',
+    () async {
+      final drafts = _FakeDocumentDraftRepository();
+      final writer =
+          _draftEnabledViewModel(
+              drafts: drafts,
+              inventory: _FakeInventoryRepository(),
+            )
+            ..selectActionByLabel('转标准')
+            ..selectNonStandardInventory(_nonStandardItem)
+            ..addProductToDraft(_standardItem, quantity: 2);
+      await writer.saveDraft();
+      expect(drafts.saved.single.payload['non_standard_source_id'], 11);
+
+      final documents = _FakeDocumentsRepository();
+      final reader = _draftEnabledViewModel(
+        drafts: _FakeDocumentDraftRepository(loaded: drafts.saved.single),
+        documents: documents,
+        inventory: _FakeInventoryRepository(),
+      );
+      expect(await reader.openDraft(drafts.saved.single.id), isTrue);
+      expect(reader.nonStandardSourceId, 11);
+      expect(await reader.createDocument(), isTrue);
+      expect(documents.createdRequest?.nonStdInventoryId, 11);
+    },
+  );
+
+  test('role-changed draft requires explicit review before submit', () async {
+    final oldRoleDraft = _savedDraft('role-review').copyWith();
+    final repository = _FakeDocumentsRepository();
+    final viewModel = _draftEnabledViewModel(
+      drafts: _FakeDocumentDraftRepository(loaded: oldRoleDraft),
+      documents: repository,
+      roleCode: 'admin',
+    );
+
+    expect(await viewModel.openDraft('role-review'), isTrue);
+    expect(viewModel.requiresDraftReview, isTrue);
+    expect(await viewModel.createDocument(), isFalse);
+    expect(repository.createCallCount, 0);
+
+    viewModel.confirmDraftReview();
+    expect(viewModel.requiresDraftReview, isFalse);
+    expect(await viewModel.createDocument(), isTrue);
+  });
+
+  test(
+    'pending product query, selection, and quantity recover before line add',
+    () async {
+      final drafts = _FakeDocumentDraftRepository();
+      final writer = _draftEnabledViewModel(drafts: drafts);
+      writer.updateProductName('矿泉');
+      writer.selectProduct(_standardItem);
+      writer.updateQuantity('7');
+      await writer.saveDraft();
+
+      final reader = _draftEnabledViewModel(
+        drafts: _FakeDocumentDraftRepository(loaded: drafts.saved.single),
+      );
+      expect(await reader.openDraft(drafts.saved.single.id), isTrue);
+
+      expect(reader.productQuery, _standardItem.productName);
+      expect(reader.selectedProduct?.productId, _standardItem.productId);
+      expect(reader.quantityText, '7');
+    },
+  );
+
+  test(
+    'real repository and store recover a draft after process rebuild',
+    () async {
+      final store = MemoryOfflineStore();
+      final writer = _draftEnabledViewModel(
+        drafts: DriftDocumentDraftRepository(store: store),
+        draftIdFactory: () => 'process-draft',
+      );
+      writer.selectProduct(_standardItem);
+      writer.updateQuantity('4');
+      writer.updateAttachmentStagingIds(['persisted-file']);
+      await writer.saveDraft();
+      writer.dispose();
+
+      final rebuilt = _draftEnabledViewModel(
+        drafts: DriftDocumentDraftRepository(store: store),
+      );
+      expect(await rebuilt.openDraft('process-draft'), isTrue);
+      expect(rebuilt.selectedProduct?.productId, 10);
+      expect(rebuilt.quantityText, '4');
+      expect(rebuilt.attachmentStagingIds, ['persisted-file']);
+    },
+  );
+
+  testWidgets('new document form stages attachments against stable draft id', (
+    tester,
+  ) async {
+    final drafts = _FakeDocumentDraftRepository();
+    final staging = _PageDraftStaging();
+    final viewModel = _draftEnabledViewModel(
+      drafts: drafts,
+      draftIdFactory: () => 'ui-stable-draft',
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: DocumentsPage(
+            viewModel: viewModel,
+            attachmentPicker: _PageDraftPicker(),
+            attachmentStagingStore: staging,
+            attachmentUserId: '7',
+          ),
+        ),
+      ),
+    );
+
+    await tester.tap(find.byKey(const Key('document-draft-attachment-file')));
+    await tester.pumpAndSettle();
+
+    expect(staging.bindings.single.localDraftId, 'ui-stable-draft');
+    expect(viewModel.attachmentStagingIds, ['ui-request']);
+  });
+
+  testWidgets('role-changed form shows compact review confirmation', (
+    tester,
+  ) async {
+    final draft = _savedDraft('ui-role-review');
+    final viewModel = _draftEnabledViewModel(
+      drafts: _FakeDocumentDraftRepository(loaded: draft),
+      roleCode: 'admin',
+    );
+    await viewModel.openDraft(draft.id);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: DocumentsPage(viewModel: viewModel)),
+      ),
+    );
+
+    expect(
+      find.byKey(const Key('document-confirm-draft-review')),
+      findsOneWidget,
+    );
+    await tester.tap(find.byKey(const Key('document-confirm-draft-review')));
+    await tester.pump();
+
+    expect(viewModel.requiresDraftReview, isFalse);
     viewModel.dispose();
   });
 
@@ -1901,6 +2110,36 @@ void main() {
   });
 }
 
+DocumentsViewModel _draftEnabledViewModel({
+  required DocumentDraftRepository drafts,
+  DocumentsRepository? documents,
+  InventoryRepository? inventory,
+  String roleCode = 'operator',
+  String Function()? draftIdFactory,
+}) => DocumentsViewModel(
+  repository: documents,
+  inventoryRepository: inventory,
+  draftRepository: drafts,
+  accountId: '7',
+  observedRoleCode: roleCode,
+  currentWarehouse: const Warehouse(
+    id: 11,
+    code: 'MAIN',
+    name: 'Main',
+    isDefault: true,
+  ),
+  draftIdFactory:
+      draftIdFactory ?? () => 'draft-${DateTime.now().microsecondsSinceEpoch}',
+);
+
+Future<void> _waitFor(bool Function() condition) async {
+  for (var attempt = 0; attempt < 100; attempt += 1) {
+    if (condition()) return;
+    await Future<void>.delayed(const Duration(milliseconds: 2));
+  }
+  throw TestFailure('Condition was not reached.');
+}
+
 DocumentDraft _savedDraft(String id, {String remark = ''}) {
   final now = DateTime.utc(2026, 7, 13);
   return DocumentDraft(
@@ -1966,6 +2205,133 @@ final class _FakeDocumentDraftRepository implements DocumentDraftRepository {
 
   @override
   Future<void> prune() async {}
+}
+
+final class _ControlledDraftRepository implements DocumentDraftRepository {
+  final List<(DocumentDraft, int, Completer<Result<DocumentDraft>>)> _pending =
+      [];
+  final Map<String, DocumentDraft> _persisted = {};
+  final List<(String, String)> deleted = [];
+  int saveCallCount = 0;
+
+  Iterable<String> get persistedDraftIds => _persisted.keys;
+
+  void completeNextSave() {
+    final pending = _pending.removeAt(0);
+    final saved = pending.$1.copyWith(version: pending.$2 + 1);
+    pending.$3.complete(Success(saved));
+  }
+
+  @override
+  Future<Result<DocumentDraft>> save(
+    DocumentDraft draft, {
+    required int expectedVersion,
+  }) async {
+    saveCallCount += 1;
+    final completer = Completer<Result<DocumentDraft>>();
+    _pending.add((draft, expectedVersion, completer));
+    final result = await completer.future;
+    result.when(
+      success: (saved) => _persisted[saved.id] = saved,
+      failure: (_) {},
+    );
+    return result;
+  }
+
+  @override
+  Future<void> delete({
+    required String accountId,
+    required String draftId,
+  }) async {
+    deleted.add((accountId, draftId));
+    _persisted.remove(draftId);
+  }
+
+  @override
+  Future<DocumentDraft?> load({
+    required String accountId,
+    required String draftId,
+  }) async => _persisted[draftId];
+
+  @override
+  Future<List<DocumentDraft>> list(String accountId) async => _persisted.values
+      .where((draft) => draft.accountId == accountId)
+      .toList(growable: false);
+
+  @override
+  Future<void> prune() async {}
+}
+
+final class _PageDraftPicker implements AttachmentPicker {
+  @override
+  Future<Result<SelectedAttachmentSource?>> pick(
+    AttachmentPickSource source,
+  ) async => const Success(
+    SelectedAttachmentSource(
+      path: '/source/file.pdf',
+      originalName: 'file.pdf',
+      mimeType: 'application/pdf',
+      fileSize: 12,
+    ),
+  );
+
+  @override
+  Future<Result<List<SelectedAttachmentSource>>> recoverLostData() async =>
+      const Success([]);
+
+  @override
+  List<SelectedAttachmentSource> takeRecovered() => const [];
+}
+
+final class _PageDraftStaging implements AttachmentStagingStore {
+  final List<AttachmentBinding> bindings = [];
+  final List<StagedAttachment> items = [];
+
+  @override
+  Future<Result<StagedAttachment>> stage({
+    required String userId,
+    required AttachmentBinding binding,
+    required SelectedAttachmentSource selection,
+    required int existingCount,
+  }) async {
+    bindings.add(binding);
+    final item = StagedAttachment(
+      pending: PendingAttachment(
+        requestId: 'ui-request',
+        binding: binding,
+        stagedPath: '/staged/ui-request',
+        originalName: selection.originalName,
+        mimeType: selection.mimeType,
+        fileSize: selection.fileSize,
+      ),
+      thumbnailPath: null,
+      createdAt: DateTime.utc(2026, 7, 13),
+    );
+    items.add(item);
+    return Success(item);
+  }
+
+  @override
+  Future<Result<List<StagedAttachment>>> recoverForUser(String userId) async =>
+      Success(items);
+
+  @override
+  Future<Result<void>> remove(String userId, String requestId) async =>
+      const Success(null);
+
+  @override
+  Future<Result<void>> cleanupStale({required Duration maxAge}) async =>
+      const Success(null);
+
+  @override
+  Future<Result<void>> clearForUser(String userId) async => const Success(null);
+
+  @override
+  Future<Result<String>> saveDownload({
+    required String userId,
+    required String originalName,
+    required Uint8List bytes,
+  }) async => const Success('/download');
 }
 
 const _remoteDocument = DocumentRecord(

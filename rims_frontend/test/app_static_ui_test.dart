@@ -13,6 +13,10 @@ import 'package:rims_frontend/features/auth/domain/entities/warehouse.dart';
 import 'package:rims_frontend/features/auth/domain/repositories/auth_repository.dart';
 import 'package:rims_frontend/features/auth/presentation/view_models/auth_session_controller.dart';
 import 'package:rims_frontend/features/home/presentation/view_models/home_view_model.dart';
+import 'package:rims_frontend/features/offline/data/repositories/drift_document_draft_repository.dart';
+import 'package:rims_frontend/features/offline/data/repositories/memory_offline_store.dart';
+import 'package:rims_frontend/features/offline/domain/entities/document_draft.dart';
+import 'package:rims_frontend/features/offline/domain/repositories/document_draft_repository.dart';
 import 'package:rims_frontend/features/reports/domain/entities/report_data.dart';
 import 'package:rims_frontend/features/reports/domain/repositories/reports_repository.dart';
 import 'package:rims_frontend/routes/app_router.dart';
@@ -490,6 +494,40 @@ void main() {
     expect(find.text('销售趋势（元）'), findsOneWidget);
     expect(find.text('商品排行（销售额）'), findsOneWidget);
   });
+
+  testWidgets(
+    'draft route follows authenticated account switches without stale rows',
+    (tester) async {
+      final store = MemoryOfflineStore();
+      final drafts = DriftDocumentDraftRepository(store: store);
+      await drafts.save(
+        _routeDraft('account-1', accountId: '1', docType: 1),
+        expectedVersion: 0,
+      );
+      await drafts.save(
+        _routeDraft('account-2', accountId: '2', docType: 2),
+        expectedVersion: 0,
+      );
+      final sessionController = AuthSessionController()..startSession(_session);
+
+      await _pumpApp(
+        tester,
+        initialLocation: RoutePaths.drafts,
+        sessionController: sessionController,
+        documentDraftRepository: drafts,
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('草稿管理'), findsOneWidget);
+      expect(find.text('采购入库'), findsOneWidget);
+      expect(find.text('销售出库'), findsNothing);
+
+      sessionController.startSession(_secondAccountSession);
+      await tester.pumpAndSettle();
+
+      expect(find.text('采购入库'), findsNothing);
+      expect(find.text('销售出库'), findsOneWidget);
+    },
+  );
 }
 
 Future<void> _pumpApp(
@@ -499,6 +537,7 @@ Future<void> _pumpApp(
   AuthRepository? authRepository,
   AppEventBus? eventBus,
   ReportsRepository? reportsRepository,
+  DocumentDraftRepository? documentDraftRepository,
 }) async {
   final activeSessionController = sessionController ?? AuthSessionController();
 
@@ -509,11 +548,30 @@ Future<void> _pumpApp(
         sessionController: activeSessionController,
         eventBus: eventBus,
         reportsRepository: reportsRepository,
+        documentDraftRepository: documentDraftRepository,
         initialLocation: initialLocation,
       ),
     ),
   );
   await tester.pump();
+}
+
+DocumentDraft _routeDraft(
+  String id, {
+  required String accountId,
+  required int docType,
+}) {
+  final timestamp = DateTime.utc(2026, 7, 13);
+  return DocumentDraft(
+    id: id,
+    accountId: accountId,
+    warehouseId: 1,
+    docType: docType,
+    observedRoleCode: 'admin',
+    payload: const {'lines': <Object?>[], 'remark': ''},
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  );
 }
 
 Future<void> _login(WidgetTester tester) async {
@@ -536,6 +594,19 @@ const _session = AuthSession(
     id: 1,
     username: 'admin',
     realName: '系统管理员',
+    roleCode: 'admin',
+    roleName: '管理员',
+  ),
+  currentWarehouse: Warehouse(id: 1, code: 'SH', name: '上海仓', isDefault: true),
+  warehouses: [Warehouse(id: 1, code: 'SH', name: '上海仓', isDefault: true)],
+);
+
+const _secondAccountSession = AuthSession(
+  accessToken: 'token-2',
+  user: AppUser(
+    id: 2,
+    username: 'second',
+    realName: '第二账号',
     roleCode: 'admin',
     roleName: '管理员',
   ),

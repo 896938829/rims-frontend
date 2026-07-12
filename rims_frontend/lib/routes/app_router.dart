@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
@@ -114,25 +116,65 @@ final class _DraftManagerRoute extends StatefulWidget {
 
 final class _DraftManagerRouteState extends State<_DraftManagerRoute> {
   DraftsViewModel? _viewModel;
+  String? _accountId;
+  String? _roleCode;
+  int? _warehouseId;
 
   @override
   void initState() {
     super.initState();
+    widget.sessionController.addListener(_handleSessionChanged);
+    _createViewModel();
+  }
+
+  void _createViewModel() {
     final repository = widget.repository;
     final user = widget.sessionController.currentUser;
     final warehouse = widget.sessionController.currentWarehouse;
     if (repository != null && user != null && warehouse != null) {
+      _accountId = user.id.toString();
+      _roleCode = user.roleCode;
+      _warehouseId = warehouse.id;
       _viewModel = DraftsViewModel(
         repository: repository,
-        accountId: user.id.toString(),
-        roleCode: user.roleCode,
-        warehouseId: warehouse.id,
+        accountId: _accountId!,
+        roleCode: _roleCode!,
+        warehouseId: _warehouseId!,
       );
     }
   }
 
+  void _handleSessionChanged() {
+    final user = widget.sessionController.currentUser;
+    final warehouse = widget.sessionController.currentWarehouse;
+    if (user == null || warehouse == null) return;
+    final accountId = user.id.toString();
+    if (_accountId == accountId &&
+        _roleCode == user.roleCode &&
+        _warehouseId == warehouse.id) {
+      return;
+    }
+    _accountId = accountId;
+    _roleCode = user.roleCode;
+    _warehouseId = warehouse.id;
+    final viewModel = _viewModel;
+    if (viewModel == null) {
+      _createViewModel();
+      if (mounted) setState(() {});
+      return;
+    }
+    unawaited(
+      viewModel.updateContext(
+        accountId: accountId,
+        roleCode: user.roleCode,
+        warehouseId: warehouse.id,
+      ),
+    );
+  }
+
   @override
   void dispose() {
+    widget.sessionController.removeListener(_handleSessionChanged);
     _viewModel?.dispose();
     super.dispose();
   }

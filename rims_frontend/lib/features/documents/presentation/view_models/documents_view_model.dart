@@ -121,11 +121,16 @@ final class DocumentsViewModel extends ChangeNotifier {
   DocumentReadStatus? _readStatus;
   Timer? _draftSaveTimer;
   Future<void>? _draftSaveInFlight;
-  bool _draftSaveQueued = false;
+  bool _draftDirty = false;
+  bool _draftSubmissionBarrier = false;
   String? _activeDraftId;
   DateTime? _draftCreatedAt;
   int _draftVersion = 0;
   String? _draftSaveError;
+  List<String> _attachmentStagingIds = const [];
+  int? _nonStandardSourceId;
+  bool _requiresDraftReview = false;
+  String? _draftObservedRoleCode;
 
   @override
   void dispose() {
@@ -220,6 +225,10 @@ final class DocumentsViewModel extends ChangeNotifier {
   String? get returnSourceError => _returnSourceError;
   String? get activeDraftId => _activeDraftId;
   String? get draftSaveError => _draftSaveError;
+  List<String> get attachmentStagingIds =>
+      List.unmodifiable(_attachmentStagingIds);
+  int? get nonStandardSourceId => _nonStandardSourceId;
+  bool get requiresDraftReview => _requiresDraftReview;
   bool get isLoading => _isLoading;
   bool get isSearchingProducts => _isSearchingProducts;
   bool get isLoadingNonStandardInventory => _isLoadingNonStandardInventory;
@@ -267,6 +276,7 @@ final class DocumentsViewModel extends ChangeNotifier {
     }
     if (!isConversionAction) {
       _selectedNonStandardInventory = null;
+      _nonStandardSourceId = null;
     }
     _scheduleDraftSave();
     notifyListeners();
@@ -339,6 +349,7 @@ final class DocumentsViewModel extends ChangeNotifier {
       _selectedProduct = null;
     }
     _formError = null;
+    _scheduleDraftSave();
 
     final repository = inventoryRepository;
     final keyword = value.trim();
@@ -381,6 +392,7 @@ final class DocumentsViewModel extends ChangeNotifier {
     _productCandidates = const [];
     _productSearchError = null;
     _formError = null;
+    _scheduleDraftSave();
     notifyListeners();
   }
 
@@ -577,6 +589,7 @@ final class DocumentsViewModel extends ChangeNotifier {
     );
     if (!sourceStillAvailable) {
       _selectedNonStandardInventory = null;
+      _nonStandardSourceId = null;
     }
   }
 
@@ -594,6 +607,7 @@ final class DocumentsViewModel extends ChangeNotifier {
 
   void selectNonStandardInventory(NonStandardInventoryItem item) {
     _selectedNonStandardInventory = item;
+    _nonStandardSourceId = item.id;
     _formError = null;
     _scheduleDraftSave();
     notifyListeners();
@@ -616,6 +630,7 @@ final class DocumentsViewModel extends ChangeNotifier {
   void updateQuantity(String value) {
     _quantityText = value;
     _formError = null;
+    _scheduleDraftSave();
     notifyListeners();
   }
 
@@ -626,27 +641,60 @@ final class DocumentsViewModel extends ChangeNotifier {
     notifyListeners();
   }
 
+  String ensureDraftId() {
+    _ensureDraftIdentity();
+    return _activeDraftId!;
+  }
+
+  void updateAttachmentStagingIds(List<String> requestIds) {
+    _attachmentStagingIds = List.unmodifiable(requestIds);
+    _scheduleDraftSave();
+    notifyListeners();
+  }
+
+  void confirmDraftReview() {
+    if (!_requiresDraftReview) return;
+    _requiresDraftReview = false;
+    _draftObservedRoleCode = observedRoleCode;
+    _scheduleDraftSave();
+    notifyListeners();
+  }
+
   Future<void> saveDraft() async {
     _draftSaveTimer?.cancel();
-    if (!_canPersistDraft) return;
+    if (!_canPersistDraft || _draftSubmissionBarrier) return;
     _ensureDraftIdentity();
-    final inFlight = _draftSaveInFlight;
-    if (inFlight != null) {
-      _draftSaveQueued = true;
-      await inFlight;
-      if (_draftSaveInFlight case final queuedSave?) {
-        await queuedSave;
-      }
+    _draftDirty = true;
+    await _ensureDraftSaveWorker();
+  }
+
+  Future<void> _ensureDraftSaveWorker() async {
+    final current = _draftSaveInFlight;
+    if (current != null) {
+      await current;
       return;
     }
+    final worker = _runDraftSaveWorker();
+    _draftSaveInFlight = worker;
+    await worker;
+    if (identical(_draftSaveInFlight, worker)) {
+      _draftSaveInFlight = null;
+    }
+  }
 
-    final save = _persistDraft();
-    _draftSaveInFlight = save;
-    await save;
-    _draftSaveInFlight = null;
-    if (_draftSaveQueued && !_isDisposed) {
-      _draftSaveQueued = false;
-      unawaited(saveDraft());
+  Future<void> _runDraftSaveWorker() async {
+    while (_draftDirty && !_isDisposed) {
+      _draftDirty = false;
+      await _persistDraft();
+    }
+  }
+
+  Future<void> _drainDraftSavesForSubmit() async {
+    if (!_canPersistDraft) return;
+    _ensureDraftIdentity();
+    _draftDirty = true;
+    while (_draftDirty || _draftSaveInFlight != null) {
+      await _ensureDraftSaveWorker();
     }
   }
 
@@ -677,12 +725,20 @@ final class DocumentsViewModel extends ChangeNotifier {
     _draftCreatedAt = draft.createdAt;
     _draftVersion = draft.version;
     _draftSaveError = null;
+    _draftObservedRoleCode = draft.observedRoleCode;
+    _requiresDraftReview = draft.observedRoleCode != observedRoleCode;
+    _attachmentStagingIds = List.unmodifiable(draft.attachmentStagingIds);
     _selectedAction = _actions.firstWhere(
       (action) => action.docType == draft.docType,
       orElse: () => _actions.first,
     );
     _draftLines = _linesFromDraft(draft.payload['lines']);
     _remark = draft.payload['remark']?.toString() ?? '';
+    _productQuery = draft.payload['product_query']?.toString() ?? '';
+    _quantityText = draft.payload['quantity_text']?.toString() ?? '';
+    _selectedProduct = _productFromDraft(draft.payload['pending_product']);
+    _nonStandardSourceId = _intValue(draft.payload['non_standard_source_id']);
+    _selectedNonStandardInventory = null;
     final targetWarehouseId = _intValue(draft.payload['target_warehouse_id']);
     _selectedTargetWarehouse = targetWarehouseId == null
         ? null
@@ -703,8 +759,9 @@ final class DocumentsViewModel extends ChangeNotifier {
       currentWarehouse != null;
 
   void _scheduleDraftSave() {
-    if (!_canPersistDraft || _isDisposed) return;
+    if (!_canPersistDraft || _isDisposed || _draftSubmissionBarrier) return;
     _ensureDraftIdentity();
+    _draftDirty = true;
     _draftSaveTimer?.cancel();
     _draftSaveTimer = Timer(autosaveDelay, () => unawaited(saveDraft()));
   }
@@ -714,6 +771,7 @@ final class DocumentsViewModel extends ChangeNotifier {
     _activeDraftId = draftIdFactory();
     _draftCreatedAt = now().toUtc();
     _draftVersion = 0;
+    _draftObservedRoleCode = observedRoleCode;
   }
 
   Future<void> _persistDraft() async {
@@ -727,13 +785,30 @@ final class DocumentsViewModel extends ChangeNotifier {
       refDocId: _selectedReturnSourceDocument?.id,
       remark: _remark,
     );
+    final payload = Map<String, Object?>.from(request.toDraftPayload())
+      ..['product_query'] = _productQuery
+      ..['quantity_text'] = _quantityText;
+    if (_nonStandardSourceId case final sourceId?) {
+      payload['non_standard_source_id'] = sourceId;
+    }
+    if (_selectedProduct case final product?) {
+      payload['pending_product'] = {
+        'product_id': product.productId,
+        'product_name': product.productName,
+        'sku': product.sku,
+        'status_label': product.statusLabel,
+        'image_url': product.imageUrl,
+        'retail_price': product.retailPrice,
+      };
+    }
     final draft = DocumentDraft(
       id: _activeDraftId!,
       accountId: accountId!,
       warehouseId: currentWarehouse!.id,
       docType: _selectedAction.docType,
-      observedRoleCode: observedRoleCode,
-      payload: request.toDraftPayload(),
+      observedRoleCode: _draftObservedRoleCode ?? observedRoleCode,
+      payload: payload,
+      attachmentStagingIds: _attachmentStagingIds,
       createdAt: _draftCreatedAt ?? timestamp,
       updatedAt: timestamp,
       version: _draftVersion,
@@ -768,6 +843,23 @@ final class DocumentsViewModel extends ChangeNotifier {
           );
         })
         .toList(growable: false);
+  }
+
+  InventoryItem? _productFromDraft(Object? value) {
+    if (value is! Map) return null;
+    final productId = _intValue(value['product_id']);
+    if (productId == null) return null;
+    return InventoryItem(
+      id: productId,
+      productId: productId,
+      productName: value['product_name']?.toString() ?? '',
+      sku: value['sku']?.toString() ?? '',
+      availableQuantity: 0,
+      stockQuantity: 0,
+      statusLabel: value['status_label']?.toString() ?? '',
+      imageUrl: value['image_url']?.toString() ?? '',
+      retailPrice: _doubleValue(value['retail_price']) ?? 0,
+    );
   }
 
   int? _intValue(Object? value) => value is num ? value.toInt() : null;
@@ -998,6 +1090,11 @@ final class DocumentsViewModel extends ChangeNotifier {
     if (_isSubmitting) {
       return false;
     }
+    if (_requiresDraftReview) {
+      _formError = '请确认草稿复核后再提交';
+      notifyListeners();
+      return false;
+    }
 
     final selectedProduct = _selectedProduct;
     final quantity = int.tryParse(_quantityText.trim());
@@ -1061,8 +1158,7 @@ final class DocumentsViewModel extends ChangeNotifier {
       }
     }
 
-    final nonStandardInventory = _selectedNonStandardInventory;
-    if (isConversionAction && nonStandardInventory == null) {
+    if (isConversionAction && _nonStandardSourceId == null) {
       _formError = '请选择非标库存';
       notifyListeners();
       return false;
@@ -1072,18 +1168,6 @@ final class DocumentsViewModel extends ChangeNotifier {
       notifyListeners();
       return false;
     }
-    if (isConversionAction) {
-      final line = submissionLines.single;
-      submissionLines = [
-        CreateDocumentLineRequest(
-          productId: line.productId,
-          productName: line.productName,
-          quantity: line.quantity,
-          nonStandardInventoryId: nonStandardInventory?.id,
-        ),
-      ];
-    }
-
     final repository = this.repository;
     if (repository == null) {
       _formError = '单据服务未配置';
@@ -1091,16 +1175,34 @@ final class DocumentsViewModel extends ChangeNotifier {
       return false;
     }
 
+    _draftSubmissionBarrier = true;
     _draftSaveTimer?.cancel();
-    if (_draftSaveInFlight case final save?) {
-      await save;
-      if (_isDisposed) return false;
-    }
-
     _isSubmitting = true;
     final hadLoadedDocumentPage = _documentPage > 0;
     _formError = null;
     notifyListeners();
+
+    if (isConversionAction) {
+      final source = await _revalidateNonStandardSource();
+      if (_isDisposed) return false;
+      if (source == null) {
+        _formError = _nonStandardInventoryError ?? '非标库存已不可用，请重新选择';
+        _releaseSubmissionBarrier();
+        return false;
+      }
+      final line = submissionLines.single;
+      submissionLines = [
+        CreateDocumentLineRequest(
+          productId: line.productId,
+          productName: line.productName,
+          quantity: line.quantity,
+          nonStandardInventoryId: source.id,
+        ),
+      ];
+    }
+
+    await _drainDraftSavesForSubmit();
+    if (_isDisposed) return false;
 
     final result = await repository.createDocument(
       CreateDocumentRequest(
@@ -1131,12 +1233,16 @@ final class DocumentsViewModel extends ChangeNotifier {
         _productQuery = '';
         _productCandidates = const [];
         _selectedNonStandardInventory = null;
+        _nonStandardSourceId = null;
         _selectedTargetWarehouse = null;
         _selectedReturnSourceDocument = null;
         _draftLines = const [];
         _draftRequestId = null;
         _quantityText = '';
         _remark = '';
+        _attachmentStagingIds = const [];
+        _requiresDraftReview = false;
+        _draftObservedRoleCode = null;
         _formError = null;
         created = true;
         notifyListeners();
@@ -1170,9 +1276,30 @@ final class DocumentsViewModel extends ChangeNotifier {
       if (_isDisposed) return false;
     }
 
+    _draftSubmissionBarrier = false;
     _isSubmitting = false;
     notifyListeners();
     return created;
+  }
+
+  Future<NonStandardInventoryItem?> _revalidateNonStandardSource() async {
+    final sourceId = _nonStandardSourceId;
+    if (sourceId == null) return null;
+    await loadNonStandardInventory();
+    if (_isDisposed) return null;
+    for (final item in _nonStandardInventoryItems) {
+      if (item.id == sourceId) {
+        _selectedNonStandardInventory = item;
+        return item;
+      }
+    }
+    return null;
+  }
+
+  void _releaseSubmissionBarrier() {
+    _draftSubmissionBarrier = false;
+    _isSubmitting = false;
+    notifyListeners();
   }
 
   DocumentRecord _withSubmittedLineSummary({

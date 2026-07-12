@@ -23,6 +23,8 @@ import '../../domain/repositories/documents_repository.dart';
 import '../../../inventory/domain/entities/inventory_item.dart';
 import '../../../inventory/domain/repositories/inventory_repository.dart';
 import '../../../offline/domain/repositories/document_draft_repository.dart';
+import '../../../offline/presentation/view_models/draft_attachments_view_model.dart';
+import '../../../offline/presentation/widgets/draft_attachment_panel.dart';
 import '../view_models/documents_view_model.dart';
 import '../widgets/document_action_card.dart';
 import '../widgets/document_flow_strip.dart';
@@ -260,6 +262,9 @@ final class _DocumentsPageState extends State<DocumentsPage> {
               _DocumentForm(
                 viewModel: viewModel,
                 eventBus: widget.eventBus,
+                attachmentPicker: widget.attachmentPicker,
+                attachmentStagingStore: widget.attachmentStagingStore,
+                attachmentUserId: widget.attachmentUserId,
                 onScanRequested: widget.onScanRequested == null
                     ? null
                     : _requestScan,
@@ -1186,11 +1191,17 @@ final class _DocumentForm extends StatefulWidget {
     required this.viewModel,
     this.eventBus,
     this.onScanRequested,
+    this.attachmentPicker,
+    this.attachmentStagingStore,
+    this.attachmentUserId,
   });
 
   final DocumentsViewModel viewModel;
   final AppEventBus? eventBus;
   final Future<void> Function()? onScanRequested;
+  final AttachmentPicker? attachmentPicker;
+  final AttachmentStagingStore? attachmentStagingStore;
+  final String? attachmentUserId;
 
   @override
   State<_DocumentForm> createState() => _DocumentFormState();
@@ -1200,6 +1211,8 @@ final class _DocumentFormState extends State<_DocumentForm> {
   late final TextEditingController _productController;
   late final TextEditingController _quantityController;
   late final TextEditingController _remarkController;
+  DraftAttachmentsViewModel? _draftAttachmentsViewModel;
+  String _recoveredAttachmentSignature = '';
 
   @override
   void initState() {
@@ -1211,6 +1224,8 @@ final class _DocumentFormState extends State<_DocumentForm> {
       text: widget.viewModel.quantityText,
     );
     _remarkController = TextEditingController(text: widget.viewModel.remark);
+    _createDraftAttachmentsViewModel();
+    _recoverDraftAttachments();
   }
 
   @override
@@ -1219,6 +1234,7 @@ final class _DocumentFormState extends State<_DocumentForm> {
     _syncController(_productController, widget.viewModel.productQuery);
     _syncController(_quantityController, widget.viewModel.quantityText);
     _syncController(_remarkController, widget.viewModel.remark);
+    _recoverDraftAttachments();
   }
 
   @override
@@ -1226,7 +1242,32 @@ final class _DocumentFormState extends State<_DocumentForm> {
     _productController.dispose();
     _quantityController.dispose();
     _remarkController.dispose();
+    _draftAttachmentsViewModel?.dispose();
     super.dispose();
+  }
+
+  void _createDraftAttachmentsViewModel() {
+    final picker = widget.attachmentPicker;
+    final stagingStore = widget.attachmentStagingStore;
+    final userId = widget.attachmentUserId;
+    if (picker == null || stagingStore == null || userId == null) return;
+    _draftAttachmentsViewModel = DraftAttachmentsViewModel(
+      picker: picker,
+      stagingStore: stagingStore,
+      userId: userId,
+      draftIdProvider: widget.viewModel.ensureDraftId,
+      onChanged: widget.viewModel.updateAttachmentStagingIds,
+    );
+  }
+
+  void _recoverDraftAttachments() {
+    final attachments = _draftAttachmentsViewModel;
+    if (attachments == null) return;
+    final ids = widget.viewModel.attachmentStagingIds;
+    final signature = '${widget.viewModel.activeDraftId}:${ids.join(',')}';
+    if (signature == _recoveredAttachmentSignature) return;
+    _recoveredAttachmentSignature = signature;
+    unawaited(attachments.recover(ids));
   }
 
   Future<void> _createDocument() async {
@@ -1295,6 +1336,23 @@ final class _DocumentFormState extends State<_DocumentForm> {
               error,
               key: const Key('document-draft-save-error'),
               style: AppTextStyles.bodySmall.copyWith(color: AppColors.error),
+            ),
+          ],
+          if (viewModel.requiresDraftReview) ...[
+            const SizedBox(height: 8),
+            Row(
+              children: [
+                const Icon(Icons.fact_check_outlined, size: 18),
+                const SizedBox(width: 8),
+                const Expanded(
+                  child: Text('角色已变化，提交前需复核', style: AppTextStyles.bodySmall),
+                ),
+                TextButton(
+                  key: const Key('document-confirm-draft-review'),
+                  onPressed: viewModel.confirmDraftReview,
+                  child: const Text('确认复核'),
+                ),
+              ],
             ),
           ],
           const SizedBox(height: 12),
@@ -1412,6 +1470,10 @@ final class _DocumentFormState extends State<_DocumentForm> {
               isDense: true,
             ),
           ),
+          if (_draftAttachmentsViewModel case final attachments?) ...[
+            const SizedBox(height: 10),
+            DraftAttachmentPanel(viewModel: attachments),
+          ],
           if (viewModel.formError != null) ...[
             const SizedBox(height: 10),
             Text(

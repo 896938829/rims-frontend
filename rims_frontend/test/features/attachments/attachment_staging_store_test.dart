@@ -79,6 +79,28 @@ void main() {
   );
 
   test(
+    'document draft binding survives staging-store reconstruction',
+    () async {
+      await store().stage(
+        userId: '42',
+        binding: AttachmentBinding.documentDraft('stable-draft-id'),
+        selection: selection(),
+        existingCount: 0,
+      );
+
+      final recovered = await store().recoverForUser('42');
+
+      recovered.when(
+        success: (items) {
+          expect(items.single.pending.binding.businessType, 'document_draft');
+          expect(items.single.pending.binding.localDraftId, 'stable-draft-id');
+        },
+        failure: (failure) => fail(failure.message),
+      );
+    },
+  );
+
+  test(
     'rejects unsupported type, oversize source, and exhausted count',
     () async {
       final staging = store();

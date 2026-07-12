@@ -341,6 +341,8 @@ Map<String, Object?> _stagedToJson(StagedAttachment item) => {
   'requestId': item.pending.requestId,
   'businessType': item.pending.binding.businessType,
   'businessId': item.pending.binding.businessId,
+  if (item.pending.binding.localDraftId != null)
+    'localDraftId': item.pending.binding.localDraftId,
   'stagedPath': item.pending.stagedPath,
   'originalName': item.pending.originalName,
   'mimeType': item.pending.mimeType,
@@ -356,6 +358,10 @@ StagedAttachment _stagedFromJson(Object? raw) {
   final requestId = _requiredString(raw, 'requestId');
   final businessType = _requiredString(raw, 'businessType');
   final businessId = _requiredInt(raw, 'businessId');
+  final localDraftId = raw['localDraftId'];
+  if (localDraftId != null && localDraftId is! String) {
+    throw const FormatException('Invalid staged attachment localDraftId.');
+  }
   final createdAt = DateTime.tryParse(_requiredString(raw, 'createdAt'));
   if (createdAt == null) {
     throw const FormatException('Invalid staged attachment timestamp.');
@@ -367,9 +373,10 @@ StagedAttachment _stagedFromJson(Object? raw) {
   return StagedAttachment(
     pending: PendingAttachment(
       requestId: requestId,
-      binding: AttachmentBinding.fromBackend(
+      binding: AttachmentBinding.fromStorage(
         businessType: businessType,
         businessId: businessId,
+        localDraftId: localDraftId as String?,
       ),
       stagedPath: _requiredString(raw, 'stagedPath'),
       originalName: _requiredString(raw, 'originalName'),

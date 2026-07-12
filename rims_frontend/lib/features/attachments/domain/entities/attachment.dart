@@ -1,6 +1,9 @@
 final class AttachmentBinding {
-  const AttachmentBinding._(this.businessType, this.businessId)
-    : assert(businessId > 0);
+  const AttachmentBinding._(
+    this.businessType,
+    this.businessId, {
+    this.localDraftId,
+  }) : assert(businessId > 0);
 
   factory AttachmentBinding.productImage(int productId) {
     if (productId <= 0) {
@@ -14,6 +17,14 @@ final class AttachmentBinding {
       throw ArgumentError.value(documentId, 'documentId', 'Must be positive');
     }
     return AttachmentBinding._('doc_attachment', documentId);
+  }
+
+  factory AttachmentBinding.documentDraft(String draftId) {
+    final normalized = draftId.trim();
+    if (normalized.isEmpty) {
+      throw ArgumentError.value(draftId, 'draftId', 'Must not be empty');
+    }
+    return AttachmentBinding._('document_draft', 1, localDraftId: normalized);
   }
 
   factory AttachmentBinding.fromBackend({
@@ -31,17 +42,33 @@ final class AttachmentBinding {
     return AttachmentBinding._(businessType, businessId);
   }
 
+  factory AttachmentBinding.fromStorage({
+    required String businessType,
+    required int businessId,
+    String? localDraftId,
+  }) {
+    if (businessType == 'document_draft') {
+      return AttachmentBinding.documentDraft(localDraftId ?? '');
+    }
+    return AttachmentBinding.fromBackend(
+      businessType: businessType,
+      businessId: businessId,
+    );
+  }
+
   final String businessType;
   final int businessId;
+  final String? localDraftId;
 
   @override
   bool operator ==(Object other) =>
       other is AttachmentBinding &&
       other.businessType == businessType &&
-      other.businessId == businessId;
+      other.businessId == businessId &&
+      other.localDraftId == localDraftId;
 
   @override
-  int get hashCode => Object.hash(businessType, businessId);
+  int get hashCode => Object.hash(businessType, businessId, localDraftId);
 }
 
 final class Attachment {

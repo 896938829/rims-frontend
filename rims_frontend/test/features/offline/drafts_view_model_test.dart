@@ -28,7 +28,9 @@ void main() {
   });
 
   test('opens, duplicates, and renames a draft remark', () async {
-    final repository = _MemoryDraftRepository([_draft('original')]);
+    final repository = _MemoryDraftRepository([
+      _draft('original', attachmentIds: ['original-file']),
+    ]);
     final viewModel = DraftsViewModel(
       repository: repository,
       accountId: '7',
@@ -46,6 +48,7 @@ void main() {
     expect(copy?.id, 'copy-id');
     expect(copy?.version, 1);
     expect(repository.byId('copy-id')?.payload['remark'], 'original remark');
+    expect(repository.byId('copy-id')?.attachmentStagingIds, isEmpty);
     expect(repository.byId('original')?.payload['remark'], 'renamed');
   });
 
@@ -144,6 +147,7 @@ DocumentDraft _draft(
   String id, {
   String accountId = '7',
   String roleCode = 'operator',
+  List<String> attachmentIds = const [],
 }) {
   final timestamp = DateTime.utc(2026, 7, 1);
   return DocumentDraft(
@@ -152,6 +156,7 @@ DocumentDraft _draft(
     warehouseId: 11,
     docType: 2,
     observedRoleCode: roleCode,
+    attachmentStagingIds: attachmentIds,
     payload: const {
       'lines': [
         {'product_id': 10, 'product_name': 'Product', 'quantity': 2},
