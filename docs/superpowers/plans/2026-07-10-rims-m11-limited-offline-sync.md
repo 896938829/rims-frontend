@@ -303,21 +303,21 @@ feat: add verified network reachability
 - Test: `rims_frontend/test/features/offline/cache_policy_test.dart`
 - Test: `rims_frontend/test/features/offline/cache_fallback_test.dart`
 
-- [ ] **Step 1: Write failing tests for canonical JSON, account/warehouse keys, TTL, stale-but-visible fallback, expiry, bounded namespace eviction, schema mismatch, and forbidden failure fallback.**
+- [x] **Step 1: Write failing tests for canonical JSON, account/warehouse keys, TTL, stale-but-visible fallback, expiry, bounded namespace eviction, schema mismatch, and forbidden failure fallback.**
 
-- [ ] **Step 2: Implement `CachePolicy`.**
+- [x] **Step 2: Implement `CachePolicy`.**
 
 Defaults: references 24 hours, reports 6 hours, recent documents 7 days. Keep a
 stale record for explicit stale display until retention pruning; never present
 it as fresh.
 
-- [ ] **Step 3: Implement one generic network-first helper.**
+- [x] **Step 3: Implement one generic network-first helper.**
 
 It writes successful network results atomically. It reads cache only for network
 or timeout failures. It returns the original authentication, permission,
 validation, conflict, and server failures unchanged.
 
-- [ ] **Step 4: Run tests and commit.**
+- [x] **Step 4: Run tests and commit.**
 
 ```text
 feat: add scoped offline cache primitives

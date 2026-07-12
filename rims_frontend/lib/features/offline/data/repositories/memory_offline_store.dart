@@ -16,13 +16,45 @@ final class MemoryOfflineStore implements OfflineStore {
   }
 
   @override
-  Future<CacheRecord?> readCache(CacheKey key) async {
-    final matches = _cache.values.where((record) => _sameKey(record.key, key));
+  Future<CacheRecord?> readCache(CacheKey key, {int? schemaVersion}) async {
+    final matches = _cache.values.where(
+      (record) =>
+          _sameKey(record.key, key) &&
+          (schemaVersion == null || record.schemaVersion == schemaVersion),
+    );
     if (matches.isEmpty) return null;
     return matches.reduce(
       (current, candidate) =>
           candidate.schemaVersion > current.schemaVersion ? candidate : current,
     );
+  }
+
+  @override
+  Future<void> enforceCacheLimit({
+    required String accountId,
+    required int? warehouseId,
+    required String namespace,
+    required int maxRecords,
+  }) async {
+    if (maxRecords < 1) {
+      throw ArgumentError.value(maxRecords, 'maxRecords');
+    }
+    final matches =
+        _cache.entries
+            .where(
+              (entry) =>
+                  entry.value.key.accountId == accountId &&
+                  entry.value.key.warehouseId == warehouseId &&
+                  entry.value.key.namespace == namespace,
+            )
+            .toList()
+          ..sort(
+            (left, right) =>
+                right.value.fetchedAt.compareTo(left.value.fetchedAt),
+          );
+    for (final entry in matches.skip(maxRecords)) {
+      _cache.remove(entry.key);
+    }
   }
 
   @override

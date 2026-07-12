@@ -20,7 +20,7 @@ counts, encrypted storage ownership, cleanup, and baseline restore are read.
 | Versioned encrypted native database | 2, 14 | migration, key, corruption, Android artifact | foundation PASS; Android acceptance pending |
 | Web regression adapter | 2, 17 | Web M9 journey with in-memory store | adapter/build PASS; M9 journey pending |
 | Verified network reachability | 3, 16 | captive/unreachable/switch probes | service PASS; fault harness pending |
-| Account/warehouse scoped cache | 4-7 | cache keys, invalidation, no cross-scope read | planned |
+| Account/warehouse scoped cache | 4-7 | cache keys, invalidation, no cross-scope read | primitives PASS; repositories pending |
 | User/warehouse references | 5 | secure-token gate and cached projection | planned |
 | Product/inventory/alerts/barcode | 6 | offline read, stale source/age, no mutation authority | planned |
 | Documents/details/reports | 7 | offline read and financial field boundary | planned |
@@ -89,6 +89,18 @@ counts, encrypted storage ownership, cleanup, and baseline restore are read.
 | Request behavior | ApiClient always executes the real request before reporting success or mapped failure |
 | Lifecycle | MainApp starts and disposes the service; widget tests inject a platform-free implementation |
 | GREEN | strict analyze PASS; 19 network/API/widget tests PASS; release Web build PASS |
+
+## Task 4 Cache Primitive Evidence
+
+| Probe | Observed result |
+| --- | --- |
+| RED | tests failed because codec, policy, fallback, schema read, and scoped eviction did not exist |
+| Codec | nested object keys serialize canonically while array order is preserved |
+| Policy | references 24h, reports 6h, recent documents 7d; stale retention and namespace counts are bounded |
+| Fallback | network-first success writes cache; only NetworkFailure reads fresh or explicitly stale retained data |
+| Failure boundary | authentication, authorization, validation, conflict, and server failures remain unchanged |
+| Scope | schema-specific reads and oldest-first eviction preserve other accounts and warehouses in memory and Drift |
+| GREEN | strict analyze PASS; all offline plus architecture tests PASS (32 tests) |
 
 ## Final Android State Evidence
 

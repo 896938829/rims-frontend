@@ -86,6 +86,70 @@ void main() {
     );
   });
 
+  test('cache limit evicts oldest records only inside its scope', () async {
+    final now = DateTime.utc(2026, 7, 13);
+    for (var index = 0; index < 3; index += 1) {
+      await database.writeCache(
+        CacheRecord(
+          key: CacheKey(
+            accountId: '7',
+            warehouseId: 11,
+            namespace: 'inventory',
+            entityKey: 'page=$index',
+          ),
+          payload: const {},
+          schemaVersion: 1,
+          fetchedAt: now.add(Duration(minutes: index)),
+          expiresAt: now.add(const Duration(days: 1)),
+        ),
+      );
+    }
+    await database.writeCache(
+      CacheRecord(
+        key: const CacheKey(
+          accountId: '7',
+          warehouseId: 12,
+          namespace: 'inventory',
+          entityKey: 'keep',
+        ),
+        payload: const {},
+        schemaVersion: 1,
+        fetchedAt: now,
+        expiresAt: now.add(const Duration(days: 1)),
+      ),
+    );
+
+    await database.enforceCacheLimit(
+      accountId: '7',
+      warehouseId: 11,
+      namespace: 'inventory',
+      maxRecords: 2,
+    );
+
+    expect(
+      await database.readCache(
+        const CacheKey(
+          accountId: '7',
+          warehouseId: 11,
+          namespace: 'inventory',
+          entityKey: 'page=0',
+        ),
+      ),
+      isNull,
+    );
+    expect(
+      await database.readCache(
+        const CacheKey(
+          accountId: '7',
+          warehouseId: 12,
+          namespace: 'inventory',
+          entityKey: 'keep',
+        ),
+      ),
+      isNotNull,
+    );
+  });
+
   test('draft save replaces only the matching account owned version', () async {
     final createdAt = DateTime.utc(2026, 7, 13);
     await database.saveDraft(

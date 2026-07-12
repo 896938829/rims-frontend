@@ -9,6 +9,7 @@ import '../../domain/entities/cache_snapshot.dart';
 import '../../domain/entities/document_draft.dart';
 import '../../domain/entities/outbox_operation.dart';
 import '../../domain/services/offline_store.dart';
+import '../models/cache_record_model.dart';
 import 'offline_tables.dart';
 
 part 'offline_database.g.dart';
@@ -53,7 +54,7 @@ final class OfflineDatabase extends _$OfflineDatabase implements OfflineStore {
         warehouseId: Value(record.key.warehouseId),
         namespace: record.key.namespace,
         entityKey: record.key.entityKey,
-        payload: _encodePayload(record.payload),
+        payload: CacheRecordModel.canonicalJson(record.payload),
         recordSchemaVersion: record.schemaVersion,
         fetchedAt: record.fetchedAt.toUtc(),
         expiresAt: record.expiresAt.toUtc(),
@@ -62,7 +63,7 @@ final class OfflineDatabase extends _$OfflineDatabase implements OfflineStore {
   }
 
   @override
-  Future<CacheRecord?> readCache(CacheKey key) async {
+  Future<CacheRecord?> readCache(CacheKey key, {int? schemaVersion}) async {
     final query = select(offlineCacheEntries)
       ..where(
         (entry) =>
@@ -71,7 +72,10 @@ final class OfflineDatabase extends _$OfflineDatabase implements OfflineStore {
                 ? entry.warehouseId.isNull()
                 : entry.warehouseId.equals(key.warehouseId!)) &
             entry.namespace.equals(key.namespace) &
-            entry.entityKey.equals(key.entityKey),
+            entry.entityKey.equals(key.entityKey) &
+            (schemaVersion == null
+                ? const Constant(true)
+                : entry.recordSchemaVersion.equals(schemaVersion)),
       )
       ..orderBy([(entry) => OrderingTerm.desc(entry.recordSchemaVersion)])
       ..limit(1);
@@ -84,7 +88,7 @@ final class OfflineDatabase extends _$OfflineDatabase implements OfflineStore {
         namespace: row.namespace,
         entityKey: row.entityKey,
       ),
-      payload: _decodePayload(row.payload),
+      payload: CacheRecordModel.decodePayload(row.payload),
       schemaVersion: row.recordSchemaVersion,
       fetchedAt: row.fetchedAt,
       expiresAt: row.expiresAt,
@@ -100,13 +104,45 @@ final class OfflineDatabase extends _$OfflineDatabase implements OfflineStore {
   }
 
   @override
+  Future<void> enforceCacheLimit({
+    required String accountId,
+    required int? warehouseId,
+    required String namespace,
+    required int maxRecords,
+  }) async {
+    if (maxRecords < 1) {
+      throw ArgumentError.value(maxRecords, 'maxRecords');
+    }
+    final query = select(offlineCacheEntries)
+      ..where(
+        (entry) =>
+            entry.accountId.equals(accountId) &
+            (warehouseId == null
+                ? entry.warehouseId.isNull()
+                : entry.warehouseId.equals(warehouseId)) &
+            entry.namespace.equals(namespace),
+      )
+      ..orderBy([(entry) => OrderingTerm.desc(entry.fetchedAt)]);
+    final rows = await query.get();
+    final evictedIds = rows
+        .skip(maxRecords)
+        .map((entry) => entry.cacheId)
+        .toList(growable: false);
+    if (evictedIds.isNotEmpty) {
+      await (delete(
+        offlineCacheEntries,
+      )..where((entry) => entry.cacheId.isIn(evictedIds))).go();
+    }
+  }
+
+  @override
   Future<void> saveDraft(DocumentDraft draft) async {
     await into(offlineDocumentDrafts).insertOnConflictUpdate(
       OfflineDocumentDraftsCompanion.insert(
         draftId: draft.id,
         accountId: draft.accountId,
         warehouseId: draft.warehouseId,
-        payload: _encodePayload(draft.payload),
+        payload: CacheRecordModel.canonicalJson(draft.payload),
         draftVersion: draft.version,
         createdAt: draft.createdAt.toUtc(),
         updatedAt: draft.updatedAt.toUtc(),
@@ -126,7 +162,7 @@ final class OfflineDatabase extends _$OfflineDatabase implements OfflineStore {
             id: row.draftId,
             accountId: row.accountId,
             warehouseId: row.warehouseId,
-            payload: _decodePayload(row.payload),
+            payload: CacheRecordModel.decodePayload(row.payload),
             createdAt: row.createdAt,
             updatedAt: row.updatedAt,
             version: row.draftVersion,
@@ -183,7 +219,7 @@ final class OfflineDatabase extends _$OfflineDatabase implements OfflineStore {
           accountId: operation.accountId,
           warehouseId: operation.warehouseId,
           operationKind: operation.kind.wireValue,
-          payload: _encodePayload(operation.payload),
+          payload: CacheRecordModel.canonicalJson(operation.payload),
           operationState: operation.state.wireValue,
           createdAt: operation.createdAt.toUtc(),
           confirmedAt: Value(operation.confirmedAt?.toUtc()),
@@ -311,7 +347,7 @@ final class OfflineDatabase extends _$OfflineDatabase implements OfflineStore {
       kind: OutboxOperationKind.values.singleWhere(
         (kind) => kind.wireValue == row.operationKind,
       ),
-      payload: _decodePayload(row.payload),
+      payload: CacheRecordModel.decodePayload(row.payload),
       state: OutboxState.values.singleWhere(
         (state) => state.wireValue == row.operationState,
       ),
@@ -331,22 +367,3 @@ String _cacheId(CacheKey key, int schemaVersion) => jsonEncode([
   key.entityKey,
   schemaVersion,
 ]);
-
-String _encodePayload(Map<String, Object?> payload) {
-  return jsonEncode(_canonicalizeJson(payload));
-}
-
-Object? _canonicalizeJson(Object? value) {
-  if (value is Map) {
-    final keys = value.keys.cast<String>().toList()..sort();
-    return <String, Object?>{
-      for (final key in keys) key: _canonicalizeJson(value[key]),
-    };
-  }
-  if (value is List) return value.map(_canonicalizeJson).toList();
-  return value;
-}
-
-Map<String, Object?> _decodePayload(String value) {
-  return Map<String, Object?>.from(jsonDecode(value) as Map);
-}

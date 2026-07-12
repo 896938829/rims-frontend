@@ -6,7 +6,14 @@ import '../entities/outbox_operation.dart';
 abstract interface class OfflineStore {
   Future<void> writeCache(CacheRecord record);
 
-  Future<CacheRecord?> readCache(CacheKey key);
+  Future<CacheRecord?> readCache(CacheKey key, {int? schemaVersion});
+
+  Future<void> enforceCacheLimit({
+    required String accountId,
+    required int? warehouseId,
+    required String namespace,
+    required int maxRecords,
+  });
 
   Future<void> saveDraft(DocumentDraft draft);
 
