@@ -159,6 +159,11 @@ Internet access.
 - Create: `docs/superpowers/plans/2026-07-10-rims-m11-execution-record.md`
 - Modify: `docs/superpowers/plans/2026-07-10-rims-app-long-term-completion-master-plan.md`
 - Create: `rims_frontend/test/m11_architecture_test.dart`
+- Create: `rims_frontend/lib/features/offline/domain/entities/cache_snapshot.dart`
+- Create: `rims_frontend/lib/features/offline/domain/entities/network_reachability.dart`
+- Create: `rims_frontend/lib/features/offline/domain/entities/outbox_operation.dart`
+- Create: `rims_frontend/lib/features/offline/domain/services/offline_store.dart`
+- Create: `rims_frontend/lib/features/offline/domain/services/network_status_service.dart`
 
 - [ ] **Step 1: Record exact frontend/backend commits, tool versions, stopped runtime status, current storage implementations, current dependencies, and M10 inherited reports.**
 
@@ -175,7 +180,9 @@ flutter test --no-pub test/m11_architecture_test.dart
 
 Expected: FAIL because M11 contracts do not exist.
 
-- [ ] **Step 4: Verify stopped ownership before implementation.**
+- [ ] **Step 4: Add the minimal typed domain contracts from Section 3 and verify the architecture test passes without adding persistence or sync behavior.**
+
+- [ ] **Step 5: Verify stopped ownership before implementation.**
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rims_local.ps1 -Command status
@@ -183,7 +190,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rims_local.ps1 -Co
 
 Expected: no managed state, listener, emulator, or bridge.
 
-- [ ] **Step 5: Commit the evidence skeleton.**
+- [ ] **Step 6: Commit the evidence skeleton and contracts.**
 
 ```text
 docs: freeze M11 offline sync contracts
@@ -201,8 +208,9 @@ docs: freeze M11 offline sync contracts
 - Create: `rims_frontend/lib/features/offline/data/database/offline_database.g.dart`
 - Create: `rims_frontend/lib/features/offline/data/database/offline_database_factory.dart`
 - Create: `rims_frontend/lib/features/offline/data/database/offline_tables.dart`
-- Create: `rims_frontend/lib/features/offline/domain/entities/offline_records.dart`
-- Create: `rims_frontend/lib/features/offline/domain/services/offline_store.dart`
+- Modify: `rims_frontend/lib/features/offline/domain/entities/cache_snapshot.dart`
+- Modify: `rims_frontend/lib/features/offline/domain/entities/outbox_operation.dart`
+- Modify: `rims_frontend/lib/features/offline/domain/services/offline_store.dart`
 - Test: `rims_frontend/test/features/offline/offline_database_test.dart`
 - Test: `rims_frontend/test/features/offline/offline_database_factory_test.dart`
 
@@ -257,8 +265,8 @@ feat: add encrypted offline database
 ## Task 3: Add Verified Network Reachability
 
 **Files:**
-- Create: `rims_frontend/lib/features/offline/domain/entities/network_reachability.dart`
-- Create: `rims_frontend/lib/features/offline/domain/services/network_status_service.dart`
+- Modify: `rims_frontend/lib/features/offline/domain/entities/network_reachability.dart`
+- Modify: `rims_frontend/lib/features/offline/domain/services/network_status_service.dart`
 - Create: `rims_frontend/lib/features/offline/data/services/connectivity_network_status_service.dart`
 - Modify: `rims_frontend/lib/core/network/api_client.dart`
 - Modify: `rims_frontend/lib/app.dart`
@@ -510,7 +518,7 @@ feat: query idempotency operation status
 ## Task 11: Implement Outbox State Machine And Dependency Graph
 
 **Files:**
-- Create: `rims_frontend/lib/features/offline/domain/entities/outbox_operation.dart`
+- Modify: `rims_frontend/lib/features/offline/domain/entities/outbox_operation.dart`
 - Create: `rims_frontend/lib/features/offline/domain/repositories/outbox_repository.dart`
 - Create: `rims_frontend/lib/features/offline/data/repositories/drift_outbox_repository.dart`
 - Create: `rims_frontend/lib/features/offline/domain/services/outbox_state_machine.dart`
