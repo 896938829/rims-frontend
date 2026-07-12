@@ -38,6 +38,7 @@ final class InventoryViewModel extends ChangeNotifier {
   bool _isLoadingTransactions = false;
   bool _isLookingUpBarcode = false;
   bool _isSavingSettings = false;
+  bool _isDisposed = false;
   String? _errorMessage;
   String? _transactionError;
   String? _barcodeLookupError;
@@ -100,6 +101,12 @@ final class InventoryViewModel extends ChangeNotifier {
         .toList(growable: false);
   }
 
+  @override
+  void dispose() {
+    _isDisposed = true;
+    super.dispose();
+  }
+
   List<TransactionRecord> transactionsFor(InventoryItem item) {
     return _transactions
         .where((transaction) => transaction.productId == item.productId)
@@ -141,6 +148,7 @@ final class InventoryViewModel extends ChangeNotifier {
 
     final keyword = _query.trim();
     final result = await repository.listInventory(keyword: keyword, page: page);
+    if (_isDisposed) return;
 
     if (generation != _queryGeneration || keyword != _query.trim()) {
       return;
@@ -182,6 +190,7 @@ final class InventoryViewModel extends ChangeNotifier {
       keyword: keyword,
       page: requestedPage,
     );
+    if (_isDisposed) return;
     if (generation != _queryGeneration || keyword != _query.trim()) {
       if (_loadingMoreGeneration == generation) {
         _isLoadingMore = false;
@@ -230,6 +239,7 @@ final class InventoryViewModel extends ChangeNotifier {
     var pageNumber = 1;
     while (pageNumber > 0) {
       final result = await repository.listTransactions(page: pageNumber);
+      if (_isDisposed) return;
       switch (result) {
         case Success(:final data):
           transactions.addAll(data.items);
@@ -310,6 +320,7 @@ final class InventoryViewModel extends ChangeNotifier {
     notifyListeners();
 
     final result = await repository.findProductByBarcode(trimmedBarcode);
+    if (_isDisposed) return null;
     InventoryItem? foundItem;
     result.when(
       success: (item) {
@@ -399,6 +410,7 @@ final class InventoryViewModel extends ChangeNotifier {
       alertThreshold: alertThreshold,
       status: status,
     );
+    if (_isDisposed) return false;
 
     result.when(
       success: (updatedItem) {

@@ -9,6 +9,7 @@ void main() {
       'docType': 2,
       'docTypeName': '销售单',
       'statusName': '已完成',
+      'remark': 'M9-E2E:run-42:sales',
       'createdAt': '2026-07-02T10:15:00Z',
     });
 
@@ -17,7 +18,9 @@ void main() {
     expect(model.title, '销售单');
     expect(model.number, 'XS20260417035');
     expect(model.status, '已完成');
+    expect(model.remark, 'M9-E2E:run-42:sales');
     expect(model.createdAt, '2026-07-02T10:15:00Z');
+    expect(model.toEntity().remark, 'M9-E2E:run-42:sales');
     expect(model.toEntity().createdAt, '2026-07-02T10:15:00Z');
   });
 

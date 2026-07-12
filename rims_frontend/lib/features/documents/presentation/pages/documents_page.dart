@@ -164,6 +164,7 @@ final class _DocumentsPageState extends State<DocumentsPage> {
         return RimsPageScaffold(
           key: const Key('tab-body-documents'),
           child: ListView(
+            key: const Key('documents-scroll-view'),
             children: [
               Text('单据', style: AppTextStyles.headingLarge),
               const SizedBox(height: 14),

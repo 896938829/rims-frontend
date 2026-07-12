@@ -70,6 +70,7 @@ final class HomeViewModel extends ChangeNotifier {
   int _nonStandardInventoryTotal = 0;
   int _recentDocumentsTotal = 0;
   bool _isLoading = false;
+  bool _isDisposed = false;
   String? _errorMessage;
   String? _recentDocumentsErrorMessage;
 
@@ -159,6 +160,12 @@ final class HomeViewModel extends ChangeNotifier {
 
   List<DocumentRecord> get recentDocuments => _recentDocuments;
 
+  @override
+  void dispose() {
+    _isDisposed = true;
+    super.dispose();
+  }
+
   Future<void> load() async {
     _isLoading = true;
     _errorMessage = null;
@@ -176,6 +183,7 @@ final class HomeViewModel extends ChangeNotifier {
       _nonStandardInventoryTotal = 0;
     } else {
       final inventoryResult = await inventoryRepository.listInventory();
+      if (_isDisposed) return;
       inventoryResult.when(
         success: (page) {
           _inventoryItems = page.items;
@@ -187,6 +195,7 @@ final class HomeViewModel extends ChangeNotifier {
       );
 
       final alertsResult = await inventoryRepository.listInventoryAlerts();
+      if (_isDisposed) return;
       alertsResult.when(
         success: (page) {
           _inventoryAlertTotal = page.total;
@@ -197,6 +206,7 @@ final class HomeViewModel extends ChangeNotifier {
 
       final nonStandardResult = await inventoryRepository
           .listNonStandardInventory();
+      if (_isDisposed) return;
       nonStandardResult.when(
         success: (page) {
           _nonStandardInventoryTotal = page.total;
@@ -211,6 +221,7 @@ final class HomeViewModel extends ChangeNotifier {
       _inventoryOverviewItems = const [];
     } else {
       final overviewResult = await reportsRepository.loadInventoryOverview();
+      if (_isDisposed) return;
       overviewResult.when(
         success: (items) => _inventoryOverviewItems = items,
         failure: (_) {},
@@ -224,6 +235,7 @@ final class HomeViewModel extends ChangeNotifier {
       _recentDocumentsErrorMessage = null;
     } else {
       final documentsResult = await documentsRepository.listRecentDocuments();
+      if (_isDisposed) return;
       documentsResult.when(
         success: (page) {
           _recentDocuments = page.items;

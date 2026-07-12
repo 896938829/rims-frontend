@@ -17,6 +17,24 @@ import 'package:rims_frontend/features/inventory/domain/entities/non_standard_in
 import 'package:rims_frontend/features/inventory/domain/repositories/inventory_repository.dart';
 
 void main() {
+  test(
+    'DocumentsViewModel ignores an async load completion after dispose',
+    () async {
+      final repository = _RetryDocumentsRepository();
+      final viewModel = DocumentsViewModel(repository: repository);
+      await viewModel.load();
+
+      final loadFuture = viewModel.load();
+      viewModel.dispose();
+      repository.completeRetryDocuments();
+
+      await expectLater(loadFuture, completes);
+      expect(repository.transactionCallCount, 1);
+      expect(viewModel.recentDocuments, isEmpty);
+      expect(viewModel.notifyListeners, throwsFlutterError);
+    },
+  );
+
   test('load exposes document actions and backend recent documents', () async {
     final repository = _FakeDocumentsRepository();
     final viewModel = DocumentsViewModel(repository: repository);
@@ -884,6 +902,7 @@ void main() {
       ),
     );
 
+    expect(find.byKey(const Key('documents-scroll-view')), findsOneWidget);
     expect(find.byKey(const Key('document-action-inbound')), findsOneWidget);
     expect(find.byKey(const Key('document-action-sales')), findsOneWidget);
     for (var attempt = 0; attempt < 8; attempt += 1) {
@@ -1945,6 +1964,7 @@ final class _FakeDocumentsRepository implements DocumentsRepository {
 
 final class _RetryDocumentsRepository implements DocumentsRepository {
   int listCallCount = 0;
+  int transactionCallCount = 0;
   Completer<List<DocumentRecord>>? _retryDocumentsCompleter;
 
   void completeRetryDocuments() {
@@ -1974,6 +1994,7 @@ final class _RetryDocumentsRepository implements DocumentsRepository {
     String keyword = '',
     int page = 1,
   }) async {
+    transactionCallCount += 1;
     return Success(_transactionPage([_transactionRecord], page: page));
   }
 

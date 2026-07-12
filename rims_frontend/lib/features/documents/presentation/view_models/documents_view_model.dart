@@ -98,6 +98,13 @@ final class DocumentsViewModel extends ChangeNotifier {
   bool _isLoadingMoreTransactions = false;
   bool _transactionsReachedEnd = false;
   Failure? _transactionLoadMoreFailure;
+  bool _isDisposed = false;
+
+  @override
+  void dispose() {
+    _isDisposed = true;
+    super.dispose();
+  }
 
   List<DocumentAction> get actions => _actions
       .where(
@@ -308,6 +315,7 @@ final class DocumentsViewModel extends ChangeNotifier {
     notifyListeners();
 
     final result = await repository.listInventory(keyword: keyword);
+    if (_isDisposed) return;
     if (requestId != _productSearchRequestId) {
       return;
     }
@@ -355,6 +363,7 @@ final class DocumentsViewModel extends ChangeNotifier {
       final result = await repository.listNonStandardInventory(
         page: pageNumber,
       );
+      if (_isDisposed) return;
       switch (result) {
         case Success(:final data):
           items.addAll(data.items);
@@ -409,6 +418,7 @@ final class DocumentsViewModel extends ChangeNotifier {
         docType: 2,
         page: pageNumber,
       );
+      if (_isDisposed) return;
       if (_selectedAction != selectedAction || !isReturnAction) return;
       switch (result) {
         case Success(:final data):
@@ -506,7 +516,9 @@ final class DocumentsViewModel extends ChangeNotifier {
     notifyListeners();
 
     await _loadDocumentsFirstPage();
+    if (_isDisposed) return;
     await _loadTransactionsFirstPage();
+    if (_isDisposed) return;
 
     _isLoading = false;
     notifyListeners();
@@ -523,6 +535,7 @@ final class DocumentsViewModel extends ChangeNotifier {
     _documentsReachedEnd = false;
     _documentLoadMoreFailure = null;
     final result = await repository.listRecentDocuments(docType: docType);
+    if (_isDisposed) return;
     if (generation != _documentGeneration ||
         docType != _selectedDocumentTypeFilter) {
       return;
@@ -551,6 +564,7 @@ final class DocumentsViewModel extends ChangeNotifier {
     _transactionsReachedEnd = false;
     _transactionLoadMoreFailure = null;
     final result = await repository.listTransactions();
+    if (_isDisposed) return;
     if (generation != _transactionGeneration) return;
     result.when(
       success: (page) {
@@ -579,6 +593,7 @@ final class DocumentsViewModel extends ChangeNotifier {
       docType: docType,
       page: _documentPage + 1,
     );
+    if (_isDisposed) return;
     if (generation != _documentGeneration ||
         docType != _selectedDocumentTypeFilter) {
       return;
@@ -616,6 +631,7 @@ final class DocumentsViewModel extends ChangeNotifier {
     final result = await repository.listTransactions(
       page: _transactionPage + 1,
     );
+    if (_isDisposed) return;
     if (generation != _transactionGeneration) return;
     result.when(
       success: (page) {
@@ -739,6 +755,7 @@ final class DocumentsViewModel extends ChangeNotifier {
         remark: _remark,
       ),
     );
+    if (_isDisposed) return false;
 
     var created = false;
     result.when(
@@ -770,6 +787,7 @@ final class DocumentsViewModel extends ChangeNotifier {
 
     if (created && hadLoadedDocumentPage) {
       await _loadDocumentsFirstPage();
+      if (_isDisposed) return false;
     }
 
     _isSubmitting = false;
@@ -796,6 +814,7 @@ final class DocumentsViewModel extends ChangeNotifier {
           ? product.productName
           : document.productName,
       quantity: document.quantity == 0 ? quantity : document.quantity,
+      remark: document.remark,
       createdAt: document.createdAt,
     );
   }
@@ -889,6 +908,7 @@ final class DocumentsViewModel extends ChangeNotifier {
     notifyListeners();
 
     final result = await run(repository);
+    if (_isDisposed) return false;
     var completed = false;
     await result.when(
       success: (_) async {
@@ -900,6 +920,7 @@ final class DocumentsViewModel extends ChangeNotifier {
         _documentActionError = failure.message;
       },
     );
+    if (_isDisposed) return false;
 
     _completingDocumentIds = {
       for (final id in _completingDocumentIds)

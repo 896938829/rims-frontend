@@ -9,6 +9,7 @@ final class DocumentRecordModel {
     required this.status,
     required this.productName,
     required this.quantity,
+    required this.remark,
     required this.createdAt,
   });
 
@@ -54,6 +55,7 @@ final class DocumentRecordModel {
             'actualQty',
           ]) ??
           0,
+      remark: _readString(json, const ['remark', 'notes', 'description']) ?? '',
       createdAt:
           _readString(json, const [
             'createdAt',
@@ -75,6 +77,7 @@ final class DocumentRecordModel {
   final String status;
   final String productName;
   final int quantity;
+  final String remark;
   final String createdAt;
 
   DocumentRecord toEntity() {
@@ -86,6 +89,7 @@ final class DocumentRecordModel {
       status: status,
       productName: productName,
       quantity: quantity,
+      remark: remark,
       createdAt: createdAt,
     );
   }

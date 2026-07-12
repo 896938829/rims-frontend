@@ -80,6 +80,24 @@ void main() {
     );
   });
 
+  test(
+    'HomeViewModel ignores an async load completion after dispose',
+    () async {
+      final repository = _RetryInventoryRepository();
+      final viewModel = HomeViewModel(inventoryRepository: repository);
+      await viewModel.load();
+
+      final loadFuture = viewModel.load();
+      viewModel.dispose();
+      repository.completeRetryInventory();
+
+      await expectLater(loadFuture, completes);
+      expect(repository.listInventoryAlertsCallCount, 1);
+      expect(viewModel.metrics.first.value, '0');
+      expect(viewModel.notifyListeners, throwsFlutterError);
+    },
+  );
+
   test('document failure is scoped to recent documents section', () async {
     final viewModel = HomeViewModel(
       user: _user,
@@ -587,6 +605,7 @@ final class _FailingAlertsInventoryRepository implements InventoryRepository {
 
 final class _RetryInventoryRepository implements InventoryRepository {
   int listInventoryCallCount = 0;
+  int listInventoryAlertsCallCount = 0;
   Completer<List<InventoryItem>>? _retryInventoryCompleter;
 
   void completeRetryInventory() {
@@ -613,6 +632,7 @@ final class _RetryInventoryRepository implements InventoryRepository {
   Future<Result<PageData<InventoryItem>>> listInventoryAlerts({
     int page = 1,
   }) async {
+    listInventoryAlertsCallCount += 1;
     if (listInventoryCallCount == 1) {
       return const FailureResult<PageData<InventoryItem>>(
         NetworkFailure(message: '库存预警不可用'),

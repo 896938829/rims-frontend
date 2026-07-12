@@ -275,6 +275,27 @@ void main() {
     expect(find.text('真实商品'), findsOneWidget);
   });
 
+  test(
+    'ReportsViewModel ignores an async load completion after dispose',
+    () async {
+      final repository = _RetryReportsRepository();
+      final viewModel = ReportsViewModel(
+        repository: repository,
+        today: DateTime(2026, 6, 26),
+      );
+      await viewModel.load();
+
+      final retry = viewModel.load();
+      viewModel.dispose();
+      repository.completeRetryStats();
+
+      await expectLater(retry, completes);
+      expect(repository.trendCallCount, 0);
+      expect(viewModel.summaryMetrics, isEmpty);
+      expect(viewModel.notifyListeners, throwsFlutterError);
+    },
+  );
+
   testWidgets(
     'ReportsPage shows inventory report section error with sales data',
     (tester) async {

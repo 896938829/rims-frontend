@@ -35,6 +35,7 @@ final class DocumentRecord {
     required this.status,
     this.productName = '',
     this.quantity = 0,
+    this.remark = '',
     this.createdAt = '',
   });
 
@@ -45,6 +46,7 @@ final class DocumentRecord {
   final String status;
   final String productName;
   final int quantity;
+  final String remark;
   final String createdAt;
 }
 

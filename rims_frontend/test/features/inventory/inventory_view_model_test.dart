@@ -14,6 +14,23 @@ import 'package:rims_frontend/features/inventory/presentation/pages/inventory_pa
 import 'package:rims_frontend/features/inventory/presentation/view_models/inventory_view_model.dart';
 
 void main() {
+  test(
+    'InventoryViewModel ignores an async load completion after dispose',
+    () async {
+      final repository = _RetryInventoryRepository();
+      final viewModel = InventoryViewModel(repository: repository);
+      await viewModel.load();
+
+      final loadFuture = viewModel.load();
+      viewModel.dispose();
+      repository.completeRetryInventory();
+
+      await expectLater(loadFuture, completes);
+      expect(viewModel.items, isEmpty);
+      expect(viewModel.notifyListeners, throwsFlutterError);
+    },
+  );
+
   test('load sets loading then exposes backend inventory items', () async {
     final pending = Completer<Result<PageData<InventoryItem>>>();
     final repository = _FakeInventoryRepository(result: pending.future);

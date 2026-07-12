@@ -78,10 +78,17 @@ final class ReportsViewModel extends ChangeNotifier {
   bool _isLoading = false;
   String? _errorMessage;
   String? _inventoryReportErrorMessage;
+  bool _isDisposed = false;
 
   final ReportsRepository? repository;
   final bool canViewFinancialMetrics;
   final DateTime today;
+
+  @override
+  void dispose() {
+    _isDisposed = true;
+    super.dispose();
+  }
 
   List<String> get periodLabels => const ['近7天', '近30天', '本月'];
   String get selectedPeriodLabel => _selectedPeriodLabel;
@@ -139,6 +146,7 @@ final class ReportsViewModel extends ChangeNotifier {
         startDate: range.start,
         endDate: range.end,
       );
+      if (_isDisposed) return;
       statsResult.when(
         success: (data) => salesStats = data,
         failure: (value) => failure = value,
@@ -156,6 +164,7 @@ final class ReportsViewModel extends ChangeNotifier {
         startDate: range.start,
         endDate: range.end,
       );
+      if (_isDisposed) return;
       trendResult.when(
         success: (data) => trendPoints = data,
         failure: (value) => failure = value,
@@ -169,6 +178,7 @@ final class ReportsViewModel extends ChangeNotifier {
         startDate: range.start,
         endDate: range.end,
       );
+      if (_isDisposed) return;
       rankingResult.when(
         success: (data) => rankingItems = data,
         failure: (value) => failure = value,
@@ -180,6 +190,7 @@ final class ReportsViewModel extends ChangeNotifier {
     }
 
     final overviewResult = await repository.loadInventoryOverview();
+    if (_isDisposed) return;
     List<InventoryOverviewItem> overviewItems = const [];
     overviewResult.when(
       success: (data) => overviewItems = data,
@@ -190,6 +201,7 @@ final class ReportsViewModel extends ChangeNotifier {
       startDate: range.start,
       endDate: range.end,
     );
+    if (_isDisposed) return;
     List<InventoryTurnoverItem> turnoverItems = const [];
     turnoverResult.when(
       success: (data) => turnoverItems = data,
@@ -200,6 +212,7 @@ final class ReportsViewModel extends ChangeNotifier {
       startDate: range.start,
       endDate: range.end,
     );
+    if (_isDisposed) return;
     List<SlowMovingInventoryItem> slowMovingItems = const [];
     var slowMovingTotal = 0;
     slowMovingResult.when(

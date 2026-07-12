@@ -28,6 +28,22 @@ Future<void> tapAndSettle(
   await _settleBounded(tester, timeout: timeout);
 }
 
+Future<void> tapFinderAndSettle(
+  WidgetTester tester,
+  Finder finder, {
+  String description = 'finder',
+  Duration timeout = _defaultTimeout,
+}) async {
+  await waitUntil(
+    tester,
+    description: description,
+    timeout: timeout,
+    condition: () => finder.hitTestable().evaluate().isNotEmpty,
+  );
+  await tester.tap(finder.hitTestable().first);
+  await settleBounded(tester, timeout: timeout);
+}
+
 Future<void> enterText(
   WidgetTester tester,
   Key key,
@@ -47,7 +63,6 @@ Future<void> scrollUntilVisible(
   Duration timeout = _defaultTimeout,
 }) async {
   final target = find.byKey(key);
-  final scrollTarget = scrollable ?? find.byType(Scrollable).last;
   final deadline = DateTime.now().add(timeout);
   while (target.hitTestable().evaluate().isEmpty) {
     if (DateTime.now().isAfter(deadline)) {
@@ -55,13 +70,21 @@ Future<void> scrollUntilVisible(
         'Timed out scrolling to key $key. ${_visibleState(tester)}',
       );
     }
+    if (target.evaluate().isNotEmpty) {
+      await tester.ensureVisible(target.first);
+      await tester.pump(_pollInterval);
+      _throwPendingFlutterException(tester, 'scrolling to key $key');
+      continue;
+    }
+    final scrollTarget = (scrollable ?? find.byType(Scrollable)).hitTestable();
     if (scrollTarget.evaluate().isEmpty) {
       throw TestFailure(
         'No scrollable found for key $key. ${_visibleState(tester)}',
       );
     }
-    await tester.drag(scrollTarget, Offset(0, delta));
+    await tester.drag(scrollTarget.first, Offset(0, delta));
     await tester.pump(_pollInterval);
+    _throwPendingFlutterException(tester, 'scrolling to key $key');
   }
 }
 
@@ -79,6 +102,27 @@ Future<void> expectText(
   expect(find.text(text), findsWidgets);
 }
 
+Future<void> waitUntil(
+  WidgetTester tester, {
+  required String description,
+  required bool Function() condition,
+  Duration timeout = _defaultTimeout,
+}) {
+  return _waitUntil(
+    tester,
+    description: description,
+    timeout: timeout,
+    condition: condition,
+  );
+}
+
+Future<void> settleBounded(
+  WidgetTester tester, {
+  Duration timeout = _defaultTimeout,
+}) {
+  return _settleBounded(tester, timeout: timeout);
+}
+
 Future<T> screenshotOnFailure<T>(
   IntegrationTestWidgetsFlutterBinding binding,
   String name,
@@ -86,7 +130,8 @@ Future<T> screenshotOnFailure<T>(
 ) async {
   try {
     return await body();
-  } catch (_) {
+  } catch (error, stackTrace) {
+    debugPrint('E2E failure: $error\n$stackTrace');
     try {
       await binding.takeScreenshot(name);
     } catch (_) {
@@ -110,6 +155,7 @@ Future<void> _waitUntil(
       );
     }
     await tester.pump(_pollInterval);
+    _throwPendingFlutterException(tester, description);
   }
 }
 
@@ -125,7 +171,15 @@ Future<void> _settleBounded(
       );
     }
     await tester.pump(_pollInterval);
+    _throwPendingFlutterException(tester, 'frames to settle');
   } while (tester.binding.hasScheduledFrame);
+}
+
+void _throwPendingFlutterException(WidgetTester tester, String stage) {
+  final exception = tester.takeException();
+  if (exception != null) {
+    throw TestFailure('Flutter exception while waiting for $stage: $exception');
+  }
 }
 
 String _visibleState(WidgetTester tester) {
