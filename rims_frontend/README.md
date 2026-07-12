@@ -76,6 +76,25 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rims_local.ps1 -Co
 登录、会话恢复、跨仓库库存、入库/出库库存影响、普通用户权限和退出旅程。
 脚本只清理自己精确拥有的服务和模拟器，并在失败时保留日志、截图和原始输出。
 
+M10 扫码与附件专项验收使用本地后端、本地磁盘和指定 AVD，不依赖云账号：
+
+```powershell
+$env:RIMS_ANDROID_DEVICE = 'Medium_Phone_API_36.1'
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rims_m10_smoke.ps1 -AndroidDevice $env:RIMS_ANDROID_DEVICE -BackendDir $env:RIMS_BACKEND_DIR -Output Json
+```
+
+AI 会自行启动后端和模拟器，验证相机拒绝/授权、手工条码回退、扫码反馈、
+多行出入库及库存影响、5 MiB 附件中断恢复、替换和删除，随后恢复种子基线并
+清理受管资源。测试文件位于 `.runtime/rims-local/providers/files`，专项报告位于
+`.runtime/m10-smoke-artifacts/`。本地账号为 `admin/admin123` 和
+`m9_operator/admin123`；常用条码为 `M10-ACTIVE-001`、
+`M10-DISABLED-001`、`M10-WH001-ONLY-001`。
+
+APP 仅申请相机权限；相册和文件使用 Android 系统选择器，不申请旧版存储权限。
+用户拒绝相机后仍可手工输入条码，也可重试或前往系统设置。种子重置只允许
+`dev`、`development`、`test` 环境，且不会接管或删除非脚本拥有的进程、模拟器
+和文件。
+
 1. 启动后端，确认 `http://localhost:8080/api/v1` 可访问。
 2. 启动 Flutter 前端。
 3. 使用后端账号登录。

@@ -112,7 +112,7 @@ defects, and external launch checks.
 
 ### Task 2: Generate And Execute M10 Android Field Operations Plan
 
-**Status:** IN PROGRESS on 2026-07-12. Plan:
+**Status:** COMPLETE on 2026-07-13. Plan:
 [`2026-07-10-rims-m10-android-field-operations.md`](2026-07-10-rims-m10-android-field-operations.md).
 Evidence:
 [`2026-07-10-rims-m10-execution-record.md`](2026-07-10-rims-m10-execution-record.md).
@@ -135,10 +135,10 @@ storage-provider code before planning implementation. It must inherit:
 - [x] Include exact scanner capability interfaces, permission flows, attachment
   contracts, Android configuration, emulator/device tests, and local storage
   provider commands.
-- [ ] Execute scan-to-search before scan-to-document workflows.
-- [ ] Execute attachments after camera lifecycle and permission tests pass.
-- [ ] Run Android compatibility and lifecycle fault tests.
-- [ ] Record M10 evidence and keep P0/P1 at zero.
+- [x] Execute scan-to-search before scan-to-document workflows.
+- [x] Execute attachments after camera lifecycle and permission tests pass.
+- [x] Run Android compatibility and lifecycle fault tests.
+- [x] Record M10 evidence and keep P0/P1 at zero.
 
 ### Task 3: Generate And Execute M11 Limited Offline Plan
 

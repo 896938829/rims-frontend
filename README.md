@@ -57,6 +57,29 @@ reports exist:
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rims_m9_baseline.ps1 -OutputPath .runtime\rims-local\reports\m9-baseline.json
 ```
 
+## M10 Android Field Acceptance
+
+The M10 wrapper starts the backend and the exact named AVD, resets local-only
+fixtures, grants/revokes camera permission for probes, runs scanner, multi-line
+document, stock-effect, and attachment recovery checks, then restores the
+fixture baseline and removes only owned resources:
+
+```powershell
+$env:RIMS_ANDROID_DEVICE = 'Medium_Phone_API_36.1'
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rims_m10_smoke.ps1 -AndroidDevice $env:RIMS_ANDROID_DEVICE -BackendDir $env:RIMS_BACKEND_DIR -Output Json
+```
+
+No cloud account or object store is required. Managed backend files live under
+`.runtime/rims-local/providers/files`; reports and transient provider evidence
+live under `.runtime/reports/` and `.runtime/m10-smoke-artifacts/`. The local
+fixtures include `admin/admin123`, `m9_operator/admin123`, and barcodes
+`M10-ACTIVE-001`, `M10-DISABLED-001`, and `M10-WH001-ONLY-001`.
+
+The main manifest requests camera only and keeps camera hardware optional.
+Android system gallery/file pickers use scoped access and require no legacy
+storage permission. Run `reset` only against `dev`, `development`, or `test`;
+the controller rejects incompatible runtime ownership instead of taking it over.
+
 ## License
 
 SPDX-License-Identifier: AGPL-3.0-only

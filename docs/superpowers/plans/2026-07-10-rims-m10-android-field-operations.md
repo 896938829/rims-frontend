@@ -779,7 +779,7 @@ git commit -m "test: automate M10 Android field operations"
 - Modify: `docs/superpowers/plans/2026-07-10-rims-m10-execution-record.md`
 - Modify: `docs/superpowers/plans/2026-07-10-rims-app-long-term-completion-master-plan.md`
 
-- [ ] **Step 1: From stopped state, run frontend and backend deterministic gates.**
+- [x] **Step 1: From stopped state, run frontend and backend deterministic gates.**
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test_rims_local.ps1
@@ -806,7 +806,7 @@ go build -o "$build_output" ./cmd/server
 bash scripts/test_m9_dev_seed.sh
 ```
 
-- [ ] **Step 2: Run the aggregate M9 regression and M10 Android acceptance with AI-owned services.**
+- [x] **Step 2: Run the aggregate M9 regression and M10 Android acceptance with AI-owned services.**
 
 ```powershell
 $env:RIMS_ANDROID_DEVICE = 'Medium_Phone_API_36.1'
@@ -814,25 +814,25 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rims_local.ps1 -Co
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rims_m10_smoke.ps1 -AndroidDevice $env:RIMS_ANDROID_DEVICE -IncludeDependencies
 ```
 
-- [ ] **Step 3: Run explicit fault/compatibility probes.**
+- [x] **Step 3: Run explicit fault/compatibility probes.**
 
 Cover camera denial/revocation, HOME/resume, process recreation, interrupted
 upload, low-storage injection, duplicate detection, wrong warehouse, stale
 permission, orientation, text scale, dark mode, keyboard, and system back.
 
-- [ ] **Step 4: Record exact commits, timestamps, durations, report paths, fixture counts, attachment hashes/counts, stock effects, cleanup status, and P0/P1/P2/P3 defects.**
+- [x] **Step 4: Record exact commits, timestamps, durations, report paths, fixture counts, attachment hashes/counts, stock effects, cleanup status, and P0/P1/P2/P3 defects.**
 
 Do not mark PASS from test names alone. Read JSON reports and verify frontend and
 backend commit identities, Boolean result types, Android integration exit code,
 provider cleanup, and performance thresholds.
 
-- [ ] **Step 5: Update local usage docs.**
+- [x] **Step 5: Update local usage docs.**
 
 Document how AI starts M10 services, which AVD is used, where local provider
 files/reports live, test accounts/barcodes, permission behavior, reset safety,
 and how to run scanner/attachment acceptance without cloud accounts.
 
-- [ ] **Step 6: Verify no managed state, listeners, emulator, bridge, staged test files, or provider objects remain.**
+- [x] **Step 6: Verify no managed state, listeners, emulator, bridge, staged test files, or provider objects remain.**
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rims_local.ps1 -Command status
@@ -840,7 +840,7 @@ git diff --check
 git status --short
 ```
 
-- [ ] **Step 7: Mark M10 complete only when all requirement rows have direct evidence, P0/P1 are zero, full gates pass, and final smoke is green. Commit frontend and backend evidence.**
+- [x] **Step 7: Mark M10 complete only when all requirement rows have direct evidence, P0/P1 are zero, full gates pass, and final smoke is green. Commit frontend and backend evidence.**
 
 ```text
 docs: record M10 Android field acceptance
