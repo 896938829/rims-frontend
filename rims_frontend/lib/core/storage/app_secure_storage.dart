@@ -8,11 +8,19 @@ abstract interface class TokenStorage {
   Future<void> clearAccessToken();
 }
 
-final class AppSecureStorage implements TokenStorage {
+abstract interface class OfflineDatabaseKeyStorage {
+  Future<void> saveOfflineDatabaseKey(String key);
+
+  Future<String?> readOfflineDatabaseKey();
+}
+
+final class AppSecureStorage
+    implements TokenStorage, OfflineDatabaseKeyStorage {
   const AppSecureStorage({FlutterSecureStorage? storage})
     : _storage = storage ?? const FlutterSecureStorage();
 
   static const String kAccessTokenKey = 'access_token';
+  static const String kOfflineDatabaseKey = 'offline_database_key';
 
   final FlutterSecureStorage _storage;
 
@@ -29,5 +37,15 @@ final class AppSecureStorage implements TokenStorage {
   @override
   Future<void> clearAccessToken() {
     return _storage.delete(key: kAccessTokenKey);
+  }
+
+  @override
+  Future<void> saveOfflineDatabaseKey(String key) {
+    return _storage.write(key: kOfflineDatabaseKey, value: key);
+  }
+
+  @override
+  Future<String?> readOfflineDatabaseKey() {
+    return _storage.read(key: kOfflineDatabaseKey);
   }
 }

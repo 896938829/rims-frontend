@@ -5,6 +5,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:rims_frontend/features/attachments/presentation/widgets/attachment_panel.dart';
 import 'package:rims_frontend/features/documents/presentation/view_models/documents_view_model.dart';
+import 'package:rims_frontend/features/offline/data/repositories/memory_offline_store.dart';
 import 'package:rims_frontend/main.dart';
 
 import 'support/rims_e2e_config.dart';
@@ -323,7 +324,12 @@ Future<Map<String, int>> _stockQuantities(DocumentsViewModel viewModel) async {
 Future<void> _pumpFreshApp(WidgetTester tester, String instance) async {
   await tester.pumpWidget(const SizedBox.shrink());
   await tester.pump();
-  await tester.pumpWidget(MainApp(key: ValueKey<String>(instance)));
+  await tester.pumpWidget(
+    MainApp(
+      key: ValueKey<String>(instance),
+      offlineStore: MemoryOfflineStore(),
+    ),
+  );
   await tester.pump();
 }
 

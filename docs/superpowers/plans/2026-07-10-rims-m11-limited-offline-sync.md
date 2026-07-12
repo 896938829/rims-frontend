@@ -215,26 +215,26 @@ docs: freeze M11 offline sync contracts
 - Test: `rims_frontend/test/features/offline/offline_database_test.dart`
 - Test: `rims_frontend/test/features/offline/offline_database_factory_test.dart`
 
-- [ ] **Step 1: Add pinned compatible dependencies and native sqlite3mc hook.**
+- [x] **Step 1: Add pinned compatible dependencies and native sqlite3mc hook.**
 
 Use `drift: ^2.34.1`, `drift_flutter: ^0.3.0`, and
 `drift_dev: ^2.34.1`. Configure sqlite3 native assets with
 `hooks.user_defines.sqlite3.source: sqlite3mc`. Do not add obsolete
 `sqlite3_flutter_libs` or `sqlcipher_flutter_libs` directly.
 
-- [ ] **Step 2: Write failing in-memory migration, uniqueness, foreign-key, state-transition, retention, and 500-operation-cap tests.**
+- [x] **Step 2: Write failing in-memory migration, uniqueness, foreign-key, state-transition, retention, and 500-operation-cap tests.**
 
 Required tables are `cache_records`, `document_drafts`, `outbox_operations`,
 and `outbox_dependencies`. Composite cache uniqueness is account, warehouse,
 namespace, entity key, and record schema. Dependencies use cascading foreign
 keys and reject self-dependency.
 
-- [ ] **Step 3: Implement Drift schema version 1 and generated accessors.**
+- [x] **Step 3: Implement Drift schema version 1 and generated accessors.**
 
 Payloads are canonical JSON text. Timestamps are UTC integer milliseconds.
 Outbox state and operation kind use stable wire strings, never enum indexes.
 
-- [ ] **Step 4: Add secure key bootstrap.**
+- [x] **Step 4: Add secure key bootstrap.**
 
 `main()` must call `WidgetsFlutterBinding.ensureInitialized()`, read or create a
 32-byte random key through `AppSecureStorage`, open the native database with
@@ -242,13 +242,13 @@ Outbox state and operation kind use stable wire strings, never enum indexes.
 in-memory executor. Web injects `MemoryOfflineStore` and never attempts native
 SQLite/WASM initialization.
 
-- [ ] **Step 5: Test corruption and migration failure.**
+- [x] **Step 5: Test corruption and migration failure.**
 
 An unreadable database is quarantined with a timestamped filename and recreated
 only after preserving staged attachment files. Authentication tokens and secure
 storage are never deleted by cache recovery.
 
-- [ ] **Step 6: Run generation and focused tests.**
+- [x] **Step 6: Run generation and focused tests.**
 
 ```powershell
 dart run build_runner build --delete-conflicting-outputs
@@ -257,7 +257,7 @@ flutter test --no-pub test/features/offline/offline_database_test.dart test/feat
 
 Expected: PASS.
 
-- [ ] **Step 7: Commit.**
+- [x] **Step 7: Commit.**
 
 ```text
 feat: add encrypted offline database

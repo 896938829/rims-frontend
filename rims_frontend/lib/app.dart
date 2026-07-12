@@ -27,6 +27,7 @@ import 'features/documents/data/datasources/documents_remote_datasource.dart';
 import 'features/documents/data/repositories/documents_repository_impl.dart';
 import 'features/inventory/data/datasources/inventory_remote_datasource.dart';
 import 'features/inventory/data/repositories/inventory_repository_impl.dart';
+import 'features/offline/domain/services/offline_store.dart';
 import 'features/reports/data/datasources/reports_remote_datasource.dart';
 import 'features/reports/data/repositories/reports_repository_impl.dart';
 import 'features/scanner/domain/services/scan_lookup_cache.dart';
@@ -35,7 +36,9 @@ import 'features/scanner/data/field_operations_scanner.dart';
 import 'routes/app_router.dart';
 
 class MainApp extends StatefulWidget {
-  const MainApp({super.key});
+  const MainApp({required this.offlineStore, super.key});
+
+  final OfflineStore offlineStore;
 
   @override
   State<MainApp> createState() => _MainAppState();

@@ -17,8 +17,8 @@ counts, encrypted storage ownership, cleanup, and baseline restore are read.
 
 | Requirement | Plan task(s) | Required direct evidence | Status |
 | --- | --- | --- | --- |
-| Versioned encrypted native database | 2, 14 | migration, key, corruption, Android artifact | planned |
-| Web regression adapter | 2, 17 | Web M9 journey with in-memory store | planned |
+| Versioned encrypted native database | 2, 14 | migration, key, corruption, Android artifact | foundation PASS; Android acceptance pending |
+| Web regression adapter | 2, 17 | Web M9 journey with in-memory store | adapter/build PASS; M9 journey pending |
 | Verified network reachability | 3, 16 | captive/unreachable/switch probes | planned |
 | Account/warehouse scoped cache | 4-7 | cache keys, invalidation, no cross-scope read | planned |
 | User/warehouse references | 5 | secure-token gate and cached projection | planned |
@@ -62,6 +62,21 @@ counts, encrypted storage ownership, cleanup, and baseline restore are read.
 | Outbox contract | seven stable states, five operation kinds, stable wire strings, confirmation boundary |
 | Storage contract | cache, draft, dependency enqueue, ready query, transition, account clear, and prune methods |
 | GREEN | 4 architecture tests passed; focused analysis reported no issues |
+
+## Task 2 Encrypted Storage Evidence
+
+| Probe | Observed result |
+| --- | --- |
+| Dependencies | Drift 2.34.1, drift_flutter 0.3.0, drift_dev 2.34.1; sqlite3 source is sqlite3mc |
+| Schema | version 1; stable cache_records, document_drafts, outbox_operations, and outbox_dependencies names |
+| Versioning | same cache identity retains distinct schema rows and reads the newest schema |
+| Serialization | canonical sorted JSON, UTC timestamps, stable state/kind wire strings |
+| Constraints | account/idempotency uniqueness, cascading dependency foreign keys, self/missing dependency rejection, 500-operation account cap |
+| State machine | invalid skipped and terminal transitions rejected |
+| Encryption | generated 32-byte key reused; native file header differs from plaintext SQLite; encrypted reopen preserves data |
+| Recovery | unreadable database renamed with UTC timestamp and recreated without deleting secure key or staged files |
+| Bootstrap | native app support directory plus secure storage; Web and widget tests inject MemoryOfflineStore |
+| GREEN | build_runner PASS; strict analyze PASS; 17 focused tests PASS; release Web and Android debug APK builds PASS |
 
 ## Final Android State Evidence
 

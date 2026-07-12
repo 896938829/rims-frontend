@@ -24,6 +24,25 @@ enum OutboxOperationKind {
   final String wireValue;
 }
 
+bool isOutboxTransitionAllowed(OutboxState current, OutboxState next) {
+  return switch (current) {
+    OutboxState.queued =>
+      next == OutboxState.syncing || next == OutboxState.cancelled,
+    OutboxState.syncing =>
+      next == OutboxState.succeeded ||
+          next == OutboxState.retryableFailure ||
+          next == OutboxState.conflict ||
+          next == OutboxState.permanentFailure,
+    OutboxState.retryableFailure =>
+      next == OutboxState.syncing || next == OutboxState.cancelled,
+    OutboxState.conflict =>
+      next == OutboxState.queued || next == OutboxState.cancelled,
+    OutboxState.succeeded ||
+    OutboxState.permanentFailure ||
+    OutboxState.cancelled => false,
+  };
+}
+
 final class OutboxOperation {
   const OutboxOperation({
     required this.operationId,
