@@ -167,6 +167,7 @@ void main() {
     final harness = _Harness(
       startErrors: [const DevicePermissionFailure(message: 'camera denied')],
     );
+    harness.viewModel.setMode(ScanMode.batch);
     await _pumpScannerPage(
       tester,
       harness,
@@ -174,6 +175,14 @@ void main() {
     );
 
     expect(find.text('需要相机权限才能扫描条码'), findsOneWidget);
+    final manualInput = find.byKey(const Key('scanner-manual-input'));
+    await tester.scrollUntilVisible(manualInput, 300);
+    await tester.enterText(manualInput, ' 205 ');
+    await tester.tap(find.byKey(const Key('scanner-manual-submit')));
+    await tester.pumpAndSettle();
+    expect(harness.repository.lookups, ['205']);
+    expect(find.text('Product 205'), findsOneWidget);
+
     final settings = find.byKey(const Key('scanner-open-settings'));
     await tester.ensureVisible(settings);
     await tester.tap(settings);
@@ -230,6 +239,33 @@ void main() {
     expect(find.text('Previous page'), findsOneWidget);
     expect(harness.scanner.disposeCount, 1);
     expect(harness.scanner.stopCount, greaterThanOrEqualTo(1));
+  });
+
+  testWidgets('single authoritative scan returns to the requesting page', (
+    tester,
+  ) async {
+    final harness = _Harness();
+    await tester.pumpWidget(
+      MaterialApp(
+        initialRoute: '/scanner',
+        routes: {
+          '/': (_) => const Scaffold(body: Text('Inventory page')),
+          '/scanner': (_) => ScannerPage(
+            viewModel: harness.viewModel,
+            scanner: harness.scanner,
+            camera: const ColoredBox(color: Colors.black),
+            returnSingleResult: true,
+          ),
+        },
+      ),
+    );
+    await tester.pump();
+
+    harness.scanner.emit(_scan('301'));
+    await tester.pumpAndSettle();
+
+    expect(harness.repository.lookups, ['301']);
+    expect(find.text('Inventory page'), findsOneWidget);
   });
 
   testWidgets('narrow screen and large text render without overflow', (

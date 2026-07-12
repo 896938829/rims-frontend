@@ -26,6 +26,8 @@ final class InventoryPage extends StatefulWidget {
     this.warehouseName = '未选择仓库',
     this.canManageInventorySettings = false,
     this.eventBus,
+    this.onScanRequested,
+    this.barcodeInputs,
     super.key,
   });
 
@@ -35,6 +37,8 @@ final class InventoryPage extends StatefulWidget {
   final String warehouseName;
   final bool canManageInventorySettings;
   final AppEventBus? eventBus;
+  final Future<InventoryItem?> Function(BuildContext context)? onScanRequested;
+  final Stream<String>? barcodeInputs;
 
   @override
   State<InventoryPage> createState() => _InventoryPageState();
@@ -44,6 +48,7 @@ final class _InventoryPageState extends State<InventoryPage> {
   late final InventoryViewModel viewModel;
   late final bool _ownsViewModel;
   StreamSubscription<GlobalRefreshRequestedEvent>? _refreshSubscription;
+  StreamSubscription<String>? _barcodeSubscription;
 
   @override
   void initState() {
@@ -62,6 +67,7 @@ final class _InventoryPageState extends State<InventoryPage> {
       unawaited(viewModel.load());
     }
     _subscribeToRefreshEvents();
+    _subscribeToBarcodeInputs();
   }
 
   @override
@@ -71,11 +77,16 @@ final class _InventoryPageState extends State<InventoryPage> {
       unawaited(_refreshSubscription?.cancel());
       _subscribeToRefreshEvents();
     }
+    if (widget.barcodeInputs != oldWidget.barcodeInputs) {
+      unawaited(_barcodeSubscription?.cancel());
+      _subscribeToBarcodeInputs();
+    }
   }
 
   @override
   void dispose() {
     unawaited(_refreshSubscription?.cancel());
+    unawaited(_barcodeSubscription?.cancel());
     if (_ownsViewModel) {
       viewModel.dispose();
     }
@@ -104,7 +115,7 @@ final class _InventoryPageState extends State<InventoryPage> {
               const SizedBox(height: 14),
               _InventorySearchBar(
                 onChanged: (value) => unawaited(viewModel.updateQuery(value)),
-                onBarcodeLookup: () => unawaited(_lookupBarcode()),
+                onBarcodeLookup: () => unawaited(_openScannerOrLookup()),
               ),
               if (viewModel.barcodeLookupError != null) ...[
                 const SizedBox(height: 10),
@@ -184,8 +195,7 @@ final class _InventoryPageState extends State<InventoryPage> {
                   const SizedBox(height: 12),
                   _InventoryPaginationControl(viewModel: viewModel),
                 ],
-              ]
-              else ...[
+              ] else ...[
                 for (final item in visibleItems) ...[
                   InventoryProductTile(
                     key: ValueKey('inventory-item-${item.id}'),
@@ -208,12 +218,34 @@ final class _InventoryPageState extends State<InventoryPage> {
   }
 
   Future<void> _lookupBarcode() async {
-    final item = await viewModel.lookupBarcode(viewModel.query);
+    await _lookupBarcodeValue(viewModel.query);
+  }
+
+  Future<void> _lookupBarcodeValue(String barcode) async {
+    final item = await viewModel.lookupBarcode(barcode);
     if (!mounted || item == null) {
       return;
     }
 
     _showInventoryDetail(context, item);
+  }
+
+  Future<void> _openScannerOrLookup() async {
+    final launcher = widget.onScanRequested;
+    if (launcher == null) {
+      await _lookupBarcode();
+      return;
+    }
+    final item = await launcher(context);
+    if (!mounted || item == null) return;
+    viewModel.selectItem(item);
+    _showInventoryDetail(context, item);
+  }
+
+  void _subscribeToBarcodeInputs() {
+    _barcodeSubscription = widget.barcodeInputs?.listen(
+      (barcode) => unawaited(_lookupBarcodeValue(barcode)),
+    );
   }
 
   void _showInventoryDetail(BuildContext context, InventoryItem item) {
@@ -358,6 +390,7 @@ final class _InventorySearchBar extends StatelessWidget {
         Tooltip(
           message: '条码查询',
           child: GestureDetector(
+            key: const Key('inventory-scan-button'),
             behavior: HitTestBehavior.opaque,
             onTap: onBarcodeLookup,
             child: RimsCard(

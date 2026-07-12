@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:mobile_scanner/mobile_scanner.dart';
 
 import '../../../../core/events/app_event.dart';
 import '../../../../core/events/app_event_bus.dart';
@@ -15,9 +16,16 @@ import '../../../home/presentation/pages/home_page.dart';
 import '../../../home/presentation/view_models/home_view_model.dart';
 import '../../../inventory/domain/repositories/inventory_repository.dart';
 import '../../../inventory/presentation/pages/inventory_page.dart';
+import '../../../inventory/domain/entities/inventory_item.dart';
 import '../../../profile/presentation/pages/profile_page.dart';
 import '../../../reports/domain/repositories/reports_repository.dart';
 import '../../../reports/presentation/pages/reports_page.dart';
+import '../../../scanner/data/mobile_scanner_capability.dart';
+import '../../../scanner/data/system_scan_feedback.dart';
+import '../../../scanner/domain/entities/scan_data.dart';
+import '../../../scanner/presentation/pages/scanner_page.dart';
+import '../../../scanner/presentation/view_models/scan_session_view_model.dart';
+import '../../../scanner/presentation/widgets/keyboard_wedge_listener.dart';
 import '../view_models/app_tab.dart';
 
 final class AppShellPage extends StatefulWidget {
@@ -48,6 +56,7 @@ final class _AppShellPageState extends State<AppShellPage> {
   AppTab _currentTab = AppTab.home;
   String? _pendingDocumentActionLabel;
   StreamSubscription<GlobalRefreshRequestedEvent>? _refreshSubscription;
+  final StreamController<String> _wedgeBarcodes = StreamController.broadcast();
 
   @override
   void initState() {
@@ -67,15 +76,20 @@ final class _AppShellPageState extends State<AppShellPage> {
   @override
   void dispose() {
     unawaited(_refreshSubscription?.cancel());
+    unawaited(_wedgeBarcodes.close());
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      body: ListenableBuilder(
-        listenable: widget.sessionController,
-        builder: (context, child) => _tabBody,
+      body: KeyboardWedgeListener(
+        enabled: _currentTab == AppTab.inventory,
+        onBarcode: _wedgeBarcodes.add,
+        child: ListenableBuilder(
+          listenable: widget.sessionController,
+          builder: (context, child) => _tabBody,
+        ),
       ),
       bottomNavigationBar: RimsBottomNavigation(
         currentTab: _currentTab,
@@ -103,6 +117,8 @@ final class _AppShellPageState extends State<AppShellPage> {
         canManageInventorySettings:
             widget.sessionController.currentUser?.isAdmin == true,
         eventBus: widget.eventBus,
+        onScanRequested: _openInventoryScanner,
+        barcodeInputs: _wedgeBarcodes.stream,
       ),
       AppTab.documents => DocumentsPage(
         repository: widget.documentsRepository,
@@ -137,6 +153,36 @@ final class _AppShellPageState extends State<AppShellPage> {
         eventBus: widget.eventBus,
       ),
     };
+  }
+
+  Future<InventoryItem?> _openInventoryScanner(BuildContext context) async {
+    final repository = widget.inventoryRepository;
+    final user = widget.sessionController.currentUser;
+    final warehouse = widget.sessionController.currentWarehouse;
+    if (repository == null || user == null || warehouse == null) return null;
+
+    final scanner = MobileScannerCapability();
+    final viewModel = ScanSessionViewModel(
+      inventoryRepository: repository,
+      userId: user.id.toString(),
+      warehouseId: warehouse.id,
+      feedback: SystemScanFeedback(),
+      mode: ScanMode.single,
+    );
+    try {
+      return await Navigator.of(context).push<InventoryItem>(
+        MaterialPageRoute(
+          builder: (context) => ScannerPage(
+            viewModel: viewModel,
+            scanner: scanner,
+            camera: MobileScanner(controller: scanner.controller),
+            returnSingleResult: true,
+          ),
+        ),
+      );
+    } finally {
+      viewModel.dispose();
+    }
   }
 
   void _selectTab(AppTab tab) {

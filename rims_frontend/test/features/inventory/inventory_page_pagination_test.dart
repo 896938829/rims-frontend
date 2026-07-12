@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rims_frontend/core/pagination/page_data.dart';
@@ -103,14 +105,70 @@ void main() {
     viewModel.selectTab('低库存');
 
     await tester.pumpWidget(
-      MaterialApp(home: Scaffold(body: InventoryPage(viewModel: viewModel))),
+      MaterialApp(
+        home: Scaffold(body: InventoryPage(viewModel: viewModel)),
+      ),
     );
 
     expect(find.text('没有匹配的库存商品'), findsOneWidget);
-    expect(
-      find.byKey(const Key('inventory-load-more-button')),
-      findsOneWidget,
+    expect(find.byKey(const Key('inventory-load-more-button')), findsOneWidget);
+  });
+
+  testWidgets('scan icon opens scanner result as authoritative detail', (
+    tester,
+  ) async {
+    final repository = _PageRepository([Success(_page([]))]);
+    final viewModel = InventoryViewModel(repository: repository);
+    await viewModel.load();
+    var launches = 0;
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: InventoryPage(
+            viewModel: viewModel,
+            onScanRequested: (_) async {
+              launches++;
+              return _item;
+            },
+          ),
+        ),
+      ),
     );
+
+    final scanButton = find.byKey(const Key('inventory-scan-button'));
+    await tester.ensureVisible(scanButton);
+    await tester.tap(scanButton);
+    await tester.pumpAndSettle();
+
+    expect(launches, 1);
+    expect(find.text('库存详情'), findsOneWidget);
+    expect(find.text('M9-PAGE-0001'), findsWidgets);
+  });
+
+  testWidgets('keyboard wedge barcode uses the same authoritative lookup', (
+    tester,
+  ) async {
+    final repository = _PageRepository([Success(_page([]))]);
+    final viewModel = InventoryViewModel(repository: repository);
+    await viewModel.load();
+    final barcodes = StreamController<String>.broadcast();
+    addTearDown(barcodes.close);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: InventoryPage(
+            viewModel: viewModel,
+            barcodeInputs: barcodes.stream,
+          ),
+        ),
+      ),
+    );
+
+    barcodes.add('M10-ACTIVE-001');
+    await tester.pumpAndSettle();
+
+    expect(repository.barcodeLookups, ['M10-ACTIVE-001']);
+    expect(find.text('库存详情'), findsOneWidget);
   });
 }
 
@@ -143,6 +201,7 @@ final class _PageRepository implements InventoryRepository {
 
   final List<Result<PageData<InventoryItem>>> _results;
   final List<int> requestedPages = [];
+  final List<String> barcodeLookups = [];
   int _index = 0;
 
   @override
@@ -165,6 +224,7 @@ final class _PageRepository implements InventoryRepository {
 
   @override
   Future<Result<InventoryItem>> findProductByBarcode(String barcode) async {
+    barcodeLookups.add(barcode);
     return const Success(_item);
   }
 

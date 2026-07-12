@@ -395,15 +395,15 @@ git commit -m "feat: add lifecycle-safe Android scanner"
 - Modify: `rims_frontend/test/features/inventory/inventory_page_pagination_test.dart`
 - Create: `rims_frontend/test/features/scanner/keyboard_wedge_listener_test.dart`
 
-- [ ] **Step 1: Write failing tests that the inventory scan icon opens scanner single mode, accepted scan opens the authoritative detail, manual input behaves identically, denied camera leaves manual input usable, and repeated keyboard-wedge keys ending in Enter produce exactly one code.**
+- [x] **Step 1: Write failing tests that the inventory scan icon opens scanner single mode, accepted scan opens the authoritative detail, manual input behaves identically, denied camera leaves manual input usable, and repeated keyboard-wedge keys ending in Enter produce exactly one code.**
 
-- [ ] **Step 2: Verify RED, implement route/capability injection, and retain ordinary text search.**
+- [x] **Step 2: Verify RED, implement route/capability injection, and retain ordinary text search.**
 
 Keyboard-wedge capture is opt-in, ignores events while an editable field owns
 focus, has a bounded inter-key timeout, accepts printable ASCII only, and never
 globally traps Back/System navigation.
 
-- [ ] **Step 3: Run inventory/scanner tests and commit.**
+- [x] **Step 3: Run inventory/scanner tests and commit.**
 
 ```powershell
 flutter test --no-pub test/features/inventory test/features/scanner

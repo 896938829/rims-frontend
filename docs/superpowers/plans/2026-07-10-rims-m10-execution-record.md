@@ -44,7 +44,7 @@ runtime ownership, cleanup, and business effects have been inspected.
 | Unsupported-code feedback | 5, 6 | format tests and visible Android state | pending |
 | Unknown/disabled/wrong-warehouse errors | 2, 3, 5, 16 | backend contract plus operator journey | backend contract verified; Android journey pending |
 | Wrong-batch constraint | 5 | domain constraint test; inactive until batch module exists | pending |
-| Scan-to-search | 3, 7 | authoritative current-warehouse detail | authoritative lookup verified; UI journey pending |
+| Scan-to-search | 3, 7 | authoritative current-warehouse detail | route and detail flow verified; Android journey pending |
 | Scan-to-inbound/outbound | 14, 16 | multi-line stock and transaction effects | pending |
 | Scan-to-return/transfer/stocktake/conversion | 14, 16 | request shape, permission, and lifecycle tests | pending |
 | Bounded offline scan identity | 5 | schema/TTL/warehouse/logout tests | verified |
@@ -154,6 +154,19 @@ runtime ownership, cleanup, and business effects have been inspected.
 | Page | stable 4:3 viewport, four modes, manual input, batch rows, visible failures, permission actions, back navigation verified |
 | Compatibility | narrow viewport and large text rendered without overflow |
 | Real device gate | deferred to Task 16 Android smoke as planned |
+
+## Task 7 Scan-To-Search Evidence
+
+| Probe | Observed result |
+| --- | --- |
+| Inventory entry | scan icon launches injected single-mode scanner and opens returned authoritative detail |
+| Manual fallback | manual barcode remains usable during camera denial and follows the same lookup state machine |
+| Scanner result | non-stale single result returns to inventory; stale cached identity cannot masquerade as authoritative detail |
+| Keyboard wedge | printable ASCII plus Enter emits exactly one code within bounded inter-key timeout |
+| Focus boundary | editable fields, disabled tabs, non-printable keys, and Back/Escape are not globally captured |
+| Shell activation | switching from Home to Inventory explicitly focuses the opt-in wedge listener |
+| Focused regression | all 103 inventory/scanner tests passed including post-mount activation |
+| Full verification | Flutter analysis clean; all 463 Flutter tests passed |
 
 ## Scanner Scenario Evidence
 

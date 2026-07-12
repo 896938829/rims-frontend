@@ -15,6 +15,7 @@ final class ScannerPage extends StatefulWidget {
     required this.scanner,
     required this.camera,
     this.onOpenSettings,
+    this.returnSingleResult = false,
     super.key,
   });
 
@@ -22,6 +23,7 @@ final class ScannerPage extends StatefulWidget {
   final BarcodeScannerCapability scanner;
   final Widget camera;
   final VoidCallback? onOpenSettings;
+  final bool returnSingleResult;
 
   @override
   State<ScannerPage> createState() => _ScannerPageState();
@@ -47,6 +49,7 @@ final class _ScannerPageState extends State<ScannerPage>
     _accessSubscription = widget.scanner.accessStates.listen((access) {
       if (mounted) setState(() => _access = access);
     });
+    widget.viewModel.addListener(_returnSingleResult);
     unawaited(widget.viewModel.restore());
     unawaited(_start());
   }
@@ -81,12 +84,25 @@ final class _ScannerPageState extends State<ScannerPage>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    widget.viewModel.removeListener(_returnSingleResult);
     _manualController.dispose();
     unawaited(_scanSubscription?.cancel());
     unawaited(_accessSubscription?.cancel());
     unawaited(widget.scanner.stop());
     unawaited(widget.scanner.dispose());
     super.dispose();
+  }
+
+  void _returnSingleResult() {
+    if (!widget.returnSingleResult ||
+        !mounted ||
+        widget.viewModel.mode != ScanMode.single ||
+        !widget.viewModel.isComplete ||
+        widget.viewModel.lines.isEmpty ||
+        widget.viewModel.lines.single.isStale) {
+      return;
+    }
+    Navigator.of(context).pop(widget.viewModel.lines.single.item);
   }
 
   @override
