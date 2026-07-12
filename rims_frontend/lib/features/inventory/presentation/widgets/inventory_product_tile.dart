@@ -57,6 +57,7 @@ final class InventoryProductTile extends StatelessWidget {
                     const SizedBox(height: 6),
                     Text(
                       product.sku,
+                      key: ValueKey('inventory-item-code-${product.id}'),
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: AppTextStyles.bodySmall,

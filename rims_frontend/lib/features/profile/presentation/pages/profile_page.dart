@@ -78,13 +78,28 @@ final class ProfilePage extends StatelessWidget {
               effectiveViewModel.user.isAdmin &&
               adminRepository != null) ...[
             const SizedBox(height: 14),
-            AdminUsersPanel(repository: adminRepository, eventBus: eventBus),
+            KeyedSubtree(
+              key: const Key('profile-admin-users'),
+              child: AdminUsersPanel(
+                repository: adminRepository,
+                eventBus: eventBus,
+              ),
+            ),
             const SizedBox(height: 14),
-            AdminProductsPanel(repository: adminRepository, eventBus: eventBus),
+            KeyedSubtree(
+              key: const Key('profile-admin-products'),
+              child: AdminProductsPanel(
+                repository: adminRepository,
+                eventBus: eventBus,
+              ),
+            ),
             const SizedBox(height: 14),
-            AdminWarehousesPanel(
-              repository: adminRepository,
-              eventBus: eventBus,
+            KeyedSubtree(
+              key: const Key('profile-admin-warehouses'),
+              child: AdminWarehousesPanel(
+                repository: adminRepository,
+                eventBus: eventBus,
+              ),
             ),
             const SizedBox(height: 14),
             AdminRolesPanel(repository: adminRepository, eventBus: eventBus),

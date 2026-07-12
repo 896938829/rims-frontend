@@ -854,6 +854,32 @@ void main() {
     },
   );
 
+  testWidgets('DocumentsPage exposes stable E2E action and list keys', (
+    tester,
+  ) async {
+    final viewModel = DocumentsViewModel(
+      repository: _FakeDocumentsRepository(),
+    );
+    await viewModel.load();
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: DocumentsPage(viewModel: viewModel)),
+      ),
+    );
+
+    expect(find.byKey(const Key('document-action-inbound')), findsOneWidget);
+    expect(find.byKey(const Key('document-action-sales')), findsOneWidget);
+    for (var attempt = 0; attempt < 8; attempt += 1) {
+      if (find.byKey(const Key('document-list-item-1')).evaluate().isNotEmpty) {
+        break;
+      }
+      await tester.drag(find.byType(ListView), const Offset(0, -300));
+      await tester.pump();
+    }
+    expect(find.byKey(const Key('document-list-item-1')), findsOneWidget);
+  });
+
   testWidgets('DocumentsPage clears create form fields after success', (
     tester,
   ) async {

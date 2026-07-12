@@ -31,32 +31,38 @@ final class RimsBottomNavigation extends StatelessWidget {
               final isSelected = tab == currentTab;
 
               return Expanded(
-                child: InkWell(
-                  borderRadius: BorderRadius.circular(8),
-                  onTap: () => onTabSelected(tab),
-                  child: Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 6),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Image.asset(
-                          isSelected ? tab.activeIcon : tab.inactiveIcon,
-                          width: 24,
-                          height: 24,
-                        ),
-                        const SizedBox(height: 4),
-                        Text(
-                          tab.label,
-                          style: AppTextStyles.bodySmall.copyWith(
-                            color: isSelected
-                                ? AppColors.primary
-                                : AppColors.textSecondary,
-                            fontWeight: isSelected
-                                ? FontWeight.w700
-                                : FontWeight.w500,
+                child: Semantics(
+                  key: Key('bottom-nav-${tab.name}'),
+                  label: tab.label,
+                  button: true,
+                  selected: isSelected,
+                  child: InkWell(
+                    borderRadius: BorderRadius.circular(8),
+                    onTap: () => onTabSelected(tab),
+                    child: Padding(
+                      padding: const EdgeInsets.symmetric(vertical: 6),
+                      child: Column(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Image.asset(
+                            isSelected ? tab.activeIcon : tab.inactiveIcon,
+                            width: 24,
+                            height: 24,
                           ),
-                        ),
-                      ],
+                          const SizedBox(height: 4),
+                          Text(
+                            tab.label,
+                            style: AppTextStyles.bodySmall.copyWith(
+                              color: isSelected
+                                  ? AppColors.primary
+                                  : AppColors.textSecondary,
+                              fontWeight: isSelected
+                                  ? FontWeight.w700
+                                  : FontWeight.w500,
+                            ),
+                          ),
+                        ],
+                      ),
                     ),
                   ),
                 ),

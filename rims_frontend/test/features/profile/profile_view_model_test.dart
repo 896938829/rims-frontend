@@ -119,6 +119,7 @@ void main() {
     );
     await tester.pumpAndSettle();
 
+    expect(find.byKey(const Key('profile-admin-users')), findsOneWidget);
     expect(find.byKey(const Key('profile-admin-users-panel')), findsOneWidget);
     expect(find.text('用户管理'), findsOneWidget);
     await tester.drag(find.byType(ListView), const Offset(0, -500));
@@ -127,6 +128,7 @@ void main() {
       find.byKey(const Key('profile-admin-products-panel')),
       findsOneWidget,
     );
+    expect(find.byKey(const Key('profile-admin-products')), findsOneWidget);
     expect(find.text('商品管理'), findsOneWidget);
     await tester.scrollUntilVisible(
       find.byKey(const Key('profile-admin-warehouses-panel')),
@@ -137,6 +139,7 @@ void main() {
       find.byKey(const Key('profile-admin-warehouses-panel')),
       findsOneWidget,
     );
+    expect(find.byKey(const Key('profile-admin-warehouses')), findsOneWidget);
     expect(find.text('仓库管理'), findsOneWidget);
     await tester.scrollUntilVisible(
       find.byKey(const Key('profile-admin-roles-panel')),

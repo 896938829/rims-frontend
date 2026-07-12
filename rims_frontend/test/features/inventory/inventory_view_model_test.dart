@@ -345,6 +345,9 @@ void main() {
       ),
     );
 
+    expect(find.byKey(const Key('inventory-item-1')), findsOneWidget);
+    expect(find.byKey(const Key('inventory-item-code-1')), findsOneWidget);
+
     await tester.tap(find.text('矿泉水 550ml'));
     await tester.pumpAndSettle();
 

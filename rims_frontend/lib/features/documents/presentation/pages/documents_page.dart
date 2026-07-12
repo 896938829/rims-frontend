@@ -176,10 +176,16 @@ final class _DocumentsPageState extends State<DocumentsPage> {
                 shrinkWrap: true,
                 children: [
                   for (final action in viewModel.actions)
-                    DocumentActionCard(
-                      action: action,
-                      isSelected: action == viewModel.selectedAction,
-                      onTap: () => _selectAction(action),
+                    Semantics(
+                      key: _documentActionKey(action),
+                      label: action.label,
+                      button: true,
+                      selected: action == viewModel.selectedAction,
+                      child: DocumentActionCard(
+                        action: action,
+                        isSelected: action == viewModel.selectedAction,
+                        onTap: () => _selectAction(action),
+                      ),
                     ),
                 ],
               ),
@@ -350,41 +356,54 @@ final class _DocumentsPageControl extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (failure != null) {
-      return SizedBox(
-        height: 48,
-        width: double.infinity,
-        child: OutlinedButton.icon(
-          key: Key('$prefix-load-more-retry'),
-          onPressed: isLoading ? null : () => unawaited(onRetry()),
-          icon: const Icon(Icons.refresh, size: 18),
-          label: const Text('加载失败，重试'),
+      return Semantics(
+        label: '重试加载更多$_contentLabel',
+        button: true,
+        child: SizedBox(
+          height: 48,
+          width: double.infinity,
+          child: OutlinedButton.icon(
+            key: Key('$prefix-load-more-retry'),
+            onPressed: isLoading ? null : () => unawaited(onRetry()),
+            icon: const Icon(Icons.refresh, size: 18),
+            label: const Text('加载失败，重试'),
+          ),
         ),
       );
     }
     if (hasMore) {
-      return SizedBox(
-        height: 48,
-        width: double.infinity,
-        child: TextButton.icon(
-          key: Key('$prefix-load-more-button'),
-          onPressed: isLoading ? null : () => unawaited(onLoadMore()),
-          icon: isLoading
-              ? const SizedBox.square(
-                  dimension: 18,
-                  child: CircularProgressIndicator(strokeWidth: 2),
-                )
-              : const Icon(Icons.keyboard_arrow_down, size: 20),
-          label: Text(isLoading ? '正在加载...' : '加载更多 ($loaded/$total)'),
+      return Semantics(
+        label: isLoading ? '正在加载更多$_contentLabel' : '加载更多$_contentLabel',
+        button: true,
+        child: SizedBox(
+          height: 48,
+          width: double.infinity,
+          child: TextButton.icon(
+            key: Key('$prefix-load-more-button'),
+            onPressed: isLoading ? null : () => unawaited(onLoadMore()),
+            icon: isLoading
+                ? const SizedBox.square(
+                    dimension: 18,
+                    child: CircularProgressIndicator(strokeWidth: 2),
+                  )
+                : const Icon(Icons.keyboard_arrow_down, size: 20),
+            label: Text(isLoading ? '正在加载...' : '加载更多 ($loaded/$total)'),
+          ),
         ),
       );
     }
-    return SizedBox(
-      key: Key('$prefix-page-end'),
-      height: 48,
-      width: double.infinity,
-      child: Center(child: Text('已加载全部 $loaded 条')),
+    return Semantics(
+      label: '$_contentLabel已全部加载',
+      child: SizedBox(
+        key: Key('$prefix-page-end'),
+        height: 48,
+        width: double.infinity,
+        child: Center(child: Text('已加载全部 $loaded 条')),
+      ),
     );
   }
+
+  String get _contentLabel => prefix == 'documents' ? '单据' : '库存流水';
 }
 
 final class _DocumentsRetryCard extends StatelessWidget {
@@ -1309,6 +1328,14 @@ final class _ReturnSourceSelector extends StatelessWidget {
   }
 }
 
+Key? _documentActionKey(DocumentAction action) {
+  return switch (action.docType) {
+    1 => const Key('document-action-inbound'),
+    2 => const Key('document-action-sales'),
+    _ => null,
+  };
+}
+
 final class _RecentDocumentCard extends StatelessWidget {
   const _RecentDocumentCard({
     required this.document,
@@ -1329,6 +1356,7 @@ final class _RecentDocumentCard extends StatelessWidget {
         : '${document.number} · ${document.productName} x${document.quantity}';
 
     return RimsCard(
+      key: ValueKey('document-list-item-${document.id}'),
       child: Row(
         children: [
           DecoratedBox(
