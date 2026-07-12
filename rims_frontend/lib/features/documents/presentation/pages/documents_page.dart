@@ -961,6 +961,7 @@ final class _DocumentForm extends StatefulWidget {
 final class _DocumentFormState extends State<_DocumentForm> {
   late final TextEditingController _productController;
   late final TextEditingController _quantityController;
+  late final TextEditingController _remarkController;
 
   @override
   void initState() {
@@ -971,22 +972,40 @@ final class _DocumentFormState extends State<_DocumentForm> {
     _quantityController = TextEditingController(
       text: widget.viewModel.quantityText,
     );
+    _remarkController = TextEditingController(text: widget.viewModel.remark);
+  }
+
+  @override
+  void didUpdateWidget(covariant _DocumentForm oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    _syncController(_productController, widget.viewModel.productQuery);
+    _syncController(_quantityController, widget.viewModel.quantityText);
+    _syncController(_remarkController, widget.viewModel.remark);
   }
 
   @override
   void dispose() {
     _productController.dispose();
     _quantityController.dispose();
+    _remarkController.dispose();
     super.dispose();
   }
 
   Future<void> _createDocument() async {
     final created = await widget.viewModel.createDocument();
     if (created) {
-      _productController.clear();
-      _quantityController.clear();
       widget.eventBus?.publish(const GlobalRefreshRequestedEvent());
     }
+  }
+
+  void _syncController(TextEditingController controller, String text) {
+    if (controller.text == text) {
+      return;
+    }
+    controller.value = TextEditingValue(
+      text: text,
+      selection: TextSelection.collapsed(offset: text.length),
+    );
   }
 
   void _selectProduct(InventoryItem product) {
@@ -1023,7 +1042,10 @@ final class _DocumentFormState extends State<_DocumentForm> {
           TextField(
             key: const Key('document-product-field'),
             controller: _productController,
-            onChanged: (value) => unawaited(viewModel.searchProducts(value)),
+            enabled: !viewModel.isSubmitting,
+            onChanged: viewModel.isSubmitting
+                ? null
+                : (value) => unawaited(viewModel.searchProducts(value)),
             decoration: const InputDecoration(
               labelText: '商品',
               hintText: '输入商品名称或 SKU',
@@ -1052,11 +1074,25 @@ final class _DocumentFormState extends State<_DocumentForm> {
           TextField(
             key: const Key('document-quantity-field'),
             controller: _quantityController,
+            enabled: !viewModel.isSubmitting,
             keyboardType: TextInputType.number,
-            onChanged: viewModel.updateQuantity,
+            onChanged: viewModel.isSubmitting ? null : viewModel.updateQuantity,
             decoration: InputDecoration(
               labelText: viewModel.quantityInputLabel,
               hintText: viewModel.quantityInputHint,
+              isDense: true,
+            ),
+          ),
+          const SizedBox(height: 10),
+          TextField(
+            key: const Key('document-remark-field'),
+            controller: _remarkController,
+            enabled: !viewModel.isSubmitting,
+            maxLength: 512,
+            onChanged: viewModel.isSubmitting ? null : viewModel.updateRemark,
+            decoration: const InputDecoration(
+              labelText: '备注',
+              counterText: '',
               isDense: true,
             ),
           ),

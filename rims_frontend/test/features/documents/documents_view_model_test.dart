@@ -226,6 +226,7 @@ void main() {
               inventoryRepository: inventoryRepository,
             )
             ..selectActionByLabel('销售出库')
+            ..updateRemark('M9-E2E:run-42:sales')
             ..updateQuantity('3');
 
       await viewModel.searchProducts('矿泉水');
@@ -239,11 +240,22 @@ void main() {
       expect(repository.createdRequest?.productName, '矿泉水 550ml');
       expect(repository.createdRequest?.quantity, 3);
       expect(repository.createdRequest?.retailPrice, 6.5);
+      expect(repository.createdRequest?.remark, 'M9-E2E:run-42:sales');
       expect(inventoryRepository.lastKeyword, '矿泉水');
       expect(viewModel.recentDocuments.first.number, 'SO-20260626-001');
       expect(viewModel.recentDocuments.first.status, '待提交');
+      expect(viewModel.remark, isEmpty);
     },
   );
+
+  test('document action switch preserves remark draft', () {
+    final viewModel = DocumentsViewModel()
+      ..updateRemark('M9-E2E:run-42:inbound');
+
+    viewModel.selectActionByLabel('采购入库');
+
+    expect(viewModel.remark, 'M9-E2E:run-42:inbound');
+  });
 
   test(
     'createDocument fills submitted line when backend returns header only',
@@ -846,6 +858,10 @@ void main() {
         ),
       );
 
+      await tester.ensureVisible(
+        find.byKey(const Key('document-create-button')),
+      );
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('document-create-button')));
       await tester.pumpAndSettle();
 
@@ -915,7 +931,19 @@ void main() {
       find.byKey(const Key('document-quantity-field')),
       '3',
     );
+    await tester.enterText(
+      find.byKey(const Key('document-remark-field')),
+      'M9-E2E:run-42:sales',
+    );
 
+    final remarkField = tester.widget<TextField>(
+      find.byKey(const Key('document-remark-field')),
+    );
+    expect(remarkField.decoration?.labelText, '备注');
+    expect(remarkField.maxLength, 512);
+
+    await tester.ensureVisible(find.byKey(const Key('document-create-button')));
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('document-create-button')));
     await tester.pumpAndSettle();
 
@@ -931,11 +959,93 @@ void main() {
         matching: find.byType(EditableText),
       ),
     );
+    final remarkEditable = tester.widget<EditableText>(
+      find.descendant(
+        of: find.byKey(const Key('document-remark-field')),
+        matching: find.byType(EditableText),
+      ),
+    );
     expect(repository.createdRequest?.productName, '矿泉水 550ml');
+    expect(repository.createdRequest?.remark, 'M9-E2E:run-42:sales');
     expect(productEditable.controller.text, isEmpty);
     expect(quantityEditable.controller.text, isEmpty);
+    expect(remarkEditable.controller.text, isEmpty);
     expect(find.text('已选择 矿泉水 550ml · SKU-WA-550'), findsNothing);
   });
+
+  testWidgets(
+    'DocumentsPage locks and atomically clears form during delayed refresh',
+    (tester) async {
+      final repository = _DelayedCreationRefreshRepository();
+      final viewModel = DocumentsViewModel(
+        repository: repository,
+        inventoryRepository: _FakeInventoryRepository(),
+      );
+      await viewModel.load();
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: DocumentsPage(viewModel: viewModel)),
+        ),
+      );
+      await tester.enterText(
+        find.byKey(const Key('document-product-field')),
+        '矿泉水',
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('document-product-option-10')));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const Key('document-quantity-field')),
+        '3',
+      );
+      await tester.enterText(
+        find.byKey(const Key('document-remark-field')),
+        'M9-E2E:run-42:sales',
+      );
+      await tester.ensureVisible(
+        find.byKey(const Key('document-create-button')),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byKey(const Key('document-create-button')));
+      await repository.waitForRefreshCall();
+      await tester.pump();
+
+      expect(viewModel.isSubmitting, isTrue);
+      for (final key in const [
+        Key('document-product-field'),
+        Key('document-quantity-field'),
+        Key('document-remark-field'),
+      ]) {
+        final field = tester.widget<TextField>(find.byKey(key));
+        expect(field.enabled, isFalse);
+        expect(field.onChanged, isNull);
+        final editable = tester.widget<EditableText>(
+          find.descendant(
+            of: find.byKey(key),
+            matching: find.byType(EditableText),
+          ),
+        );
+        expect(editable.controller.text, isEmpty);
+      }
+      expect(viewModel.productQuery, isEmpty);
+      expect(viewModel.quantityText, isEmpty);
+      expect(viewModel.remark, isEmpty);
+
+      repository.completeRefresh();
+      await tester.pumpAndSettle();
+
+      expect(viewModel.isSubmitting, isFalse);
+      expect(
+        tester
+            .widget<TextField>(find.byKey(const Key('document-remark-field')))
+            .enabled,
+        isTrue,
+      );
+      expect(viewModel.remark, isEmpty);
+    },
+  );
 
   testWidgets('DocumentsPage clears transfer target selector after success', (
     tester,
@@ -1888,6 +1998,57 @@ final class _RetryDocumentsRepository implements DocumentsRepository {
   Future<Result<void>> settleDocument(int id) async {
     return const Success<void>(null);
   }
+}
+
+final class _DelayedCreationRefreshRepository implements DocumentsRepository {
+  final Completer<Result<PageData<DocumentRecord>>> _refreshCompleter =
+      Completer<Result<PageData<DocumentRecord>>>();
+  int listCallCount = 0;
+
+  Future<void> waitForRefreshCall() async {
+    while (listCallCount < 2) {
+      await Future<void>.delayed(Duration.zero);
+    }
+  }
+
+  void completeRefresh() {
+    _refreshCompleter.complete(Success(_documentPage([_remoteDocument])));
+  }
+
+  @override
+  Future<Result<PageData<DocumentRecord>>> listRecentDocuments({
+    int? docType,
+    int page = 1,
+  }) async {
+    listCallCount += 1;
+    if (listCallCount == 1) {
+      return Success(_documentPage([_remoteDocument], page: page));
+    }
+    return _refreshCompleter.future;
+  }
+
+  @override
+  Future<Result<DocumentRecord>> createDocument(
+    CreateDocumentRequest request,
+  ) async => const Success(_remoteDocument);
+
+  @override
+  Future<Result<PageData<TransactionRecord>>> listTransactions({
+    String keyword = '',
+    int page = 1,
+  }) async => Success(_transactionPage([], page: page));
+
+  @override
+  Future<Result<void>> completeDocument(int id) async =>
+      const Success<void>(null);
+
+  @override
+  Future<Result<void>> confirmDocument(int id) async =>
+      const Success<void>(null);
+
+  @override
+  Future<Result<void>> settleDocument(int id) async =>
+      const Success<void>(null);
 }
 
 final class _RetryTransactionsRepository extends _FakeDocumentsRepository {

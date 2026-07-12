@@ -67,6 +67,7 @@ final class DocumentsViewModel extends ChangeNotifier {
   String _productQuery = '';
   String _documentKeyword = '';
   String _quantityText = '';
+  String _remark = '';
   DateTime? _documentStartDate;
   DateTime? _documentEndDate;
   int? _selectedDocumentTypeFilter;
@@ -172,6 +173,7 @@ final class DocumentsViewModel extends ChangeNotifier {
   int? get selectedDocumentTypeFilter => _selectedDocumentTypeFilter;
   String? get selectedDocumentStatusFilter => _selectedDocumentStatusFilter;
   String get quantityText => _quantityText;
+  String get remark => _remark;
   String? get formError => _formError;
   String? get errorMessage => _errorMessage;
   String? get transactionError => _transactionError;
@@ -481,6 +483,12 @@ final class DocumentsViewModel extends ChangeNotifier {
     notifyListeners();
   }
 
+  void updateRemark(String value) {
+    _remark = value;
+    _formError = null;
+    notifyListeners();
+  }
+
   Future<void> load() async {
     final repository = this.repository;
     if (repository == null) {
@@ -728,6 +736,7 @@ final class DocumentsViewModel extends ChangeNotifier {
         refDocId: isReturnAction ? returnSourceDocument?.id : null,
         actualQuantity: isStocktakeAction ? quantity : null,
         nonStdInventoryId: isConversionAction ? nonStandardInventory?.id : null,
+        remark: _remark,
       ),
     );
 
@@ -749,8 +758,10 @@ final class DocumentsViewModel extends ChangeNotifier {
         _selectedTargetWarehouse = null;
         _selectedReturnSourceDocument = null;
         _quantityText = '';
+        _remark = '';
         _formError = null;
         created = true;
+        notifyListeners();
       },
       failure: (failure) {
         _formError = failure.message;

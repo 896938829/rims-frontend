@@ -81,6 +81,7 @@ final class ApiDocumentsRemoteDataSource implements DocumentsRemoteDataSource {
       ApiEndpoints.documents,
       data: {
         'docType': request.docType,
+        if (request.remark.isNotEmpty) 'remark': request.remark,
         if (request.toWarehouseId != null)
           'toWarehouseId': request.toWarehouseId,
         if (request.refDocId != null) 'refDocId': request.refDocId,

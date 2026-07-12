@@ -10,6 +10,7 @@ final class CreateDocumentRequest {
     this.actualQuantity,
     this.nonStdInventoryId,
     this.retailPrice,
+    this.remark = '',
   });
 
   final int docType;
@@ -22,6 +23,7 @@ final class CreateDocumentRequest {
   final int? actualQuantity;
   final int? nonStdInventoryId;
   final double? retailPrice;
+  final String remark;
 }
 
 final class DocumentRecord {

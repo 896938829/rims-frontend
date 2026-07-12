@@ -123,6 +123,7 @@ void main() {
         productName: '矿泉水 550ml',
         quantity: 3,
         retailPrice: 6.5,
+        remark: 'M9-E2E:run-42:sales',
       ),
     );
 
@@ -130,6 +131,7 @@ void main() {
     expect(adapter.lastPath, '/documents');
     expect(adapter.lastData, {
       'docType': 2,
+      'remark': 'M9-E2E:run-42:sales',
       'lines': [
         {'productId': 10, 'quantity': 3, 'retailPrice': 6.5},
       ],
