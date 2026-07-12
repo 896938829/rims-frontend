@@ -51,4 +51,20 @@ Assert-DoesNotContain -Text $listedWithoutPubGet -Unexpected 'flutter pub get --
 Assert-Contains -Text $listedWithoutPubGet -Expected 'flutter analyze --no-pub'
 Assert-Contains -Text $listedWithoutPubGet -Expected 'flutter test --no-pub'
 
+$jsonPlan = (& $smokeScript -ListSteps -Output Json) -join "`n" |
+  ConvertFrom-Json
+if ($jsonPlan.schemaVersion -ne 1) {
+  throw 'Smoke JSON plan has an unexpected schema version.'
+}
+if (@($jsonPlan.steps).Count -lt 6) {
+  throw 'Smoke JSON plan omitted required steps.'
+}
+foreach ($step in @($jsonPlan.steps)) {
+  foreach ($property in @('name', 'command')) {
+    if ($step.PSObject.Properties.Name -notcontains $property) {
+      throw "Smoke JSON plan step omitted '$property'."
+    }
+  }
+}
+
 Write-Host 'Smoke script self-test passed.'

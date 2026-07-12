@@ -90,6 +90,79 @@ if ($Command -eq 'doctor') {
   exit $result.exitCode
 }
 
+if ($Command -eq 'smoke') {
+  if ($Target -ne 'web') {
+    $message = "Smoke target '$Target' is not implemented yet."
+    if ($Output -eq 'Json') {
+      $result = New-RimsLocalResult -Command $Command
+      $result.errors = @($message)
+      $result = Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 2
+      Write-RimsLocalJson -Result $result
+    } else {
+      [Console]::Error.WriteLine($message)
+    }
+    exit 2
+  }
+
+  $wrapper = Join-Path $scriptDir 'rims_web_e2e.ps1'
+  $runtimePaths = Get-RimsRuntimePaths -ScriptDirectory $scriptDir
+  $reportsDirectory = Join-Path $runtimePaths.root 'reports'
+  New-Item -ItemType Directory -Force -Path $reportsDirectory | Out-Null
+  $reportPath = Join-Path $reportsDirectory 'latest-smoke.json'
+  $runReportPath = Join-Path `
+    $reportsDirectory `
+    "smoke-$PID-$([guid]::NewGuid().ToString('N')).json"
+  $arguments = @('-BackendPort', "$BackendPort", '-ReportPath', $runReportPath)
+  if (-not [string]::IsNullOrWhiteSpace($BackendDir)) {
+    $arguments += @('-BackendDir', $BackendDir)
+  }
+  if (-not [string]::IsNullOrWhiteSpace($BackendWorkspaceRoot)) {
+    $arguments += @('-BackendWorkspaceRoot', $BackendWorkspaceRoot)
+  }
+  if ($IncludeDependencies) { $arguments += '-IncludeDependencies' }
+
+  $previousPreference = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $captured = @(& powershell.exe `
+        -NoProfile `
+        -ExecutionPolicy Bypass `
+        -File $wrapper `
+        @arguments 2>&1)
+    $exitCode = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousPreference
+  }
+
+  if (Test-Path -LiteralPath $runReportPath) {
+    Move-Item -LiteralPath $runReportPath -Destination $reportPath -Force
+    $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+  } else {
+    $report = $null
+  }
+
+  if ($Output -eq 'Json' -and $null -ne $report) {
+    [Console]::Out.WriteLine(($report | ConvertTo-Json -Depth 12 -Compress))
+  } elseif ($Output -eq 'Json') {
+    $failure = New-RimsLocalResult -Command $Command
+    $failure.errors = @(
+      'Managed Web smoke exited before producing a fresh report.',
+      (($captured | Select-Object -Last 8) -join ' ')
+    )
+    $failure = Complete-RimsLocalResult `
+      -Result $failure `
+      -Ok $false `
+      -ExitCode $exitCode
+    Write-RimsLocalJson -Result $failure
+  } else {
+    $captured | ForEach-Object { [Console]::Out.WriteLine("$_") }
+    if ($null -ne $report) {
+      [Console]::Out.WriteLine("Smoke report: $reportPath")
+    }
+  }
+  exit $exitCode
+}
+
 if ($Command -in @('up', 'status', 'health', 'logs', 'restart', 'reset', 'down')) {
   try {
     $result = switch ($Command) {

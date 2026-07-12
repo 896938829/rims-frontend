@@ -1,6 +1,9 @@
 param(
   [switch]$SkipPubGet,
   [switch]$ListSteps,
+  [ValidateSet('Text', 'Json')]
+  [string]$Output = 'Text',
+  [string]$ReportPath,
   [string]$FlutterRoot = 'C:\flutter'
 )
 
@@ -21,26 +24,57 @@ $pubCache = if ($env:PUB_CACHE) {
 }
 $demoResidualPattern = 'DemoAuthRepository|DemoUser|登录 Demo|管理员 Demo|普通用户 Demo|admin123|user123|DM-|2024-05|Good morning, 张三|U10086|假数据|模拟数据|固定数据'
 $lastNativeExitCode = 0
+$stepResults = [Collections.Generic.List[object]]::new()
+$smokeStartedAt = [DateTimeOffset]::Now
 
-function Get-SmokeStepNames {
+function Get-SmokeStepDefinitions {
   $steps = @(
-    "tool-state: $toolStateRelative",
-    "pub-cache: $pubCache"
+    [pscustomobject]@{
+      name = 'tool-state'
+      command = "tool-state: $toolStateRelative"
+    },
+    [pscustomobject]@{
+      name = 'pub-cache'
+      command = "pub-cache: $pubCache"
+    }
   )
   if (-not $SkipPubGet) {
-    $steps += 'flutter pub get --offline'
+    $steps += [pscustomobject]@{
+      name = 'flutter-pub-get'
+      command = 'flutter pub get --offline'
+    }
   }
   $steps += @(
-    'flutter analyze --no-pub',
-    'flutter test --no-pub',
-    'rg Demo residual scan',
-    'git diff --check'
+    [pscustomobject]@{
+      name = 'flutter-analyze'
+      command = 'flutter analyze --no-pub'
+    },
+    [pscustomobject]@{
+      name = 'flutter-test'
+      command = 'flutter test --no-pub'
+    },
+    [pscustomobject]@{
+      name = 'demo-residual-scan'
+      command = 'rg Demo residual scan'
+    },
+    [pscustomobject]@{
+      name = 'git-diff-check'
+      command = 'git diff --check'
+    }
   )
   return $steps
 }
 
 if ($ListSteps) {
-  Get-SmokeStepNames | ForEach-Object { Write-Output $_ }
+  $definitions = @(Get-SmokeStepDefinitions)
+  if ($Output -eq 'Json') {
+    [pscustomobject][ordered]@{
+      schemaVersion = 1
+      steps = $definitions
+    } | ConvertTo-Json -Depth 5
+  } else {
+    $definitions | ForEach-Object { Write-Output $_.command }
+  }
   exit 0
 }
 
@@ -55,13 +89,31 @@ function Invoke-Flutter {
 
   if ((Test-Path -LiteralPath $dartExe) -and
       (Test-Path -LiteralPath $flutterSnapshot)) {
-    & $dartExe $flutterSnapshot @Arguments
-    $script:lastNativeExitCode = $LASTEXITCODE
+    $previousPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+      $captured = @(& $dartExe $flutterSnapshot @Arguments 2>&1)
+      $script:lastNativeExitCode = $LASTEXITCODE
+    } finally {
+      $ErrorActionPreference = $previousPreference
+    }
+    if ($Output -eq 'Text') {
+      $captured | ForEach-Object { Write-Host $_ }
+    }
     return
   }
 
-  & flutter @Arguments
-  $script:lastNativeExitCode = $LASTEXITCODE
+  $previousPreference = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $captured = @(& flutter @Arguments 2>&1)
+    $script:lastNativeExitCode = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousPreference
+  }
+  if ($Output -eq 'Text') {
+    $captured | ForEach-Object { Write-Host $_ }
+  }
 }
 
 function Invoke-FlutterChecked {
@@ -72,7 +124,7 @@ function Invoke-FlutterChecked {
     [string[]]$Arguments
   )
 
-  Write-Host "==> $Name"
+  if ($Output -eq 'Text') { Write-Host "==> $Name" }
   Push-Location -LiteralPath $appRoot
   try {
     Invoke-Flutter -Arguments $Arguments
@@ -86,11 +138,20 @@ function Invoke-FlutterChecked {
 }
 
 function Invoke-DemoResidualScan {
-  Write-Host '==> rg Demo residual scan'
+  if ($Output -eq 'Text') { Write-Host '==> rg Demo residual scan' }
   $libPath = Join-Path $appRoot 'lib'
   $testPath = Join-Path $appRoot 'test'
-  & rg -n $demoResidualPattern $libPath $testPath
-  $exitCode = $LASTEXITCODE
+  $previousPreference = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $captured = @(& rg -n $demoResidualPattern $libPath $testPath 2>&1)
+    $exitCode = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousPreference
+  }
+  if ($Output -eq 'Text' -and $captured.Count -gt 0) {
+    $captured | ForEach-Object { Write-Host $_ }
+  }
   if ($exitCode -eq 0) {
     throw 'Demo residual scan found matches.'
   }
@@ -100,16 +161,88 @@ function Invoke-DemoResidualScan {
 }
 
 function Invoke-GitDiffCheck {
-  Write-Host '==> git diff --check'
+  if ($Output -eq 'Text') { Write-Host '==> git diff --check' }
   Push-Location -LiteralPath $repoRoot
   try {
-    & git diff --check
-    $exitCode = $LASTEXITCODE
+    $previousPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+      $captured = @(& git diff --check 2>&1)
+      $exitCode = $LASTEXITCODE
+    } finally {
+      $ErrorActionPreference = $previousPreference
+    }
+    if ($Output -eq 'Text' -and $captured.Count -gt 0) {
+      $captured | ForEach-Object { Write-Host $_ }
+    }
     if ($exitCode -ne 0) {
       throw "git diff --check failed with exit code $exitCode"
     }
   } finally {
     Pop-Location
+  }
+}
+
+function Invoke-RecordedSmokeStep {
+  param(
+    [string]$Name,
+    [string]$Command,
+    [scriptblock]$Action
+  )
+  $watch = [Diagnostics.Stopwatch]::StartNew()
+  try {
+    & $Action
+    $script:stepResults.Add([pscustomobject][ordered]@{
+        name = $Name
+        command = $Command
+        ok = $true
+        exitCode = 0
+        durationMs = $watch.ElapsedMilliseconds
+      })
+  } catch {
+    $script:stepResults.Add([pscustomobject][ordered]@{
+        name = $Name
+        command = $Command
+        ok = $false
+        exitCode = 1
+        durationMs = $watch.ElapsedMilliseconds
+        error = $_.Exception.Message
+      })
+    throw
+  } finally {
+    $watch.Stop()
+  }
+}
+
+function Write-SmokeReport {
+  param(
+    [bool]$Ok,
+    [int]$ExitCode,
+    [string]$ErrorMessage
+  )
+  $report = [pscustomobject][ordered]@{
+    schemaVersion = 1
+    ok = $Ok
+    exitCode = $ExitCode
+    startedAt = $smokeStartedAt.ToString('o')
+    finishedAt = [DateTimeOffset]::Now.ToString('o')
+    toolVersions = [pscustomobject][ordered]@{
+      flutter = (& flutter --version 2>$null | Select-Object -First 1)
+      git = (& git --version 2>$null)
+      rg = (& rg --version 2>$null | Select-Object -First 1)
+    }
+    error = $ErrorMessage
+    steps = @($stepResults)
+  }
+  if (-not [string]::IsNullOrWhiteSpace($ReportPath)) {
+    $directory = Split-Path -Parent $ReportPath
+    if ($directory) { New-Item -ItemType Directory -Force -Path $directory | Out-Null }
+    $temporary = "$ReportPath.tmp-$PID"
+    $report | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $temporary -Encoding UTF8
+    Move-Item -LiteralPath $temporary -Destination $ReportPath -Force
+  }
+  if ($Output -eq 'Json') {
+    [Console]::Out.WriteLine(($report | ConvertTo-Json -Depth 8 -Compress))
   }
 }
 
@@ -134,26 +267,54 @@ $previousAppData = $env:APPDATA
 $previousLocalAppData = $env:LOCALAPPDATA
 $previousPubCache = $env:PUB_CACHE
 
+$smokeError = $null
+$smokeExitCode = 0
 try {
   New-Item -ItemType Directory -Force -Path $toolState | Out-Null
   $env:APPDATA = $toolState
   $env:LOCALAPPDATA = $toolState
   $env:PUB_CACHE = $pubCache
 
+  $stepResults.Add([pscustomobject][ordered]@{
+      name = 'tool-state'
+      command = "tool-state: $toolStateRelative"
+      ok = $true
+      exitCode = 0
+      durationMs = 0
+    })
+  $stepResults.Add([pscustomobject][ordered]@{
+      name = 'pub-cache'
+      command = "pub-cache: $pubCache"
+      ok = $true
+      exitCode = 0
+      durationMs = 0
+    })
   if (-not $SkipPubGet) {
-    Invoke-FlutterChecked `
-      -Name 'flutter pub get --offline' `
-      -Arguments @('pub', 'get', '--offline')
+    Invoke-RecordedSmokeStep -Name 'flutter-pub-get' -Command 'flutter pub get --offline' -Action {
+      Invoke-FlutterChecked `
+        -Name 'flutter pub get --offline' `
+        -Arguments @('pub', 'get', '--offline')
+    }
   }
-  Invoke-FlutterChecked `
-    -Name 'flutter analyze --no-pub' `
-    -Arguments @('analyze', '--no-pub')
-  Invoke-FlutterChecked `
-    -Name 'flutter test --no-pub' `
-    -Arguments @('test', '--no-pub')
-  Invoke-DemoResidualScan
-  Invoke-GitDiffCheck
-  Write-Host 'RIMS smoke checks passed.'
+  Invoke-RecordedSmokeStep -Name 'flutter-analyze' -Command 'flutter analyze --no-pub' -Action {
+    Invoke-FlutterChecked `
+      -Name 'flutter analyze --no-pub' `
+      -Arguments @('analyze', '--no-pub')
+  }
+  Invoke-RecordedSmokeStep -Name 'flutter-test' -Command 'flutter test --no-pub' -Action {
+    Invoke-FlutterChecked `
+      -Name 'flutter test --no-pub' `
+      -Arguments @('test', '--no-pub')
+  }
+  Invoke-RecordedSmokeStep -Name 'demo-residual-scan' -Command 'rg Demo residual scan' -Action {
+    Invoke-DemoResidualScan
+  }
+  Invoke-RecordedSmokeStep -Name 'git-diff-check' -Command 'git diff --check' -Action {
+    Invoke-GitDiffCheck
+  }
+} catch {
+  $smokeError = $_.Exception.Message
+  $smokeExitCode = 1
 } finally {
   $env:APPDATA = $previousAppData
   $env:LOCALAPPDATA = $previousLocalAppData
@@ -164,3 +325,16 @@ try {
   }
   Remove-SmokeToolState
 }
+
+Write-SmokeReport `
+  -Ok ($smokeExitCode -eq 0) `
+  -ExitCode $smokeExitCode `
+  -ErrorMessage $smokeError
+if ($Output -eq 'Text') {
+  if ($smokeExitCode -eq 0) {
+    Write-Host 'RIMS smoke checks passed.'
+  } else {
+    [Console]::Error.WriteLine($smokeError)
+  }
+}
+exit $smokeExitCode

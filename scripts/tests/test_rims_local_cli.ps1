@@ -396,6 +396,7 @@ foreach ($command in ($expectedCommands | Where-Object {
         'logs',
         'restart',
         'reset',
+        'smoke',
         'down'
       )
     })) {
