@@ -467,7 +467,7 @@ git commit -m "fix: harden local attachment storage"
 - Create: backend `rims-goProgect/internal/modules/file/handler_contract_test.go`
 - Modify: backend `docs/前端API调用文档.md`
 
-- [ ] **Step 1: Write failing contract tests for stable `position`, ordered list, batch reorder, replacement, ACL, binding mismatch, rollback, and audit data.**
+- [x] **Step 1: Write failing contract tests for stable `position`, ordered list, batch reorder, replacement, ACL, binding mismatch, rollback, and audit data.**
 
 Target endpoints:
 
@@ -482,17 +482,17 @@ creator; updates hash/name/size/MIME/object key; removes the old object only
 after metadata update succeeds. Owner/admin may replace/reorder; server ACL is
 authoritative.
 
-- [ ] **Step 2: Run focused tests and verify RED.**
+- [x] **Step 2: Run focused tests and verify RED.**
 
 ```bash
 go test ./internal/modules/file ./internal/app -count=1
 ```
 
-- [ ] **Step 3: Add migration/model/repository/service/handler behavior and register routes behind auth plus idempotency where a multipart mutation occurs.**
+- [x] **Step 3: Add migration/model/repository/service/handler behavior and register routes behind auth plus idempotency where a multipart mutation occurs.**
 
-- [ ] **Step 4: Fix authorized pagination so `total` and page metadata represent authorized results for a requested binding, not merely the filtered candidate page.**
+- [x] **Step 4: Fix authorized pagination so `total` and page metadata represent authorized results for a requested binding, not merely the filtered candidate page.**
 
-- [ ] **Step 5: Run migration, full backend tests, seed verification, and commit.**
+- [x] **Step 5: Run migration, full backend tests, seed verification, and commit.**
 
 ```bash
 go test ./...

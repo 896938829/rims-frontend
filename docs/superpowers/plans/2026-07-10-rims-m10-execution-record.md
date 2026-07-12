@@ -57,7 +57,7 @@ runtime ownership, cleanup, and business effects have been inspected.
 | Upload progress/cancel/retry | 4, 12, 16 | first-progress/total timing and same request ID | transport primitives verified; attachment journey pending |
 | Interrupted upload/process recreation | 11, 12, 16 | staged manifest recovery and one server object | pending |
 | Preview/download/share | 10-12, 16 | authenticated bytes/hash and UI action evidence | pending |
-| Replace/reorder/delete | 9, 12, 16 | contract, ACL, rollback, and object evidence | pending |
+| Replace/reorder/delete | 9, 12, 16 | contract, ACL, rollback, and object evidence | backend and real API verified; UI pending |
 | Product image relationship | 13, 16 | upload, product URL, render, replace/delete | pending |
 | Document attachment relationship | 12, 16 | current/wrong warehouse ACL journey | pending |
 | Approval/audit/feedback relationships | 9-12 | contract inheritance only; modules not activated | pending |
@@ -178,6 +178,21 @@ runtime ownership, cleanup, and business effects have been inspected.
 | Failure preservation | cancellation and source errors leave an existing target unchanged with no temp residue |
 | Configuration | default 9 wired to production router; non-positive value rejected by direct config test |
 | Backend regression | `go test ./... -count=1`, temporary server build, and M9 seed/reset passed |
+
+## Task 9 Ordered And Replaceable Attachment Evidence
+
+| Probe | Observed result |
+| --- | --- |
+| Migration | real DB reports `position|0|NO` and `idx_file_business_position` |
+| Upload ordering | real document uploads IDs 19/20 received positions 0/1 |
+| Reorder | exact reverse set returned IDs 20/19 with positions 0/1; list matched |
+| Replace | ID 19, binding, creator and position 1 preserved; object/hash/name changed |
+| Download integrity | replacement metadata SHA-256 equaled authenticated download SHA-256 |
+| ACL | non-owner operator reorder returned HTTP 403/code 10002 with no mutation |
+| Rollback/contracts | duplicate/missing/foreign sets, DB update rollback, route idempotency, and audit payload covered by Go tests |
+| Authorized pagination | service paginates after dynamic ACL and reports authorized total only |
+| Cleanup | test rows soft-deleted; managed backend stopped; exactly owned provider reset |
+| Regression | full Go tests, temporary server build, and M9 seed/reset passed |
 
 ## Scanner Scenario Evidence
 
