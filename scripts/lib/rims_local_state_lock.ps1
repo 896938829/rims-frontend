@@ -19,6 +19,7 @@ function Get-RimsRuntimePaths {
   $logDirectory = Join-Path $rootResolution.path 'logs'
   return [pscustomobject][ordered]@{
     root = $rootResolution.path
+    attachmentStorage = Join-Path $rootResolution.path 'providers\files'
     state = Join-Path $rootResolution.path 'state.json'
     logs = $logDirectory
     stdoutLog = Join-Path $logDirectory 'backend.stdout.log'
@@ -37,6 +38,62 @@ function Initialize-RimsRuntimeDirectories {
 
   [void][IO.Directory]::CreateDirectory([string]$Paths.root)
   [void][IO.Directory]::CreateDirectory([string]$Paths.logs)
+  [void][IO.Directory]::CreateDirectory([string]$Paths.attachmentStorage)
+}
+
+function Reset-RimsOwnedAttachmentProvider {
+  param(
+    [Parameter(Mandatory = $true)]
+    [psobject]$RuntimePaths
+  )
+
+  try {
+    $root = [IO.Path]::GetFullPath([string]$RuntimePaths.root).TrimEnd(
+      [IO.Path]::DirectorySeparatorChar,
+      [IO.Path]::AltDirectorySeparatorChar
+    )
+    $expected = [IO.Path]::GetFullPath(
+      (Join-Path $root 'providers\files')
+    )
+    $target = [IO.Path]::GetFullPath(
+      [string]$RuntimePaths.attachmentStorage
+    )
+    $rootPrefix = $root + [IO.Path]::DirectorySeparatorChar
+    if (-not $target.StartsWith(
+        $rootPrefix,
+        [StringComparison]::OrdinalIgnoreCase
+      ) -or -not $target.Equals(
+        $expected,
+        [StringComparison]::OrdinalIgnoreCase
+      )) {
+      throw 'Attachment provider path is outside its exact runtime-owned location.'
+    }
+
+    foreach ($path in @((Split-Path -Parent $target), $target)) {
+      if (Test-Path -LiteralPath $path) {
+        $item = Get-Item -LiteralPath $path -Force
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+          throw "Attachment provider path contains a reparse point: $path"
+        }
+      }
+    }
+
+    if (Test-Path -LiteralPath $target) {
+      Remove-Item -LiteralPath $target -Recurse -Force
+    }
+    [void][IO.Directory]::CreateDirectory($target)
+    return [pscustomobject][ordered]@{
+      ok = $true
+      detail = 'Reset the exactly owned local attachment provider.'
+    }
+  } catch {
+    return [pscustomobject][ordered]@{
+      ok = $false
+      detail = ConvertTo-RimsDiagnosticSummary `
+        -StandardOutput '' `
+        -StandardError $_.Exception.Message
+    }
+  }
 }
 
 function Get-RimsStateTemporaryPath {

@@ -1076,6 +1076,7 @@ function New-RimsManagedRuntimeState {
       -Value $StartedBackend `
       -Name 'linuxIdentity'
     runtimeRoot = $RuntimePaths.root
+    attachmentStoragePath = $RuntimePaths.attachmentStorage
     statePath = $RuntimePaths.state
     stdoutLogPath = $RuntimePaths.stdoutLog
     stderrLogPath = $RuntimePaths.stderrLog
@@ -1880,10 +1881,26 @@ function Invoke-RimsLocalResetUnlocked {
   $fixture = Invoke-RimsM9Fixtures -Context $context -Reset
   $result.components += New-RimsM9FixtureComponent `
     -FixtureResult $fixture
+  if (-not $fixture.ok) {
+    return Complete-RimsLocalResult `
+      -Result $result `
+      -Ok $false `
+      -ExitCode 1
+  }
+
+  $providerReset = Reset-RimsOwnedAttachmentProvider -RuntimePaths $paths
+  $result.components += New-RimsLocalComponent `
+    -Name 'attachment-provider' `
+    -Ok $providerReset.ok `
+    -Required $true `
+    -Detail $providerReset.detail `
+    -Remediation $(if ($providerReset.ok) { '' } else {
+        'Inspect the runtime provider path and remove reparse-point or ownership conflicts.'
+      })
   return Complete-RimsLocalResult `
     -Result $result `
-    -Ok $fixture.ok `
-    -ExitCode $(if ($fixture.ok) { 0 } else { 1 })
+    -Ok $providerReset.ok `
+    -ExitCode $(if ($providerReset.ok) { 0 } else { 1 })
 }
 
 function Invoke-RimsLocalRestartUnlocked {

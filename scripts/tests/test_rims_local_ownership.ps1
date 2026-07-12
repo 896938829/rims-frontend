@@ -39,6 +39,36 @@ try {
     -Actual $runtimePaths.stderrLog `
     -Expected (Join-Path $testRuntimeDirectory 'logs\backend.stderr.log') `
     -Message 'Runtime stderr log path is incorrect.'
+  Assert-Equal `
+    -Actual $runtimePaths.attachmentStorage `
+    -Expected (Join-Path $testRuntimeDirectory 'providers\files') `
+    -Message 'Attachment storage is not owned by the runtime root.'
+  Initialize-RimsRuntimeDirectories -Paths $runtimePaths
+  $providerMarker = Join-Path $runtimePaths.attachmentStorage 'remove-me.txt'
+  $providerSibling = Join-Path $runtimePaths.root 'providers\keep-me.txt'
+  [IO.File]::WriteAllText($providerMarker, 'owned attachment')
+  [IO.File]::WriteAllText($providerSibling, 'provider sibling')
+  $providerReset = Reset-RimsOwnedAttachmentProvider `
+    -RuntimePaths $runtimePaths
+  Assert-True `
+    -Value $providerReset.ok `
+    -Message 'Exact attachment provider reset failed.'
+  Assert-False `
+    -Value (Test-Path -LiteralPath $providerMarker) `
+    -Message 'Attachment provider reset retained owned content.'
+  Assert-True `
+    -Value (Test-Path -LiteralPath $providerSibling -PathType Leaf) `
+    -Message 'Attachment provider reset removed a sibling file.'
+
+  $outsideProvider = [pscustomobject]@{
+    root = $runtimePaths.root
+    attachmentStorage = Join-Path $runtimePaths.root 'outside-files'
+  }
+  $outsideReset = Reset-RimsOwnedAttachmentProvider `
+    -RuntimePaths $outsideProvider
+  Assert-False `
+    -Value $outsideReset.ok `
+    -Message 'Attachment provider reset accepted a non-exact target.'
 
   $composeContext = [pscustomobject]@{
     workspace = '/mnt/e/My Work/RIMS'

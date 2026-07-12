@@ -61,7 +61,7 @@ runtime ownership, cleanup, and business effects have been inspected.
 | Product image relationship | 13, 16 | upload, product URL, render, replace/delete | pending |
 | Document attachment relationship | 12, 16 | current/wrong warehouse ACL journey | pending |
 | Approval/audit/feedback relationships | 9-12 | contract inheritance only; modules not activated | pending |
-| Local provider ownership/reset | 2, 17 | exact runtime path, reset, no residual objects | pending |
+| Local provider ownership/reset | 2, 17 | exact runtime path, reset, no residual objects | implementation verified; final audit pending |
 | Background/resume | 6, 12, 16 | HOME/resume and transfer state evidence | pending |
 | Low storage | 11, 12, 16 | injected disk failure preserves recoverable state | pending |
 | Portrait/landscape/tablet/font/dark/keyboard/back | 15-17 | compatibility tests and screenshots/report | pending |
@@ -86,11 +86,24 @@ runtime ownership, cleanup, and business effects have been inspected.
 
 | Fixture | Expected purpose | Observed result |
 | --- | --- | --- |
-| `M10-ACTIVE-001` | active current-warehouse scan | pending |
-| `M10-DISABLED-001` | disabled product feedback | pending |
-| Cross-warehouse barcode | wrong-warehouse feedback | pending |
-| Product image target | product attachment lifecycle | pending |
-| `M10-ATT-*` documents | document ACL and attachment lifecycle | pending |
+| `M10-ACTIVE-001` | active current-warehouse scan | `M9-PAGE-0001`, active, both fixture warehouses |
+| `M10-DISABLED-001` | disabled product feedback | `M9-PAGE-0002`, product status 0 |
+| `M10-WH001-ONLY-001` | wrong-warehouse feedback | inventory status 1 in `WH001`, 0 in `M9-WH-02` |
+| `M10-PRODUCT-IMAGE-001` | product attachment lifecycle | `M9-PAGE-0004`, active |
+| `M9DOC0001` / `M9DOC0002` M10 target remarks | cross-warehouse document ACL and attachment lifecycle | `WH001` / `M9-WH-02`, deterministic remarks |
+
+## Task 2 Runtime Evidence
+
+| Probe | Observed result |
+| --- | --- |
+| RED lifecycle test | failed because `attachmentStorage` was absent |
+| Aggregate lifecycle after implementation | passed |
+| Managed `up -Target none -IncludeDependencies` | passed; backend healthy at port 8080 |
+| Runtime state | recorded `.runtime/rims-local/providers/files` |
+| Managed `down` | passed; state/listener removed |
+| Provider reset probe | owned file removed, provider recreated, sibling preserved |
+| Backend full tests | `go test ./...` passed |
+| Seed idempotency/reset | passed with fingerprint `45|1|1|2|90|25|15|15|15` |
 
 ## Scanner Scenario Evidence
 

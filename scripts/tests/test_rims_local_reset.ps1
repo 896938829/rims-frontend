@@ -26,6 +26,8 @@ foreach ($functionName in $mockedFunctions) {
 }
 
 $fixtureResetObserved = [pscustomobject]@{ value = $false }
+$providerResetObserved = [pscustomobject]@{ value = $false }
+$savedProviderReset = $null
 try {
   Set-Item 'Function:\Invoke-RimsLocalDoctor' -Value {
     param($Target, $BackendDir, $BackendWorkspaceRoot, $AndroidDevice, $ScriptDirectory)
@@ -93,6 +95,16 @@ try {
       }
     }
   }
+  $savedProviderReset = Get-Item 'Function:\Reset-RimsOwnedAttachmentProvider' `
+    -ErrorAction SilentlyContinue
+  Set-Item 'Function:\Reset-RimsOwnedAttachmentProvider' -Value {
+    param($RuntimePaths)
+    $providerResetObserved.value = $true
+    return [pscustomobject]@{
+      ok = $true
+      detail = 'attachment provider reset complete'
+    }
+  }
 
   $reset = Invoke-RimsLocalResetUnlocked `
     -Target 'none' `
@@ -102,6 +114,7 @@ try {
     -BackendPort 18080
   Assert-True -Value $reset.ok -Message 'Healthy reset lifecycle failed.'
   Assert-True -Value $fixtureResetObserved.value -Message 'Reset lifecycle seeded without reset mode.'
+  Assert-True -Value $providerResetObserved.value -Message 'Reset lifecycle did not clear attachment storage.'
   Assert-Equal -Actual $reset.command -Expected 'reset' -Message 'Reset command name changed.'
   $fixtureComponent = @($reset.components | Where-Object { $_.name -eq 'fixtures' })
   Assert-Equal -Actual $fixtureComponent.Count -Expected 1 -Message 'Reset fixture component missing.'
@@ -118,6 +131,13 @@ try {
     -Value (($invalidTarget.errors -join ' ').Contains('Target none')) `
     -Message 'Reset target failure was unclear.'
 } finally {
+  if ($null -ne $savedProviderReset) {
+    Set-Item 'Function:\Reset-RimsOwnedAttachmentProvider' `
+      -Value $savedProviderReset.ScriptBlock
+  } else {
+    Remove-Item 'Function:\Reset-RimsOwnedAttachmentProvider' `
+      -ErrorAction SilentlyContinue
+  }
   foreach ($functionName in $mockedFunctions) {
     Set-Item "Function:\$functionName" -Value $savedFunctions[$functionName]
   }

@@ -10,6 +10,17 @@ try {
   if ([string]::IsNullOrWhiteSpace($wsl)) {
     throw 'WSL is required for dotenv parser behavior tests.'
   }
+  $bootstrapScript = Get-RimsBackendBootstrapScript
+  foreach ($requiredBootstrapLine in @(
+      'upload_dir=$9',
+      'export UPLOAD_DIR="$upload_dir"',
+      'export MAX_UPLOAD_MB=10',
+      'export MAX_ATTACHMENTS_PER_OBJECT=9'
+    )) {
+    if (-not $bootstrapScript.Contains($requiredBootstrapLine)) {
+      throw "Backend bootstrap omitted attachment setting '$requiredBootstrapLine'."
+    }
+  }
   $normalizedArguments = ConvertTo-RimsWslBashArguments `
     -FilePath $wsl `
     -Arguments @('-e', 'bash', '-c', "first`r`nsecond", "literal`r`nvalue")

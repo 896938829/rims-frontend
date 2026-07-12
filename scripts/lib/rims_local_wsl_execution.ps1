@@ -107,6 +107,12 @@ function Get-RimsWslLifecycleContext {
       activationGate = ConvertTo-RimsWslPath `
         -WindowsPath $RuntimePaths.backendActivationGate `
         -WslExecutable $wsl
+      attachmentStorageWindows = [IO.Path]::GetFullPath(
+        [string]$RuntimePaths.attachmentStorage
+      )
+      attachmentStorage = ConvertTo-RimsWslPath `
+        -WindowsPath $RuntimePaths.attachmentStorage `
+        -WslExecutable $wsl
     }
   } catch {
     return [pscustomobject][ordered]@{
@@ -468,9 +474,13 @@ pgid_file=$5
 identity_file=$6
 activation_gate=$7
 command_marker=$8
+upload_dir=$9
 load_rims_dotenv "$env_file"
 export APP_PORT="$port"
 export MIGRATIONS_DIR="$migrations_dir"
+export UPLOAD_DIR="$upload_dir"
+export MAX_UPLOAD_MB=10
+export MAX_ATTACHMENTS_PER_OBJECT=9
 cd "$source_dir"
 exec setsid --fork --wait bash -c '
   set -euo pipefail
@@ -665,7 +675,8 @@ function Start-RimsManagedBackend {
           $Context.processGroupFile,
           $Context.linuxIdentityFile,
           $Context.activationGate,
-          $commandMarker
+          $commandMarker,
+          $Context.attachmentStorage
         )
         $effectiveArguments = @(ConvertTo-RimsWslBashArguments `
             -FilePath $Context.wsl `

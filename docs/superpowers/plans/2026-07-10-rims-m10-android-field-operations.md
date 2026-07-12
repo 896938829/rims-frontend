@@ -137,15 +137,15 @@ abstract interface class AttachmentsRepository {
 - Modify: `docs/superpowers/plans/2026-07-10-rims-app-long-term-completion-master-plan.md`
 - Test: repository searches and worktree status
 
-- [ ] **Step 1: Record the observed frontend/backend identities, tool versions, Android AVD, current dependencies, current manifest, scanner gap, attachment gap, and M9 inherited gates.**
+- [x] **Step 1: Record the observed frontend/backend identities, tool versions, Android AVD, current dependencies, current manifest, scanner gap, attachment gap, and M9 inherited gates.**
 
 The execution record starts as `Status: IN PROGRESS` and contains empty tables
 for environment, fixtures, scanner modes, attachment scenarios, lifecycle
 faults, compatibility, performance, defects, deviations, and final commands.
 
-- [ ] **Step 2: Add a requirement matrix mapping every M10, 5.8, 5.9, and relevant Section 6 requirement to an implementation task and evidence row.**
+- [x] **Step 2: Add a requirement matrix mapping every M10, 5.8, 5.9, and relevant Section 6 requirement to an implementation task and evidence row.**
 
-- [ ] **Step 3: Verify there are no unowned runtime processes before M10 changes.**
+- [x] **Step 3: Verify there are no unowned runtime processes before M10 changes.**
 
 Run:
 
@@ -157,7 +157,7 @@ git status --short
 Expected: no managed state/listeners and only the two M10 plan documents are
 modified.
 
-- [ ] **Step 4: Commit the planning baseline.**
+- [x] **Step 4: Commit the planning baseline.**
 
 ```powershell
 git add docs/superpowers/plans/2026-07-10-rims-m10-android-field-operations.md docs/superpowers/plans/2026-07-10-rims-m10-execution-record.md docs/superpowers/plans/2026-07-10-rims-app-long-term-completion-master-plan.md
@@ -176,13 +176,13 @@ git commit -m "docs: plan M10 Android field operations"
 - Modify: backend `rims-goProgect/scripts/m9_dev_seed.sql`
 - Modify: backend `rims-goProgect/scripts/test_m9_dev_seed.sh`
 
-- [ ] **Step 1: Write failing lifecycle tests for an owned upload directory.**
+- [x] **Step 1: Write failing lifecycle tests for an owned upload directory.**
 
 Assert that launch context exports a WSL path for
 `.runtime/rims-local/providers/files`, state records it, reset removes only that
 owned directory, and a path outside runtime is rejected.
 
-- [ ] **Step 2: Run the focused tests and verify RED.**
+- [x] **Step 2: Run the focused tests and verify RED.**
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test_rims_local.ps1
@@ -190,17 +190,18 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test_rims_local.ps
 
 Expected: FAIL because `UPLOAD_DIR` ownership is not represented.
 
-- [ ] **Step 3: Add the runtime path and export `UPLOAD_DIR`, `MAX_UPLOAD_MB=10`, `MAX_ATTACHMENTS_PER_OBJECT=9`, and the existing extension allow-list through the safe WSL environment path.**
+- [x] **Step 3: Add the runtime path and export `UPLOAD_DIR`, `MAX_UPLOAD_MB=10`, `MAX_ATTACHMENTS_PER_OBJECT=9`, and the existing extension allow-list through the safe WSL environment path.**
 
 The backend must never default to a source-worktree `uploads` directory during
 managed runs.
 
-- [ ] **Step 4: Extend deterministic fixtures with active and disabled barcodes, a product image target, document attachment targets in both warehouses, and ordinary-user access/non-access cases.**
+- [x] **Step 4: Extend deterministic fixtures with active and disabled barcodes, a product image target, document attachment targets in both warehouses, and ordinary-user access/non-access cases.**
 
-Use stable codes such as `M10-ACTIVE-001`, `M10-DISABLED-001`, and document
-numbers prefixed `M10-ATT-`; keep seed/reset idempotent.
+Use stable codes such as `M10-ACTIVE-001`, `M10-DISABLED-001`, and attachment
+target remarks on `M9DOC0001`/`M9DOC0002`; keep seed/reset idempotent without
+changing the M9 `45/90/15` count baseline.
 
-- [ ] **Step 5: Run lifecycle and seed tests, then commit frontend and backend changes separately.**
+- [x] **Step 5: Run lifecycle and seed tests, then commit frontend and backend changes separately.**
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test_rims_local.ps1
