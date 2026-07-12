@@ -10,6 +10,17 @@ try {
   if ([string]::IsNullOrWhiteSpace($wsl)) {
     throw 'WSL is required for dotenv parser behavior tests.'
   }
+  $normalizedArguments = ConvertTo-RimsWslBashArguments `
+    -FilePath $wsl `
+    -Arguments @('-e', 'bash', '-c', "first`r`nsecond", "literal`r`nvalue")
+  Assert-Equal `
+    -Actual $normalizedArguments[3] `
+    -Expected "first`nsecond" `
+    -Message 'WSL Bash command argument retained Windows line endings.'
+  Assert-Equal `
+    -Actual $normalizedArguments[4] `
+    -Expected "literal`r`nvalue" `
+    -Message 'WSL argument normalization changed a non-command argument.'
   $dotenvWsl = ConvertTo-RimsWslPath `
     -WindowsPath $dotenvPath `
     -WslExecutable $wsl

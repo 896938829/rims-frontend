@@ -667,7 +667,10 @@ function Start-RimsManagedBackend {
           $Context.activationGate,
           $commandMarker
         )
-        $argumentLine = ($arguments | ForEach-Object {
+        $effectiveArguments = @(ConvertTo-RimsWslBashArguments `
+            -FilePath $Context.wsl `
+            -Arguments $arguments)
+        $argumentLine = ($effectiveArguments | ForEach-Object {
             ConvertTo-RimsWindowsCommandLineArgument -Value $_
           }) -join ' '
         $spawnedProcess = Start-Process `

@@ -226,7 +226,10 @@ function Invoke-RimsExternalCommand {
   $standardErrorTask = $null
   $processId = $null
   try {
-    $quotedArguments = $Arguments | ForEach-Object {
+    $effectiveArguments = @(ConvertTo-RimsWslBashArguments `
+        -FilePath $FilePath `
+        -Arguments $Arguments)
+    $quotedArguments = $effectiveArguments | ForEach-Object {
       ConvertTo-RimsWindowsCommandLineArgument -Value $_
     }
     $startInfo = New-Object Diagnostics.ProcessStartInfo
@@ -286,6 +289,25 @@ function Invoke-RimsExternalCommand {
       $process.Dispose()
     }
   }
+}
+
+function ConvertTo-RimsWslBashArguments {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$FilePath,
+    [Parameter(Mandatory = $true)]
+    [AllowEmptyCollection()]
+    [string[]]$Arguments
+  )
+
+  $normalized = [string[]]@($Arguments)
+  if ([IO.Path]::GetFileName($FilePath) -ieq 'wsl.exe' -and
+      $normalized.Count -ge 4 -and
+      $normalized[1] -eq 'bash' -and
+      $normalized[2] -in @('-c', '-lc')) {
+    $normalized[3] = $normalized[3].Replace("`r`n", "`n").Replace("`r", "`n")
+  }
+  return $normalized
 }
 
 function ConvertTo-RimsDiagnosticSummary {
