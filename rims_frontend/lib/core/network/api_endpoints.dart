@@ -3,6 +3,9 @@ abstract final class ApiEndpoints {
     'API_BASE_URL',
     defaultValue: 'http://localhost:8080/api/v1',
   );
+  static final Uri healthUri = Uri.parse(
+    baseUrl,
+  ).replace(path: '/healthz', query: null, fragment: null);
 
   static const String login = '/auth/login';
   static const String currentUser = '/users/me';

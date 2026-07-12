@@ -6,4 +6,8 @@ abstract interface class NetworkStatusService {
   Stream<NetworkReachability> get changes;
 
   Future<NetworkReachability> verify();
+
+  void markOnlineFromRequest();
+
+  Future<void> dispose();
 }

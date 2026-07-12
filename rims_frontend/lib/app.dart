@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:connectivity_plus/connectivity_plus.dart';
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 import 'package:path_provider/path_provider.dart';
@@ -9,6 +11,7 @@ import 'core/events/app_event.dart';
 import 'core/events/app_event_bus.dart';
 import 'core/network/api_client.dart';
 import 'core/network/api_endpoints.dart';
+import 'core/result/failure.dart';
 import 'core/storage/app_secure_storage.dart';
 import 'core/theme/app_theme.dart';
 import 'features/admin/data/datasources/admin_remote_datasource.dart';
@@ -28,6 +31,8 @@ import 'features/documents/data/repositories/documents_repository_impl.dart';
 import 'features/inventory/data/datasources/inventory_remote_datasource.dart';
 import 'features/inventory/data/repositories/inventory_repository_impl.dart';
 import 'features/offline/domain/services/offline_store.dart';
+import 'features/offline/data/services/connectivity_network_status_service.dart';
+import 'features/offline/domain/services/network_status_service.dart';
 import 'features/reports/data/datasources/reports_remote_datasource.dart';
 import 'features/reports/data/repositories/reports_repository_impl.dart';
 import 'features/scanner/domain/services/scan_lookup_cache.dart';
@@ -36,9 +41,14 @@ import 'features/scanner/data/field_operations_scanner.dart';
 import 'routes/app_router.dart';
 
 class MainApp extends StatefulWidget {
-  const MainApp({required this.offlineStore, super.key});
+  const MainApp({
+    required this.offlineStore,
+    this.networkStatusService,
+    super.key,
+  });
 
   final OfflineStore offlineStore;
+  final NetworkStatusService? networkStatusService;
 
   @override
   State<MainApp> createState() => _MainAppState();
@@ -62,12 +72,16 @@ final class _MainAppState extends State<MainApp> {
   late final ReportsRepositoryImpl _reportsRepository;
   late final AdminRepositoryImpl _adminRepository;
   late final GoRouter _router;
+  late final NetworkStatusService _networkStatusService;
+  Dio? _healthClient;
   String? _activeUserId;
 
   @override
   void initState() {
     super.initState();
     _sessionController.addListener(_handleSessionOwnership);
+    _networkStatusService =
+        widget.networkStatusService ?? _createNetworkStatusService();
     final fieldConfig = FieldOperationsTestConfig.current;
     _attachmentPicker = fieldConfig.enabled
         ? FieldOperationsAttachmentPicker(
@@ -90,6 +104,13 @@ final class _MainAppState extends State<MainApp> {
           await _secureStorage.readAccessToken(),
       warehouseIdReader: () async => _sessionController.currentWarehouse?.id,
       eventBus: _eventBus,
+      requestObserver: (outcome) {
+        if (outcome.succeeded) {
+          _networkStatusService.markOnlineFromRequest();
+        } else if (outcome.failure is NetworkFailure) {
+          unawaited(_networkStatusService.verify());
+        }
+      },
     );
     _attachmentsRepository = AttachmentsRepositoryImpl(
       remoteDataSource: ApiAttachmentsRemoteDataSource(_apiClient),
@@ -144,6 +165,7 @@ final class _MainAppState extends State<MainApp> {
       _sessionController.expireSession();
     });
     unawaited(_sessionController.restoreSession(_authRepository));
+    unawaited(_networkStatusService.verify());
   }
 
   @override
@@ -155,9 +177,34 @@ final class _MainAppState extends State<MainApp> {
     }
     unawaited(_tokenExpiredSubscription?.cancel());
     unawaited(_eventBus.dispose());
+    unawaited(_networkStatusService.dispose());
+    _healthClient?.close(force: true);
     _router.dispose();
     _sessionController.dispose();
     super.dispose();
+  }
+
+  NetworkStatusService _createNetworkStatusService() {
+    final connectivity = Connectivity();
+    final healthClient = Dio(
+      BaseOptions(
+        connectTimeout: const Duration(seconds: 3),
+        receiveTimeout: const Duration(seconds: 3),
+        sendTimeout: const Duration(seconds: 3),
+        validateStatus: (_) => true,
+      ),
+    );
+    _healthClient = healthClient;
+    return ConnectivityNetworkStatusService(
+      checkConnectivity: connectivity.checkConnectivity,
+      connectivityChanges: connectivity.onConnectivityChanged,
+      healthProbe: () async {
+        final response = await healthClient.getUri<Object?>(
+          ApiEndpoints.healthUri,
+        );
+        return response.statusCode == 200;
+      },
+    );
   }
 
   void _handleSessionOwnership() {

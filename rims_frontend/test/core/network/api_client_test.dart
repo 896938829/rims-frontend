@@ -14,6 +14,7 @@ import 'package:rims_frontend/core/network/interceptors/warehouse_interceptor.da
 void main() {
   test('defaults API base URL to localhost for local backend integration', () {
     expect(ApiEndpoints.baseUrl, 'http://localhost:8080/api/v1');
+    expect(ApiEndpoints.healthUri, Uri.parse('http://localhost:8080/healthz'));
   });
 
   test('attaches logging interceptor by default', () {
@@ -142,6 +143,48 @@ void main() {
 
       expect(result.isFailure, isTrue);
       expect(tokenExpiredEvents, 0);
+    },
+  );
+
+  test('request observer receives success after the real request', () async {
+    final adapter = _CapturingAdapter();
+    final outcomes = <ApiRequestOutcome>[];
+    final client = ApiClient(
+      dio: Dio()..httpClientAdapter = adapter,
+      requestObserver: outcomes.add,
+      enableLogging: false,
+    );
+
+    await client.get<dynamic>('/inventory');
+
+    expect(adapter.lastOptions?.path, '/inventory');
+    expect(outcomes, hasLength(1));
+    expect(outcomes.single.path, '/inventory');
+    expect(outcomes.single.succeeded, isTrue);
+    expect(outcomes.single.failure, isNull);
+  });
+
+  test(
+    'request observer receives mapped failure after the real request',
+    () async {
+      final outcomes = <ApiRequestOutcome>[];
+      final client = ApiClient(
+        dio: Dio()
+          ..httpClientAdapter = const _StatusAdapter(
+            statusCode: 503,
+            body: '{"message":"unavailable"}',
+          ),
+        requestObserver: outcomes.add,
+        enableLogging: false,
+      );
+
+      final result = await client.get<dynamic>('/inventory');
+
+      expect(result.isFailure, isTrue);
+      expect(outcomes, hasLength(1));
+      expect(outcomes.single.path, '/inventory');
+      expect(outcomes.single.succeeded, isFalse);
+      expect(outcomes.single.failure, isNotNull);
     },
   );
 }

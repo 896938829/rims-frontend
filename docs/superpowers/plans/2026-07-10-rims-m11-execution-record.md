@@ -19,7 +19,7 @@ counts, encrypted storage ownership, cleanup, and baseline restore are read.
 | --- | --- | --- | --- |
 | Versioned encrypted native database | 2, 14 | migration, key, corruption, Android artifact | foundation PASS; Android acceptance pending |
 | Web regression adapter | 2, 17 | Web M9 journey with in-memory store | adapter/build PASS; M9 journey pending |
-| Verified network reachability | 3, 16 | captive/unreachable/switch probes | planned |
+| Verified network reachability | 3, 16 | captive/unreachable/switch probes | service PASS; fault harness pending |
 | Account/warehouse scoped cache | 4-7 | cache keys, invalidation, no cross-scope read | planned |
 | User/warehouse references | 5 | secure-token gate and cached projection | planned |
 | Product/inventory/alerts/barcode | 6 | offline read, stale source/age, no mutation authority | planned |
@@ -77,6 +77,18 @@ counts, encrypted storage ownership, cleanup, and baseline restore are read.
 | Recovery | unreadable database renamed with UTC timestamp and recreated without deleting secure key or staged files |
 | Bootstrap | native app support directory plus secure storage; Web and widget tests inject MemoryOfflineStore |
 | GREEN | build_runner PASS; strict analyze PASS; 17 focused tests PASS; release Web and Android debug APK builds PASS |
+
+## Task 3 Verified Reachability Evidence
+
+| Probe | Observed result |
+| --- | --- |
+| RED | tests failed because reachability service and passive ApiClient observer did not exist |
+| Connectivity boundary | none maps to offline without a probe; Wi-Fi/mobile remain hints only |
+| Health verification | root `/healthz` probe is bounded to 3 seconds; success maps online, false/timeout maps unreachable |
+| Ordering | generation invalidates stale health completions after loss, switch, or successful API response |
+| Request behavior | ApiClient always executes the real request before reporting success or mapped failure |
+| Lifecycle | MainApp starts and disposes the service; widget tests inject a platform-free implementation |
+| GREEN | strict analyze PASS; 19 network/API/widget tests PASS; release Web build PASS |
 
 ## Final Android State Evidence
 

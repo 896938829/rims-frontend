@@ -10,6 +10,20 @@ import 'interceptors/auth_interceptor.dart';
 import 'interceptors/logging_interceptor.dart';
 import 'interceptors/warehouse_interceptor.dart';
 
+typedef ApiRequestObserver = void Function(ApiRequestOutcome outcome);
+
+final class ApiRequestOutcome {
+  const ApiRequestOutcome({
+    required this.path,
+    required this.succeeded,
+    this.failure,
+  });
+
+  final String path;
+  final bool succeeded;
+  final Failure? failure;
+}
+
 final class ApiClient {
   ApiClient({
     Dio? dio,
@@ -17,6 +31,7 @@ final class ApiClient {
     TokenReader? tokenReader,
     WarehouseIdReader? warehouseIdReader,
     AppEventBus? eventBus,
+    ApiRequestObserver? requestObserver,
     bool enableLogging = true,
   }) : this._(
          dio: dio ?? Dio(),
@@ -24,6 +39,7 @@ final class ApiClient {
          tokenReader: tokenReader,
          warehouseIdReader: warehouseIdReader,
          eventBus: eventBus,
+         requestObserver: requestObserver,
          enableLogging: enableLogging,
        );
 
@@ -33,6 +49,7 @@ final class ApiClient {
     required TokenReader? tokenReader,
     required WarehouseIdReader? warehouseIdReader,
     required this.eventBus,
+    required this.requestObserver,
     required bool enableLogging,
   }) {
     _dio.options = BaseOptions(
@@ -64,6 +81,7 @@ final class ApiClient {
   final Dio _dio;
   final ApiExceptionMapper _exceptionMapper;
   final AppEventBus? eventBus;
+  final ApiRequestObserver? requestObserver;
 
   Dio get dio => _dio;
 
@@ -179,9 +197,14 @@ final class ApiClient {
     Future<Response<T>> Function() request,
   ) async {
     try {
-      return Success<Response<T>>(await request());
+      final response = await request();
+      _observe(ApiRequestOutcome(path: path, succeeded: true));
+      return Success<Response<T>>(response);
     } catch (error) {
       final failure = _exceptionMapper.map(error);
+      _observe(
+        ApiRequestOutcome(path: path, succeeded: false, failure: failure),
+      );
       if (failure is AuthenticationFailure && _publishesTokenExpired(path)) {
         eventBus?.publish(const TokenExpiredEvent());
       }
@@ -191,5 +214,13 @@ final class ApiClient {
 
   bool _publishesTokenExpired(String path) {
     return path != ApiEndpoints.login;
+  }
+
+  void _observe(ApiRequestOutcome outcome) {
+    try {
+      requestObserver?.call(outcome);
+    } on Object {
+      // Observation must never alter the request result.
+    }
   }
 }

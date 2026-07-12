@@ -273,17 +273,17 @@ feat: add encrypted offline database
 - Modify: `rims_frontend/lib/app.dart`
 - Test: `rims_frontend/test/features/offline/network_status_service_test.dart`
 
-- [ ] **Step 1: Write failing tests for offline, connectivity-only, verified online, timeout, captive/unreachable Wi-Fi, network switch, and stale probe completion.**
+- [x] **Step 1: Write failing tests for offline, connectivity-only, verified online, timeout, captive/unreachable Wi-Fi, network switch, and stale probe completion.**
 
-- [ ] **Step 2: Implement `ConnectivityNetworkStatusService`.**
+- [x] **Step 2: Implement `ConnectivityNetworkStatusService`.**
 
 Map plugin results to a hint, then perform a bounded `/healthz` request through
 an injected probe. Expose `offline`, `checking`, `online`, and `unreachable`.
 Ignore probe completions whose generation predates the newest connectivity event.
 
-- [ ] **Step 3: Add an ApiClient request observer without treating connectivity hints as authorization to skip a real request.**
+- [x] **Step 3: Add an ApiClient request observer without treating connectivity hints as authorization to skip a real request.**
 
-- [ ] **Step 4: Run tests and commit.**
+- [x] **Step 4: Run tests and commit.**
 
 ```powershell
 flutter test --no-pub test/features/offline/network_status_service_test.dart test/core/network/api_client_test.dart
