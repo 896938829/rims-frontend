@@ -673,7 +673,7 @@ function Invoke-BaselineRestore {
 }
 
 New-Item -ItemType Directory -Force -Path $logRoot, $reportRoot | Out-Null
-$lockPath = Join-Path $runtimeRoot 'web-smoke.lock'
+$lockPath = Join-Path $runtimeRoot 'acceptance-smoke.lock'
 try {
   $smokeLock = [IO.File]::Open(
     $lockPath,

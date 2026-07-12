@@ -91,7 +91,7 @@ if ($Command -eq 'doctor') {
 }
 
 if ($Command -eq 'smoke') {
-  if ($Target -ne 'web') {
+  if ($Target -notin @('web', 'android')) {
     $message = "Smoke target '$Target' is not implemented yet."
     if ($Output -eq 'Json') {
       $result = New-RimsLocalResult -Command $Command
@@ -104,11 +104,17 @@ if ($Command -eq 'smoke') {
     exit 2
   }
 
-  $wrapper = Join-Path $scriptDir 'rims_web_e2e.ps1'
+  $wrapperName = if ($Target -eq 'android') {
+    'rims_android_smoke.ps1'
+  } else { 'rims_web_e2e.ps1' }
+  $wrapper = Join-Path $scriptDir $wrapperName
   $runtimePaths = Get-RimsRuntimePaths -ScriptDirectory $scriptDir
   $reportsDirectory = Join-Path $runtimePaths.root 'reports'
   New-Item -ItemType Directory -Force -Path $reportsDirectory | Out-Null
-  $reportPath = Join-Path $reportsDirectory 'latest-smoke.json'
+  $reportName = if ($Target -eq 'android') {
+    'latest-android-smoke.json'
+  } else { 'latest-smoke.json' }
+  $reportPath = Join-Path $reportsDirectory $reportName
   $runReportPath = Join-Path `
     $reportsDirectory `
     "smoke-$PID-$([guid]::NewGuid().ToString('N')).json"
@@ -118,6 +124,9 @@ if ($Command -eq 'smoke') {
   }
   if (-not [string]::IsNullOrWhiteSpace($BackendWorkspaceRoot)) {
     $arguments += @('-BackendWorkspaceRoot', $BackendWorkspaceRoot)
+  }
+  if ($Target -eq 'android') {
+    $arguments += @('-AndroidDevice', $AndroidDevice)
   }
   if ($IncludeDependencies) { $arguments += '-IncludeDependencies' }
 
@@ -146,7 +155,7 @@ if ($Command -eq 'smoke') {
   } elseif ($Output -eq 'Json') {
     $failure = New-RimsLocalResult -Command $Command
     $failure.errors = @(
-      'Managed Web smoke exited before producing a fresh report.',
+      "Managed $Target smoke exited before producing a fresh report.",
       (($captured | Select-Object -Last 8) -join ' ')
     )
     $failure = Complete-RimsLocalResult `
