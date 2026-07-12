@@ -125,7 +125,7 @@ if (@($fieldPlan.command | Where-Object {
 foreach ($define in @(
     '--dart-define=RIMS_E2E_FIELD_OPERATIONS=true',
     '--dart-define=RIMS_E2E_BARCODE=M9-PAGE-0001',
-    '--dart-define=RIMS_E2E_PICKED_FILE=<provider-file>'
+    '--dart-define=RIMS_E2E_PICKED_FILE=provider-file'
   )) {
   if (@($fieldPlan.command | Where-Object { $_ -eq $define }).Count -ne 1) {
     throw "M10 Android command omitted '$define'."
