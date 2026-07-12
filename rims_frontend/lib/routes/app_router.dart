@@ -176,6 +176,7 @@ final class _DraftManagerRouteState extends State<_DraftManagerRoute> {
         accountId: accountId,
         roleCode: user.roleCode,
         warehouseId: warehouse.id,
+        attachmentUserId: accountId,
       ),
     );
   }

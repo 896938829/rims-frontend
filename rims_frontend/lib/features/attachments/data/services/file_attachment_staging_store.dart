@@ -14,9 +14,12 @@ const int _manifestVersion = 1;
 const int _maximumFileSize = 10 * 1024 * 1024;
 const int _maximumAttachmentCount = 9;
 const int _thumbnailLongestSide = 512;
+const String _pendingCleanupFilename = 'pending_cleanup.json';
 
 typedef DirectoryProvider = Future<Directory> Function();
 typedef FileCopier = Future<void> Function(String source, String destination);
+typedef FileDeleter = Future<void> Function(File file);
+typedef ManifestCommitter = Future<void> Function(File temporary, File target);
 typedef ThumbnailBuilder =
     Future<String?> Function(String source, String destination);
 
@@ -27,12 +30,16 @@ final class FileAttachmentStagingStore
     required String Function() idFactory,
     DateTime Function()? clock,
     FileCopier? copyFile,
+    FileDeleter? deleteFile,
+    ManifestCommitter? commitManifest,
     ThumbnailBuilder? thumbnailBuilder,
   }) : this._(
          rootDirectory,
          idFactory,
          clock ?? DateTime.now,
          copyFile ?? _defaultCopy,
+         deleteFile ?? _deleteIfExists,
+         commitManifest ?? _defaultCommitManifest,
          thumbnailBuilder ?? buildBoundedThumbnail,
        );
 
@@ -41,6 +48,8 @@ final class FileAttachmentStagingStore
     this._idFactory,
     this._clock,
     this._copyFile,
+    this._deleteFile,
+    this._commitManifest,
     this._thumbnailBuilder,
   );
 
@@ -48,6 +57,8 @@ final class FileAttachmentStagingStore
   final String Function() _idFactory;
   final DateTime Function() _clock;
   final FileCopier _copyFile;
+  final FileDeleter _deleteFile;
+  final ManifestCommitter _commitManifest;
   final ThumbnailBuilder _thumbnailBuilder;
 
   @override
@@ -75,6 +86,7 @@ final class FileAttachmentStagingStore
         '${thumbnailsDirectory.path}${Platform.pathSeparator}$requestId.png';
 
     try {
+      await _completePendingCleanup(userDirectory);
       await stagedDirectory.create(recursive: true);
       if (await File(stagedPath).exists()) {
         return const FailureResult(
@@ -125,6 +137,7 @@ final class FileAttachmentStagingStore
     try {
       final directory = await _userDirectory(userId, create: false);
       if (!await directory.exists()) return const Success([]);
+      await _completePendingCleanup(directory);
       final items = await _readManifest(directory);
       final existing = <StagedAttachment>[];
       for (final item in items) {
@@ -158,6 +171,7 @@ final class FileAttachmentStagingStore
       if (!await directory.exists()) {
         throw const FileSystemException('Attachment owner directory missing.');
       }
+      await _completePendingCleanup(directory);
       final current = await _readManifest(directory);
       final requested = requestIds.toSet();
       if (requested.length != requestIds.length) {
@@ -251,27 +265,22 @@ final class FileAttachmentStagingStore
     required List<String> requestIds,
   }) async {
     if (requestIds.isEmpty) return const Success(null);
+    var cleanupIntentPersisted = false;
     try {
       final directory = await _userDirectory(userId, create: false);
       if (!await directory.exists()) return const Success(null);
-      final requested = requestIds.toSet();
-      final items = await _readManifest(directory);
-      final retained = <StagedAttachment>[];
-      for (final item in items) {
-        if (requested.contains(item.pending.requestId)) {
-          await _deleteIfExists(File(item.pending.stagedPath));
-          final thumbnail = item.thumbnailPath;
-          if (thumbnail != null) await _deleteIfExists(File(thumbnail));
-        } else {
-          retained.add(item);
-        }
-      }
-      await _writeManifest(directory, retained);
+      final pending = await _readPendingCleanup(directory)
+        ..addAll(requestIds);
+      await _writePendingCleanup(directory, pending);
+      cleanupIntentPersisted = true;
+      await _completePendingCleanup(directory);
       return const Success(null);
     } catch (error) {
       return FailureResult(
         LocalStorageFailure(
-          message: 'Unable to remove duplicated draft attachments.',
+          message: cleanupIntentPersisted
+              ? 'Unable to remove duplicated draft attachments. Cleanup is pending and will retry.'
+              : 'Unable to remove duplicated draft attachments. Cleanup intent could not be persisted.',
           cause: error,
         ),
       );
@@ -461,14 +470,134 @@ final class FileAttachmentStagingStore
       '${directory.path}${Platform.pathSeparator}manifest.json',
     );
     final temporary = File('${target.path}.${_idFactory()}.tmp');
+    try {
+      await temporary.writeAsString(
+        jsonEncode({
+          'version': _manifestVersion,
+          'items': items.map(_stagedToJson).toList(growable: false),
+        }),
+        flush: true,
+      );
+      await _commitManifest(temporary, target);
+    } catch (_) {
+      await _deleteIfExists(temporary);
+      rethrow;
+    }
+  }
+
+  Future<Set<String>> _readPendingCleanup(Directory directory) async {
+    final file = File(
+      '${directory.path}${Platform.pathSeparator}$_pendingCleanupFilename',
+    );
+    if (!await file.exists()) return <String>{};
+    final decoded = jsonDecode(await file.readAsString());
+    if (decoded is! Map<String, Object?> ||
+        decoded['version'] != _manifestVersion ||
+        decoded['requestIds'] is! List<Object?>) {
+      throw const FormatException('Invalid attachment cleanup intent.');
+    }
+    final requestIds = decoded['requestIds']! as List<Object?>;
+    if (requestIds.any((item) => item is! String || item.isEmpty)) {
+      throw const FormatException('Invalid attachment cleanup request ID.');
+    }
+    return requestIds.cast<String>().toSet();
+  }
+
+  Future<void> _writePendingCleanup(
+    Directory directory,
+    Set<String> requestIds,
+  ) async {
+    final target = File(
+      '${directory.path}${Platform.pathSeparator}$_pendingCleanupFilename',
+    );
+    final temporary = File('${target.path}.tmp');
     await temporary.writeAsString(
       jsonEncode({
         'version': _manifestVersion,
-        'items': items.map(_stagedToJson).toList(growable: false),
+        'requestIds': requestIds.toList(growable: false),
       }),
       flush: true,
     );
     await temporary.rename(target.path);
+  }
+
+  Future<void> _completePendingCleanup(Directory directory) async {
+    final requested = await _readPendingCleanup(directory);
+    if (requested.isEmpty) return;
+    final items = await _readManifest(directory);
+    final retained = <StagedAttachment>[];
+    for (final item in items) {
+      if (requested.contains(item.pending.requestId)) {
+        await _deleteFile(File(item.pending.stagedPath));
+        final thumbnail = item.thumbnailPath;
+        if (thumbnail != null) await _deleteFile(File(thumbnail));
+      } else {
+        retained.add(item);
+      }
+    }
+    await _deleteFilesForRequestIds(directory, requested);
+    await _writeManifest(directory, retained);
+    final verified = await _readManifest(directory);
+    if (verified.any((item) => requested.contains(item.pending.requestId))) {
+      throw const FileSystemException(
+        'Attachment cleanup manifest verification failed.',
+      );
+    }
+    if (await _hasFilesForRequestIds(directory, requested)) {
+      throw const FileSystemException(
+        'Attachment cleanup file verification failed.',
+      );
+    }
+    await _deleteIfExists(
+      File(
+        '${directory.path}${Platform.pathSeparator}$_pendingCleanupFilename',
+      ),
+    );
+  }
+
+  Future<void> _deleteFilesForRequestIds(
+    Directory directory,
+    Set<String> requestIds,
+  ) async {
+    for (final name in const ['staged', 'thumbnails']) {
+      final files = Directory(
+        '${directory.path}${Platform.pathSeparator}$name',
+      );
+      if (!await files.exists()) continue;
+      await for (final entity in files.list()) {
+        if (entity is File &&
+            requestIds.any(
+              (requestId) =>
+                  _filename(entity.path) == requestId ||
+                  _filename(entity.path).startsWith('$requestId.'),
+            )) {
+          await _deleteFile(entity);
+        }
+      }
+    }
+  }
+
+  Future<bool> _hasFilesForRequestIds(
+    Directory directory,
+    Set<String> requestIds,
+  ) async {
+    for (final name in const ['staged', 'thumbnails']) {
+      final files = Directory(
+        '${directory.path}${Platform.pathSeparator}$name',
+      );
+      if (!await files.exists()) continue;
+      await for (final entity in files.list()) {
+        final filename = _filename(entity.path);
+        if (entity is File &&
+            requestIds.any(
+              (requestId) =>
+                  filename == requestId || filename.startsWith('$requestId.'),
+            )) {
+          return true;
+        }
+      }
+    }
+    return false;
   }
 }
 
@@ -571,9 +700,15 @@ Future<void> _defaultCopy(String source, String destination) async {
   await File(source).copy(destination);
 }
 
+Future<void> _defaultCommitManifest(File temporary, File target) async {
+  await temporary.rename(target.path);
+}
+
 Future<void> _deleteIfExists(File file) async {
   if (await file.exists()) await file.delete();
 }
+
+String _filename(String path) => path.split(Platform.pathSeparator).last;
 
 Future<void> _deleteFilesOlderThan(Directory directory, DateTime cutoff) async {
   if (!await directory.exists()) return;

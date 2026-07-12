@@ -55,9 +55,10 @@ void main() {
     expect(copy?.version, 1);
     expect(repository.byId('copy-id')?.payload['remark'], 'original remark');
     expect(repository.byId('copy-id')?.attachmentStagingIds, ['copy-file']);
-    expect(staging.requests.single.$1, 'original');
-    expect(staging.requests.single.$2, 'copy-id');
-    expect(staging.requests.single.$3, ['original-file']);
+    expect(staging.requests.single.$1, '7');
+    expect(staging.requests.single.$2, 'original');
+    expect(staging.requests.single.$3, 'copy-id');
+    expect(staging.requests.single.$4, ['original-file']);
     expect(repository.byId('original')?.payload['remark'], 'renamed');
   });
 
@@ -125,6 +126,106 @@ void main() {
 
       expect(viewModel.drafts.map((item) => item.draft.id), ['account-8']);
       expect(await viewModel.open('account-7'), isNull);
+    },
+  );
+
+  test(
+    'account switch duplicates attachments only in the new account',
+    () async {
+      final repository = _MemoryDraftRepository([
+        _draft('account-7', attachmentIds: ['file-7']),
+        _draft('account-8', accountId: '8', attachmentIds: ['file-8']),
+      ]);
+      final staging = _FakeDraftAttachmentStagingStore();
+      final viewModel = DraftsViewModel(
+        repository: repository,
+        accountId: '7',
+        roleCode: 'operator',
+        warehouseId: 11,
+        attachmentStagingStore: staging,
+        attachmentUserId: '7',
+        draftIdFactory: () => 'copy-8',
+      );
+
+      await viewModel.updateContext(
+        accountId: '8',
+        roleCode: 'operator',
+        warehouseId: 11,
+        attachmentUserId: '8',
+      );
+      final copy = await viewModel.duplicate('account-8');
+
+      expect(copy?.accountId, '8');
+      expect(staging.requests.map((request) => request.$1), ['8']);
+      expect(staging.requests.single.$2, 'account-8');
+      expect(staging.requests.single.$4, ['file-8']);
+    },
+  );
+
+  test('save and attachment rollback failures are both visible', () async {
+    final repository = _MemoryDraftRepository([
+      _draft('original', attachmentIds: ['original-file']),
+    ], failingDraftId: 'copy-id');
+    final staging = _FakeDraftAttachmentStagingStore(
+      removeResult: const FailureResult(
+        LocalStorageFailure(message: 'cleanup failed; retry pending'),
+      ),
+    );
+    final viewModel = DraftsViewModel(
+      repository: repository,
+      accountId: '7',
+      roleCode: 'operator',
+      warehouseId: 11,
+      attachmentStagingStore: staging,
+      attachmentUserId: '7',
+      draftIdFactory: () => 'copy-id',
+    );
+
+    expect(await viewModel.duplicate('original'), isNull);
+
+    expect(
+      viewModel.errorMessage,
+      'copy draft failed; attachment cleanup failed: cleanup failed; retry pending',
+    );
+  });
+
+  test(
+    'late duplicate rollback remains scoped to its starting account',
+    () async {
+      final delayedSave = Completer<Result<DocumentDraft>>();
+      final repository = _MemoryDraftRepository([
+        _draft('account-7', attachmentIds: ['file-7']),
+        _draft('account-8', accountId: '8'),
+      ], delayedSave: delayedSave);
+      final staging = _FakeDraftAttachmentStagingStore();
+      final viewModel = DraftsViewModel(
+        repository: repository,
+        accountId: '7',
+        roleCode: 'operator',
+        warehouseId: 11,
+        attachmentStagingStore: staging,
+        attachmentUserId: '7',
+        draftIdFactory: () => 'copy-7',
+      );
+
+      final duplicate = viewModel.duplicate('account-7');
+      while (staging.requests.isEmpty) {
+        await Future<void>.delayed(Duration.zero);
+      }
+      await viewModel.updateContext(
+        accountId: '8',
+        roleCode: 'operator',
+        warehouseId: 11,
+        attachmentUserId: '8',
+      );
+      delayedSave.complete(
+        const FailureResult(LocalStorageFailure(message: 'late save failed')),
+      );
+      await duplicate;
+
+      expect(staging.removalRequests.single.$1, '7');
+      expect(staging.removalRequests.single.$2, ['copy-file']);
+      expect(viewModel.drafts.map((item) => item.draft.accountId), ['8']);
     },
   );
 
@@ -204,11 +305,15 @@ DocumentDraft _draft(
 }
 
 final class _MemoryDraftRepository implements DocumentDraftRepository {
-  _MemoryDraftRepository(List<DocumentDraft> drafts, {this.failingDraftId})
-    : _drafts = {for (final draft in drafts) draft.id: draft};
+  _MemoryDraftRepository(
+    List<DocumentDraft> drafts, {
+    this.failingDraftId,
+    this.delayedSave,
+  }) : _drafts = {for (final draft in drafts) draft.id: draft};
 
   final Map<String, DocumentDraft> _drafts;
   final String? failingDraftId;
+  final Completer<Result<DocumentDraft>>? delayedSave;
 
   DocumentDraft? byId(String id) => _drafts[id];
 
@@ -217,6 +322,7 @@ final class _MemoryDraftRepository implements DocumentDraftRepository {
     DocumentDraft draft, {
     required int expectedVersion,
   }) async {
+    if (delayedSave case final completer?) return completer.future;
     if (draft.id == failingDraftId) {
       return const FailureResult(
         LocalStorageFailure(message: 'copy draft failed'),
@@ -255,8 +361,12 @@ final class _MemoryDraftRepository implements DocumentDraftRepository {
 
 final class _FakeDraftAttachmentStagingStore
     implements DraftAttachmentStagingStore {
-  final List<(String, String, List<String>)> requests = [];
+  _FakeDraftAttachmentStagingStore({this.removeResult = const Success(null)});
+
+  final Result<void> removeResult;
+  final List<(String, String, String, List<String>)> requests = [];
   final List<String> removedRequestIds = [];
+  final List<(String, List<String>)> removalRequests = [];
 
   @override
   Future<Result<List<StagedAttachment>>> duplicateDraftAttachments({
@@ -265,7 +375,7 @@ final class _FakeDraftAttachmentStagingStore
     required String targetDraftId,
     required List<String> requestIds,
   }) async {
-    requests.add((sourceDraftId, targetDraftId, requestIds));
+    requests.add((userId, sourceDraftId, targetDraftId, requestIds));
     return Success([
       StagedAttachment(
         pending: PendingAttachment(
@@ -288,7 +398,8 @@ final class _FakeDraftAttachmentStagingStore
     required List<String> requestIds,
   }) async {
     removedRequestIds.addAll(requestIds);
-    return const Success(null);
+    removalRequests.add((userId, requestIds));
+    return removeResult;
   }
 }
 

@@ -22,6 +22,8 @@ void main() {
 
   FileAttachmentStagingStore store({
     FileCopier? copyFile,
+    FileDeleter? deleteFile,
+    ManifestCommitter? commitManifest,
     DateTime? now,
     String Function()? idFactory,
   }) {
@@ -30,6 +32,8 @@ void main() {
       idFactory: idFactory ?? () => 'request-1',
       clock: () => now ?? DateTime.utc(2026, 7, 13),
       copyFile: copyFile,
+      deleteFile: deleteFile,
+      commitManifest: commitManifest,
       thumbnailBuilder: (sourcePath, destinationPath) async {
         await File(destinationPath).writeAsBytes([9, 8, 7]);
         return destinationPath;
@@ -228,6 +232,171 @@ void main() {
           );
         },
         failure: (failure) => fail(failure.message),
+      );
+    },
+  );
+
+  test(
+    'failed cleanup persists intent and a rebuilt store removes orphans',
+    () async {
+      final ids = [
+        'source-request',
+        'manifest-source',
+        'copy-request',
+        'manifest-copy',
+        'manifest-recovery',
+      ].iterator;
+      var failCleanup = true;
+      final staging = store(
+        idFactory: () {
+          ids.moveNext();
+          return ids.current;
+        },
+        deleteFile: (file) async {
+          if (failCleanup && file.path.contains('copy-request')) {
+            failCleanup = false;
+            throw const FileSystemException('injected cleanup failure');
+          }
+          if (await file.exists()) await file.delete();
+        },
+      );
+      final sourceResult = await staging.stage(
+        userId: '42',
+        binding: AttachmentBinding.documentDraft('draft-source'),
+        selection: selection(),
+        existingCount: 0,
+      );
+      final sourceItem = sourceResult.when(
+        success: (item) => item,
+        failure: (failure) => throw TestFailure(failure.message),
+      );
+      final duplicateResult = await staging.duplicateDraftAttachments(
+        userId: '42',
+        sourceDraftId: 'draft-source',
+        targetDraftId: 'draft-copy',
+        requestIds: [sourceItem.pending.requestId],
+      );
+      final copyItem = duplicateResult.when(
+        success: (items) => items.single,
+        failure: (failure) => throw TestFailure(failure.message),
+      );
+
+      final removal = await staging.removeStagedAttachments(
+        userId: '42',
+        requestIds: [copyItem.pending.requestId],
+      );
+
+      expect(removal.isFailure, isTrue);
+      expect(
+        root
+            .listSync(recursive: true)
+            .whereType<File>()
+            .where((file) => file.path.endsWith('pending_cleanup.json')),
+        hasLength(1),
+      );
+      expect(File(copyItem.pending.stagedPath).existsSync(), isTrue);
+
+      final recovered = await store().recoverForUser('42');
+      recovered.when(
+        success: (items) {
+          expect(items.map((item) => item.pending.requestId), [
+            sourceItem.pending.requestId,
+          ]);
+        },
+        failure: (failure) => fail(failure.message),
+      );
+      expect(File(copyItem.pending.stagedPath).existsSync(), isFalse);
+      expect(
+        root
+            .listSync(recursive: true)
+            .whereType<File>()
+            .where((file) => file.path.endsWith('pending_cleanup.json')),
+        isEmpty,
+      );
+    },
+  );
+
+  test(
+    'manifest cleanup failure is retried without temporary orphans',
+    () async {
+      final ids = [
+        'source-request',
+        'manifest-source',
+        'copy-request',
+        'manifest-copy',
+        'manifest-cleanup',
+      ].iterator;
+      var manifestCommits = 0;
+      final staging = store(
+        idFactory: () {
+          ids.moveNext();
+          return ids.current;
+        },
+        commitManifest: (temporary, target) async {
+          manifestCommits += 1;
+          if (manifestCommits == 3) {
+            throw const FileSystemException('injected manifest failure');
+          }
+          await temporary.rename(target.path);
+        },
+      );
+      final source =
+          (await staging.stage(
+            userId: '42',
+            binding: AttachmentBinding.documentDraft('draft-source'),
+            selection: selection(),
+            existingCount: 0,
+          )).when(
+            success: (item) => item,
+            failure: (failure) => throw TestFailure(failure.message),
+          );
+      final copy =
+          (await staging.duplicateDraftAttachments(
+            userId: '42',
+            sourceDraftId: 'draft-source',
+            targetDraftId: 'draft-copy',
+            requestIds: [source.pending.requestId],
+          )).when(
+            success: (items) => items.single,
+            failure: (failure) => throw TestFailure(failure.message),
+          );
+
+      final removal = await staging.removeStagedAttachments(
+        userId: '42',
+        requestIds: [copy.pending.requestId],
+      );
+
+      expect(removal.isFailure, isTrue);
+      expect(
+        root
+            .listSync(recursive: true)
+            .whereType<File>()
+            .where((file) => file.path.endsWith('pending_cleanup.json')),
+        hasLength(1),
+      );
+      expect(
+        root
+            .listSync(recursive: true)
+            .whereType<File>()
+            .where((file) => file.path.endsWith('.tmp')),
+        isEmpty,
+      );
+
+      final recovered = await store().recoverForUser('42');
+      recovered.when(
+        success: (items) => expect(
+          items.map((item) => item.pending.requestId),
+          [source.pending.requestId],
+        ),
+        failure: (failure) => fail(failure.message),
+      );
+      expect(File(copy.pending.stagedPath).existsSync(), isFalse);
+      expect(
+        root
+            .listSync(recursive: true)
+            .whereType<File>()
+            .where((file) => file.path.endsWith('pending_cleanup.json')),
+        isEmpty,
       );
     },
   );

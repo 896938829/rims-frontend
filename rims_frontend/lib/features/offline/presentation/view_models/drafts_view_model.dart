@@ -34,7 +34,7 @@ final class DraftsViewModel extends ChangeNotifier {
   final String Function() draftIdFactory;
   final DateTime Function() now;
   final DraftAttachmentStagingStore? attachmentStagingStore;
-  final String? attachmentUserId;
+  String? attachmentUserId;
   String accountId;
   String roleCode;
   int warehouseId;
@@ -90,10 +90,13 @@ final class DraftsViewModel extends ChangeNotifier {
     required String accountId,
     required String roleCode,
     required int warehouseId,
+    String? attachmentUserId,
   }) async {
     this.accountId = accountId;
     this.roleCode = roleCode;
     this.warehouseId = warehouseId;
+    this.attachmentUserId =
+        attachmentUserId ?? (attachmentStagingStore == null ? null : accountId);
     _drafts = const [];
     await load();
   }
@@ -103,14 +106,21 @@ final class DraftsViewModel extends ChangeNotifier {
   }
 
   Future<DocumentDraft?> duplicate(String draftId) async {
-    final source = await open(draftId);
+    final operationAccountId = accountId;
+    final operationRoleCode = roleCode;
+    final operationAttachmentUserId = attachmentUserId;
+    final source = await repository.load(
+      accountId: operationAccountId,
+      draftId: draftId,
+    );
     if (source == null) return null;
+    if (accountId != operationAccountId) return null;
     final timestamp = now().toUtc();
     final targetDraftId = draftIdFactory();
     var duplicatedAttachmentIds = const <String>[];
     if (source.attachmentStagingIds.isNotEmpty) {
       final stagingStore = attachmentStagingStore;
-      final userId = attachmentUserId;
+      final userId = operationAttachmentUserId;
       if (stagingStore == null || userId == null) {
         _errorMessage = 'Draft attachment copy is unavailable.';
         _notify();
@@ -135,10 +145,10 @@ final class DraftsViewModel extends ChangeNotifier {
     }
     final duplicate = DocumentDraft(
       id: targetDraftId,
-      accountId: accountId,
+      accountId: operationAccountId,
       warehouseId: source.warehouseId,
       docType: source.docType,
-      observedRoleCode: roleCode,
+      observedRoleCode: operationRoleCode,
       payload: source.payload,
       attachmentStagingIds: duplicatedAttachmentIds,
       createdAt: timestamp,
@@ -147,21 +157,28 @@ final class DraftsViewModel extends ChangeNotifier {
     final result = await repository.save(duplicate, expectedVersion: 0);
     switch (result) {
       case Success(:final data):
-        _replaceOrAdd(data);
+        if (accountId == operationAccountId) _replaceOrAdd(data);
         return data;
       case FailureResult(:final failure):
+        var errorMessage = failure.message;
         final stagingStore = attachmentStagingStore;
-        final userId = attachmentUserId;
+        final userId = operationAttachmentUserId;
         if (stagingStore != null &&
             userId != null &&
             duplicatedAttachmentIds.isNotEmpty) {
-          await stagingStore.removeStagedAttachments(
+          final cleanup = await stagingStore.removeStagedAttachments(
             userId: userId,
             requestIds: duplicatedAttachmentIds,
           );
+          if (cleanup case FailureResult(:final failure)) {
+            errorMessage =
+                '$errorMessage; attachment cleanup failed: ${failure.message}';
+          }
         }
-        _errorMessage = failure.message;
-        _notify();
+        if (accountId == operationAccountId) {
+          _errorMessage = errorMessage;
+          _notify();
+        }
         return null;
     }
   }
