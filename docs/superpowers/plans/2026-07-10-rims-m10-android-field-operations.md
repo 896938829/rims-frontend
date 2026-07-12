@@ -227,7 +227,7 @@ test: add deterministic M10 field fixtures
 - Modify: `rims_frontend/lib/features/inventory/data/datasources/inventory_remote_datasource.dart`
 - Modify: `rims_frontend/test/features/inventory/inventory_remote_datasource_test.dart`
 
-- [ ] **Step 1: Write failing backend tests for `GET /api/v1/inventory/barcode/:barcode`.**
+- [x] **Step 1: Write failing backend tests for `GET /api/v1/inventory/barcode/:barcode`.**
 
 The route must require authentication and warehouse scope, return the inventory
 row plus active product data for the current warehouse, return not-found for an
@@ -235,22 +235,22 @@ unknown barcode, return a safe business-state failure for a disabled product or
 for a known product absent from the current warehouse, and never return another
 warehouse's quantity.
 
-- [ ] **Step 2: Write a failing frontend DataSource test requiring the new endpoint and strict inventory-shaped response.**
+- [x] **Step 2: Write a failing frontend DataSource test requiring the new endpoint and strict inventory-shaped response.**
 
-- [ ] **Step 3: Run focused tests and verify RED.**
+- [x] **Step 3: Run focused tests and verify RED.**
 
 ```powershell
 wsl.exe -e bash -lc 'export PATH="$HOME/local/go/bin:$PATH"; go test ./internal/modules/product -run Barcode -count=1'
 flutter test --no-pub test/features/inventory/inventory_remote_datasource_test.dart
 ```
 
-- [ ] **Step 4: Implement the minimal repository/service/handler route and switch only `InventoryRepository.findProductByBarcode` to it.**
+- [x] **Step 4: Implement the minimal repository/service/handler route and switch only `InventoryRepository.findProductByBarcode` to it.**
 
 Keep `/products/barcode/:barcode` unchanged for global catalog/admin lookup.
 Wrong-batch remains an optional `ScanWorkflowConstraint` until a batch module is
 activated; it must not be simulated as a server field that does not exist.
 
-- [ ] **Step 5: Run full product/inventory tests and commit frontend and backend changes.**
+- [x] **Step 5: Run full product/inventory tests and commit frontend and backend changes.**
 
 ```text
 feat: add warehouse-scoped barcode lookup

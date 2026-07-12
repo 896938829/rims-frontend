@@ -29,6 +29,9 @@ abstract final class ApiEndpoints {
   static const String inventory = '/inventory';
   static const String inventoryAlerts = '/inventory/alerts';
   static String inventoryItem(int id) => '$inventory/$id';
+  static String inventoryByBarcode(String barcode) {
+    return '$inventory/barcode/${Uri.encodeComponent(barcode)}';
+  }
 
   static const String nonStandardInventory = '/non-std-inventory';
   static String productByBarcode(String barcode) {

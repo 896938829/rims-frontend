@@ -26,14 +26,6 @@ final class InventoryItemModel {
         _readString(json, const ['sku', 'skuCode', 'productCode', 'barcode']) ??
         _readString(product, const ['sku', 'skuCode', 'code', 'barcode']) ??
         '';
-    final availableQuantity =
-        _readInt(json, const [
-          'availableQuantity',
-          'availableQty',
-          'available',
-          'quantity',
-        ]) ??
-        0;
     final stockQuantity =
         _readInt(json, const [
           'stockQuantity',
@@ -42,7 +34,16 @@ final class InventoryItemModel {
           'totalQuantity',
           'quantity',
         ]) ??
-        availableQuantity;
+        0;
+    final lockedQuantity =
+        _readInt(json, const ['lockedQuantity', 'lockedQty', 'locked']) ?? 0;
+    final availableQuantity =
+        _readInt(json, const [
+          'availableQuantity',
+          'availableQty',
+          'available',
+        ]) ??
+        (stockQuantity - lockedQuantity).clamp(0, stockQuantity).toInt();
     final rawStatus =
         _readString(json, const ['statusLabel', 'statusName', 'stateName']) ??
         _readString(product, const ['statusLabel', 'statusName']) ??

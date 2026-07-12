@@ -73,10 +73,10 @@ final class ApiInventoryRemoteDataSource implements InventoryRemoteDataSource {
     String barcode,
   ) async {
     final result = await _apiClient.get<dynamic>(
-      ApiEndpoints.productByBarcode(barcode.trim()),
+      ApiEndpoints.inventoryByBarcode(barcode.trim()),
     );
 
-    return _mapEnvelope(result, _parseProductItem);
+    return _mapEnvelope(result, _parseInventoryItem);
   }
 
   @override
@@ -156,10 +156,6 @@ final class ApiInventoryRemoteDataSource implements InventoryRemoteDataSource {
       },
       failure: FailureResult<T>.new,
     );
-  }
-
-  InventoryItemModel _parseProductItem(Object? data) {
-    return InventoryItemModel.fromProductJson(_requiredMap(data, 'product'));
   }
 
   InventoryItemModel _parseInventoryItem(Object? data) {

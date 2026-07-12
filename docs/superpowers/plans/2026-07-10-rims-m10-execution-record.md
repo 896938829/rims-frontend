@@ -42,9 +42,9 @@ runtime ownership, cleanup, and business effects have been inspected.
 | Torch, zoom, tap focus | 6, 16 | adapter tests and emulator controls | pending |
 | Sound and vibration | 6 | independent feedback-capability tests | pending |
 | Unsupported-code feedback | 5, 6 | format tests and visible Android state | pending |
-| Unknown/disabled/wrong-warehouse errors | 2, 3, 5, 16 | backend contract plus operator journey | pending |
+| Unknown/disabled/wrong-warehouse errors | 2, 3, 5, 16 | backend contract plus operator journey | backend contract verified; Android journey pending |
 | Wrong-batch constraint | 5 | domain constraint test; inactive until batch module exists | pending |
-| Scan-to-search | 3, 7 | authoritative current-warehouse detail | pending |
+| Scan-to-search | 3, 7 | authoritative current-warehouse detail | authoritative lookup verified; UI journey pending |
 | Scan-to-inbound/outbound | 14, 16 | multi-line stock and transaction effects | pending |
 | Scan-to-return/transfer/stocktake/conversion | 14, 16 | request shape, permission, and lifecycle tests | pending |
 | Bounded offline scan identity | 5 | schema/TTL/warehouse/logout tests | pending |
@@ -104,6 +104,20 @@ runtime ownership, cleanup, and business effects have been inspected.
 | Provider reset probe | owned file removed, provider recreated, sibling preserved |
 | Backend full tests | `go test ./...` passed |
 | Seed idempotency/reset | passed with fingerprint `45|1|1|2|90|25|15|15|15` |
+
+## Task 3 Barcode Lookup Evidence
+
+| Probe | Observed result |
+| --- | --- |
+| Backend RED | focused test failed because `GetInventoryByBarcode` did not exist |
+| Frontend RED | focused test observed the legacy `/products/barcode/:barcode` request |
+| Focused tests | backend barcode suite and 10 frontend DataSource tests passed |
+| Full regression | `go test ./... -count=1`, Flutter analysis, and all 398 Flutter tests passed |
+| Active WH001 lookup | `M10-ACTIVE-001` returned HTTP 200/code 0, inventory 6753, product `M9-PAGE-0001`, quantity 2 |
+| Disabled product | `M10-DISABLED-001` returned HTTP 422/code 20002 with no inventory payload |
+| Warehouse isolation | `M10-WH001-ONLY-001` returned quantity 2 in WH001 and HTTP 422/code 20002 in `M9-WH-02` |
+| Unknown barcode | `M10-UNKNOWN-001` returned HTTP 404/code 10004 with no inventory payload |
+| Runtime cleanup | exactly owned backend stopped; pre-existing healthy PostgreSQL remained user-managed |
 
 ## Scanner Scenario Evidence
 

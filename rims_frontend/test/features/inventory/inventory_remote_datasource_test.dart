@@ -12,7 +12,7 @@ void main() {
   test('findProductByBarcode loads backend barcode endpoint', () async {
     final adapter = _CapturingAdapter(
       body:
-          '{"code":0,"message":"ok","data":{"id":10,"name":"矿泉水 550ml","code":"SKU-WA-550","barcode":"6901234567890","imageUrl":""}}',
+          '{"code":0,"message":"ok","data":{"id":17,"warehouseId":1,"productId":10,"quantity":8,"lockedQty":2,"status":1,"product":{"id":10,"name":"矿泉水 550ml","code":"SKU-WA-550","barcode":"6901234567890","imageUrl":"","status":1}}}',
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiInventoryRemoteDataSource(
@@ -22,12 +22,15 @@ void main() {
     final result = await dataSource.findProductByBarcode('6901234567890');
 
     expect(result.isSuccess, isTrue);
-    expect(adapter.lastPath, '/products/barcode/6901234567890');
+    expect(adapter.lastPath, '/inventory/barcode/6901234567890');
     result.when(
       success: (item) {
+        expect(item.id, 17);
         expect(item.productId, 10);
         expect(item.productName, '矿泉水 550ml');
         expect(item.sku, 'SKU-WA-550');
+        expect(item.stockQuantity, 8);
+        expect(item.availableQuantity, 6);
       },
       failure: (failure) => fail(failure.message),
     );
@@ -49,10 +52,10 @@ void main() {
       expect(result.isFailure, isTrue);
       result.when(
         success: (_) => fail(
-          'findProductByBarcode should fail without backend product data',
+          'findProductByBarcode should fail without backend inventory data',
         ),
         failure: (failure) =>
-            expect(failure.message, 'Invalid product response'),
+            expect(failure.message, 'Invalid inventory response'),
       );
     },
   );
