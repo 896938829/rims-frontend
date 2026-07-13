@@ -1823,7 +1823,13 @@ void main() {
         queued.map((operation) => operation.kind),
         isNot(contains(OutboxOperationKind.documentCreate)),
       );
-      expect(queued.first.payload['documentId'], _draftSalesDocument.id);
+      expect(queued.first.payload, {
+        'version': 1,
+        'documentId': _draftSalesDocument.id,
+        'expectedDocType': _draftSalesDocument.docType,
+        'expectedStatus': _draftSalesDocument.status,
+        'lifecycleIntent': 'document_complete',
+      });
       expect(queued.last.payload, {'version': 1});
       expect(queued.last.idempotencyKey, repository.completedRequestIds.single);
 
@@ -1852,6 +1858,42 @@ void main() {
       expect((await outbox.ready('7')).successData.map((item) => item.kind), [
         OutboxOperationKind.documentComplete,
       ]);
+    },
+  );
+
+  test(
+    'existing stocktake settle queues a verified reference snapshot',
+    () async {
+      final repository = _FakeDocumentsRepository(
+        settleResult: const FailureResult<void>(TransportUnknownFailure()),
+      );
+      final outbox = MemoryOutboxRepository(stateMachine: OutboxStateMachine());
+      final viewModel = _draftEnabledViewModel(
+        drafts: _FakeDocumentDraftRepository(),
+        documents: repository,
+        outbox: outbox,
+      );
+
+      expect(
+        await viewModel.settleStocktakeDocument(_confirmedStocktakeDocument),
+        isFalse,
+      );
+      expect(await viewModel.confirmOfflineSubmission(), isTrue);
+
+      final queued = (await outbox.list('7')).successData;
+      expect(queued.map((operation) => operation.kind), [
+        OutboxOperationKind.documentReference,
+        OutboxOperationKind.stocktakeSettle,
+      ]);
+      expect(queued.first.payload, {
+        'version': 1,
+        'documentId': _confirmedStocktakeDocument.id,
+        'expectedDocType': 5,
+        'expectedStatus': '差异已确认',
+        'lifecycleIntent': 'stocktake_settle',
+      });
+      expect(queued.last.requiresStatusProbe, isTrue);
+      expect(queued.last.idempotencyKey, repository.settledRequestIds.single);
     },
   );
 
@@ -3639,6 +3681,7 @@ final class _FakeDocumentsRepository
   int? completedDocumentId;
   int? confirmedDocumentId;
   int? settledDocumentId;
+  final List<String> settledRequestIds = [];
   int? detailDocumentId;
   int listCallCount = 0;
   int _transactionResultCallCount = 0;
@@ -3719,6 +3762,7 @@ final class _FakeDocumentsRepository
   @override
   Future<Result<void>> settleDocument(int id, {String? requestId}) async {
     settledDocumentId = id;
+    settledRequestIds.add(requestId ?? '');
     return settleResult;
   }
 

@@ -9,11 +9,16 @@ import 'package:rims_frontend/features/documents/data/datasources/documents_remo
 import 'package:rims_frontend/features/documents/data/models/document_models.dart';
 import 'package:rims_frontend/features/documents/domain/entities/document_data.dart';
 import 'package:rims_frontend/features/offline/data/services/document_outbox_handler.dart';
+import 'package:rims_frontend/features/offline/data/datasources/operation_status_remote_datasource.dart';
+import 'package:rims_frontend/features/offline/data/repositories/memory_outbox_repository.dart';
 import 'package:rims_frontend/features/offline/domain/entities/document_draft.dart';
+import 'package:rims_frontend/features/offline/domain/entities/network_reachability.dart';
 import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.dart';
 import 'package:rims_frontend/features/offline/domain/entities/outbox_graph.dart';
 import 'package:rims_frontend/features/offline/domain/services/outbox_executor.dart';
 import 'package:rims_frontend/features/offline/domain/repositories/document_draft_repository.dart';
+import 'package:rims_frontend/features/offline/domain/services/network_status_service.dart';
+import 'package:rims_frontend/features/offline/domain/services/outbox_state_machine.dart';
 
 void main() {
   late _DocumentsDataSource dataSource;
@@ -152,6 +157,253 @@ void main() {
     await Future<void>.delayed(Duration.zero);
     expect(events.whereType<GlobalRefreshRequestedEvent>(), isEmpty);
   });
+
+  test(
+    'settle reference verifies authoritative stocktake state and emits exact v1 output',
+    () async {
+      dataSource.detailResult = Success(_detail(docType: 5, status: '差异已确认'));
+      final handler = DocumentOutboxHandler(
+        kind: OutboxOperationKind.documentReference,
+        remoteDataSource: dataSource,
+        stagingStore: stagingStore,
+        draftRepository: draftRepository,
+        eventBus: eventBus,
+      );
+
+      final result = await handler.execute(
+        _operation(
+          kind: OutboxOperationKind.documentReference,
+          operationId: 'reference-settle-91',
+          idempotencyKey: 'settle-request-1.document_reference',
+          payload: const {
+            'version': 1,
+            'documentId': 91,
+            'expectedDocType': 5,
+            'expectedStatus': '差异已确认',
+            'lifecycleIntent': 'stocktake_settle',
+          },
+        ),
+      );
+
+      expect(result, isA<Success<OutboxHandlerSuccess>>());
+      final success = (result as Success<OutboxHandlerSuccess>).data;
+      expect(success.output.version, 1);
+      expect(success.output.data, {
+        'operationKind': 'stocktake_settle_reference',
+        'documentId': 91,
+      });
+      expect(dataSource.detailIds, [91]);
+      expect(dataSource.events, ['detail:91']);
+    },
+  );
+
+  test(
+    'settle reference rejects wrong doc type or changed state without settle',
+    () async {
+      final handler = DocumentOutboxHandler(
+        kind: OutboxOperationKind.documentReference,
+        remoteDataSource: dataSource,
+        stagingStore: stagingStore,
+        draftRepository: draftRepository,
+        eventBus: eventBus,
+      );
+      final operation = _operation(
+        kind: OutboxOperationKind.documentReference,
+        operationId: 'reference-settle-91',
+        idempotencyKey: 'settle-request-1.document_reference',
+        payload: const {
+          'version': 1,
+          'documentId': 91,
+          'expectedDocType': 5,
+          'expectedStatus': '差异已确认',
+          'lifecycleIntent': 'stocktake_settle',
+        },
+      );
+
+      dataSource.detailResult = Success(_detail(docType: 2, status: '差异已确认'));
+      final wrongType = await handler.execute(operation);
+      expect(wrongType.failureOrNull, isA<ValidationFailure>());
+
+      dataSource.detailResult = Success(_detail(docType: 5, status: '盘点中'));
+      final wrongState = await handler.execute(operation);
+      expect(wrongState.failureOrNull, isA<ConflictFailure>());
+
+      expect(dataSource.detailIds, [91, 91]);
+      expect(
+        dataSource.events.where((event) => event.startsWith('settle:')),
+        isEmpty,
+      );
+    },
+  );
+
+  test(
+    'inconsistent settle reference is rejected before detail network',
+    () async {
+      final handler = DocumentOutboxHandler(
+        kind: OutboxOperationKind.documentReference,
+        remoteDataSource: dataSource,
+        stagingStore: stagingStore,
+        draftRepository: draftRepository,
+        eventBus: eventBus,
+      );
+
+      final result = await handler.execute(
+        _operation(
+          kind: OutboxOperationKind.documentReference,
+          operationId: 'invalid-reference-settle-91',
+          idempotencyKey: 'settle-request-1.document_reference',
+          payload: const {
+            'version': 1,
+            'documentId': 91,
+            'expectedDocType': 2,
+            'expectedStatus': '差异已确认',
+            'lifecycleIntent': 'stocktake_settle',
+          },
+        ),
+      );
+
+      expect(result.failureOrNull, isA<ValidationFailure>());
+      expect(dataSource.detailIds, isEmpty);
+      expect(dataSource.events, isEmpty);
+    },
+  );
+
+  test(
+    'ordinary lifecycle references keep intent-specific output shapes',
+    () async {
+      final handler = DocumentOutboxHandler(
+        kind: OutboxOperationKind.documentReference,
+        remoteDataSource: dataSource,
+        stagingStore: stagingStore,
+        draftRepository: draftRepository,
+        eventBus: eventBus,
+      );
+      for (final testCase in [
+        (
+          intent: 'document_complete',
+          docType: 2,
+          status: '待提交',
+          marker: 'document_complete_reference',
+        ),
+        (
+          intent: 'stocktake_confirm',
+          docType: 5,
+          status: '盘点中',
+          marker: 'stocktake_confirm_reference',
+        ),
+      ]) {
+        dataSource.detailResult = Success(
+          _detail(docType: testCase.docType, status: testCase.status),
+        );
+        final result = await handler.execute(
+          _operation(
+            kind: OutboxOperationKind.documentReference,
+            operationId: 'reference-${testCase.intent}',
+            idempotencyKey: '${testCase.intent}.document_reference',
+            payload: {
+              'version': 1,
+              'documentId': 91,
+              'expectedDocType': testCase.docType,
+              'expectedStatus': testCase.status,
+              'lifecycleIntent': testCase.intent,
+            },
+          ),
+        );
+        expect(result, isA<Success<OutboxHandlerSuccess>>());
+        expect((result as Success<OutboxHandlerSuccess>).data.output.data, {
+          'operationKind': testCase.marker,
+          'documentId': 91,
+        });
+      }
+    },
+  );
+
+  test(
+    'executor probes unknown settle before verified reference and replays same key',
+    () async {
+      dataSource.detailResult = Success(_detail(docType: 5, status: '差异已确认'));
+      final repository = MemoryOutboxRepository(
+        stateMachine: OutboxStateMachine(),
+      );
+      await _enqueueReviewedSettleGraph(repository, requiresStatusProbe: true);
+      final executor = _settleExecutor(
+        repository: repository,
+        dataSource: dataSource,
+        stagingStore: stagingStore,
+        draftRepository: draftRepository,
+        eventBus: eventBus,
+        statusDataSource: _AbsentStatus(dataSource.events),
+      );
+
+      final report = await executor.execute(_settleReview);
+
+      expect(report.failure, isNull);
+      expect(report.succeededOperationIds, [
+        'reference-settle-91',
+        'settle-91',
+      ]);
+      expect(dataSource.events, [
+        'status:settle-request-1',
+        'detail:91',
+        'settle:91',
+      ]);
+      expect(dataSource.lifecycleRequestIds, ['settle-request-1']);
+    },
+  );
+
+  test(
+    'executor blocks settle when authoritative stocktake type or state changed',
+    () async {
+      for (final testCase in [
+        (
+          detail: _detail(docType: 2, status: '差异已确认'),
+          failure: isA<ValidationFailure>(),
+        ),
+        (
+          detail: _detail(docType: 5, status: '盘点中'),
+          failure: isA<ConflictFailure>(),
+        ),
+      ]) {
+        dataSource
+          ..events.clear()
+          ..detailIds.clear()
+          ..lifecycleRequestIds.clear()
+          ..detailResult = Success(testCase.detail);
+        final repository = MemoryOutboxRepository(
+          stateMachine: OutboxStateMachine(),
+        );
+        await _enqueueReviewedSettleGraph(
+          repository,
+          requiresStatusProbe: false,
+        );
+        final executor = _settleExecutor(
+          repository: repository,
+          dataSource: dataSource,
+          stagingStore: stagingStore,
+          draftRepository: draftRepository,
+          eventBus: eventBus,
+          statusDataSource: _AbsentStatus(dataSource.events),
+        );
+
+        final report = await executor.execute(_settleReview);
+
+        expect(report.failure, testCase.failure);
+        expect(dataSource.detailIds, [91]);
+        expect(
+          dataSource.events.where((event) => event.startsWith('settle:')),
+          isEmpty,
+        );
+        expect(dataSource.lifecycleRequestIds, isEmpty);
+        final listed = await repository.list('42');
+        final settle = (listed as Success<List<OutboxOperation>>).data
+            .singleWhere(
+              (operation) =>
+                  operation.kind == OutboxOperationKind.stocktakeSettle,
+            );
+        expect(settle.state, OutboxState.cancelled);
+      }
+    },
+  );
 
   test(
     'lifecycle reads authoritative id only from explicit dependency output',
@@ -297,6 +549,15 @@ void main() {
             version: 1,
             data: {'attachmentId': 17, 'documentId': 91},
           ),
+          OutboxOperationOutput(
+            version: 1,
+            data: {
+              'documentId': 91,
+              'operationKind': kind == OutboxOperationKind.documentComplete
+                  ? 'document_complete_reference'
+                  : 'stocktake_confirm_reference',
+            },
+          ),
         ]) {
           final result = await handler.execute(
             _operation(
@@ -369,6 +630,20 @@ void main() {
         'operationKind': 'stocktake_settle',
       });
 
+      final verifiedReference = await handler.execute(
+        operation,
+        dependencyOutputs: {
+          'reference': OutboxOperationOutput(
+            version: 1,
+            data: {
+              'documentId': 91,
+              'operationKind': 'stocktake_settle_reference',
+            },
+          ),
+        },
+      );
+      expect(verifiedReference, isA<Success<OutboxHandlerSuccess>>());
+
       final callsBeforeInvalid = dataSource.events.length;
       final invalid = <OutboxOperationOutput>[
         OutboxOperationOutput(version: 1, data: {'documentId': 91}),
@@ -383,6 +658,20 @@ void main() {
         OutboxOperationOutput(
           version: 1,
           data: {'documentId': 91, 'operationKind': 'stocktake_settle'},
+        ),
+        OutboxOperationOutput(
+          version: 1,
+          data: {
+            'documentId': 91,
+            'operationKind': 'document_complete_reference',
+          },
+        ),
+        OutboxOperationOutput(
+          version: 1,
+          data: {
+            'documentId': 91,
+            'operationKind': 'stocktake_confirm_reference',
+          },
         ),
         OutboxOperationOutput(
           version: 1,
@@ -425,6 +714,119 @@ Map<String, Object?> _createPayload() => {
   },
 };
 
+DocumentDetailModel _detail({required int docType, required String status}) =>
+    DocumentDetailModel(
+      record: DocumentRecordModel(
+        id: 91,
+        docType: docType,
+        title: docType == 5 ? '盘点单' : '销售单',
+        number: 'DOC-91',
+        status: status,
+        productName: 'Widget',
+        quantity: 3,
+        remark: '',
+        createdAt: '2026-07-13T00:00:00Z',
+      ),
+      lines: const [],
+    );
+
+const _settleReview = OutboxReview(
+  operationIds: {'reference-settle-91', 'settle-91'},
+  accountId: '42',
+  warehouseId: 8,
+  permissionStamp: 'stocktake@1',
+);
+
+Future<void> _enqueueReviewedSettleGraph(
+  MemoryOutboxRepository repository, {
+  required bool requiresStatusProbe,
+}) async {
+  final createdAt = DateTime.utc(2026, 7, 13);
+  const reviewStamp = '42\u00008\u0000stocktake@1';
+  final result = await repository.enqueueGraph(
+    OutboxGraph(
+      operations: [
+        OutboxOperation(
+          operationId: 'reference-settle-91',
+          idempotencyKey: 'settle-request-1.document_reference',
+          accountId: '42',
+          warehouseId: 8,
+          kind: OutboxOperationKind.documentReference,
+          payload: const {
+            'version': 1,
+            'documentId': 91,
+            'expectedDocType': 5,
+            'expectedStatus': '差异已确认',
+            'lifecycleIntent': 'stocktake_settle',
+          },
+          state: OutboxState.queued,
+          createdAt: createdAt,
+          confirmedAt: createdAt,
+          reviewStamp: reviewStamp,
+        ),
+        OutboxOperation(
+          operationId: 'settle-91',
+          idempotencyKey: 'settle-request-1',
+          accountId: '42',
+          warehouseId: 8,
+          kind: OutboxOperationKind.stocktakeSettle,
+          payload: const {'version': 1},
+          state: OutboxState.queued,
+          createdAt: createdAt.add(const Duration(microseconds: 1)),
+          confirmedAt: createdAt,
+          reviewStamp: reviewStamp,
+          requiresStatusProbe: requiresStatusProbe,
+        ),
+      ],
+      dependencies: const {
+        'settle-91': {'reference-settle-91'},
+      },
+    ),
+  );
+  if (result case FailureResult<List<OutboxOperation>>(:final failure)) {
+    throw StateError(failure.message);
+  }
+}
+
+OutboxExecutor _settleExecutor({
+  required MemoryOutboxRepository repository,
+  required DocumentsRemoteDataSource dataSource,
+  required OutboxAttachmentStagingStore stagingStore,
+  required DocumentDraftRepository draftRepository,
+  required AppEventBus eventBus,
+  required OperationStatusRemoteDataSource statusDataSource,
+}) => OutboxExecutor(
+  repository: repository,
+  networkStatusService: const _OnlineNetwork(),
+  statusDataSource: statusDataSource,
+  handlers: [
+    DocumentOutboxHandler(
+      kind: OutboxOperationKind.documentReference,
+      remoteDataSource: dataSource,
+      stagingStore: stagingStore,
+      draftRepository: draftRepository,
+      eventBus: eventBus,
+    ),
+    DocumentOutboxHandler(
+      kind: OutboxOperationKind.stocktakeSettle,
+      remoteDataSource: dataSource,
+      stagingStore: stagingStore,
+      draftRepository: draftRepository,
+      eventBus: eventBus,
+    ),
+  ],
+  contextReader: () => const OutboxExecutionContext(
+    accountId: '42',
+    warehouseId: 8,
+    permissionStamp: 'stocktake@1',
+    allowedKinds: {
+      OutboxOperationKind.documentReference,
+      OutboxOperationKind.stocktakeSettle,
+    },
+  ),
+  delay: (_) async {},
+);
+
 OutboxOperation _operation({
   OutboxOperationKind kind = OutboxOperationKind.documentCreate,
   String operationId = 'create-document-request-1',
@@ -460,6 +862,10 @@ final class _DocumentsDataSource implements DocumentsRemoteDataSource {
   final List<CreateDocumentRequest> createRequests = [];
   final List<String> events = [];
   final List<String> lifecycleRequestIds = [];
+  final List<int> detailIds = [];
+  Result<DocumentDetailModel> detailResult = Success(
+    _detail(docType: 5, status: '差异已确认'),
+  );
 
   @override
   Future<Result<DocumentRecordModel>> createDocument(
@@ -492,8 +898,11 @@ final class _DocumentsDataSource implements DocumentsRemoteDataSource {
   }
 
   @override
-  Future<Result<DocumentDetailModel>> getDocument(int id) =>
-      throw UnimplementedError();
+  Future<Result<DocumentDetailModel>> getDocument(int id) async {
+    detailIds.add(id);
+    events.add('detail:$id');
+    return detailResult;
+  }
 
   @override
   Future<Result<PageData<DocumentRecordModel>>> listRecentDocuments({
@@ -608,6 +1017,40 @@ final class _DraftRepository implements DocumentDraftRepository {
 
   @override
   Future<void> prune() => throw UnimplementedError();
+}
+
+final class _AbsentStatus implements OperationStatusRemoteDataSource {
+  const _AbsentStatus(this.events);
+
+  final List<String> events;
+
+  @override
+  Future<Result<OperationStatus>> loadStatus({
+    required String key,
+    required String scope,
+  }) async {
+    events.add('status:$key');
+    return const FailureResult(NotFoundFailure());
+  }
+}
+
+final class _OnlineNetwork implements NetworkStatusService {
+  const _OnlineNetwork();
+
+  @override
+  Stream<NetworkReachability> get changes => const Stream.empty();
+
+  @override
+  NetworkReachability get current => NetworkReachability.online;
+
+  @override
+  Future<void> dispose() async {}
+
+  @override
+  void markOnlineFromRequest() {}
+
+  @override
+  Future<NetworkReachability> verify() async => NetworkReachability.online;
 }
 
 extension on Result<dynamic> {

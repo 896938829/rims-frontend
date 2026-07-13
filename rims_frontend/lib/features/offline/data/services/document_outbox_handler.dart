@@ -3,6 +3,7 @@ import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
 import '../../../attachments/domain/services/attachment_staging_store.dart';
 import '../../../documents/data/datasources/documents_remote_datasource.dart';
+import '../../../documents/data/models/document_models.dart';
 import '../../../documents/domain/entities/document_data.dart';
 import '../../domain/entities/outbox_operation.dart';
 import '../../domain/entities/outbox_graph.dart';
@@ -35,7 +36,7 @@ final class DocumentOutboxHandler implements OutboxOperationHandler {
 
   @override
   String get statusScope => switch (kind) {
-    OutboxOperationKind.documentReference => 'LOCAL document reference',
+    OutboxOperationKind.documentReference => 'GET /api/v1/documents/:id',
     OutboxOperationKind.documentCreate => 'POST /api/v1/documents',
     OutboxOperationKind.documentComplete =>
       'POST /api/v1/documents/:id/complete',
@@ -66,7 +67,9 @@ final class DocumentOutboxHandler implements OutboxOperationHandler {
     }
     try {
       return switch (kind) {
-        OutboxOperationKind.documentReference => _executeReference(operation),
+        OutboxOperationKind.documentReference => await _executeReference(
+          operation,
+        ),
         OutboxOperationKind.documentCreate => await _executeCreate(operation),
         _ => await _executeLifecycle(operation, dependencyOutputs),
       };
@@ -77,15 +80,38 @@ final class DocumentOutboxHandler implements OutboxOperationHandler {
     }
   }
 
-  Result<OutboxHandlerSuccess> _executeReference(OutboxOperation operation) {
-    _expectKeys(operation.payload, const {'version', 'documentId'});
-    _expectVersion(operation.payload);
-    final documentId = _positiveInt(operation.payload, 'documentId');
+  Future<Result<OutboxHandlerSuccess>> _executeReference(
+    OutboxOperation operation,
+  ) async {
+    final payload = _DocumentReferencePayload.fromJson(operation.payload);
+    final loaded = await remoteDataSource.getDocument(payload.documentId);
+    if (loaded case FailureResult<DocumentDetailModel>(:final failure)) {
+      return FailureResult(failure);
+    }
+    final record = (loaded as Success<DocumentDetailModel>).data.record;
+    if (record.id != payload.documentId ||
+        record.docType != payload.expectedDocType) {
+      return const FailureResult(
+        ValidationFailure(
+          message: 'Authoritative document type does not match the review.',
+        ),
+      );
+    }
+    if (record.status != payload.expectedStatus) {
+      return const FailureResult(
+        ConflictFailure(
+          message: 'Authoritative document state changed after review.',
+        ),
+      );
+    }
     return Success(
       OutboxHandlerSuccess(
         output: OutboxOperationOutput(
           version: 1,
-          data: {'documentId': documentId},
+          data: {
+            'operationKind': payload.outputMarker,
+            'documentId': payload.documentId,
+          },
         ),
       ),
     );
@@ -130,11 +156,21 @@ final class DocumentOutboxHandler implements OutboxOperationHandler {
           : const {
               OutboxDependencyOutputShape.document,
               OutboxDependencyOutputShape.attachment,
+              OutboxDependencyOutputShape.lifecycle,
             },
-      requiredLifecycleOperationKind:
-          kind == OutboxOperationKind.stocktakeSettle
-          ? OutboxOperationKind.stocktakeConfirm.wireValue
-          : null,
+      allowedLifecycleOperationKinds: switch (kind) {
+        OutboxOperationKind.documentComplete => const {
+          'document_complete_reference',
+        },
+        OutboxOperationKind.stocktakeConfirm => const {
+          'stocktake_confirm_reference',
+        },
+        OutboxOperationKind.stocktakeSettle => const {
+          'stocktake_confirm',
+          'stocktake_settle_reference',
+        },
+        _ => null,
+      },
     );
     final Result<void> result = switch (kind) {
       OutboxOperationKind.documentComplete =>
@@ -167,6 +203,56 @@ final class DocumentOutboxHandler implements OutboxOperationHandler {
       ),
     );
   }
+}
+
+final class _DocumentReferencePayload {
+  const _DocumentReferencePayload({
+    required this.documentId,
+    required this.expectedDocType,
+    required this.expectedStatus,
+    required this.outputMarker,
+  });
+
+  factory _DocumentReferencePayload.fromJson(Map<String, Object?> json) {
+    _expectKeys(json, const {
+      'version',
+      'documentId',
+      'expectedDocType',
+      'expectedStatus',
+      'lifecycleIntent',
+    });
+    _expectVersion(json);
+    final documentId = _positiveInt(json, 'documentId');
+    final expectedDocType = _positiveInt(json, 'expectedDocType');
+    final expectedStatus = _string(json, 'expectedStatus');
+    final lifecycleIntent = _string(json, 'lifecycleIntent');
+    final outputMarker = switch (lifecycleIntent) {
+      'document_complete'
+          when expectedDocType != 5 &&
+              (expectedStatus == '待提交' || expectedStatus == '草稿') =>
+        'document_complete_reference',
+      'stocktake_confirm'
+          when expectedDocType == 5 && expectedStatus == '盘点中' =>
+        'stocktake_confirm_reference',
+      'stocktake_settle'
+          when expectedDocType == 5 && expectedStatus == '差异已确认' =>
+        'stocktake_settle_reference',
+      _ => throw const FormatException(
+        'Document reference lifecycle intent is inconsistent.',
+      ),
+    };
+    return _DocumentReferencePayload(
+      documentId: documentId,
+      expectedDocType: expectedDocType,
+      expectedStatus: expectedStatus,
+      outputMarker: outputMarker,
+    );
+  }
+
+  final int documentId;
+  final int expectedDocType;
+  final String expectedStatus;
+  final String outputMarker;
 }
 
 final class _DocumentCreatePayload {

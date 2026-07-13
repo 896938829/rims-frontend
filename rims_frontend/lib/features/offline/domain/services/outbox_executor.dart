@@ -219,6 +219,83 @@ final class OutboxExecutor implements OutboxExecutorPort {
           failure: persistedReviewFailure,
         );
       }
+      final initiallyReadyResult = await repository.ready(
+        review.accountId,
+        reviewStamp: _reviewStamp(review),
+      );
+      if (initiallyReadyResult case FailureResult<List<OutboxOperation>>(
+        :final failure,
+      )) {
+        return OutboxExecutionReport(failure: failure);
+      }
+      final initiallyReadyIds = {
+        for (final operation
+            in (initiallyReadyResult as Success<List<OutboxOperation>>).data)
+          operation.operationId,
+      };
+      final preflightStatusResults = <String, Result<OperationStatus>>{};
+      for (final operation in reloaded) {
+        if (!review.operationIds.contains(operation.operationId) ||
+            initiallyReadyIds.contains(operation.operationId) ||
+            !_requiresCurrentReview(operation) ||
+            !operation.requiresStatusProbe) {
+          continue;
+        }
+        final handler = handlers[operation.kind];
+        if (handler == null) continue;
+        final reachability = await networkStatusService.verify();
+        if (reachability != NetworkReachability.online) {
+          return OutboxExecutionReport(
+            paused: true,
+            skippedOperationReasons: _skipAll(
+              review.operationIds,
+              'connectivity_unverified',
+            ),
+            failure: const NetworkFailure(),
+          );
+        }
+        final operationFailure = _validateOperation(review, operation);
+        if (operationFailure != null) {
+          return OutboxExecutionReport(
+            paused: true,
+            reviewInvalidated: true,
+            skippedOperationReasons: _skipAll(
+              review.operationIds,
+              'review_invalidated',
+            ),
+            failure: operationFailure,
+          );
+        }
+        final statusResult = await statusDataSource.loadStatus(
+          key: operation.idempotencyKey,
+          scope: handler.statusScope,
+        );
+        if (statusResult case FailureResult<OperationStatus>(
+          :final failure,
+        ) when failure is! NotFoundFailure) {
+          final syncing = await repository.transition(
+            accountId: operation.accountId,
+            operationId: operation.operationId,
+            next: OutboxState.syncing,
+          );
+          if (syncing case FailureResult<OutboxOperation>(:final failure)) {
+            return OutboxExecutionReport(failure: failure);
+          }
+          final outcome = await _finishFailure(
+            (syncing as Success<OutboxOperation>).data,
+            failure,
+          );
+          return OutboxExecutionReport(
+            paused: outcome.pauseBatch,
+            skippedOperationReasons: _skipAll(
+              review.operationIds,
+              'status_probe_failed',
+            ),
+            failure: outcome.failure,
+          );
+        }
+        preflightStatusResults[operation.operationId] = statusResult;
+      }
       final succeeded = <String>[];
       final processed = <String>{};
       final skipped = <String, String>{};
@@ -371,7 +448,12 @@ final class OutboxExecutor implements OutboxExecutorPort {
           );
         }
 
-        final outcome = await _executeOne(operation);
+        final outcome = await _executeOne(
+          operation,
+          preflightStatusResult: preflightStatusResults.remove(
+            operation.operationId,
+          ),
+        );
         processed.add(operation.operationId);
         if (outcome.succeeded) succeeded.add(operation.operationId);
         if (outcome.pauseBatch) {
@@ -492,7 +574,10 @@ final class OutboxExecutor implements OutboxExecutorPort {
       operation.state == OutboxState.syncing ||
       operation.state == OutboxState.retryableFailure;
 
-  Future<_OperationOutcome> _executeOne(OutboxOperation operation) async {
+  Future<_OperationOutcome> _executeOne(
+    OutboxOperation operation, {
+    Result<OperationStatus>? preflightStatusResult,
+  }) async {
     final handler = handlers[operation.kind];
     if (handler == null) {
       return const _OperationOutcome(
@@ -512,7 +597,11 @@ final class OutboxExecutor implements OutboxExecutorPort {
 
     if (hadUnknownResult &&
         operation.kind != OutboxOperationKind.documentReference) {
-      final probeOutcome = await _probeUnknown(syncingOperation, handler);
+      final probeOutcome = await _probeUnknown(
+        syncingOperation,
+        handler,
+        preflightStatusResult: preflightStatusResult,
+      );
       if (probeOutcome != null) return probeOutcome;
     }
     return _executeHandler(syncingOperation, handler);
@@ -520,13 +609,16 @@ final class OutboxExecutor implements OutboxExecutorPort {
 
   Future<_OperationOutcome?> _probeUnknown(
     OutboxOperation operation,
-    OutboxOperationHandler handler,
-  ) async {
+    OutboxOperationHandler handler, {
+    Result<OperationStatus>? preflightStatusResult,
+  }) async {
     for (var probe = 1; probe <= maxStatusProbes; probe += 1) {
-      final result = await statusDataSource.loadStatus(
-        key: operation.idempotencyKey,
-        scope: handler.statusScope,
-      );
+      final result = probe == 1 && preflightStatusResult != null
+          ? preflightStatusResult
+          : await statusDataSource.loadStatus(
+              key: operation.idempotencyKey,
+              scope: handler.statusScope,
+            );
       if (result case FailureResult<OperationStatus>(:final failure)) {
         if (failure is NotFoundFailure) return null;
         return _finishFailure(operation, failure);

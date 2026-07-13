@@ -351,6 +351,56 @@ void main() {
   );
 
   test(
+    'descendant preflight failure blocks every handler and stays probe-required',
+    () async {
+      final parent = _operation('parent');
+      final child = _operation(
+        'child',
+        kind: OutboxOperationKind.documentComplete,
+      ).copyWith(requiresStatusProbe: true);
+      await repository.enqueueGraph(
+        OutboxGraph(
+          operations: [parent, child],
+          dependencies: const {
+            'child': {'parent'},
+          },
+        ),
+      );
+      final completeHandler = _Handler(
+        kind: OutboxOperationKind.documentComplete,
+      );
+      context = const OutboxExecutionContext(
+        accountId: '7',
+        warehouseId: 11,
+        permissionStamp: 'stock:write@1',
+        allowedKinds: {
+          OutboxOperationKind.documentCreate,
+          OutboxOperationKind.documentComplete,
+        },
+      );
+      final graphExecutor = OutboxExecutor(
+        repository: repository,
+        networkStatusService: network,
+        statusDataSource: status,
+        handlers: [handler, completeHandler],
+        contextReader: () => context,
+        delay: (_) async {},
+      );
+      status.results.add(const FailureResult(NetworkFailure()));
+
+      final report = await graphExecutor.execute(review({'parent', 'child'}));
+
+      expect(report.failure, isA<NetworkFailure>());
+      expect(handler.calls, isEmpty);
+      expect(completeHandler.calls, isEmpty);
+      expect(status.keys, ['key-child']);
+      expect(await state('parent'), OutboxState.queued);
+      expect(await state('child'), OutboxState.retryableFailure);
+      expect((await stored('child')).requiresStatusProbe, isTrue);
+    },
+  );
+
+  test(
     '401 pauses batch and returns operation to explicit retryable state',
     () async {
       await repository.enqueue(_operation('a'));

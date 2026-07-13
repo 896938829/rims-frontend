@@ -57,6 +57,8 @@ final class _PendingLifecycleSubmission {
     required this.kind,
     required this.requestId,
     required this.documentId,
+    required this.expectedDocType,
+    required this.expectedStatus,
     required this.accountId,
     required this.warehouseId,
     required this.requiresStatusProbe,
@@ -66,6 +68,8 @@ final class _PendingLifecycleSubmission {
   final OutboxOperationKind kind;
   final String requestId;
   final int documentId;
+  final int expectedDocType;
+  final String expectedStatus;
   final String accountId;
   final int warehouseId;
   final bool requiresStatusProbe;
@@ -1680,7 +1684,13 @@ final class DocumentsViewModel extends ChangeNotifier {
       accountId: pending.accountId,
       warehouseId: pending.warehouseId,
       kind: OutboxOperationKind.documentReference,
-      payload: {'version': 1, 'documentId': pending.documentId},
+      payload: {
+        'version': 1,
+        'documentId': pending.documentId,
+        'expectedDocType': pending.expectedDocType,
+        'expectedStatus': pending.expectedStatus,
+        'lifecycleIntent': pending.kind.wireValue,
+      },
       state: OutboxState.queued,
       createdAt: createdAt,
     );
@@ -1932,6 +1942,8 @@ final class DocumentsViewModel extends ChangeNotifier {
             kind: kind,
             requestId: requestId,
             documentId: document.id,
+            expectedDocType: document.docType,
+            expectedStatus: document.status,
             accountId: currentAccountId,
             warehouseId: warehouse.id,
             requiresStatusProbe: failure is TransportUnknownFailure,

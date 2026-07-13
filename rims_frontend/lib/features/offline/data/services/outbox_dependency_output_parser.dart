@@ -5,7 +5,7 @@ enum OutboxDependencyOutputShape { document, attachment, lifecycle }
 int requireAuthoritativeDocumentId(
   Map<String, OutboxOperationOutput> dependencyOutputs, {
   required Set<OutboxDependencyOutputShape> allowedShapes,
-  String? requiredLifecycleOperationKind,
+  Set<String>? allowedLifecycleOperationKinds,
 }) {
   if (dependencyOutputs.length != 1) {
     throw const FormatException(
@@ -42,11 +42,14 @@ int requireAuthoritativeDocumentId(
     final operationKind = data['operationKind'];
     if (operationKind != 'document_complete' &&
         operationKind != 'stocktake_confirm' &&
-        operationKind != 'stocktake_settle') {
+        operationKind != 'stocktake_settle' &&
+        operationKind != 'document_complete_reference' &&
+        operationKind != 'stocktake_confirm_reference' &&
+        operationKind != 'stocktake_settle_reference') {
       throw const FormatException('Invalid lifecycle dependency output.');
     }
-    if (requiredLifecycleOperationKind != null &&
-        operationKind != requiredLifecycleOperationKind) {
+    if (allowedLifecycleOperationKinds != null &&
+        !allowedLifecycleOperationKinds.contains(operationKind)) {
       throw const FormatException('Unexpected lifecycle dependency output.');
     }
   }
