@@ -50,3 +50,7 @@ abstract interface class OutboxRepository {
 
   Future<Result<int>> prune({required String accountId});
 }
+
+abstract interface class OutboxRepositoryOwner {
+  OutboxRepository get outboxRepository;
+}

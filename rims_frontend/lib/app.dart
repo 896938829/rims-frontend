@@ -45,10 +45,10 @@ import 'features/offline/data/repositories/cached_documents_repository.dart';
 import 'features/offline/data/repositories/cached_reports_repository.dart';
 import 'features/offline/data/repositories/drift_document_draft_repository.dart';
 import 'features/offline/domain/repositories/document_draft_repository.dart';
-import 'features/offline/domain/entities/outbox_operation.dart';
 import 'features/offline/domain/repositories/outbox_repository.dart';
 import 'features/offline/domain/services/network_status_service.dart';
 import 'features/offline/domain/services/outbox_executor.dart';
+import 'features/offline/domain/services/outbox_permission_policy.dart';
 import 'features/offline/domain/services/outbox_state_machine.dart';
 import 'features/reports/data/datasources/reports_remote_datasource.dart';
 import 'features/reports/data/repositories/reports_repository_impl.dart';
@@ -78,6 +78,8 @@ final class _MainAppState extends State<MainApp> {
   late final AuthSessionController _sessionController;
   final AppSecureStorage _secureStorage = const AppSecureStorage();
   final AppEventBus _eventBus = AppEventBus();
+  final OutboxPermissionPolicy _outboxPermissionPolicy =
+      const OutboxPermissionPolicy();
   late final ScanLookupCache _scanLookupCache;
   final ScanSessionStore _scanSessionStore = ScanSessionStore();
   late final AttachmentPicker _attachmentPicker;
@@ -203,12 +205,7 @@ final class _MainAppState extends State<MainApp> {
     _documentDraftRepository = DriftDocumentDraftRepository(
       store: widget.offlineStore,
     );
-    _outboxRepository = widget.offlineStore is OfflineDatabase
-        ? DriftOutboxRepository(
-            database: widget.offlineStore as OfflineDatabase,
-            stateMachine: OutboxStateMachine(),
-          )
-        : MemoryOutboxRepository(stateMachine: OutboxStateMachine());
+    _outboxRepository = outboxRepositoryForOfflineStore(widget.offlineStore);
     _operationStatusDataSource = ApiOperationStatusRemoteDataSource(_apiClient);
     _outboxExecutor = OutboxExecutor(
       repository: _outboxRepository,
@@ -270,11 +267,9 @@ final class _MainAppState extends State<MainApp> {
     final user = _sessionController.currentUser;
     final warehouse = _sessionController.currentWarehouse;
     if (user == null || warehouse == null) return null;
-    return OutboxExecutionContext(
-      accountId: user.id.toString(),
+    return _outboxPermissionPolicy.contextFor(
+      user: user,
       warehouseId: warehouse.id,
-      permissionStamp: user.roleCode,
-      allowedKinds: Set.unmodifiable(OutboxOperationKind.values),
     );
   }
 
@@ -339,4 +334,17 @@ final class _MainAppState extends State<MainApp> {
       routerConfig: _router,
     );
   }
+}
+
+OutboxRepository outboxRepositoryForOfflineStore(OfflineStore store) {
+  if (store is OutboxRepositoryOwner) {
+    return (store as OutboxRepositoryOwner).outboxRepository;
+  }
+  if (store is OfflineDatabase) {
+    return DriftOutboxRepository(
+      database: store,
+      stateMachine: OutboxStateMachine(),
+    );
+  }
+  return MemoryOutboxRepository(stateMachine: OutboxStateMachine());
 }

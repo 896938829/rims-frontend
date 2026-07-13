@@ -225,6 +225,7 @@ Map<String, Object?> _encodeSession(AuthSession session) => {
     'real_name': session.user.realName,
     'role_code': session.user.roleCode,
     'role_name': session.user.roleName,
+    'permission_codes': session.user.permissionCodes.toList()..sort(),
   },
   'current_warehouse_id': session.currentWarehouse?.id,
   'warehouses': session.warehouses.map(_encodeWarehouse).toList(),
@@ -255,6 +256,11 @@ AuthSession _decodeSession(Map<String, Object?> payload, String token) {
       realName: userPayload['real_name']! as String,
       roleCode: userPayload['role_code']! as String,
       roleName: userPayload['role_name']! as String,
+      permissionCodes: Set.unmodifiable(
+        ((userPayload['permission_codes'] as List?) ?? const []).map(
+          (value) => value.toString(),
+        ),
+      ),
     ),
     currentWarehouse: currentWarehouse,
     warehouses: warehouses,

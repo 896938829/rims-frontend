@@ -3,15 +3,72 @@ import 'dart:async';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rims_frontend/core/result/failure.dart';
 import 'package:rims_frontend/core/result/result.dart';
+import 'package:rims_frontend/features/auth/domain/entities/app_user.dart';
 import 'package:rims_frontend/features/offline/data/datasources/operation_status_remote_datasource.dart';
 import 'package:rims_frontend/features/offline/data/repositories/memory_outbox_repository.dart';
 import 'package:rims_frontend/features/offline/domain/entities/network_reachability.dart';
 import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.dart';
 import 'package:rims_frontend/features/offline/domain/services/network_status_service.dart';
 import 'package:rims_frontend/features/offline/domain/services/outbox_executor.dart';
+import 'package:rims_frontend/features/offline/domain/services/outbox_permission_policy.dart';
 import 'package:rims_frontend/features/offline/domain/services/outbox_state_machine.dart';
 
 void main() {
+  test('permission policy derives allowed kinds and stable fingerprint', () {
+    const policy = OutboxPermissionPolicy();
+    const first = AppUser(
+      id: 7,
+      username: 'operator',
+      realName: 'Operator',
+      roleCode: 'operator',
+      roleName: 'Operator',
+      permissionCodes: {
+        'stocktake.confirm',
+        'attachment.upload',
+        'document.create',
+      },
+    );
+    const reordered = AppUser(
+      id: 7,
+      username: 'operator',
+      realName: 'Operator',
+      roleCode: 'operator',
+      roleName: 'Operator',
+      permissionCodes: {
+        'document.create',
+        'attachment.upload',
+        'stocktake.confirm',
+      },
+    );
+    const revoked = AppUser(
+      id: 7,
+      username: 'operator',
+      realName: 'Operator',
+      roleCode: 'operator',
+      roleName: 'Operator',
+      permissionCodes: {'attachment.upload', 'stocktake.confirm'},
+    );
+
+    final context = policy.contextFor(user: first, warehouseId: 11);
+    final reorderedContext = policy.contextFor(
+      user: reordered,
+      warehouseId: 11,
+    );
+    final revokedContext = policy.contextFor(user: revoked, warehouseId: 11);
+
+    expect(context.allowedKinds, {
+      OutboxOperationKind.attachmentUpload,
+      OutboxOperationKind.documentCreate,
+      OutboxOperationKind.stocktakeConfirm,
+    });
+    expect(context.permissionStamp, reorderedContext.permissionStamp);
+    expect(revokedContext.permissionStamp, isNot(context.permissionStamp));
+    expect(
+      revokedContext.allowedKinds,
+      isNot(contains(OutboxOperationKind.documentCreate)),
+    );
+  });
+
   late DateTime now;
   late MemoryOutboxRepository repository;
   late _NetworkStatusService network;
@@ -346,11 +403,118 @@ void main() {
     expect(handler.calls, isEmpty);
     expect(await state('op'), OutboxState.queued);
   });
+
+  test(
+    'revalidates context before every operation and invalidates review',
+    () async {
+      await repository.enqueue(_operation('a'));
+      await repository.enqueue(_operation('b'));
+      handler.onCall = (operation) async {
+        if (operation.operationId == 'a') {
+          context = const OutboxExecutionContext(
+            accountId: '7',
+            warehouseId: 11,
+            permissionStamp: 'stock:write@2',
+            allowedKinds: {OutboxOperationKind.documentCreate},
+          );
+        }
+        return const Success(null);
+      };
+
+      final report = await executor.execute(review({'a', 'b'}));
+
+      expect(handler.calls, ['a']);
+      expect(network.verifyCalls, 1);
+      expect(report.paused, isTrue);
+      expect(report.reviewInvalidated, isTrue);
+      expect(report.skippedOperationReasons['b'], 'review_invalidated');
+      expect(await state('b'), OutboxState.queued);
+    },
+  );
+
+  test(
+    'revalidates connectivity before every operation and pauses batch',
+    () async {
+      await repository.enqueue(_operation('a'));
+      await repository.enqueue(_operation('b'));
+      handler.onCall = (operation) async {
+        if (operation.operationId == 'a') {
+          network.next = NetworkReachability.offline;
+        }
+        return const Success(null);
+      };
+
+      final report = await executor.execute(review({'a', 'b'}));
+
+      expect(handler.calls, ['a']);
+      expect(network.verifyCalls, 2);
+      expect(report.paused, isTrue);
+      expect(report.reviewInvalidated, isFalse);
+      expect(report.skippedOperationReasons['b'], 'connectivity_unverified');
+      expect(await state('b'), OutboxState.queued);
+    },
+  );
+
+  test('dynamically drains a reviewed dependency chain exactly once', () async {
+    await repository.enqueue(
+      _operation('attachment', kind: OutboxOperationKind.attachmentUpload),
+    );
+    await repository.enqueue(
+      _operation('create'),
+      dependencies: const {'attachment'},
+    );
+    await repository.enqueue(
+      _operation('complete', kind: OutboxOperationKind.documentComplete),
+      dependencies: const {'create'},
+    );
+    final attachmentHandler = _Handler(
+      kind: OutboxOperationKind.attachmentUpload,
+    );
+    final createHandler = _Handler();
+    final completeHandler = _Handler(
+      kind: OutboxOperationKind.documentComplete,
+    );
+    context = const OutboxExecutionContext(
+      accountId: '7',
+      warehouseId: 11,
+      permissionStamp: 'chain@1',
+      allowedKinds: {
+        OutboxOperationKind.attachmentUpload,
+        OutboxOperationKind.documentCreate,
+        OutboxOperationKind.documentComplete,
+      },
+    );
+    final chainExecutor = OutboxExecutor(
+      repository: repository,
+      networkStatusService: network,
+      statusDataSource: status,
+      handlers: [attachmentHandler, createHandler, completeHandler],
+      contextReader: () => context,
+      delay: (_) async {},
+    );
+
+    final report = await chainExecutor.execute(
+      const OutboxReview(
+        operationIds: {'attachment', 'create', 'complete', 'missing'},
+        accountId: '7',
+        warehouseId: 11,
+        permissionStamp: 'chain@1',
+      ),
+    );
+
+    expect(report.succeededOperationIds, ['attachment', 'create', 'complete']);
+    expect(attachmentHandler.calls, ['attachment']);
+    expect(createHandler.calls, ['create']);
+    expect(completeHandler.calls, ['complete']);
+    expect(network.verifyCalls, 3);
+    expect(report.skippedOperationReasons['missing'], 'not_ready');
+  });
 }
 
 OutboxOperation _operation(
   String id, {
   Map<String, Object?> payload = const {},
+  OutboxOperationKind kind = OutboxOperationKind.documentCreate,
 }) {
   final now = DateTime.utc(2026, 7, 13, 8);
   return OutboxOperation(
@@ -358,7 +522,7 @@ OutboxOperation _operation(
     idempotencyKey: 'key-$id',
     accountId: '7',
     warehouseId: 11,
-    kind: OutboxOperationKind.documentCreate,
+    kind: kind,
     payload: payload,
     state: OutboxState.queued,
     createdAt: now,
@@ -367,8 +531,10 @@ OutboxOperation _operation(
 }
 
 final class _Handler implements OutboxOperationHandler {
+  _Handler({this.kind = OutboxOperationKind.documentCreate});
+
   @override
-  OutboxOperationKind get kind => OutboxOperationKind.documentCreate;
+  final OutboxOperationKind kind;
 
   @override
   String get statusScope => 'POST /api/v1/documents';

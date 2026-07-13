@@ -37,6 +37,7 @@ final class SyncCenterViewModel extends ChangeNotifier {
   bool _isBusy = false;
   Failure? _failure;
   bool _isDisposed = false;
+  int _contextGeneration = 0;
 
   List<OutboxOperation> get operations => _operations;
   Set<String> get reviewedOperationIds =>
@@ -45,6 +46,7 @@ final class SyncCenterViewModel extends ChangeNotifier {
       Set.unmodifiable(_selectedOperationIds);
   bool get isBusy => _isBusy;
   Failure? get failure => _failure;
+  int get contextGeneration => _contextGeneration;
 
   List<OutboxOperation> get waiting => _operations
       .where(
@@ -71,17 +73,29 @@ final class SyncCenterViewModel extends ChangeNotifier {
       )
       .toList(growable: false);
 
-  Future<void> load() async {
-    if (_isDisposed) return;
+  Future<void> load() => _beginLoad();
+
+  Future<void> refreshContext() => _beginLoad();
+
+  Future<void> _beginLoad() {
     final context = contextReader();
+    final generation = ++_contextGeneration;
     _updateFingerprint(context);
+    _isBusy = false;
+    return _load(generation, context);
+  }
+
+  Future<void> _load(int generation, OutboxExecutionContext? context) async {
+    if (_isDisposed) return;
     if (context == null) {
+      if (!_acceptResult(generation, context)) return;
       _operations = const [];
       _failure = const AuthenticationFailure();
       _notifyListeners();
       return;
     }
     final result = await repository.list(context.accountId);
+    if (!_acceptResult(generation, context)) return;
     result.when(
       success: (operations) {
         _operations = operations;
@@ -89,7 +103,6 @@ final class SyncCenterViewModel extends ChangeNotifier {
       },
       failure: (failure) => _failure = failure,
     );
-    if (_isDisposed) return;
     final waitingIds = waiting
         .map((operation) => operation.operationId)
         .toSet();
@@ -98,14 +111,13 @@ final class SyncCenterViewModel extends ChangeNotifier {
     _notifyListeners();
   }
 
-  Future<void> refreshContext() => load();
-
   Future<bool> review(String operationId) async {
     if (_isDisposed) return false;
-    final context = contextReader();
-    _updateFingerprint(context);
+    final snapshot = _commandSnapshot();
+    final context = snapshot?.context;
     final operation = _find(operationId);
-    if (context == null ||
+    if (snapshot == null ||
+        context == null ||
         operation == null ||
         operation.accountId != context.accountId ||
         operation.warehouseId != context.warehouseId ||
@@ -121,6 +133,7 @@ final class SyncCenterViewModel extends ChangeNotifier {
       accountId: context.accountId,
       operationId: operationId,
     );
+    if (!_acceptResult(snapshot.generation, context)) return false;
     final confirmed = result.when(
       success: (_) {
         _reviewedOperationIds.add(operationId);
@@ -137,6 +150,7 @@ final class SyncCenterViewModel extends ChangeNotifier {
   }
 
   void setSelected(String operationId, bool selected) {
+    if (_commandSnapshot() == null) return;
     if (selected) {
       _selectedOperationIds.add(operationId);
     } else {
@@ -155,22 +169,27 @@ final class SyncCenterViewModel extends ChangeNotifier {
   Future<void> retryAllReviewed() => _execute(_reviewedOperationIds);
 
   Future<void> cancel(String operationId) async {
-    final context = contextReader();
-    if (context == null) return;
+    final snapshot = _commandSnapshot();
+    final context = snapshot?.context;
+    if (snapshot == null || context == null) return;
     await _mutate(
+      snapshot,
       repository.cancel(accountId: context.accountId, operationId: operationId),
     );
   }
 
   Future<void> discard(String operationId) async {
-    final context = contextReader();
-    if (context == null) return;
-    await _mutate(
+    final snapshot = _commandSnapshot();
+    final context = snapshot?.context;
+    if (snapshot == null || context == null) return;
+    final applied = await _mutate(
+      snapshot,
       repository.discard(
         accountId: context.accountId,
         operationId: operationId,
       ),
     );
+    if (!applied) return;
     _reviewedOperationIds.remove(operationId);
     _selectedOperationIds.remove(operationId);
   }
@@ -180,9 +199,11 @@ final class SyncCenterViewModel extends ChangeNotifier {
     OutboxOperation replacement, {
     Set<String> dependencies = const {},
   }) async {
-    final context = contextReader();
-    if (context == null) return;
+    final snapshot = _commandSnapshot();
+    final context = snapshot?.context;
+    if (snapshot == null || context == null) return;
     await _mutate(
+      snapshot,
       repository.resolveConflict(
         accountId: context.accountId,
         conflictedOperationId: conflictedOperationId,
@@ -219,17 +240,22 @@ final class SyncCenterViewModel extends ChangeNotifier {
 
   Future<void> _execute(Set<String> operationIds) async {
     if (_isDisposed) return;
-    final context = contextReader();
-    _updateFingerprint(context);
-    if (context == null || operationIds.isEmpty) return;
+    final snapshot = _commandSnapshot();
+    final context = snapshot?.context;
+    if (snapshot == null || context == null) return;
+    final eligibleOperationIds = operationIds.intersection(
+      _reviewedOperationIds,
+    );
+    if (eligibleOperationIds.isEmpty) return;
     _isBusy = true;
     _failure = null;
     _notifyListeners();
-    for (final operationId in operationIds) {
+    for (final operationId in eligibleOperationIds) {
       final prepared = await repository.retryNow(
         accountId: context.accountId,
         operationId: operationId,
       );
+      if (!_acceptResult(snapshot.generation, context)) return;
       if (prepared case FailureResult<OutboxOperation>(:final failure)) {
         _failure = failure;
         _isBusy = false;
@@ -239,28 +265,34 @@ final class SyncCenterViewModel extends ChangeNotifier {
     }
     final report = await executor.execute(
       OutboxReview(
-        operationIds: Set.unmodifiable(operationIds),
+        operationIds: Set.unmodifiable(eligibleOperationIds),
         accountId: context.accountId,
         warehouseId: context.warehouseId,
         permissionStamp: context.permissionStamp,
       ),
     );
+    if (!_acceptResult(snapshot.generation, context)) return;
     _failure = report.failure;
     _isBusy = false;
-    await load();
+    await _load(snapshot.generation, context);
   }
 
-  Future<void> _mutate(Future<Result<OutboxOperation>> future) async {
-    if (_isDisposed) return;
+  Future<bool> _mutate(
+    _ContextSnapshot snapshot,
+    Future<Result<OutboxOperation>> future,
+  ) async {
+    if (_isDisposed) return false;
     _isBusy = true;
     _notifyListeners();
     final result = await future;
+    if (!_acceptResult(snapshot.generation, snapshot.context)) return false;
     result.when(
       success: (_) => _failure = null,
       failure: (failure) => _failure = failure,
     );
     _isBusy = false;
-    await load();
+    await _load(snapshot.generation, snapshot.context);
+    return true;
   }
 
   void _notifyListeners() {
@@ -282,13 +314,50 @@ final class SyncCenterViewModel extends ChangeNotifier {
   }
 
   void _updateFingerprint(OutboxExecutionContext? context) {
-    final next = context == null
-        ? null
-        : '${context.accountId}:${context.warehouseId}:${context.permissionStamp}';
+    final next = _fingerprint(context);
     if (_contextFingerprint != null && _contextFingerprint != next) {
       _reviewedOperationIds.clear();
       _selectedOperationIds.clear();
+      _operations = const [];
+      _failure = null;
+      _isBusy = false;
     }
     _contextFingerprint = next;
   }
+
+  _ContextSnapshot? _commandSnapshot() {
+    if (_isDisposed) return null;
+    final context = contextReader();
+    final nextFingerprint = _fingerprint(context);
+    if (nextFingerprint != _contextFingerprint) {
+      _contextGeneration += 1;
+      _updateFingerprint(context);
+      _isBusy = false;
+    }
+    if (context == null) return null;
+    return _ContextSnapshot(generation: _contextGeneration, context: context);
+  }
+
+  bool _acceptResult(int generation, OutboxExecutionContext? context) {
+    if (_isDisposed || generation != _contextGeneration) return false;
+    final current = contextReader();
+    if (_fingerprint(current) == _fingerprint(context)) return true;
+    _contextGeneration += 1;
+    _updateFingerprint(current);
+    _isBusy = false;
+    _failure = null;
+    _notifyListeners();
+    return false;
+  }
+
+  String? _fingerprint(OutboxExecutionContext? context) => context == null
+      ? null
+      : '${context.accountId}:${context.warehouseId}:${context.permissionStamp}';
+}
+
+final class _ContextSnapshot {
+  const _ContextSnapshot({required this.generation, required this.context});
+
+  final int generation;
+  final OutboxExecutionContext context;
 }

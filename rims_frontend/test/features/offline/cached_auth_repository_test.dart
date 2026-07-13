@@ -12,6 +12,7 @@ import 'package:rims_frontend/features/auth/presentation/view_models/auth_sessio
 import 'package:rims_frontend/features/offline/data/repositories/cached_auth_repository.dart';
 import 'package:rims_frontend/features/offline/data/repositories/memory_offline_store.dart';
 import 'package:rims_frontend/features/offline/domain/entities/cache_snapshot.dart';
+import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.dart';
 
 void main() {
   final now = DateTime.utc(2026, 7, 13, 12);
@@ -128,6 +129,35 @@ void main() {
 
     expect(cached?.user.roleCode, 'admin');
     expect(cached?.user.isAdmin, isTrue);
+    expect(cached?.user.permissionCodes, {'document.complete'});
+  });
+
+  test('logout clears the same Memory outbox used by Sync Center', () async {
+    final delegate = _FakeAuthRepository(
+      restoreResult: const Success(_session),
+    );
+    final storage = _FakeSessionStorage(token: 'token');
+    final store = MemoryOfflineStore();
+    final repository = _repository(delegate, storage, store: store, now: now);
+    await repository.restoreSession();
+    await store.enqueue(
+      OutboxOperation(
+        operationId: 'logout-operation',
+        idempotencyKey: 'logout-key',
+        accountId: '7',
+        warehouseId: 11,
+        kind: OutboxOperationKind.documentCreate,
+        payload: const {},
+        state: OutboxState.queued,
+        createdAt: now,
+        confirmedAt: now,
+      ),
+      const {},
+    );
+
+    await repository.logout();
+
+    expect((await store.outboxRepository.list('7') as Success).data, isEmpty);
   });
 
   test('offline login is never satisfied from an existing cache', () async {
@@ -315,6 +345,7 @@ const _admin = AppUser(
   realName: 'Alice',
   roleCode: 'admin',
   roleName: '管理员',
+  permissionCodes: {'document.complete'},
 );
 const _session = AuthSession(
   accessToken: 'token',

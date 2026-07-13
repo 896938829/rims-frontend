@@ -33,6 +33,7 @@ final class AppUserModel {
     required this.realName,
     required this.roleCode,
     required this.roleName,
+    this.permissionCodes = const {},
   });
 
   factory AppUserModel.fromJson(Map<dynamic, dynamic> json) {
@@ -65,6 +66,7 @@ final class AppUserModel {
           _readString(json, const ['roleName', 'role_name', 'roleLabel']) ??
           _readString(roleJson, const ['roleName', 'name', 'role_name']) ??
           '',
+      permissionCodes: _readPermissionCodes([json, roleJson]),
     );
   }
 
@@ -73,6 +75,7 @@ final class AppUserModel {
   final String realName;
   final String roleCode;
   final String roleName;
+  final Set<String> permissionCodes;
 
   AppUser toEntity() {
     return AppUser(
@@ -81,8 +84,37 @@ final class AppUserModel {
       realName: realName.isNotEmpty ? realName : username,
       roleCode: roleCode,
       roleName: roleName,
+      permissionCodes: permissionCodes,
     );
   }
+}
+
+Set<String> _readPermissionCodes(Iterable<Map<dynamic, dynamic>> sources) {
+  final codes = <String>{};
+  for (final source in sources) {
+    for (final key in const [
+      'permissions',
+      'permissionCodes',
+      'capabilities',
+    ]) {
+      final values = source[key];
+      if (values is! List) continue;
+      for (final value in values) {
+        final raw = value is Map
+            ? _readString(value, const [
+                'code',
+                'permissionCode',
+                'capability',
+                'key',
+                'value',
+              ])
+            : value?.toString();
+        final normalized = raw?.trim().toLowerCase();
+        if (normalized != null && normalized.isNotEmpty) codes.add(normalized);
+      }
+    }
+  }
+  return Set.unmodifiable(codes);
 }
 
 final class WarehouseModel {

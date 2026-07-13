@@ -1,14 +1,26 @@
 import '../../../../core/result/failure.dart';
+import '../../../../core/result/result.dart';
 import '../../domain/entities/cache_snapshot.dart';
 import '../../domain/entities/document_draft.dart';
 import '../../domain/entities/outbox_operation.dart';
+import '../../domain/repositories/outbox_repository.dart';
 import '../../domain/services/offline_store.dart';
+import '../../domain/services/outbox_state_machine.dart';
+import 'memory_outbox_repository.dart';
 
-final class MemoryOfflineStore implements OfflineStore {
+final class MemoryOfflineStore implements OfflineStore, OutboxRepositoryOwner {
+  MemoryOfflineStore({DateTime Function()? now})
+    : outboxRepository = MemoryOutboxRepository(
+        stateMachine: OutboxStateMachine(now: now),
+        now: now,
+      );
+
+  @override
+  final MemoryOutboxRepository outboxRepository;
+
   final Map<String, CacheRecord> _cache = {};
   final Map<String, DocumentDraft> _drafts = {};
-  final Map<String, OutboxOperation> _operations = {};
-  final Map<String, Set<String>> _dependencies = {};
+  final Map<String, String> _legacyOperationAccounts = {};
 
   @override
   Future<void> writeCache(CacheRecord record) async {
@@ -129,43 +141,17 @@ final class MemoryOfflineStore implements OfflineStore {
     if (dependencies.contains(operation.operationId)) {
       throw ArgumentError.value(operation.operationId, 'dependencies');
     }
-    final accountOperations = _operations.values.where(
-      (candidate) => candidate.accountId == operation.accountId,
+    final result = await outboxRepository.enqueue(
+      operation,
+      dependencies: dependencies,
     );
-    if (accountOperations.length >= 500) {
-      throw StateError('The offline outbox limit is 500 operations.');
-    }
-    if (accountOperations.any(
-      (candidate) => candidate.idempotencyKey == operation.idempotencyKey,
-    )) {
-      throw StateError('The idempotency key already exists for this account.');
-    }
-    for (final dependency in dependencies) {
-      final parent = _operations[dependency];
-      if (parent == null || parent.accountId != operation.accountId) {
-        throw StateError(
-          'Every dependency must exist and belong to the same account.',
-        );
-      }
-    }
-    _operations[operation.operationId] = operation;
-    _dependencies[operation.operationId] = Set.unmodifiable(dependencies);
+    _throwLegacyFailure(result);
+    _legacyOperationAccounts[operation.operationId] = operation.accountId;
   }
 
   @override
   Future<List<OutboxOperation>> readyOperations(String accountId) async {
-    final result =
-        _operations.values.where((operation) {
-            if (operation.accountId != accountId ||
-                operation.state != OutboxState.queued ||
-                !operation.isConfirmed) {
-              return false;
-            }
-            return (_dependencies[operation.operationId] ?? const <String>{})
-                .every((id) => _operations[id]?.state == OutboxState.succeeded);
-          }).toList()
-          ..sort((left, right) => left.createdAt.compareTo(right.createdAt));
-    return List.unmodifiable(result);
+    return _successOrThrow(await outboxRepository.ready(accountId));
   }
 
   @override
@@ -174,31 +160,17 @@ final class MemoryOfflineStore implements OfflineStore {
     OutboxState next, {
     Failure? failure,
   }) async {
-    final current = _operations[operationId];
-    if (current == null) {
+    final accountId = _legacyOperationAccounts[operationId];
+    if (accountId == null) {
       throw StateError('The offline operation does not exist.');
     }
-    if (!isOutboxTransitionAllowed(current.state, next)) {
-      throw StateError(
-        'Invalid offline operation transition: ${current.state.wireValue} -> '
-        '${next.wireValue}.',
-      );
-    }
-    _operations[operationId] = OutboxOperation(
-      operationId: current.operationId,
-      idempotencyKey: current.idempotencyKey,
-      accountId: current.accountId,
-      warehouseId: current.warehouseId,
-      kind: current.kind,
-      payload: current.payload,
-      state: next,
-      createdAt: current.createdAt,
-      updatedAt: DateTime.now().toUtc(),
-      confirmedAt: current.confirmedAt,
-      nextAttemptAt: current.nextAttemptAt,
-      attemptCount: current.attemptCount,
-      lastFailureCode: failure?.runtimeType.toString(),
-      replacementOf: current.replacementOf,
+    _throwLegacyFailure(
+      await outboxRepository.transition(
+        accountId: accountId,
+        operationId: operationId,
+        next: next,
+        failure: failure,
+      ),
     );
   }
 
@@ -206,20 +178,26 @@ final class MemoryOfflineStore implements OfflineStore {
   Future<void> clearAccount(String accountId) async {
     _cache.removeWhere((_, record) => record.key.accountId == accountId);
     _drafts.removeWhere((_, draft) => draft.accountId == accountId);
-    final ids = _operations.values
-        .where((operation) => operation.accountId == accountId)
-        .map((operation) => operation.operationId)
-        .toSet();
-    _operations.removeWhere((id, _) => ids.contains(id));
-    _dependencies.removeWhere(
-      (id, parents) => ids.contains(id) || parents.any(ids.contains),
-    );
+    _throwLegacyFailure(await outboxRepository.clearAccount(accountId));
+    _legacyOperationAccounts.removeWhere((_, owner) => owner == accountId);
   }
 
   @override
   Future<void> prune(DateTime now) async {
     _cache.removeWhere((_, record) => record.expiresAt.isBefore(now));
+    for (final accountId in _legacyOperationAccounts.values.toSet()) {
+      _throwLegacyFailure(await outboxRepository.prune(accountId: accountId));
+    }
   }
+}
+
+T _successOrThrow<T>(Result<T> result) => result.when(
+  success: (data) => data,
+  failure: (failure) => throw StateError(failure.message),
+);
+
+void _throwLegacyFailure<T>(Result<T> result) {
+  _successOrThrow(result);
 }
 
 String _cacheKey(CacheKey key, int schemaVersion) =>

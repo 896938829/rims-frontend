@@ -38,6 +38,43 @@ void main() {
       expect(model.roleCode, 'user');
       expect(model.roleName, '普通用户');
     });
+
+    test('parses permission codes from permissions and capabilities', () {
+      final model = AppUserModel.fromJson({
+        'id': 7,
+        'username': 'operator',
+        'roleCode': 'operator',
+        'roleName': 'Operator',
+        'permissions': [
+          {'code': 'document.create'},
+          {'permissionCode': 'attachment.upload'},
+        ],
+        'capabilities': ['stocktake.confirm', 'document.create'],
+      });
+
+      expect(model.permissionCodes, {
+        'attachment.upload',
+        'document.create',
+        'stocktake.confirm',
+      });
+      expect(model.toEntity().permissionCodes, model.permissionCodes);
+    });
+
+    test('includes permissions nested in the current role projection', () {
+      final model = AppUserModel.fromJson({
+        'id': 7,
+        'username': 'operator',
+        'role': {
+          'code': 'operator',
+          'name': 'Operator',
+          'permissions': [
+            {'code': 'document.complete'},
+          ],
+        },
+      });
+
+      expect(model.permissionCodes, {'document.complete'});
+    });
   });
 
   group('WarehouseModel', () {

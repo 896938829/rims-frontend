@@ -49,11 +49,15 @@ final class OutboxExecutionReport {
   const OutboxExecutionReport({
     this.succeededOperationIds = const [],
     this.paused = false,
+    this.reviewInvalidated = false,
+    this.skippedOperationReasons = const {},
     this.failure,
   });
 
   final List<String> succeededOperationIds;
   final bool paused;
+  final bool reviewInvalidated;
+  final Map<String, String> skippedOperationReasons;
   final Failure? failure;
 }
 
@@ -101,57 +105,166 @@ final class OutboxExecutor implements OutboxExecutorPort {
 
     final contextFailure = _validateContext(review);
     if (contextFailure != null) {
-      return OutboxExecutionReport(failure: contextFailure);
+      return OutboxExecutionReport(
+        paused: true,
+        reviewInvalidated: true,
+        skippedOperationReasons: _skipAll(
+          review.operationIds,
+          'review_invalidated',
+        ),
+        failure: contextFailure,
+      );
     }
     if (review.operationIds.isEmpty) return const OutboxExecutionReport();
 
     _isExecuting = true;
     try {
-      final readyResult = await repository.ready(review.accountId);
-      if (readyResult case FailureResult<List<OutboxOperation>>(
-        :final failure,
-      )) {
-        return OutboxExecutionReport(failure: failure);
-      }
-      final ready = (readyResult as Success<List<OutboxOperation>>).data
-          .where(
-            (operation) => review.operationIds.contains(operation.operationId),
-          )
-          .toList(growable: false);
-      for (final operation in ready) {
-        final currentFailure = _validateOperation(review, operation);
-        if (currentFailure != null) {
-          return OutboxExecutionReport(failure: currentFailure);
-        }
-      }
-
-      final reachability = await networkStatusService.verify();
-      if (reachability != NetworkReachability.online) {
-        return const OutboxExecutionReport(failure: NetworkFailure());
-      }
-
       final succeeded = <String>[];
+      final processed = <String>{};
+      final skipped = <String, String>{};
       Failure? lastFailure;
 
-      for (final operation in ready) {
+      while (true) {
+        final currentContextFailure = _validateContext(review);
+        if (currentContextFailure != null) {
+          _markRemaining(
+            review.operationIds,
+            processed,
+            skipped,
+            'review_invalidated',
+          );
+          return OutboxExecutionReport(
+            succeededOperationIds: List.unmodifiable(succeeded),
+            paused: true,
+            reviewInvalidated: true,
+            skippedOperationReasons: Map.unmodifiable(skipped),
+            failure: currentContextFailure,
+          );
+        }
+
+        final readyResult = await repository.ready(review.accountId);
+        if (readyResult case FailureResult<List<OutboxOperation>>(
+          :final failure,
+        )) {
+          return OutboxExecutionReport(
+            succeededOperationIds: List.unmodifiable(succeeded),
+            skippedOperationReasons: Map.unmodifiable(skipped),
+            failure: failure,
+          );
+        }
+        final candidates = (readyResult as Success<List<OutboxOperation>>).data
+            .where(
+              (operation) =>
+                  review.operationIds.contains(operation.operationId) &&
+                  !processed.contains(operation.operationId),
+            )
+            .toList(growable: false);
+        if (candidates.isEmpty) break;
+        final operation = candidates.first;
+        final operationFailure = _validateOperation(review, operation);
+        if (operationFailure != null) {
+          _markRemaining(
+            review.operationIds,
+            processed,
+            skipped,
+            'review_invalidated',
+          );
+          return OutboxExecutionReport(
+            succeededOperationIds: List.unmodifiable(succeeded),
+            paused: true,
+            reviewInvalidated: true,
+            skippedOperationReasons: Map.unmodifiable(skipped),
+            failure: operationFailure,
+          );
+        }
+        if (!handlers.containsKey(operation.kind)) {
+          processed.add(operation.operationId);
+          skipped[operation.operationId] = 'handler_unavailable';
+          lastFailure = const StateFailure(
+            message: 'No handler for offline operation.',
+          );
+          continue;
+        }
+
+        final reachability = await networkStatusService.verify();
+        if (reachability != NetworkReachability.online) {
+          _markRemaining(
+            review.operationIds,
+            processed,
+            skipped,
+            'connectivity_unverified',
+          );
+          return OutboxExecutionReport(
+            succeededOperationIds: List.unmodifiable(succeeded),
+            paused: true,
+            skippedOperationReasons: Map.unmodifiable(skipped),
+            failure: const NetworkFailure(),
+          );
+        }
+        final postVerifyFailure = _validateOperation(review, operation);
+        if (postVerifyFailure != null) {
+          _markRemaining(
+            review.operationIds,
+            processed,
+            skipped,
+            'review_invalidated',
+          );
+          return OutboxExecutionReport(
+            succeededOperationIds: List.unmodifiable(succeeded),
+            paused: true,
+            reviewInvalidated: true,
+            skippedOperationReasons: Map.unmodifiable(skipped),
+            failure: postVerifyFailure,
+          );
+        }
+
         final outcome = await _executeOne(operation);
+        processed.add(operation.operationId);
         if (outcome.succeeded) succeeded.add(operation.operationId);
         if (outcome.pauseBatch) {
+          _markRemaining(
+            review.operationIds,
+            processed,
+            skipped,
+            'authentication_required',
+          );
           return OutboxExecutionReport(
             succeededOperationIds: List.unmodifiable(succeeded),
             paused: outcome.pauseBatch,
+            skippedOperationReasons: Map.unmodifiable(skipped),
             failure: outcome.failure,
           );
         }
         lastFailure = outcome.failure ?? lastFailure;
       }
 
+      _markRemaining(review.operationIds, processed, skipped, 'not_ready');
+
       return OutboxExecutionReport(
         succeededOperationIds: List.unmodifiable(succeeded),
+        skippedOperationReasons: Map.unmodifiable(skipped),
         failure: lastFailure,
       );
     } finally {
       _isExecuting = false;
+    }
+  }
+
+  Map<String, String> _skipAll(Set<String> operationIds, String reason) =>
+      Map.unmodifiable({
+        for (final operationId in operationIds) operationId: reason,
+      });
+
+  void _markRemaining(
+    Set<String> operationIds,
+    Set<String> processed,
+    Map<String, String> skipped,
+    String reason,
+  ) {
+    for (final operationId in operationIds) {
+      if (!processed.contains(operationId)) {
+        skipped.putIfAbsent(operationId, () => reason);
+      }
     }
   }
 

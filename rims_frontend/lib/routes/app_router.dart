@@ -15,9 +15,9 @@ import '../features/auth/presentation/view_models/auth_session_controller.dart';
 import '../features/documents/domain/repositories/documents_repository.dart';
 import '../features/inventory/domain/repositories/inventory_repository.dart';
 import '../features/offline/domain/repositories/document_draft_repository.dart';
-import '../features/offline/domain/entities/outbox_operation.dart';
 import '../features/offline/domain/repositories/outbox_repository.dart';
 import '../features/offline/domain/services/outbox_executor.dart';
+import '../features/offline/domain/services/outbox_permission_policy.dart';
 import '../features/offline/presentation/pages/sync_center_page.dart';
 import '../features/offline/presentation/view_models/sync_center_view_model.dart';
 import '../features/offline/presentation/view_models/drafts_view_model.dart';
@@ -133,6 +133,8 @@ final class _SyncCenterRoute extends StatefulWidget {
 }
 
 final class _SyncCenterRouteState extends State<_SyncCenterRoute> {
+  static const OutboxPermissionPolicy _permissionPolicy =
+      OutboxPermissionPolicy();
   SyncCenterViewModel? _viewModel;
 
   @override
@@ -154,12 +156,7 @@ final class _SyncCenterRouteState extends State<_SyncCenterRoute> {
     final user = widget.sessionController.currentUser;
     final warehouse = widget.sessionController.currentWarehouse;
     if (user == null || warehouse == null) return null;
-    return OutboxExecutionContext(
-      accountId: user.id.toString(),
-      warehouseId: warehouse.id,
-      permissionStamp: user.roleCode,
-      allowedKinds: Set.unmodifiable(OutboxOperationKind.values),
-    );
+    return _permissionPolicy.contextFor(user: user, warehouseId: warehouse.id);
   }
 
   void _handleSessionChanged() {

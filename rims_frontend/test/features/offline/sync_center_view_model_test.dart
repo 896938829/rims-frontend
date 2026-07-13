@@ -1,8 +1,17 @@
+import 'dart:async';
+import 'dart:collection';
+
 import 'package:flutter_test/flutter_test.dart';
+import 'package:rims_frontend/app.dart';
+import 'package:rims_frontend/core/result/failure.dart';
 import 'package:rims_frontend/core/result/result.dart';
+import 'package:rims_frontend/features/auth/domain/entities/app_user.dart';
 import 'package:rims_frontend/features/offline/data/repositories/memory_outbox_repository.dart';
+import 'package:rims_frontend/features/offline/data/repositories/memory_offline_store.dart';
 import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.dart';
+import 'package:rims_frontend/features/offline/domain/repositories/outbox_repository.dart';
 import 'package:rims_frontend/features/offline/domain/services/outbox_executor.dart';
+import 'package:rims_frontend/features/offline/domain/services/outbox_permission_policy.dart';
 import 'package:rims_frontend/features/offline/domain/services/outbox_state_machine.dart';
 import 'package:rims_frontend/features/offline/presentation/view_models/sync_center_view_model.dart';
 
@@ -143,6 +152,38 @@ void main() {
   });
 
   test(
+    'same-role permission revocation invalidates controlled review',
+    () async {
+      const policy = OutboxPermissionPolicy();
+      const granted = AppUser(
+        id: 7,
+        username: 'operator',
+        realName: 'Operator',
+        roleCode: 'operator',
+        roleName: 'Operator',
+        permissionCodes: {'document.create'},
+      );
+      const revoked = AppUser(
+        id: 7,
+        username: 'operator',
+        realName: 'Operator',
+        roleCode: 'operator',
+        roleName: 'Operator',
+        permissionCodes: {},
+      );
+      context = policy.contextFor(user: granted, warehouseId: 11);
+      await repository.enqueue(_operation('op'));
+      await viewModel.load();
+      await viewModel.review('op');
+
+      context = policy.contextFor(user: revoked, warehouseId: 11);
+      await viewModel.refreshContext();
+
+      expect(viewModel.reviewedOperationIds, isEmpty);
+    },
+  );
+
+  test(
     'retry selected excludes selected operations that are not reviewed',
     () async {
       await repository.enqueue(_operation('a'));
@@ -157,6 +198,143 @@ void main() {
       expect(executor.reviews.single.operationIds, {'a'});
     },
   );
+
+  test(
+    'slow account A load cannot overwrite fast account B generation',
+    () async {
+      viewModel.dispose();
+      final deferred = _DeferredRepository(repository);
+      final loadA = Completer<Result<List<OutboxOperation>>>();
+      final loadB = Completer<Result<List<OutboxOperation>>>();
+      deferred.listResults.addAll([loadA, loadB]);
+      viewModel = SyncCenterViewModel(
+        repository: deferred,
+        executor: executor,
+        contextReader: () => context,
+      );
+      final operationA = _operation('a');
+      final operationB = _operation('b', accountId: '8');
+
+      final slow = viewModel.load();
+      final generationA = viewModel.contextGeneration;
+      context = const OutboxExecutionContext(
+        accountId: '8',
+        warehouseId: 11,
+        permissionStamp: 'role:operator@1',
+        allowedKinds: {OutboxOperationKind.documentCreate},
+      );
+      final fast = viewModel.refreshContext();
+      final generationB = viewModel.contextGeneration;
+      loadB.complete(Success([operationB]));
+      await fast;
+      loadA.complete(Success([operationA]));
+      await slow;
+
+      expect(generationB, greaterThan(generationA));
+      expect(viewModel.operations.map((item) => item.operationId), ['b']);
+    },
+  );
+
+  test('late review result cannot enter a newer context', () async {
+    await repository.enqueue(_operation('a'));
+    await repository.enqueue(_operation('b', accountId: '8'));
+    viewModel.dispose();
+    final deferred = _DeferredRepository(repository);
+    viewModel = SyncCenterViewModel(
+      repository: deferred,
+      executor: executor,
+      contextReader: () => context,
+    );
+    await viewModel.load();
+    final confirmA = Completer<Result<OutboxOperation>>();
+    deferred.confirmResult = confirmA;
+    final lateReview = viewModel.review('a');
+
+    context = const OutboxExecutionContext(
+      accountId: '8',
+      warehouseId: 11,
+      permissionStamp: 'role:operator@1',
+      allowedKinds: {OutboxOperationKind.documentCreate},
+    );
+    await viewModel.refreshContext();
+    confirmA.complete(const FailureResult(AuthorizationFailure()));
+
+    expect(await lateReview, isFalse);
+    expect(viewModel.operations.map((item) => item.operationId), ['b']);
+    expect(viewModel.reviewedOperationIds, isEmpty);
+    expect(viewModel.failure, isNull);
+    expect(viewModel.isBusy, isFalse);
+  });
+
+  test('retry command drops stale reviewed ids before route refresh', () async {
+    await repository.enqueue(_operation('a'));
+    await viewModel.load();
+    await viewModel.review('a');
+    viewModel.setSelected('a', true);
+    context = const OutboxExecutionContext(
+      accountId: '8',
+      warehouseId: 11,
+      permissionStamp: 'role:operator@1',
+      allowedKinds: {OutboxOperationKind.documentCreate},
+    );
+
+    await viewModel.retrySelected();
+
+    expect(executor.reviews, isEmpty);
+    expect(viewModel.reviewedOperationIds, isEmpty);
+    expect(viewModel.selectedOperationIds, isEmpty);
+    expect(viewModel.failure, isNull);
+    expect(viewModel.operations, isEmpty);
+  });
+
+  test(
+    'late mutation self-invalidates busy state before route refresh',
+    () async {
+      await repository.enqueue(_operation('a'));
+      viewModel.dispose();
+      final deferred = _DeferredRepository(repository);
+      viewModel = SyncCenterViewModel(
+        repository: deferred,
+        executor: executor,
+        contextReader: () => context,
+      );
+      await viewModel.load();
+      final cancelA = Completer<Result<OutboxOperation>>();
+      deferred.cancelResult = cancelA;
+      final lateCancel = viewModel.cancel('a');
+      expect(viewModel.isBusy, isTrue);
+      context = const OutboxExecutionContext(
+        accountId: '8',
+        warehouseId: 11,
+        permissionStamp: 'role:operator@1',
+        allowedKinds: {OutboxOperationKind.documentCreate},
+      );
+      cancelA.complete(const FailureResult(AuthorizationFailure()));
+
+      await lateCancel;
+
+      expect(viewModel.isBusy, isFalse);
+      expect(viewModel.failure, isNull);
+      expect(viewModel.operations, isEmpty);
+    },
+  );
+
+  test('memory store legacy and Sync Center share one app outbox', () async {
+    final store = MemoryOfflineStore();
+    final appRepository = outboxRepositoryForOfflineStore(store);
+    expect(identical(appRepository, store.outboxRepository), isTrue);
+    final operation = _operation('legacy');
+
+    await store.enqueue(operation, const {});
+    await store.transition('legacy', OutboxState.syncing);
+
+    expect(
+      (await appRepository.list('7')).dataOrNull!.single.state,
+      OutboxState.syncing,
+    );
+    await store.clearAccount('7');
+    expect((await appRepository.list('7')).dataOrNull, isEmpty);
+  });
 
   test('inventory confirmation summarizes immutable review facts', () async {
     await repository.enqueue(
@@ -226,12 +404,13 @@ OutboxOperation _operation(
   String? key,
   Map<String, Object?> payload = const {},
   bool confirmed = true,
+  String accountId = '7',
 }) {
   final now = DateTime.utc(2026, 7, 13);
   return OutboxOperation(
     operationId: id,
     idempotencyKey: key ?? 'key-$id',
-    accountId: '7',
+    accountId: accountId,
     warehouseId: 11,
     kind: OutboxOperationKind.documentCreate,
     payload: payload,
@@ -239,6 +418,93 @@ OutboxOperation _operation(
     createdAt: now,
     confirmedAt: confirmed ? now : null,
   );
+}
+
+final class _DeferredRepository implements OutboxRepository {
+  _DeferredRepository(this.delegate);
+
+  final OutboxRepository delegate;
+  final Queue<Completer<Result<List<OutboxOperation>>>> listResults = Queue();
+  Completer<Result<OutboxOperation>>? confirmResult;
+  Completer<Result<OutboxOperation>>? cancelResult;
+
+  @override
+  Future<Result<List<OutboxOperation>>> list(String accountId) =>
+      listResults.isEmpty
+      ? delegate.list(accountId)
+      : listResults.removeFirst().future;
+
+  @override
+  Future<Result<OutboxOperation>> confirm({
+    required String accountId,
+    required String operationId,
+  }) =>
+      confirmResult?.future ??
+      delegate.confirm(accountId: accountId, operationId: operationId);
+
+  @override
+  Future<Result<OutboxOperation>> enqueue(
+    OutboxOperation operation, {
+    Set<String> dependencies = const {},
+  }) => delegate.enqueue(operation, dependencies: dependencies);
+
+  @override
+  Future<Result<List<OutboxOperation>>> ready(String accountId) =>
+      delegate.ready(accountId);
+
+  @override
+  Future<Result<OutboxOperation>> retryNow({
+    required String accountId,
+    required String operationId,
+  }) => delegate.retryNow(accountId: accountId, operationId: operationId);
+
+  @override
+  Future<Result<OutboxOperation>> transition({
+    required String accountId,
+    required String operationId,
+    required OutboxState next,
+    Failure? failure,
+  }) => delegate.transition(
+    accountId: accountId,
+    operationId: operationId,
+    next: next,
+    failure: failure,
+  );
+
+  @override
+  Future<Result<OutboxOperation>> cancel({
+    required String accountId,
+    required String operationId,
+  }) =>
+      cancelResult?.future ??
+      delegate.cancel(accountId: accountId, operationId: operationId);
+
+  @override
+  Future<Result<OutboxOperation>> discard({
+    required String accountId,
+    required String operationId,
+  }) => delegate.discard(accountId: accountId, operationId: operationId);
+
+  @override
+  Future<Result<OutboxOperation>> resolveConflict({
+    required String accountId,
+    required String conflictedOperationId,
+    required OutboxOperation replacement,
+    Set<String> dependencies = const {},
+  }) => delegate.resolveConflict(
+    accountId: accountId,
+    conflictedOperationId: conflictedOperationId,
+    replacement: replacement,
+    dependencies: dependencies,
+  );
+
+  @override
+  Future<Result<void>> clearAccount(String accountId) =>
+      delegate.clearAccount(accountId);
+
+  @override
+  Future<Result<int>> prune({required String accountId}) =>
+      delegate.prune(accountId: accountId);
 }
 
 final class _Executor implements OutboxExecutorPort {
