@@ -39,24 +39,20 @@ void main() {
       expect(model.roleName, '普通用户');
     });
 
-    test('parses permission codes from permissions and capabilities', () {
+    test('parses backend permissionCodes as a normalized set', () {
       final model = AppUserModel.fromJson({
         'id': 7,
         'username': 'operator',
         'roleCode': 'operator',
         'roleName': 'Operator',
-        'permissions': [
-          {'code': 'document.create'},
-          {'permissionCode': 'attachment.upload'},
+        'permissionCodes': [
+          'document:create',
+          'file:upload',
+          'document:create',
         ],
-        'capabilities': ['stocktake.confirm', 'document.create'],
       });
 
-      expect(model.permissionCodes, {
-        'attachment.upload',
-        'document.create',
-        'stocktake.confirm',
-      });
+      expect(model.permissionCodes, {'document:create', 'file:upload'});
       expect(model.toEntity().permissionCodes, model.permissionCodes);
     });
 
@@ -68,12 +64,12 @@ void main() {
           'code': 'operator',
           'name': 'Operator',
           'permissions': [
-            {'code': 'document.complete'},
+            {'code': 'document:complete'},
           ],
         },
       });
 
-      expect(model.permissionCodes, {'document.complete'});
+      expect(model.permissionCodes, {'document:complete'});
     });
   });
 

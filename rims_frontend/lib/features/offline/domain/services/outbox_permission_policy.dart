@@ -2,18 +2,29 @@ import '../../../auth/domain/entities/app_user.dart';
 import '../entities/outbox_operation.dart';
 import 'outbox_executor.dart';
 
+abstract final class OutboxPermissionCodes {
+  static const String fileUpload = 'file:upload';
+  static const String documentCreate = 'document:create';
+  static const String documentComplete = 'document:complete';
+  static const String stocktakeConfirm = 'stocktake:confirm';
+  static const String stocktakeSettle = 'stocktake:settle';
+}
+
 final class OutboxPermissionPolicy {
   const OutboxPermissionPolicy();
 
   static const Map<OutboxOperationKind, Set<String>> _requiredCodes = {
-    OutboxOperationKind.attachmentUpload: {
-      'attachment.upload',
-      'document.attachment.upload',
+    OutboxOperationKind.attachmentUpload: {OutboxPermissionCodes.fileUpload},
+    OutboxOperationKind.documentCreate: {OutboxPermissionCodes.documentCreate},
+    OutboxOperationKind.documentComplete: {
+      OutboxPermissionCodes.documentComplete,
     },
-    OutboxOperationKind.documentCreate: {'document.create'},
-    OutboxOperationKind.documentComplete: {'document.complete'},
-    OutboxOperationKind.stocktakeConfirm: {'stocktake.confirm'},
-    OutboxOperationKind.stocktakeSettle: {'stocktake.settle'},
+    OutboxOperationKind.stocktakeConfirm: {
+      OutboxPermissionCodes.stocktakeConfirm,
+    },
+    OutboxOperationKind.stocktakeSettle: {
+      OutboxPermissionCodes.stocktakeSettle,
+    },
   };
 
   OutboxExecutionContext contextFor({

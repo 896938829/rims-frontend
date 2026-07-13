@@ -14,60 +14,88 @@ import 'package:rims_frontend/features/offline/domain/services/outbox_permission
 import 'package:rims_frontend/features/offline/domain/services/outbox_state_machine.dart';
 
 void main() {
-  test('permission policy derives allowed kinds and stable fingerprint', () {
-    const policy = OutboxPermissionPolicy();
-    const first = AppUser(
-      id: 7,
-      username: 'operator',
-      realName: 'Operator',
-      roleCode: 'operator',
-      roleName: 'Operator',
-      permissionCodes: {
-        'stocktake.confirm',
-        'attachment.upload',
-        'document.create',
-      },
-    );
-    const reordered = AppUser(
-      id: 7,
-      username: 'operator',
-      realName: 'Operator',
-      roleCode: 'operator',
-      roleName: 'Operator',
-      permissionCodes: {
-        'document.create',
-        'attachment.upload',
-        'stocktake.confirm',
-      },
-    );
-    const revoked = AppUser(
-      id: 7,
-      username: 'operator',
-      realName: 'Operator',
-      roleCode: 'operator',
-      roleName: 'Operator',
-      permissionCodes: {'attachment.upload', 'stocktake.confirm'},
-    );
+  test(
+    'permission policy derives ordinary allowed kinds and stable fingerprint',
+    () {
+      const policy = OutboxPermissionPolicy();
+      const first = AppUser(
+        id: 7,
+        username: 'operator',
+        realName: 'Operator',
+        roleCode: 'operator',
+        roleName: 'Operator',
+        permissionCodes: {
+          'stocktake:confirm',
+          'file:upload',
+          'document:create',
+        },
+      );
+      const reordered = AppUser(
+        id: 7,
+        username: 'operator',
+        realName: 'Operator',
+        roleCode: 'operator',
+        roleName: 'Operator',
+        permissionCodes: {
+          'document:create',
+          'file:upload',
+          'stocktake:confirm',
+        },
+      );
+      const revoked = AppUser(
+        id: 7,
+        username: 'operator',
+        realName: 'Operator',
+        roleCode: 'operator',
+        roleName: 'Operator',
+        permissionCodes: {'file:upload', 'stocktake:confirm'},
+      );
 
-    final context = policy.contextFor(user: first, warehouseId: 11);
-    final reorderedContext = policy.contextFor(
-      user: reordered,
-      warehouseId: 11,
-    );
-    final revokedContext = policy.contextFor(user: revoked, warehouseId: 11);
+      final context = policy.contextFor(user: first, warehouseId: 11);
+      final reorderedContext = policy.contextFor(
+        user: reordered,
+        warehouseId: 11,
+      );
+      final revokedContext = policy.contextFor(user: revoked, warehouseId: 11);
 
-    expect(context.allowedKinds, {
-      OutboxOperationKind.attachmentUpload,
-      OutboxOperationKind.documentCreate,
-      OutboxOperationKind.stocktakeConfirm,
-    });
-    expect(context.permissionStamp, reorderedContext.permissionStamp);
-    expect(revokedContext.permissionStamp, isNot(context.permissionStamp));
-    expect(
-      revokedContext.allowedKinds,
-      isNot(contains(OutboxOperationKind.documentCreate)),
-    );
-  });
+      expect(context.allowedKinds, {
+        OutboxOperationKind.attachmentUpload,
+        OutboxOperationKind.documentCreate,
+        OutboxOperationKind.stocktakeConfirm,
+      });
+      expect(context.permissionStamp, reorderedContext.permissionStamp);
+      expect(revokedContext.permissionStamp, isNot(context.permissionStamp));
+      expect(
+        revokedContext.allowedKinds,
+        isNot(contains(OutboxOperationKind.documentCreate)),
+      );
+    },
+  );
+
+  test(
+    'admin allowed kinds come only from actual backend permission codes',
+    () {
+      const policy = OutboxPermissionPolicy();
+      const admin = AppUser(
+        id: 1,
+        username: 'admin',
+        realName: 'Admin',
+        roleCode: 'admin',
+        roleName: 'Administrator',
+        permissionCodes: {
+          'document:create',
+          'document:complete',
+          'stocktake:confirm',
+          'stocktake:settle',
+          'file:upload',
+        },
+      );
+
+      final context = policy.contextFor(user: admin, warehouseId: 11);
+
+      expect(context.allowedKinds, OutboxOperationKind.values.toSet());
+    },
+  );
 
   late DateTime now;
   late MemoryOutboxRepository repository;

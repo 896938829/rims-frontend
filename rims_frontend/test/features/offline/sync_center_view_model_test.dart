@@ -161,7 +161,7 @@ void main() {
         realName: 'Operator',
         roleCode: 'operator',
         roleName: 'Operator',
-        permissionCodes: {'document.create'},
+        permissionCodes: {'document:create'},
       );
       const revoked = AppUser(
         id: 7,

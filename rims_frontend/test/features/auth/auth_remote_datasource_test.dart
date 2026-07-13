@@ -6,8 +6,79 @@ import 'package:rims_frontend/core/network/api_client.dart';
 import 'package:rims_frontend/core/result/result.dart';
 import 'package:rims_frontend/features/auth/data/datasources/auth_remote_datasource.dart';
 import 'package:rims_frontend/features/auth/data/models/auth_models.dart';
+import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.dart';
+import 'package:rims_frontend/features/offline/domain/services/outbox_permission_policy.dart';
 
 void main() {
+  test('login maps backend permissionCodes fixture', () async {
+    final adapter = _CapturingAdapter(
+      body:
+          '{"code":0,"message":"ok","data":{"token":"jwt","expiresAt":1770000000,"user":{"id":7,"username":"alice","realName":"Alice","roleCode":"operator","roleName":"Operator","permissionCodes":["document:create","file:upload"]}}}',
+    );
+    final dio = Dio()..httpClientAdapter = adapter;
+    final dataSource = ApiAuthRemoteDataSource(
+      ApiClient(dio: dio, enableLogging: false),
+    );
+
+    final result = await dataSource.login(
+      username: 'alice',
+      password: 'secret',
+    );
+
+    expect(adapter.lastPath, '/auth/login');
+    result.when(
+      success: (login) {
+        expect(login.user.permissionCodes, {'document:create', 'file:upload'});
+        expect(
+          const OutboxPermissionPolicy()
+              .contextFor(user: login.user.toEntity(), warehouseId: 11)
+              .allowedKinds,
+          {
+            OutboxOperationKind.attachmentUpload,
+            OutboxOperationKind.documentCreate,
+          },
+        );
+      },
+      failure: (failure) => fail(failure.message),
+    );
+  });
+
+  test(
+    'loadCurrentUser maps refreshed backend permissionCodes fixture',
+    () async {
+      final adapter = _CapturingAdapter(
+        body:
+            '{"code":0,"message":"ok","data":{"id":1,"username":"admin","realName":"Admin","roleId":1,"roleCode":"admin","roleName":"Administrator","permissionCodes":["document:create","document:complete","stocktake:confirm","stocktake:settle","file:upload"]}}',
+      );
+      final dio = Dio()..httpClientAdapter = adapter;
+      final dataSource = ApiAuthRemoteDataSource(
+        ApiClient(dio: dio, enableLogging: false),
+      );
+
+      final result = await dataSource.loadCurrentUser();
+
+      expect(adapter.lastPath, '/users/me');
+      result.when(
+        success: (user) {
+          expect(user.permissionCodes, {
+            'document:create',
+            'document:complete',
+            'stocktake:confirm',
+            'stocktake:settle',
+            'file:upload',
+          });
+          expect(
+            const OutboxPermissionPolicy()
+                .contextFor(user: user.toEntity(), warehouseId: 11)
+                .allowedKinds,
+            OutboxOperationKind.values.toSet(),
+          );
+        },
+        failure: (failure) => fail(failure.message),
+      );
+    },
+  );
+
   test('login rejects success envelope with non-object payload', () async {
     final adapter = _CapturingAdapter(
       body: '{"code":0,"message":"ok","data":"bad-login-payload"}',

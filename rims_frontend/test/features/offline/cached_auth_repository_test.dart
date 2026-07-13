@@ -129,7 +129,7 @@ void main() {
 
     expect(cached?.user.roleCode, 'admin');
     expect(cached?.user.isAdmin, isTrue);
-    expect(cached?.user.permissionCodes, {'document.complete'});
+    expect(cached?.user.permissionCodes, {'document:complete'});
   });
 
   test('logout clears the same Memory outbox used by Sync Center', () async {
@@ -345,7 +345,7 @@ const _admin = AppUser(
   realName: 'Alice',
   roleCode: 'admin',
   roleName: '管理员',
-  permissionCodes: {'document.complete'},
+  permissionCodes: {'document:complete'},
 );
 const _session = AuthSession(
   accessToken: 'token',
