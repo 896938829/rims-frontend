@@ -17,6 +17,7 @@ import 'package:rims_frontend/features/auth/presentation/view_models/auth_sessio
 import 'package:rims_frontend/features/offline/data/repositories/cached_auth_repository.dart';
 import 'package:rims_frontend/features/offline/data/repositories/memory_offline_store.dart';
 import 'package:rims_frontend/features/offline/domain/entities/cache_snapshot.dart';
+import 'package:rims_frontend/features/offline/domain/entities/document_draft.dart';
 import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.dart';
 import 'package:rims_frontend/features/offline/domain/services/offline_ownership_service.dart';
 
@@ -88,6 +89,106 @@ void main() {
       expect(keys.generation, 2);
     },
   );
+
+  for (final stage in _AuthenticationFailureStage.values) {
+    test(
+      'real ${stage.name} 401 invalidates memory before retryable credential cleanup',
+      () async {
+        final storage = _FakeSessionStorage(token: 'expired-token');
+        final remote = _MutableAuthRemoteDataSource(
+          currentUserResult: const Success(
+            AppUserModel(
+              id: 7,
+              username: 'alice',
+              realName: 'Alice',
+              roleCode: 'user',
+              roleName: '普通用户',
+            ),
+          ),
+          warehousesResult: const Success([
+            WarehouseModel(id: 11, code: 'SH', name: '上海仓', isDefault: true),
+          ]),
+        );
+        final store = MemoryOfflineStore();
+        final reviews = _BlockingReviewInvalidator();
+        final ownership = OfflineOwnershipService(
+          store: store,
+          files: const _NoopOwnedFiles(),
+          scans: const _NoopOwnedScans(),
+          reviews: reviews,
+          databaseKeys: MemoryOfflineDatabaseKeyManager(),
+        );
+        final controller = AuthSessionController(
+          ownershipCoordinator: ownership,
+        );
+        addTearDown(controller.dispose);
+        final delegate = AuthRepositoryImpl(
+          remoteDataSource: remote,
+          secureStorage: storage,
+        );
+        final repository = CachedAuthRepository(
+          delegate: delegate,
+          store: store,
+          tokenStorage: storage,
+          accountStorage: storage,
+          revocationStorage: storage,
+          ownershipCoordinator: ownership,
+          onSessionRevoked: controller.invalidateRevokedSession,
+          onSessionExpired: controller.invalidateExpiredSession,
+          now: () => now,
+        );
+        await controller.restoreSession(repository);
+        await store.saveDraft(
+          DocumentDraft(
+            id: 'retained-draft',
+            accountId: '7',
+            warehouseId: 11,
+            payload: const {},
+            createdAt: now,
+            updatedAt: now,
+          ),
+        );
+        switch (stage) {
+          case _AuthenticationFailureStage.currentUser:
+            remote.currentUserResult = const FailureResult(
+              AuthenticationFailure(statusCode: 401),
+            );
+          case _AuthenticationFailureStage.warehouses:
+            remote.warehousesResult = const FailureResult(
+              AuthenticationFailure(statusCode: 401),
+            );
+        }
+        storage.failNext(_RevocationStorageFailure.clearCredential, times: 2);
+
+        final refresh = controller.refreshSession(repository);
+        await reviews.firstInvalidationStarted.future;
+
+        expect(controller.session, isNull);
+        expect(controller.accessToken, isNull);
+        expect(controller.canAuthenticateRequests, isFalse);
+        expect(controller.isRestoring, isTrue);
+        expect(ownership.canSync('7'), isFalse);
+
+        reviews.releaseFirstInvalidation.complete();
+        await refresh;
+
+        expect(controller.isRestoring, isFalse);
+        expect(controller.restoreFailure, isA<AuthenticationFailure>());
+        expect(controller.restoreFailure?.cause, isA<LocalStorageFailure>());
+        expect(storage.token, 'expired-token');
+        expect((await store.inspectAccount('7')).drafts, 1);
+
+        await controller.refreshSession(repository);
+
+        expect(controller.session, isNull);
+        expect(controller.canAuthenticateRequests, isFalse);
+        expect(controller.restoreFailure, isA<AuthenticationFailure>());
+        expect(storage.token, isNull);
+        expect(reviews.invalidationCalls, 2);
+        expect((await store.inspectAccount('7')).drafts, 1);
+      },
+    );
+  }
 
   test('authenticated network restore seeds cache with age metadata', () async {
     final delegate = _FakeAuthRepository(
@@ -522,7 +623,9 @@ void main() {
                 (intent) => intent.reason == OfflineOwnershipReason.revocation,
               )
               .length,
-          greaterThanOrEqualTo(2),
+          storageFailure == _RevocationStorageFailure.saveMarker
+              ? 1
+              : greaterThanOrEqualTo(2),
         );
       },
     );
@@ -795,15 +898,20 @@ final class _FakeSessionStorage
   String? token;
   String? accountId;
   String? pendingRevocationAccountId;
-  _RevocationStorageFailure? _nextFailure;
+  final Map<_RevocationStorageFailure, int> _remainingFailures = {};
 
-  void failNext(_RevocationStorageFailure failure) {
-    _nextFailure = failure;
+  void failNext(_RevocationStorageFailure failure, {int times = 1}) {
+    _remainingFailures[failure] = times;
   }
 
   void _throwIf(_RevocationStorageFailure failure) {
-    if (_nextFailure != failure) return;
-    _nextFailure = null;
+    final remaining = _remainingFailures[failure] ?? 0;
+    if (remaining == 0) return;
+    if (remaining == 1) {
+      _remainingFailures.remove(failure);
+    } else {
+      _remainingFailures[failure] = remaining - 1;
+    }
     throw StateError('${failure.name} failed');
   }
 
@@ -857,6 +965,8 @@ enum _RevocationStorageFailure {
   clearAccount,
   clearMarker,
 }
+
+enum _AuthenticationFailureStage { currentUser, warehouses }
 
 final class _MutableAuthRemoteDataSource implements AuthRemoteDataSource {
   _MutableAuthRemoteDataSource({
@@ -930,6 +1040,20 @@ final class _NoopReviewInvalidator implements OfflineReviewInvalidator {
     required String accountId,
     int? warehouseId,
   }) async {}
+}
+
+final class _BlockingReviewInvalidator implements OfflineReviewInvalidator {
+  final Completer<void> firstInvalidationStarted = Completer<void>();
+  final Completer<void> releaseFirstInvalidation = Completer<void>();
+  int invalidationCalls = 0;
+
+  @override
+  Future<void> invalidate({required String accountId, int? warehouseId}) async {
+    invalidationCalls += 1;
+    if (invalidationCalls != 1) return;
+    firstInvalidationStarted.complete();
+    await releaseFirstInvalidation.future;
+  }
 }
 
 final class _FakeAuthRepository implements AuthRepository {

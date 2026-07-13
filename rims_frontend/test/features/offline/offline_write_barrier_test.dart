@@ -406,57 +406,60 @@ void main() {
   );
 
   test(
-    'volatile pending revocation is retried before same-account login can expose a token',
+    'volatile revocation becomes durable before cleanup and survives a process restart',
     () async {
-      final barrier = OfflineWriteBarrier();
-      final rawStore = MemoryOfflineStore();
-      final store = WriteBarrierOfflineStore(
-        delegate: rawStore,
-        barrier: barrier,
+      final firstBarrier = OfflineWriteBarrier();
+      final firstRawStore = MemoryOfflineStore();
+      final firstStore = WriteBarrierOfflineStore(
+        delegate: firstRawStore,
+        barrier: firstBarrier,
       );
-      final files = _FailingOwnedFiles();
-      final keys = MemoryOfflineDatabaseKeyManager();
-      final ownership = OfflineOwnershipService(
-        store: rawStore,
-        files: files,
+      final firstFiles = _FailingOwnedFiles()..failNextClearAll = true;
+      final firstKeys = MemoryOfflineDatabaseKeyManager();
+      final firstOwnership = OfflineOwnershipService(
+        store: firstRawStore,
+        files: firstFiles,
         scans: const _NoopScans(),
         reviews: const _NoopReviews(),
-        databaseKeys: keys,
-        mutationParticipants: [barrier],
+        databaseKeys: firstKeys,
+        mutationParticipants: [firstBarrier],
       );
       final storage = _SessionStorage()
         ..token = 'revoked-token'
         ..accountId = '7'
-        ..failNextPendingMarkerWrite = true;
-      final delegate = _PendingAuthRepository(storage);
-      final repository = CachedAuthRepository(
-        delegate: delegate,
-        store: store,
+        ..pendingMarkerWriteFailuresRemaining = 1;
+      final firstDelegate = _PendingAuthRepository(storage);
+      final firstRepository = CachedAuthRepository(
+        delegate: firstDelegate,
+        store: firstStore,
         tokenStorage: storage,
         accountStorage: storage,
         revocationStorage: storage,
         onSessionRevoked: () {},
-        ownershipCoordinator: ownership,
+        ownershipCoordinator: firstOwnership,
       );
 
-      final revoked = await repository.restoreSession();
+      final initialFailure = await firstRepository.restoreSession();
 
-      expect(revoked, isA<FailureResult<AuthSession?>>());
+      expect(initialFailure, isA<FailureResult<AuthSession?>>());
       expect(storage.pendingRevocationAccountId, isNull);
-      expect(storage.token, isNull);
-      expect(keys.generation, 1);
-      files.failNextClearAll = true;
+      expect(storage.token, 'revoked-token');
+      expect(firstFiles.clearAllCalls, 0);
+      expect(firstKeys.generation, 0);
 
-      final failedLogin = await repository.login(
+      final volatileRetry = await firstRepository.login(
         username: 'alice',
         password: 'secret',
       );
 
-      expect(failedLogin, isA<FailureResult<AuthSession>>());
-      expect(delegate.loginCalls, 0);
+      expect(volatileRetry, isA<FailureResult<AuthSession>>());
+      expect(firstDelegate.loginCalls, 0);
+      expect(firstFiles.clearAllCalls, 1);
       expect(storage.token, isNull);
+      expect(storage.pendingRevocationAccountId, '7');
+      expect(firstKeys.generation, 0);
       await expectLater(
-        store.saveDraft(
+        firstStore.saveDraft(
           DocumentDraft(
             id: 'blocked',
             accountId: '7',
@@ -469,19 +472,101 @@ void main() {
         throwsA(isA<OfflineWriteBlockedException>()),
       );
 
-      final successfulLogin = await repository.login(
+      final restartedBarrier = OfflineWriteBarrier();
+      final restartedRawStore = MemoryOfflineStore();
+      final restartedStore = WriteBarrierOfflineStore(
+        delegate: restartedRawStore,
+        barrier: restartedBarrier,
+      );
+      final restartedFiles = _FailingOwnedFiles()..failNextClearAll = true;
+      final restartedKeys = MemoryOfflineDatabaseKeyManager();
+      final restartedOwnership = OfflineOwnershipService(
+        store: restartedRawStore,
+        files: restartedFiles,
+        scans: const _NoopScans(),
+        reviews: const _NoopReviews(),
+        databaseKeys: restartedKeys,
+        mutationParticipants: [restartedBarrier],
+      );
+      final restartedDelegate = _PendingAuthRepository(storage);
+      final restartedRepository = CachedAuthRepository(
+        delegate: restartedDelegate,
+        store: restartedStore,
+        tokenStorage: storage,
+        accountStorage: storage,
+        revocationStorage: storage,
+        onSessionRevoked: () {},
+        ownershipCoordinator: restartedOwnership,
+      );
+
+      final restartedFailure = await restartedRepository.login(
+        username: 'alice',
+        password: 'secret',
+      );
+
+      expect(restartedFailure, isA<FailureResult<AuthSession>>());
+      expect(restartedDelegate.loginCalls, 0);
+      expect(storage.pendingRevocationAccountId, '7');
+      expect(restartedKeys.generation, 0);
+
+      final successfulLogin = await restartedRepository.login(
         username: 'alice',
         password: 'secret',
       );
 
       expect(successfulLogin, isA<Success<AuthSession>>());
-      expect(delegate.loginCalls, 1);
+      expect(restartedDelegate.loginCalls, 1);
       expect(storage.token, 'new-token');
       expect(storage.pendingRevocationAccountId, isNull);
-      expect(keys.generation, 2);
-      expect(ownership.canAccessOfflineData('7'), isTrue);
+      expect(restartedKeys.generation, 1);
+      expect(restartedOwnership.canAccessOfflineData('7'), isTrue);
     },
   );
+
+  test('repeated volatile marker failures block cleanup and login', () async {
+    final barrier = OfflineWriteBarrier();
+    final rawStore = MemoryOfflineStore();
+    final files = _FailingOwnedFiles();
+    final keys = MemoryOfflineDatabaseKeyManager();
+    final ownership = OfflineOwnershipService(
+      store: rawStore,
+      files: files,
+      scans: const _NoopScans(),
+      reviews: const _NoopReviews(),
+      databaseKeys: keys,
+      mutationParticipants: [barrier],
+    );
+    final storage = _SessionStorage()
+      ..token = 'revoked-token'
+      ..accountId = '7'
+      ..pendingMarkerWriteFailuresRemaining = 2;
+    final delegate = _PendingAuthRepository(storage);
+    final repository = CachedAuthRepository(
+      delegate: delegate,
+      store: WriteBarrierOfflineStore(delegate: rawStore, barrier: barrier),
+      tokenStorage: storage,
+      accountStorage: storage,
+      revocationStorage: storage,
+      onSessionRevoked: () {},
+      ownershipCoordinator: ownership,
+    );
+
+    expect(
+      await repository.restoreSession(),
+      isA<FailureResult<AuthSession?>>(),
+    );
+    expect(
+      await repository.login(username: 'alice', password: 'secret'),
+      isA<FailureResult<AuthSession>>(),
+    );
+
+    expect(storage.pendingMarkerWriteCalls, 2);
+    expect(storage.pendingRevocationAccountId, isNull);
+    expect(storage.token, 'revoked-token');
+    expect(files.clearAllCalls, 0);
+    expect(keys.generation, 0);
+    expect(delegate.loginCalls, 0);
+  });
 
   test(
     'durable pending revocation is drained before login after repository restart',
@@ -779,6 +864,7 @@ final class _NoopFiles implements OfflineOwnedFileStore {
 
 final class _FailingOwnedFiles implements OfflineOwnedFileStore {
   bool failNextClearAll = false;
+  int clearAllCalls = 0;
 
   @override
   Future<void> clearAccountFiles(
@@ -788,6 +874,7 @@ final class _FailingOwnedFiles implements OfflineOwnedFileStore {
 
   @override
   Future<void> clearAllFiles() async {
+    clearAllCalls += 1;
     if (!failNextClearAll) return;
     failNextClearAll = false;
     throw StateError('file cleanup failed');
@@ -862,7 +949,8 @@ final class _SessionStorage
   String? token;
   String? accountId;
   String? pendingRevocationAccountId;
-  bool failNextPendingMarkerWrite = false;
+  int pendingMarkerWriteFailuresRemaining = 0;
+  int pendingMarkerWriteCalls = 0;
 
   @override
   Future<void> clearAccessToken() async => token = null;
@@ -895,8 +983,9 @@ final class _SessionStorage
 
   @override
   Future<void> savePendingRevocationAccountId(String accountId) async {
-    if (failNextPendingMarkerWrite) {
-      failNextPendingMarkerWrite = false;
+    pendingMarkerWriteCalls += 1;
+    if (pendingMarkerWriteFailuresRemaining > 0) {
+      pendingMarkerWriteFailuresRemaining -= 1;
       throw StateError('pending marker write failed');
     }
     pendingRevocationAccountId = accountId;

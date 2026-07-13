@@ -68,24 +68,30 @@ void main() {
       },
     );
 
-    test('restoreSession clears stale token when backend rejects it', () async {
-      final storage = _FakeTokenStorage(accessToken: 'expired-token');
-      final remoteDataSource = _FakeAuthRemoteDataSource(
-        currentUserResult: const FailureResult<AppUserModel>(
-          AuthenticationFailure(message: '登录已过期', businessCode: 10001),
-        ),
-      );
-      final repository = AuthRepositoryImpl(
-        remoteDataSource: remoteDataSource,
-        secureStorage: storage,
-      );
+    test(
+      'restoreSession delegates expired token cleanup after backend 401',
+      () async {
+        final storage = _FakeTokenStorage(accessToken: 'expired-token');
+        final remoteDataSource = _FakeAuthRemoteDataSource(
+          currentUserResult: const FailureResult<AppUserModel>(
+            AuthenticationFailure(message: '登录已过期', businessCode: 10001),
+          ),
+        );
+        final repository = AuthRepositoryImpl(
+          remoteDataSource: remoteDataSource,
+          secureStorage: storage,
+        );
 
-      final result = await repository.restoreSession();
+        final result = await repository.restoreSession();
 
-      expect(result.isFailure, isTrue);
-      expect(storage.accessToken, isNull);
-      expect(storage.clearCallCount, 1);
-    });
+        expect(
+          result.when(success: (_) => null, failure: (failure) => failure),
+          isA<AuthenticationFailure>(),
+        );
+        expect(storage.accessToken, 'expired-token');
+        expect(storage.clearCallCount, 0);
+      },
+    );
 
     test(
       'restoreSession delegates revoked token cleanup after backend 403',

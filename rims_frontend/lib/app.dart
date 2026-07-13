@@ -231,6 +231,7 @@ final class _MainAppState extends State<MainApp> {
       revocationStorage: _secureStorage,
       ownershipCoordinator: _offlineOwnershipService,
       onSessionRevoked: _sessionController.invalidateRevokedSession,
+      onSessionExpired: _sessionController.invalidateExpiredSession,
     );
     final documentsRemoteDataSource = ApiDocumentsRemoteDataSource(_apiClient);
     final documentsRepository = DocumentsRepositoryImpl(

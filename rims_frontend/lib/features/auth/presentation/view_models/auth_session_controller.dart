@@ -318,6 +318,17 @@ final class AuthSessionController extends ChangeNotifier {
     notifyListeners();
   }
 
+  void invalidateExpiredSession() {
+    final previous = _session;
+    _session = null;
+    _credentialsInvalidated = true;
+    _restoreFailure = const AuthenticationFailure();
+    _sessionMessage = '登录已过期，请重新登录';
+    _clearSourceMetadata();
+    _publishOwnershipChanges(previous, null);
+    notifyListeners();
+  }
+
   Future<bool> _prepareOwnershipChange(
     AuthSession? previous,
     AuthSession? current,
