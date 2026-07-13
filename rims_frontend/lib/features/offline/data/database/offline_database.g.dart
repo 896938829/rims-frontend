@@ -1214,6 +1214,17 @@ class $OfflineOutboxOperationsTable extends OfflineOutboxOperations
     type: DriftSqlType.string,
     requiredDuringInsert: false,
   );
+  static const VerificationMeta _replacementOfMeta = const VerificationMeta(
+    'replacementOf',
+  );
+  @override
+  late final GeneratedColumn<String> replacementOf = GeneratedColumn<String>(
+    'replacement_of',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
   @override
   List<GeneratedColumn> get $columns => [
     operationId,
@@ -1229,6 +1240,7 @@ class $OfflineOutboxOperationsTable extends OfflineOutboxOperations
     nextAttemptAt,
     attemptCount,
     lastFailureCode,
+    replacementOf,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -1363,6 +1375,15 @@ class $OfflineOutboxOperationsTable extends OfflineOutboxOperations
         ),
       );
     }
+    if (data.containsKey('replacement_of')) {
+      context.handle(
+        _replacementOfMeta,
+        replacementOf.isAcceptableOrUnknown(
+          data['replacement_of']!,
+          _replacementOfMeta,
+        ),
+      );
+    }
     return context;
   }
 
@@ -1428,6 +1449,10 @@ class $OfflineOutboxOperationsTable extends OfflineOutboxOperations
         DriftSqlType.string,
         data['${effectivePrefix}last_failure_code'],
       ),
+      replacementOf: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}replacement_of'],
+      ),
     );
   }
 
@@ -1452,6 +1477,7 @@ class OfflineOutboxOperation extends DataClass
   final DateTime? nextAttemptAt;
   final int attemptCount;
   final String? lastFailureCode;
+  final String? replacementOf;
   const OfflineOutboxOperation({
     required this.operationId,
     required this.idempotencyKey,
@@ -1466,6 +1492,7 @@ class OfflineOutboxOperation extends DataClass
     this.nextAttemptAt,
     required this.attemptCount,
     this.lastFailureCode,
+    this.replacementOf,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -1490,6 +1517,9 @@ class OfflineOutboxOperation extends DataClass
     map['attempt_count'] = Variable<int>(attemptCount);
     if (!nullToAbsent || lastFailureCode != null) {
       map['last_failure_code'] = Variable<String>(lastFailureCode);
+    }
+    if (!nullToAbsent || replacementOf != null) {
+      map['replacement_of'] = Variable<String>(replacementOf);
     }
     return map;
   }
@@ -1517,6 +1547,9 @@ class OfflineOutboxOperation extends DataClass
       lastFailureCode: lastFailureCode == null && nullToAbsent
           ? const Value.absent()
           : Value(lastFailureCode),
+      replacementOf: replacementOf == null && nullToAbsent
+          ? const Value.absent()
+          : Value(replacementOf),
     );
   }
 
@@ -1539,6 +1572,7 @@ class OfflineOutboxOperation extends DataClass
       nextAttemptAt: serializer.fromJson<DateTime?>(json['nextAttemptAt']),
       attemptCount: serializer.fromJson<int>(json['attemptCount']),
       lastFailureCode: serializer.fromJson<String?>(json['lastFailureCode']),
+      replacementOf: serializer.fromJson<String?>(json['replacementOf']),
     );
   }
   @override
@@ -1558,6 +1592,7 @@ class OfflineOutboxOperation extends DataClass
       'nextAttemptAt': serializer.toJson<DateTime?>(nextAttemptAt),
       'attemptCount': serializer.toJson<int>(attemptCount),
       'lastFailureCode': serializer.toJson<String?>(lastFailureCode),
+      'replacementOf': serializer.toJson<String?>(replacementOf),
     };
   }
 
@@ -1575,6 +1610,7 @@ class OfflineOutboxOperation extends DataClass
     Value<DateTime?> nextAttemptAt = const Value.absent(),
     int? attemptCount,
     Value<String?> lastFailureCode = const Value.absent(),
+    Value<String?> replacementOf = const Value.absent(),
   }) => OfflineOutboxOperation(
     operationId: operationId ?? this.operationId,
     idempotencyKey: idempotencyKey ?? this.idempotencyKey,
@@ -1593,6 +1629,9 @@ class OfflineOutboxOperation extends DataClass
     lastFailureCode: lastFailureCode.present
         ? lastFailureCode.value
         : this.lastFailureCode,
+    replacementOf: replacementOf.present
+        ? replacementOf.value
+        : this.replacementOf,
   );
   OfflineOutboxOperation copyWithCompanion(
     OfflineOutboxOperationsCompanion data,
@@ -1629,6 +1668,9 @@ class OfflineOutboxOperation extends DataClass
       lastFailureCode: data.lastFailureCode.present
           ? data.lastFailureCode.value
           : this.lastFailureCode,
+      replacementOf: data.replacementOf.present
+          ? data.replacementOf.value
+          : this.replacementOf,
     );
   }
 
@@ -1647,7 +1689,8 @@ class OfflineOutboxOperation extends DataClass
           ..write('confirmedAt: $confirmedAt, ')
           ..write('nextAttemptAt: $nextAttemptAt, ')
           ..write('attemptCount: $attemptCount, ')
-          ..write('lastFailureCode: $lastFailureCode')
+          ..write('lastFailureCode: $lastFailureCode, ')
+          ..write('replacementOf: $replacementOf')
           ..write(')'))
         .toString();
   }
@@ -1667,6 +1710,7 @@ class OfflineOutboxOperation extends DataClass
     nextAttemptAt,
     attemptCount,
     lastFailureCode,
+    replacementOf,
   );
   @override
   bool operator ==(Object other) =>
@@ -1684,7 +1728,8 @@ class OfflineOutboxOperation extends DataClass
           other.confirmedAt == this.confirmedAt &&
           other.nextAttemptAt == this.nextAttemptAt &&
           other.attemptCount == this.attemptCount &&
-          other.lastFailureCode == this.lastFailureCode);
+          other.lastFailureCode == this.lastFailureCode &&
+          other.replacementOf == this.replacementOf);
 }
 
 class OfflineOutboxOperationsCompanion
@@ -1702,6 +1747,7 @@ class OfflineOutboxOperationsCompanion
   final Value<DateTime?> nextAttemptAt;
   final Value<int> attemptCount;
   final Value<String?> lastFailureCode;
+  final Value<String?> replacementOf;
   final Value<int> rowid;
   const OfflineOutboxOperationsCompanion({
     this.operationId = const Value.absent(),
@@ -1717,6 +1763,7 @@ class OfflineOutboxOperationsCompanion
     this.nextAttemptAt = const Value.absent(),
     this.attemptCount = const Value.absent(),
     this.lastFailureCode = const Value.absent(),
+    this.replacementOf = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   OfflineOutboxOperationsCompanion.insert({
@@ -1733,6 +1780,7 @@ class OfflineOutboxOperationsCompanion
     this.nextAttemptAt = const Value.absent(),
     this.attemptCount = const Value.absent(),
     this.lastFailureCode = const Value.absent(),
+    this.replacementOf = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : operationId = Value(operationId),
        idempotencyKey = Value(idempotencyKey),
@@ -1756,6 +1804,7 @@ class OfflineOutboxOperationsCompanion
     Expression<DateTime>? nextAttemptAt,
     Expression<int>? attemptCount,
     Expression<String>? lastFailureCode,
+    Expression<String>? replacementOf,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -1772,6 +1821,7 @@ class OfflineOutboxOperationsCompanion
       if (nextAttemptAt != null) 'next_attempt_at': nextAttemptAt,
       if (attemptCount != null) 'attempt_count': attemptCount,
       if (lastFailureCode != null) 'last_failure_code': lastFailureCode,
+      if (replacementOf != null) 'replacement_of': replacementOf,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -1790,6 +1840,7 @@ class OfflineOutboxOperationsCompanion
     Value<DateTime?>? nextAttemptAt,
     Value<int>? attemptCount,
     Value<String?>? lastFailureCode,
+    Value<String?>? replacementOf,
     Value<int>? rowid,
   }) {
     return OfflineOutboxOperationsCompanion(
@@ -1806,6 +1857,7 @@ class OfflineOutboxOperationsCompanion
       nextAttemptAt: nextAttemptAt ?? this.nextAttemptAt,
       attemptCount: attemptCount ?? this.attemptCount,
       lastFailureCode: lastFailureCode ?? this.lastFailureCode,
+      replacementOf: replacementOf ?? this.replacementOf,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -1852,6 +1904,9 @@ class OfflineOutboxOperationsCompanion
     if (lastFailureCode.present) {
       map['last_failure_code'] = Variable<String>(lastFailureCode.value);
     }
+    if (replacementOf.present) {
+      map['replacement_of'] = Variable<String>(replacementOf.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -1874,6 +1929,7 @@ class OfflineOutboxOperationsCompanion
           ..write('nextAttemptAt: $nextAttemptAt, ')
           ..write('attemptCount: $attemptCount, ')
           ..write('lastFailureCode: $lastFailureCode, ')
+          ..write('replacementOf: $replacementOf, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -2738,6 +2794,7 @@ typedef $$OfflineOutboxOperationsTableCreateCompanionBuilder =
       Value<DateTime?> nextAttemptAt,
       Value<int> attemptCount,
       Value<String?> lastFailureCode,
+      Value<String?> replacementOf,
       Value<int> rowid,
     });
 typedef $$OfflineOutboxOperationsTableUpdateCompanionBuilder =
@@ -2755,6 +2812,7 @@ typedef $$OfflineOutboxOperationsTableUpdateCompanionBuilder =
       Value<DateTime?> nextAttemptAt,
       Value<int> attemptCount,
       Value<String?> lastFailureCode,
+      Value<String?> replacementOf,
       Value<int> rowid,
     });
 
@@ -2904,6 +2962,11 @@ class $$OfflineOutboxOperationsTableFilterComposer
     builder: (column) => ColumnFilters(column),
   );
 
+  ColumnFilters<String> get replacementOf => $composableBuilder(
+    column: $table.replacementOf,
+    builder: (column) => ColumnFilters(column),
+  );
+
   Expression<bool> dependentOperation(
     Expression<bool> Function($$OfflineOutboxDependenciesTableFilterComposer f)
     f,
@@ -3032,6 +3095,11 @@ class $$OfflineOutboxOperationsTableOrderingComposer
     column: $table.lastFailureCode,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<String> get replacementOf => $composableBuilder(
+    column: $table.replacementOf,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $$OfflineOutboxOperationsTableAnnotationComposer
@@ -3097,6 +3165,11 @@ class $$OfflineOutboxOperationsTableAnnotationComposer
 
   GeneratedColumn<String> get lastFailureCode => $composableBuilder(
     column: $table.lastFailureCode,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get replacementOf => $composableBuilder(
+    column: $table.replacementOf,
     builder: (column) => column,
   );
 
@@ -3210,6 +3283,7 @@ class $$OfflineOutboxOperationsTableTableManager
                 Value<DateTime?> nextAttemptAt = const Value.absent(),
                 Value<int> attemptCount = const Value.absent(),
                 Value<String?> lastFailureCode = const Value.absent(),
+                Value<String?> replacementOf = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => OfflineOutboxOperationsCompanion(
                 operationId: operationId,
@@ -3225,6 +3299,7 @@ class $$OfflineOutboxOperationsTableTableManager
                 nextAttemptAt: nextAttemptAt,
                 attemptCount: attemptCount,
                 lastFailureCode: lastFailureCode,
+                replacementOf: replacementOf,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -3242,6 +3317,7 @@ class $$OfflineOutboxOperationsTableTableManager
                 Value<DateTime?> nextAttemptAt = const Value.absent(),
                 Value<int> attemptCount = const Value.absent(),
                 Value<String?> lastFailureCode = const Value.absent(),
+                Value<String?> replacementOf = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => OfflineOutboxOperationsCompanion.insert(
                 operationId: operationId,
@@ -3257,6 +3333,7 @@ class $$OfflineOutboxOperationsTableTableManager
                 nextAttemptAt: nextAttemptAt,
                 attemptCount: attemptCount,
                 lastFailureCode: lastFailureCode,
+                replacementOf: replacementOf,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0

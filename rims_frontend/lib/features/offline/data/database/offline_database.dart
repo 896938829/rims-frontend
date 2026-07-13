@@ -43,7 +43,7 @@ final class OfflineDatabase extends _$OfflineDatabase implements OfflineStore {
        );
 
   @override
-  int get schemaVersion => 2;
+  int get schemaVersion => 3;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -54,14 +54,25 @@ final class OfflineDatabase extends _$OfflineDatabase implements OfflineStore {
           offlineOutboxOperations,
           offlineOutboxOperations.updatedAt,
         );
+      }
+      if (from < 3) {
         await customStatement(
           'UPDATE outbox_operations '
           'SET updated_at = created_at WHERE updated_at IS NULL',
+        );
+        await migrator.addColumn(
+          offlineOutboxOperations,
+          offlineOutboxOperations.replacementOf,
         );
       }
     },
     beforeOpen: (details) async {
       await customStatement('PRAGMA foreign_keys = ON');
+      await customStatement(
+        'CREATE UNIQUE INDEX IF NOT EXISTS outbox_replacement_once '
+        'ON outbox_operations(replacement_of) '
+        'WHERE replacement_of IS NOT NULL',
+      );
     },
   );
 
@@ -321,6 +332,7 @@ final class OfflineDatabase extends _$OfflineDatabase implements OfflineStore {
           nextAttemptAt: Value(operation.nextAttemptAt?.toUtc()),
           attemptCount: Value(operation.attemptCount),
           lastFailureCode: Value(operation.lastFailureCode),
+          replacementOf: Value(operation.replacementOf),
         ),
       );
       for (final dependency in dependencies) {
@@ -453,6 +465,7 @@ final class OfflineDatabase extends _$OfflineDatabase implements OfflineStore {
       nextAttemptAt: row.nextAttemptAt,
       attemptCount: row.attemptCount,
       lastFailureCode: row.lastFailureCode,
+      replacementOf: row.replacementOf,
     );
   }
 }

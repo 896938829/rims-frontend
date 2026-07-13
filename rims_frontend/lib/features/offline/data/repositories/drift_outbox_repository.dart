@@ -1,4 +1,5 @@
 import 'package:drift/drift.dart';
+import 'package:drift/native.dart';
 
 import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
@@ -47,42 +48,22 @@ final class DriftOutboxRepository implements OutboxRepository {
         await _validateCapacity(operation.accountId);
         await _validateIdentity(operation);
         await _validateDependencies(operation, dependencies);
-        await database
-            .into(database.offlineOutboxOperations)
-            .insert(
-              OfflineOutboxOperationsCompanion.insert(
-                operationId: operation.operationId,
-                idempotencyKey: operation.idempotencyKey,
-                accountId: operation.accountId,
-                warehouseId: operation.warehouseId,
-                operationKind: operation.kind.wireValue,
-                payload: CacheRecordModel.canonicalJson(operation.payload),
-                operationState: operation.state.wireValue,
-                createdAt: operation.createdAt.toUtc(),
-                updatedAt: Value(operation.updatedAt.toUtc()),
-                confirmedAt: Value(operation.confirmedAt?.toUtc()),
-                nextAttemptAt: Value(operation.nextAttemptAt?.toUtc()),
-                attemptCount: Value(operation.attemptCount),
-                lastFailureCode: Value(operation.lastFailureCode),
-              ),
-            );
-        for (final dependency in dependencies) {
-          await database
-              .into(database.offlineOutboxDependencies)
-              .insert(
-                OfflineOutboxDependenciesCompanion.insert(
-                  operationId: operation.operationId,
-                  dependencyId: dependency,
-                ),
-              );
-        }
+        await _insertOperation(operation, dependencies);
       });
       return Success(operation);
     } on _OutboxValidationException catch (error) {
       return FailureResult(ValidationFailure(message: error.message));
     } on _OutboxCapacityException catch (error) {
       return FailureResult(StateFailure(message: error.message));
-    } on Object catch (error) {
+    } on StateError catch (error) {
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to enqueue offline operation.',
+          cause: error,
+        ),
+      );
+    } on Exception catch (error) {
+      if (!_isStorageException(error)) rethrow;
       return FailureResult(
         LocalStorageFailure(
           message: 'Unable to enqueue offline operation.',
@@ -104,7 +85,15 @@ final class DriftOutboxRepository implements OutboxRepository {
       return Success(
         List.unmodifiable((await query.get()).map(_toDomainOperation)),
       );
-    } on Object catch (error) {
+    } on StateError catch (error) {
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to read offline operations.',
+          cause: error,
+        ),
+      );
+    } on Exception catch (error) {
+      if (!_isStorageException(error)) rethrow;
       return FailureResult(
         LocalStorageFailure(
           message: 'Unable to read offline operations.',
@@ -116,8 +105,8 @@ final class DriftOutboxRepository implements OutboxRepository {
 
   @override
   Future<Result<List<OutboxOperation>>> ready(String accountId) async {
+    final currentTime = now().toUtc();
     try {
-      final currentTime = now().toUtc();
       final rows = await database
           .customSelect(
             '''
@@ -159,7 +148,15 @@ ORDER BY operation.created_at ASC, operation.operation_id ASC
           ),
         ),
       );
-    } on Object catch (error) {
+    } on StateError catch (error) {
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to determine ready offline operations.',
+          cause: error,
+        ),
+      );
+    } on Exception catch (error) {
+      if (!_isStorageException(error)) rethrow;
       return FailureResult(
         LocalStorageFailure(
           message: 'Unable to determine ready offline operations.',
@@ -176,29 +173,67 @@ ORDER BY operation.created_at ASC, operation.operation_id ASC
     required OutboxState next,
     Failure? failure,
   }) async {
+    late final OfflineOutboxOperation? row;
+    late final OutboxOperation? current;
+    try {
+      row = await _find(accountId, operationId);
+      current = row == null ? null : _toDomainOperation(row);
+    } on StateError catch (error) {
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to read offline operation state.',
+          cause: error,
+        ),
+      );
+    } on Exception catch (error) {
+      if (!_isStorageException(error)) rethrow;
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to read offline operation state.',
+          cause: error,
+        ),
+      );
+    }
+    if (current == null) {
+      return const FailureResult(
+        NotFoundFailure(message: 'Offline operation not found.'),
+      );
+    }
+    final result = stateMachine.transition(current, next, failure: failure);
+    if (result case FailureResult<OutboxOperation>()) return result;
+    final updated = (result as Success<OutboxOperation>).data;
+
     try {
       return await database.transaction(() async {
-        final row = await _find(accountId, operationId);
-        if (row == null) {
+        final changed = await _compareAndSetState(
+          updated,
+          expectedState: row!.operationState,
+        );
+        if (!changed) {
           return const FailureResult(
-            NotFoundFailure(message: 'Offline operation not found.'),
+            ConflictFailure(
+              message: 'Offline operation state changed concurrently.',
+            ),
           );
         }
-        final result = stateMachine.transition(
-          _toDomainOperation(row),
-          next,
-          failure: failure,
-        );
-        if (result case FailureResult<OutboxOperation>()) return result;
-
-        final updated = (result as Success<OutboxOperation>).data;
-        await _writeState(updated);
         if (_blocksDependencies(next)) {
-          await _cancelDescendants(accountId, operationId);
+          await _cancelDescendants(
+            accountId,
+            operationId,
+            transitionedAt: updated.updatedAt,
+          );
         }
         return Success(updated);
       });
-    } on Object catch (error) {
+    } on StateError catch (error) {
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to transition offline operation.',
+          cause: error,
+        ),
+      );
+    } on Exception catch (error) {
+      if (!_isStorageException(error)) rethrow;
       return FailureResult(
         LocalStorageFailure(
           message: 'Unable to transition offline operation.',
@@ -228,7 +263,12 @@ ORDER BY operation.created_at ASC, operation.operation_id ASC
     required OutboxOperation replacement,
     Set<String> dependencies = const {},
   }) async {
+    final claimed = replacement.copyWith(replacementOf: conflictedOperationId);
     try {
+      final existing = await _findReplacement(accountId, conflictedOperationId);
+      if (existing != null) {
+        return _replayOrConflict(existing, claimed);
+      }
       final original = await _find(accountId, conflictedOperationId);
       if (original == null ||
           original.operationState != OutboxState.conflict.wireValue) {
@@ -245,8 +285,38 @@ ORDER BY operation.created_at ASC, operation.operation_id ASC
           ),
         );
       }
-      return enqueue(replacement, dependencies: dependencies);
-    } on Object catch (error) {
+      await database.transaction(() async {
+        await _validateCapacity(accountId);
+        await _validateIdentity(claimed);
+        await _validateDependencies(claimed, dependencies);
+        await _insertOperation(claimed, dependencies);
+      });
+      return Success(claimed);
+    } on _OutboxValidationException catch (error) {
+      return FailureResult(ValidationFailure(message: error.message));
+    } on _OutboxCapacityException catch (error) {
+      return FailureResult(StateFailure(message: error.message));
+    } on SqliteException catch (error) {
+      final existing = await _findReplacementAfterClaimRace(
+        accountId,
+        conflictedOperationId,
+      );
+      if (existing != null) return _replayOrConflict(existing, claimed);
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to resolve offline conflict.',
+          cause: error,
+        ),
+      );
+    } on StateError catch (error) {
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to resolve offline conflict.',
+          cause: error,
+        ),
+      );
+    } on Exception catch (error) {
+      if (!_isStorageException(error)) rethrow;
       return FailureResult(
         LocalStorageFailure(
           message: 'Unable to resolve offline conflict.',
@@ -258,8 +328,8 @@ ORDER BY operation.created_at ASC, operation.operation_id ASC
 
   @override
   Future<Result<int>> prune({required String accountId}) async {
+    final currentTime = now().toUtc();
     try {
-      final currentTime = now().toUtc();
       final deleted = await database.transaction(() async {
         final operations = await (database.select(
           database.offlineOutboxOperations,
@@ -276,37 +346,26 @@ ORDER BY operation.created_at ASC, operation.operation_id ASC
                       edge.dependencyId.isIn(operationIds),
                 ))
                 .get();
-        final adjacency = {
-          for (final operationId in operationIds) operationId: <String>{},
-        };
-        for (final edge in edges) {
-          adjacency[edge.operationId]!.add(edge.dependencyId);
-          adjacency[edge.dependencyId]!.add(edge.operationId);
-        }
-
         final byId = {
           for (final operation in operations) operation.operationId: operation,
         };
+        final children = {
+          for (final operationId in operationIds) operationId: <String>{},
+        };
+        for (final edge in edges) {
+          children[edge.dependencyId]!.add(edge.operationId);
+        }
         final expiredIds = <String>{};
-        final visited = <String>{};
-        for (final operationId in operationIds) {
-          if (!visited.add(operationId)) continue;
-          final component = <String>{operationId};
-          final pending = <String>[operationId];
-          while (pending.isNotEmpty) {
-            final current = pending.removeLast();
-            for (final neighbor in adjacency[current]!) {
-              if (visited.add(neighbor)) {
-                component.add(neighbor);
-                pending.add(neighbor);
-              }
-            }
+        for (final operation in operations) {
+          if (!_isExpiredTerminal(operation, currentTime)) continue;
+          final state = OutboxState.values.singleWhere(
+            (candidate) => candidate.wireValue == operation.operationState,
+          );
+          if (state != OutboxState.succeeded &&
+              _hasActiveDescendant(operation.operationId, children, byId)) {
+            continue;
           }
-          if (component.every(
-            (id) => _isExpiredTerminal(byId[id]!, currentTime),
-          )) {
-            expiredIds.addAll(component);
-          }
+          expiredIds.add(operation.operationId);
         }
 
         if (expiredIds.isEmpty) return 0;
@@ -324,7 +383,15 @@ ORDER BY operation.created_at ASC, operation.operation_id ASC
             .go();
       });
       return Success(deleted);
-    } on Object catch (error) {
+    } on StateError catch (error) {
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to prune offline operations.',
+          cause: error,
+        ),
+      );
+    } on Exception catch (error) {
+      if (!_isStorageException(error)) rethrow;
       return FailureResult(
         LocalStorageFailure(
           message: 'Unable to prune offline operations.',
@@ -422,21 +489,127 @@ SELECT 1 AS found FROM ancestors WHERE operation_id = ? LIMIT 1
         .getSingleOrNull();
   }
 
-  Future<void> _writeState(OutboxOperation operation) async {
-    await (database.update(
-      database.offlineOutboxOperations,
-    )..where((row) => row.operationId.equals(operation.operationId))).write(
-      OfflineOutboxOperationsCompanion(
-        operationState: Value(operation.state.wireValue),
-        updatedAt: Value(operation.updatedAt.toUtc()),
-        nextAttemptAt: Value(operation.nextAttemptAt?.toUtc()),
-        attemptCount: Value(operation.attemptCount),
-        lastFailureCode: Value(operation.lastFailureCode),
+  Future<OfflineOutboxOperation?> _findReplacement(
+    String accountId,
+    String conflictedOperationId,
+  ) {
+    return (database.select(database.offlineOutboxOperations)..where(
+          (row) =>
+              row.accountId.equals(accountId) &
+              row.replacementOf.equals(conflictedOperationId),
+        ))
+        .getSingleOrNull();
+  }
+
+  Future<OfflineOutboxOperation?> _findReplacementAfterClaimRace(
+    String accountId,
+    String conflictedOperationId,
+  ) async {
+    try {
+      for (var attempt = 0; attempt < 3; attempt += 1) {
+        final existing = await _findReplacement(
+          accountId,
+          conflictedOperationId,
+        );
+        if (existing != null) return existing;
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+      return null;
+    } on StateError {
+      return null;
+    } on Exception catch (error) {
+      if (!_isStorageException(error)) rethrow;
+      return null;
+    }
+  }
+
+  Result<OutboxOperation> _replayOrConflict(
+    OfflineOutboxOperation existing,
+    OutboxOperation requested,
+  ) {
+    final operation = _toDomainOperation(existing);
+    final isSameRequest =
+        operation.operationId == requested.operationId &&
+        operation.idempotencyKey == requested.idempotencyKey &&
+        operation.kind == requested.kind &&
+        operation.warehouseId == requested.warehouseId &&
+        CacheRecordModel.canonicalJson(operation.payload) ==
+            CacheRecordModel.canonicalJson(requested.payload);
+    if (isSameRequest) return Success(operation);
+    return const FailureResult(
+      ConflictFailure(
+        message: 'The conflicted operation already has a replacement.',
       ),
     );
   }
 
-  Future<void> _cancelDescendants(String accountId, String operationId) async {
+  Future<void> _insertOperation(
+    OutboxOperation operation,
+    Set<String> dependencies,
+  ) async {
+    await database
+        .into(database.offlineOutboxOperations)
+        .insert(
+          OfflineOutboxOperationsCompanion.insert(
+            operationId: operation.operationId,
+            idempotencyKey: operation.idempotencyKey,
+            accountId: operation.accountId,
+            warehouseId: operation.warehouseId,
+            operationKind: operation.kind.wireValue,
+            payload: CacheRecordModel.canonicalJson(operation.payload),
+            operationState: operation.state.wireValue,
+            createdAt: operation.createdAt.toUtc(),
+            updatedAt: Value(operation.updatedAt.toUtc()),
+            confirmedAt: Value(operation.confirmedAt?.toUtc()),
+            nextAttemptAt: Value(operation.nextAttemptAt?.toUtc()),
+            attemptCount: Value(operation.attemptCount),
+            lastFailureCode: Value(operation.lastFailureCode),
+            replacementOf: Value(operation.replacementOf),
+          ),
+        );
+    for (final dependency in dependencies) {
+      await database
+          .into(database.offlineOutboxDependencies)
+          .insert(
+            OfflineOutboxDependenciesCompanion.insert(
+              operationId: operation.operationId,
+              dependencyId: dependency,
+            ),
+          );
+    }
+  }
+
+  Future<bool> _compareAndSetState(
+    OutboxOperation operation, {
+    required String expectedState,
+  }) async {
+    final changed = await database.customUpdate(
+      '''
+UPDATE outbox_operations
+SET operation_state = ?, updated_at = ?, next_attempt_at = ?,
+    attempt_count = ?, last_failure_code = ?
+WHERE account_id = ? AND operation_id = ? AND operation_state = ?
+''',
+      variables: [
+        Variable(operation.state.wireValue),
+        Variable(operation.updatedAt.toUtc()),
+        Variable(operation.nextAttemptAt?.toUtc()),
+        Variable(operation.attemptCount),
+        Variable(operation.lastFailureCode),
+        Variable(operation.accountId),
+        Variable(operation.operationId),
+        Variable(expectedState),
+      ],
+      updates: {database.offlineOutboxOperations},
+    );
+    return changed == 1;
+  }
+
+  Future<void> _cancelDescendants(
+    String accountId,
+    String operationId, {
+    required DateTime transitionedAt,
+  }) async {
     await database.customUpdate(
       '''
 WITH RECURSIVE descendants(operation_id) AS (
@@ -456,7 +629,7 @@ WHERE account_id = ?
       variables: [
         Variable(operationId),
         Variable(OutboxState.cancelled.wireValue),
-        Variable(now().toUtc()),
+        Variable(transitionedAt.toUtc()),
         Variable(accountId),
         Variable(OutboxState.queued.wireValue),
         Variable(OutboxState.retryableFailure.wireValue),
@@ -493,6 +666,28 @@ WHERE account_id = ?
     };
   }
 
+  bool _hasActiveDescendant(
+    String operationId,
+    Map<String, Set<String>> children,
+    Map<String, OfflineOutboxOperation> operations,
+  ) {
+    final pending = <String>[...children[operationId] ?? const <String>{}];
+    final visited = <String>{};
+    while (pending.isNotEmpty) {
+      final childId = pending.removeLast();
+      if (!visited.add(childId)) continue;
+      final child = operations[childId];
+      if (child != null &&
+          (child.operationState == OutboxState.queued.wireValue ||
+              child.operationState == OutboxState.syncing.wireValue ||
+              child.operationState == OutboxState.retryableFailure.wireValue)) {
+        return true;
+      }
+      pending.addAll(children[childId] ?? const <String>{});
+    }
+    return false;
+  }
+
   OutboxOperation _toDomainOperation(OfflineOutboxOperation row) {
     return OutboxOperation(
       operationId: row.operationId,
@@ -512,6 +707,7 @@ WHERE account_id = ?
       nextAttemptAt: row.nextAttemptAt,
       attemptCount: row.attemptCount,
       lastFailureCode: row.lastFailureCode,
+      replacementOf: row.replacementOf,
     );
   }
 }
@@ -527,3 +723,9 @@ final class _OutboxCapacityException implements Exception {
 
   final String message;
 }
+
+bool _isStorageException(Exception error) =>
+    error is SqliteException ||
+    error is DriftWrappedException ||
+    error is InvalidDataException ||
+    error is FormatException;

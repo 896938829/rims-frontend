@@ -191,6 +191,7 @@ final class MemoryOfflineStore implements OfflineStore {
       nextAttemptAt: current.nextAttemptAt,
       attemptCount: current.attemptCount,
       lastFailureCode: failure?.runtimeType.toString(),
+      replacementOf: current.replacementOf,
     );
   }
 

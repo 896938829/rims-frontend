@@ -293,7 +293,7 @@ void main() {
   });
 
   test(
-    'mixed terminal and active dependency component is retained whole',
+    'expired succeeded parent is pruned while active child remains ready',
     () async {
       final old = now.subtract(const Duration(days: 31));
       clock = old;
@@ -307,13 +307,20 @@ void main() {
 
       final result = await repository.prune(accountId: '7');
 
-      expect((result as Success<int>).data, 0);
-      expect((await repository.list('7')).getOrThrow(), hasLength(2));
+      expect((result as Success<int>).data, 1);
+      expect(
+        (await repository.list('7')).getOrThrow().single.operationId,
+        'active-child',
+      );
+      expect(
+        (await repository.ready('7')).getOrThrow().single.operationId,
+        'active-child',
+      );
     },
   );
 
   test(
-    'terminal component with one unexpired node is retained whole',
+    'expired succeeded parent does not pin unexpired terminal child',
     () async {
       final old = now.subtract(const Duration(days: 31));
       clock = old;
@@ -329,8 +336,11 @@ void main() {
 
       final result = await repository.prune(accountId: '7');
 
-      expect((result as Success<int>).data, 0);
-      expect((await repository.list('7')).getOrThrow(), hasLength(2));
+      expect((result as Success<int>).data, 1);
+      expect(
+        (await repository.list('7')).getOrThrow().single.operationId,
+        'recent-child',
+      );
     },
   );
 
@@ -430,7 +440,103 @@ void main() {
       ),
     );
     _expectLocalStorageFailure(await failingRepository.prune(accountId: '7'));
+    _expectLocalStorageFailure(
+      await failingRepository.resolveConflict(
+        accountId: '7',
+        conflictedOperationId: 'failed-conflict',
+        replacement: _operation('failed-replacement'),
+      ),
+    );
   });
+
+  test(
+    'clock Error is rethrown instead of mapped as storage failure',
+    () async {
+      final failingClockRepository = DriftOutboxRepository(
+        database: database,
+        stateMachine: OutboxStateMachine(now: () => now),
+        now: () => throw AssertionError('clock bug'),
+      );
+
+      await expectLater(
+        failingClockRepository.ready('7'),
+        throwsA(isA<AssertionError>()),
+      );
+      await expectLater(
+        failingClockRepository.prune(accountId: '7'),
+        throwsA(isA<AssertionError>()),
+      );
+    },
+  );
+
+  test('backoff callback StateError and Error are rethrown', () async {
+    await repository.enqueue(_operation('callback'));
+    final stateErrorRepository = DriftOutboxRepository(
+      database: database,
+      stateMachine: OutboxStateMachine(
+        now: () => now,
+        retryBackoff: (_) => throw StateError('backoff state bug'),
+      ),
+      now: () => now,
+    );
+    await stateErrorRepository.transition(
+      accountId: '7',
+      operationId: 'callback',
+      next: OutboxState.syncing,
+    );
+
+    await expectLater(
+      stateErrorRepository.transition(
+        accountId: '7',
+        operationId: 'callback',
+        next: OutboxState.retryableFailure,
+      ),
+      throwsStateError,
+    );
+
+    await repository.enqueue(_operation('callback-error'));
+    final errorRepository = DriftOutboxRepository(
+      database: database,
+      stateMachine: OutboxStateMachine(
+        now: () => now,
+        retryBackoff: (_) => throw AssertionError('backoff error'),
+      ),
+      now: () => now,
+    );
+    await errorRepository.transition(
+      accountId: '7',
+      operationId: 'callback-error',
+      next: OutboxState.syncing,
+    );
+    await expectLater(
+      errorRepository.transition(
+        accountId: '7',
+        operationId: 'callback-error',
+        next: OutboxState.retryableFailure,
+      ),
+      throwsA(isA<AssertionError>()),
+    );
+  });
+
+  test(
+    'malformed stored state maps decode StateError to storage failure',
+    () async {
+      await repository.enqueue(_operation('malformed'));
+      await database.customUpdate(
+        "UPDATE outbox_operations SET operation_state = 'broken' "
+        "WHERE operation_id = 'malformed'",
+        updates: {database.offlineOutboxOperations},
+      );
+
+      final result = await repository.transition(
+        accountId: '7',
+        operationId: 'malformed',
+        next: OutboxState.syncing,
+      );
+
+      _expectLocalStorageFailure(result);
+    },
+  );
 }
 
 void _expectLocalStorageFailure<T>(Result<T> result) {

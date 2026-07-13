@@ -44,13 +44,13 @@ bool isOutboxTransitionAllowed(OutboxState current, OutboxState next) {
 }
 
 final class OutboxOperation {
-  const OutboxOperation({
+  OutboxOperation({
     required this.operationId,
     required this.idempotencyKey,
     required this.accountId,
     required this.warehouseId,
     required this.kind,
-    required this.payload,
+    required Map<String, Object?> payload,
     required this.state,
     required this.createdAt,
     DateTime? updatedAt,
@@ -58,7 +58,9 @@ final class OutboxOperation {
     this.nextAttemptAt,
     this.attemptCount = 0,
     this.lastFailureCode,
-  }) : updatedAt = updatedAt ?? createdAt;
+    this.replacementOf,
+  }) : payload = _freezeMap(payload),
+       updatedAt = updatedAt ?? createdAt;
 
   final String operationId;
   final String idempotencyKey;
@@ -73,6 +75,7 @@ final class OutboxOperation {
   final DateTime? nextAttemptAt;
   final int attemptCount;
   final String? lastFailureCode;
+  final String? replacementOf;
 
   bool get isConfirmed => confirmedAt != null;
 
@@ -83,6 +86,7 @@ final class OutboxOperation {
     bool clearNextAttemptAt = false,
     int? attemptCount,
     String? lastFailureCode,
+    String? replacementOf,
   }) {
     return OutboxOperation(
       operationId: operationId,
@@ -100,6 +104,25 @@ final class OutboxOperation {
           : nextAttemptAt ?? this.nextAttemptAt,
       attemptCount: attemptCount ?? this.attemptCount,
       lastFailureCode: lastFailureCode ?? this.lastFailureCode,
+      replacementOf: replacementOf ?? this.replacementOf,
     );
   }
+}
+
+Map<String, Object?> _freezeMap(Map<Object?, Object?> source) {
+  return Map.unmodifiable({
+    for (final entry in source.entries)
+      entry.key.toString(): _freezeValue(entry.value),
+  });
+}
+
+Object? _freezeValue(Object? value) {
+  if (value is Map) return _freezeMap(value);
+  if (value is List) {
+    return List<Object?>.unmodifiable(value.map(_freezeValue));
+  }
+  if (value is Set) {
+    return Set<Object?>.unmodifiable(value.map(_freezeValue));
+  }
+  return value;
 }
