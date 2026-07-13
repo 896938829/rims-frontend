@@ -390,7 +390,7 @@ final class _Handler implements OutboxOperationHandler {
     Map<String, OutboxOperationOutput> dependencyOutputs = const {},
   }) async {
     calls += 1;
-    return const Success(
+    return Success(
       OutboxHandlerSuccess(output: OutboxOperationOutput(version: 1, data: {})),
     );
   }

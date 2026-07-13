@@ -1,8 +1,10 @@
+import 'immutable_snapshot.dart';
+
 final class OutboxCleanupRequest {
-  const OutboxCleanupRequest({
+  OutboxCleanupRequest({
     this.draftId,
-    this.attachmentRequestIds = const [],
-  });
+    List<String> attachmentRequestIds = const [],
+  }) : attachmentRequestIds = immutableListSnapshot(attachmentRequestIds);
 
   final String? draftId;
   final List<String> attachmentRequestIds;
@@ -19,7 +21,7 @@ final class OutboxCleanupIntent {
     List<String> attachmentRequestIds = const [],
     this.attemptCount = 0,
     this.lastFailure,
-  }) : attachmentRequestIds = List.unmodifiable(attachmentRequestIds);
+  }) : attachmentRequestIds = immutableListSnapshot(attachmentRequestIds);
 
   final String operationId;
   final String accountId;

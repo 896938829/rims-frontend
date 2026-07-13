@@ -40,11 +40,8 @@ void main() {
       await repository.completeSuccess(
         accountId: '7',
         operationId: operation.operationId,
-        output: const OutboxOperationOutput(
-          version: 1,
-          data: {'documentId': 91},
-        ),
-        cleanup: const OutboxCleanupRequest(
+        output: OutboxOperationOutput(version: 1, data: {'documentId': 91}),
+        cleanup: OutboxCleanupRequest(
           draftId: 'draft-1',
           attachmentRequestIds: ['file-1'],
         ),

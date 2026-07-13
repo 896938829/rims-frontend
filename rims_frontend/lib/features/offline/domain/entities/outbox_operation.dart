@@ -1,3 +1,4 @@
+import 'immutable_snapshot.dart';
 import 'outbox_operation_output.dart';
 
 enum OutboxState {
@@ -66,7 +67,7 @@ final class OutboxOperation {
     this.requiresStatusProbe = false,
     this.syncingStartedAt,
     this.output,
-  }) : payload = _freezeMap(payload),
+  }) : payload = immutableMapSnapshot(payload),
        updatedAt = updatedAt ?? createdAt;
 
   final String operationId;
@@ -131,22 +132,4 @@ final class OutboxOperation {
       output: output ?? this.output,
     );
   }
-}
-
-Map<String, Object?> _freezeMap(Map<Object?, Object?> source) {
-  return Map.unmodifiable({
-    for (final entry in source.entries)
-      entry.key.toString(): _freezeValue(entry.value),
-  });
-}
-
-Object? _freezeValue(Object? value) {
-  if (value is Map) return _freezeMap(value);
-  if (value is List) {
-    return List<Object?>.unmodifiable(value.map(_freezeValue));
-  }
-  if (value is Set) {
-    return Set<Object?>.unmodifiable(value.map(_freezeValue));
-  }
-  return value;
 }

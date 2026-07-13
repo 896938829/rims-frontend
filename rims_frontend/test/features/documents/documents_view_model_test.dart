@@ -30,6 +30,7 @@ import 'package:rims_frontend/features/offline/data/repositories/drift_document_
 import 'package:rims_frontend/features/offline/data/repositories/memory_offline_store.dart';
 import 'package:rims_frontend/features/offline/data/repositories/memory_outbox_repository.dart';
 import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.dart';
+import 'package:rims_frontend/features/offline/domain/entities/outbox_operation_output.dart';
 import 'package:rims_frontend/features/offline/domain/repositories/outbox_repository.dart';
 import 'package:rims_frontend/features/offline/domain/services/outbox_state_machine.dart';
 
@@ -584,24 +585,43 @@ void main() {
         draftIdFactory: () => 'draft-1',
       );
       viewModel.addScannedProduct(_standardItem);
-      viewModel.updateAttachmentStagingIds(const ['attachment-request-1']);
+      viewModel.updateAttachmentStagingIds(const [
+        'attachment-request-1',
+        'attachment-request-2',
+      ]);
 
       expect(await viewModel.createDocument(), isFalse);
       expect((await outbox.list('7')).successData, isEmpty);
       expect(viewModel.offlineSubmissionReview?.warehouseName, 'Main');
       expect(viewModel.offlineSubmissionReview?.documentType, '销售出库');
       expect(viewModel.offlineSubmissionReview?.lineCount, 1);
-      expect(viewModel.offlineSubmissionReview?.staleAssumptions, isNotEmpty);
+      expect(
+        viewModel.offlineSubmissionReview?.staleAssumptions,
+        contains(contains('创建并完成')),
+      );
 
       expect(await viewModel.confirmOfflineSubmission(), isTrue);
       final queued = (await outbox.list('7')).successData;
       expect(queued.map((item) => item.kind), [
         OutboxOperationKind.documentCreate,
         OutboxOperationKind.attachmentUpload,
+        OutboxOperationKind.attachmentUpload,
+        OutboxOperationKind.documentComplete,
       ]);
       expect(queued.first.idempotencyKey, repository.createdRequestIds.single);
       expect(queued.first.payload.toString(), isNot(contains('token')));
       expect(queued.first.payload.toString(), isNot(contains('cached')));
+      expect(
+        queued.take(3).every((item) => !item.payload.containsKey('cleanup')),
+        isTrue,
+      );
+      expect(queued.last.payload['cleanup'], {
+        'draftId': 'draft-1',
+        'attachmentRequestIds': [
+          'attachment-request-1',
+          'attachment-request-2',
+        ],
+      });
 
       await outbox.confirm(
         accountId: '7',
@@ -616,20 +636,121 @@ void main() {
         operationId: queued.first.operationId,
         next: OutboxState.syncing,
       );
-      await outbox.transition(
+      await outbox.completeSuccess(
         accountId: '7',
         operationId: queued.first.operationId,
-        next: OutboxState.succeeded,
+        output: OutboxOperationOutput(version: 1, data: {'documentId': 91}),
       );
-      await outbox.confirm(
-        accountId: '7',
-        operationId: queued.last.operationId,
-      );
-      expect((await outbox.ready('7')).successData.map((item) => item.kind), [
-        OutboxOperationKind.attachmentUpload,
-      ]);
+      for (var index = 1; index < queued.length; index += 1) {
+        await outbox.confirm(
+          accountId: '7',
+          operationId: queued[index].operationId,
+        );
+        expect(
+          (await outbox.ready('7')).successData.map((item) => item.operationId),
+          [queued[index].operationId],
+        );
+        if (index < queued.length - 1) {
+          await outbox.transition(
+            accountId: '7',
+            operationId: queued[index].operationId,
+            next: OutboxState.syncing,
+          );
+          await outbox.completeSuccess(
+            accountId: '7',
+            operationId: queued[index].operationId,
+            output: OutboxOperationOutput(
+              version: 1,
+              data: {'documentId': 91, 'attachmentId': 17},
+            ),
+          );
+        }
+      }
     },
   );
+
+  test('ordinary offline document types create then complete', () async {
+    for (final action in const ['销售出库', '采购入库', '退货入库', '调拨单', '转标准']) {
+      final outbox = MemoryOutboxRepository(stateMachine: OutboxStateMachine());
+      final viewModel = _draftEnabledViewModel(
+        drafts: _FakeDocumentDraftRepository(),
+        documents: _FakeDocumentsRepository(
+          createResult: Future.value(const FailureResult(NetworkFailure())),
+        ),
+        inventory: _FakeInventoryRepository(),
+        outbox: outbox,
+        submissionStagingStore: _OutboxSubmissionStagingStore(),
+        draftIdFactory: () => 'draft-1',
+      )..selectActionByLabel(action);
+      if (action == '退货入库') {
+        viewModel.selectReturnSourceDocument(_completedSalesDocument);
+      }
+      if (action == '调拨单') {
+        viewModel.selectTargetWarehouse(_beijingWarehouse);
+      }
+      if (action == '转标准') {
+        viewModel.selectNonStandardInventory(_nonStandardItem);
+      }
+      viewModel.addProductToDraft(_standardItem, quantity: 1);
+
+      expect(await viewModel.createDocument(), isFalse, reason: action);
+      expect(
+        await viewModel.confirmOfflineSubmission(),
+        isTrue,
+        reason: action,
+      );
+
+      final queued = (await outbox.list('7')).successData;
+      expect(queued.map((operation) => operation.kind), [
+        OutboxOperationKind.documentCreate,
+        OutboxOperationKind.documentComplete,
+      ], reason: action);
+      expect(queued.first.payload.containsKey('cleanup'), isFalse);
+      expect(queued.last.payload.containsKey('cleanup'), isTrue);
+    }
+  });
+
+  test('offline stocktake serializes create confirm settle', () async {
+    final outbox = MemoryOutboxRepository(stateMachine: OutboxStateMachine());
+    final viewModel =
+        _draftEnabledViewModel(
+            drafts: _FakeDocumentDraftRepository(),
+            documents: _FakeDocumentsRepository(
+              createResult: Future.value(
+                const FailureResult(TransportUnknownFailure()),
+              ),
+            ),
+            outbox: outbox,
+            submissionStagingStore: _OutboxSubmissionStagingStore(),
+            draftIdFactory: () => 'draft-1',
+          )
+          ..selectActionByLabel('盘点单')
+          ..addProductToDraft(_standardItem, quantity: 3);
+
+    expect(await viewModel.createDocument(), isFalse);
+    expect(
+      viewModel.offlineSubmissionReview?.staleAssumptions,
+      contains(contains('确认差异并结转')),
+    );
+    expect(await viewModel.confirmOfflineSubmission(), isTrue);
+
+    final queued = (await outbox.list('7')).successData;
+    expect(queued.map((operation) => operation.kind), [
+      OutboxOperationKind.documentCreate,
+      OutboxOperationKind.stocktakeConfirm,
+      OutboxOperationKind.stocktakeSettle,
+    ]);
+    expect(queued.map((operation) => operation.requiresStatusProbe), [
+      isTrue,
+      isFalse,
+      isFalse,
+    ]);
+    expect(
+      queued.take(2).every((item) => !item.payload.containsKey('cleanup')),
+      isTrue,
+    );
+    expect(queued.last.payload.containsKey('cleanup'), isTrue);
+  });
 
   test(
     'repeated offline confirmation does not create a second write',
@@ -652,11 +773,12 @@ void main() {
       expect(await viewModel.confirmOfflineSubmission(), isFalse);
 
       final queued = (await outbox.list('7')).successData;
-      expect(queued, hasLength(1));
+      expect(queued, hasLength(2));
       expect(
-        queued.single.operationId,
-        'document-create-${queued.single.idempotencyKey}',
+        queued.first.operationId,
+        'document-create-${queued.first.idempotencyKey}',
       );
+      expect(queued.last.kind, OutboxOperationKind.documentComplete);
     },
   );
 
@@ -680,8 +802,12 @@ void main() {
 
       await unknown.createDocument();
       expect(await unknown.confirmOfflineSubmission(), isTrue);
+      final unknownOperations = (await unknownOutbox.list('7')).successData;
+      expect(unknownOperations.first.requiresStatusProbe, isTrue);
       expect(
-        (await unknownOutbox.list('7')).successData.single.requiresStatusProbe,
+        unknownOperations
+            .skip(1)
+            .every((operation) => !operation.requiresStatusProbe),
         isTrue,
       );
 
@@ -1572,7 +1698,7 @@ void main() {
   });
 
   test(
-    'offline lifecycle keeps stable key and waits for queue confirmation',
+    'existing authoritative document queues direct lifecycle without create',
     () async {
       final repository = _FakeDocumentsRepository(
         completeResult: Future.value(
@@ -1596,8 +1722,39 @@ void main() {
         OutboxOperationKind.documentReference,
         OutboxOperationKind.documentComplete,
       ]);
+      expect(
+        queued.map((operation) => operation.kind),
+        isNot(contains(OutboxOperationKind.documentCreate)),
+      );
+      expect(queued.first.payload['documentId'], _draftSalesDocument.id);
       expect(queued.last.payload, {'version': 1});
       expect(queued.last.idempotencyKey, repository.completedRequestIds.single);
+
+      for (final operation in queued) {
+        await outbox.confirm(
+          accountId: '7',
+          operationId: operation.operationId,
+        );
+      }
+      expect((await outbox.ready('7')).successData.map((item) => item.kind), [
+        OutboxOperationKind.documentReference,
+      ]);
+      await outbox.transition(
+        accountId: '7',
+        operationId: queued.first.operationId,
+        next: OutboxState.syncing,
+      );
+      await outbox.completeSuccess(
+        accountId: '7',
+        operationId: queued.first.operationId,
+        output: OutboxOperationOutput(
+          version: 1,
+          data: {'documentId': _draftSalesDocument.id},
+        ),
+      );
+      expect((await outbox.ready('7')).successData.map((item) => item.kind), [
+        OutboxOperationKind.documentComplete,
+      ]);
     },
   );
 

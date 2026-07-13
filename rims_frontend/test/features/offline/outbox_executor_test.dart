@@ -628,7 +628,7 @@ final class _Handler implements OutboxOperationHandler {
           ? const Success<Object?>(null)
           : results.removeAt(0);
       return result.when(
-        success: (_) => const Success(
+        success: (_) => Success(
           OutboxHandlerSuccess(
             output: OutboxOperationOutput(version: 1, data: {}),
           ),

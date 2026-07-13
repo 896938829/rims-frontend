@@ -124,7 +124,7 @@ void main() {
     },
   );
 
-  test('terminal create success cleans draft and publishes refresh', () async {
+  test('create rejects cleanup ownership reserved for lifecycle', () async {
     final handler = DocumentOutboxHandler(
       kind: OutboxOperationKind.documentCreate,
       remoteDataSource: dataSource,
@@ -146,9 +146,8 @@ void main() {
       ),
     );
 
-    expect(result, isA<Success<Object?>>());
-    final success = (result as Success<OutboxHandlerSuccess>).data;
-    expect(success.cleanup?.draftId, 'draft-1');
+    expect(result.failureOrNull, isA<ValidationFailure>());
+    expect(dataSource.createRequests, isEmpty);
     expect(draftRepository.deletedDraftIds, isEmpty);
     await Future<void>.delayed(Duration.zero);
     expect(events.whereType<GlobalRefreshRequestedEvent>(), isEmpty);
@@ -168,12 +167,18 @@ void main() {
         kind: OutboxOperationKind.documentComplete,
         operationId: 'complete-document-request-1',
         idempotencyKey: 'complete-request-1',
-        payload: const {'version': 1},
+        payload: const {
+          'version': 1,
+          'cleanup': {
+            'draftId': 'draft-1',
+            'attachmentRequestIds': ['attachment-request-1'],
+          },
+        },
       );
 
       final result = await handler.execute(
         operation,
-        dependencyOutputs: const {
+        dependencyOutputs: {
           'create-document-request-1': OutboxOperationOutput(
             version: 1,
             data: {'documentId': 91},
@@ -182,6 +187,13 @@ void main() {
       );
 
       expect(result, isA<Success<OutboxHandlerSuccess>>());
+      final success = (result as Success<OutboxHandlerSuccess>).data;
+      expect(success.output.data, {
+        'documentId': 91,
+        'lifecycle': 'document_complete',
+      });
+      expect(success.cleanup?.draftId, 'draft-1');
+      expect(success.cleanup?.attachmentRequestIds, ['attachment-request-1']);
       expect(dataSource.events, ['complete:91']);
       expect(dataSource.lifecycleRequestIds, ['complete-request-1']);
     },

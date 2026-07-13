@@ -14,7 +14,6 @@ import 'package:rims_frontend/features/offline/data/services/attachment_outbox_h
 import 'package:rims_frontend/features/offline/domain/entities/document_draft.dart';
 import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.dart';
 import 'package:rims_frontend/features/offline/domain/entities/outbox_graph.dart';
-import 'package:rims_frontend/features/offline/domain/services/outbox_executor.dart';
 import 'package:rims_frontend/features/offline/domain/repositories/document_draft_repository.dart';
 
 void main() {
@@ -81,7 +80,7 @@ void main() {
 
       final result = await handler.execute(
         _operation(),
-        dependencyOutputs: const {
+        dependencyOutputs: {
           'create-document-request-1': OutboxOperationOutput(
             version: 1,
             data: {'documentId': 91},
@@ -114,7 +113,7 @@ void main() {
 
       final result = await handler.execute(
         _operation(),
-        dependencyOutputs: const {
+        dependencyOutputs: {
           'create-document-request-1': OutboxOperationOutput(
             version: 1,
             data: {'documentId': 91},
@@ -178,7 +177,7 @@ void main() {
 
       final result = await handler.execute(
         _operation(requiresStatusProbe: true),
-        dependencyOutputs: const {
+        dependencyOutputs: {
           'create-document-request-1': OutboxOperationOutput(
             version: 1,
             data: {'documentId': 91},
@@ -194,7 +193,7 @@ void main() {
   );
 
   test(
-    'terminal success atomically cleans staged graph and draft then refreshes',
+    'draft attachment rejects cleanup ownership reserved for lifecycle',
     () async {
       final handler = _handler(
         dataSource,
@@ -216,7 +215,7 @@ void main() {
             },
           },
         ),
-        dependencyOutputs: const {
+        dependencyOutputs: {
           'create-document-request-1': OutboxOperationOutput(
             version: 1,
             data: {'documentId': 91},
@@ -224,13 +223,8 @@ void main() {
         },
       );
 
-      expect(result, isA<Success<OutboxHandlerSuccess>>());
-      final success = (result as Success<OutboxHandlerSuccess>).data;
-      expect(success.output.data, {'attachmentId': 5, 'documentId': 91});
-      expect(success.cleanup?.attachmentRequestIds, [
-        'attachment-request-1',
-        'attachment-request-2',
-      ]);
+      expect(result.failureOrNull, isA<ValidationFailure>());
+      expect(dataSource.uploads, isEmpty);
       expect(stagingStore.removeCalls, isEmpty);
       expect(draftRepository.deletedDraftIds, isEmpty);
       await Future<void>.delayed(Duration.zero);

@@ -1451,7 +1451,13 @@ final class DocumentsViewModel extends ChangeNotifier {
             lines: request.effectiveLines
                 .map((line) => '${line.productName} × ${line.quantity}')
                 .toList(growable: false),
-            staleAssumptions: const ['库存、原单状态和权限将在同步前重新校验', '附件内容必须与当前暂存快照一致'],
+            staleAssumptions: [
+              request.docType == 5
+                  ? '离线同步将创建盘点单、确认差异并结转库存'
+                  : '离线同步将创建并完成单据以产生库存效果',
+              '库存、原单状态和权限将在同步前重新校验',
+              '附件内容必须与当前暂存快照一致',
+            ],
           ),
         );
         _formError = '网络结果不确定，确认后可保存到待同步';
@@ -1552,7 +1558,6 @@ final class DocumentsViewModel extends ChangeNotifier {
           pending.attachmentRequestIds,
         ),
         'request': _outboxDocumentRequest(pending.request),
-        if (staged.isEmpty) 'cleanup': cleanup,
       },
       state: OutboxState.queued,
       createdAt: createdAt,
@@ -1563,7 +1568,6 @@ final class DocumentsViewModel extends ChangeNotifier {
     var dependencyId = createOperationId;
     for (var index = 0; index < staged.length; index += 1) {
       final attachment = staged[index];
-      final terminal = index == staged.length - 1;
       final operation = OutboxOperation(
         operationId: 'attachment-upload-${attachment.pending.requestId}',
         idempotencyKey: attachment.pending.requestId,
@@ -1576,15 +1580,51 @@ final class DocumentsViewModel extends ChangeNotifier {
           'expectedSize': attachment.pending.fileSize,
           'expectedSha256': attachment.sha256,
           'localAggregateId': pending.localAggregateId,
-          if (terminal) 'cleanup': cleanup,
         },
         state: OutboxState.queued,
         createdAt: createdAt.add(Duration(microseconds: index + 1)),
-        requiresStatusProbe: pending.requiresStatusProbe,
       );
       operations.add(operation);
       dependencies[operation.operationId] = {dependencyId};
       dependencyId = operation.operationId;
+    }
+
+    var sequence = staged.length + 1;
+    void addLifecycleOperation(
+      OutboxOperationKind kind, {
+      required bool terminal,
+    }) {
+      final requestId = '${pending.request.requestId}:${kind.wireValue}';
+      final operation = OutboxOperation(
+        operationId: '${kind.wireValue}-${pending.request.requestId}',
+        idempotencyKey: requestId,
+        accountId: pending.accountId,
+        warehouseId: pending.warehouseId,
+        kind: kind,
+        payload: {'version': 1, if (terminal) 'cleanup': cleanup},
+        state: OutboxState.queued,
+        createdAt: createdAt.add(Duration(microseconds: sequence)),
+      );
+      sequence += 1;
+      operations.add(operation);
+      dependencies[operation.operationId] = {dependencyId};
+      dependencyId = operation.operationId;
+    }
+
+    if (pending.request.docType == 5) {
+      addLifecycleOperation(
+        OutboxOperationKind.stocktakeConfirm,
+        terminal: false,
+      );
+      addLifecycleOperation(
+        OutboxOperationKind.stocktakeSettle,
+        terminal: true,
+      );
+    } else {
+      addLifecycleOperation(
+        OutboxOperationKind.documentComplete,
+        terminal: true,
+      );
     }
 
     final result = await outbox.enqueueGraph(

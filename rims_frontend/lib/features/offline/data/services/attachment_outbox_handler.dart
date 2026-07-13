@@ -166,6 +166,11 @@ final class _AttachmentPayload {
         (localAggregateId is! String || localAggregateId.trim().isEmpty)) {
       throw const FormatException('Invalid attachment local aggregate ID.');
     }
+    if (localAggregateId != null && json['cleanup'] != null) {
+      throw const FormatException(
+        'Draft attachment cleanup belongs to the terminal lifecycle.',
+      );
+    }
     return _AttachmentPayload(
       requestId: requestId,
       expectedSize: size,

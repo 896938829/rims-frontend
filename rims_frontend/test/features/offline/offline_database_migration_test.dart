@@ -307,11 +307,8 @@ void main() {
       await repository.completeSuccess(
         accountId: '7',
         operationId: operation.operationId,
-        output: const OutboxOperationOutput(
-          version: 1,
-          data: {'documentId': 91},
-        ),
-        cleanup: const OutboxCleanupRequest(
+        output: OutboxOperationOutput(version: 1, data: {'documentId': 91}),
+        cleanup: OutboxCleanupRequest(
           draftId: 'draft-v6',
           attachmentRequestIds: ['file-v6'],
         ),
@@ -698,7 +695,7 @@ final class _RecordingHandler implements OutboxOperationHandler {
     Map<String, OutboxOperationOutput> dependencyOutputs = const {},
   }) async {
     events.add('handler');
-    return const Success(
+    return Success(
       OutboxHandlerSuccess(output: OutboxOperationOutput(version: 1, data: {})),
     );
   }

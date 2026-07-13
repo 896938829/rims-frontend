@@ -101,11 +101,8 @@ void runOutboxRepositoryContract(String name, OutboxHarnessFactory create) {
       final completed = await repository.completeSuccess(
         accountId: '7',
         operationId: operation.operationId,
-        output: const OutboxOperationOutput(
-          version: 1,
-          data: {'documentId': 91},
-        ),
-        cleanup: const OutboxCleanupRequest(
+        output: OutboxOperationOutput(version: 1, data: {'documentId': 91}),
+        cleanup: OutboxCleanupRequest(
           draftId: 'draft-output',
           attachmentRequestIds: ['file-output'],
         ),
@@ -118,6 +115,58 @@ void runOutboxRepositoryContract(String name, OutboxHarnessFactory create) {
       expect(intents.single.operationId, operation.operationId);
       expect(intents.single.draftId, 'draft-output');
       expect(intents.single.attachmentRequestIds, ['file-output']);
+    });
+
+    test('success snapshots nested output and cleanup inputs', () async {
+      final operation = _operation('snapshot-success', clock.value);
+      await repository.enqueueGraph(OutboxGraph(operations: [operation]));
+      await repository.transition(
+        accountId: '7',
+        operationId: operation.operationId,
+        next: OutboxState.syncing,
+      );
+      final steps = <Object?>[
+        <String, Object?>{'state': 'created'},
+      ];
+      final outputSource = <String, Object?>{
+        'documentId': 91,
+        'metadata': <String, Object?>{'steps': steps},
+      };
+      final cleanupIds = <String>['snapshot-file'];
+
+      await repository.completeSuccess(
+        accountId: '7',
+        operationId: operation.operationId,
+        output: OutboxOperationOutput(version: 1, data: outputSource),
+        cleanup: OutboxCleanupRequest(
+          draftId: 'snapshot-draft',
+          attachmentRequestIds: cleanupIds,
+        ),
+      );
+      (steps.single! as Map<String, Object?>)['state'] = 'mutated';
+      steps.add('late');
+      outputSource['documentId'] = 999;
+      cleanupIds.add('late-file');
+
+      final stored = (await repository.list('7')).successData.single;
+      expect(stored.output?.data, {
+        'documentId': 91,
+        'metadata': {
+          'steps': [
+            {'state': 'created'},
+          ],
+        },
+      });
+      final metadata = stored.output!.data['metadata']! as Map<String, Object?>;
+      final storedSteps = metadata['steps']! as List<Object?>;
+      expect(() => metadata['late'] = true, throwsUnsupportedError);
+      expect(() => storedSteps.add('late'), throwsUnsupportedError);
+      expect(
+        (await repository.listCleanupIntents(
+          '7',
+        )).successData.single.attachmentRequestIds,
+        ['snapshot-file'],
+      );
     });
 
     test('direct dependency outputs survive repository reads', () async {
@@ -143,10 +192,7 @@ void runOutboxRepositoryContract(String name, OutboxHarnessFactory create) {
       await repository.completeSuccess(
         accountId: '7',
         operationId: parent.operationId,
-        output: const OutboxOperationOutput(
-          version: 1,
-          data: {'documentId': 91},
-        ),
+        output: OutboxOperationOutput(version: 1, data: {'documentId': 91}),
       );
 
       final outputs = await repository.loadDependencyOutputs(
@@ -171,10 +217,8 @@ void runOutboxRepositoryContract(String name, OutboxHarnessFactory create) {
         await repository.completeSuccess(
           accountId: '7',
           operationId: operation.operationId,
-          output: const OutboxOperationOutput(version: 1, data: {}),
-          cleanup: const OutboxCleanupRequest(
-            attachmentRequestIds: ['cleanup-file'],
-          ),
+          output: OutboxOperationOutput(version: 1, data: {}),
+          cleanup: OutboxCleanupRequest(attachmentRequestIds: ['cleanup-file']),
         );
 
         await repository.recordCleanupFailure(
@@ -225,10 +269,8 @@ void runOutboxRepositoryContract(String name, OutboxHarnessFactory create) {
         await repository.completeSuccess(
           accountId: '7',
           operationId: operation.operationId,
-          output: const OutboxOperationOutput(version: 1, data: {}),
-          cleanup: const OutboxCleanupRequest(
-            attachmentRequestIds: ['still-needed'],
-          ),
+          output: OutboxOperationOutput(version: 1, data: {}),
+          cleanup: OutboxCleanupRequest(attachmentRequestIds: ['still-needed']),
         );
         clock.value = initialTime;
 

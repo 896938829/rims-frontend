@@ -104,7 +104,6 @@ final class DocumentOutboxHandler implements OutboxOperationHandler {
           version: 1,
           data: {'documentId': model.id},
         ),
-        cleanup: payload.cleanup?.toRequest(),
       ),
     );
   }
@@ -154,7 +153,7 @@ final class DocumentOutboxHandler implements OutboxOperationHandler {
           version: 1,
           data: {'documentId': documentId, 'lifecycle': kind.wireValue},
         ),
-        cleanup: payload.cleanup?.toRequest() ?? const OutboxCleanupRequest(),
+        cleanup: payload.cleanup?.toRequest(),
       ),
     );
   }
@@ -165,24 +164,18 @@ final class _DocumentCreatePayload {
     required this.localAggregateId,
     required this.attachmentRequestIds,
     required this.request,
-    required this.cleanup,
   });
 
   factory _DocumentCreatePayload.fromJson(
     Map<String, Object?> json, {
     required String expectedRequestId,
   }) {
-    _expectKeys(
-      json,
-      const {
-        'version',
-        'localAggregateId',
-        'attachmentRequestIds',
-        'request',
-        'cleanup',
-      },
-      optional: const {'cleanup'},
-    );
+    _expectKeys(json, const {
+      'version',
+      'localAggregateId',
+      'attachmentRequestIds',
+      'request',
+    });
     _expectVersion(json);
     final localAggregateId = _string(json, 'localAggregateId');
     final attachments = _stringList(json, 'attachmentRequestIds');
@@ -193,16 +186,12 @@ final class _DocumentCreatePayload {
         _map(json, 'request'),
         expectedRequestId: expectedRequestId,
       ),
-      cleanup: json['cleanup'] == null
-          ? null
-          : _OutboxCleanup.fromJson(_map(json, 'cleanup')),
     );
   }
 
   final String localAggregateId;
   final List<String> attachmentRequestIds;
   final CreateDocumentRequest request;
-  final _OutboxCleanup? cleanup;
 }
 
 final class _DocumentLifecyclePayload {
