@@ -5,6 +5,7 @@ import '../../../../core/network/api_endpoints.dart';
 import '../../../../core/network/api_envelope.dart';
 import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
+import '../../domain/services/idempotency_key_validator.dart';
 
 enum OperationState { processing, completed }
 
@@ -84,7 +85,7 @@ final class ApiOperationStatusRemoteDataSource
     required String key,
     required String scope,
   }) async {
-    if (!_isValidIdempotencyKey(key)) {
+    if (!IdempotencyKeyValidator.isValid(key)) {
       return const FailureResult<OperationStatus>(
         ValidationFailure(message: 'Invalid idempotency key'),
       );
@@ -148,11 +149,4 @@ final class ApiOperationStatusRemoteDataSource
       ),
     );
   }
-}
-
-bool _isValidIdempotencyKey(String key) {
-  if (key.isEmpty || key.length > 255 || key == '.' || key == '..') {
-    return false;
-  }
-  return RegExp(r'^[A-Za-z0-9._~-]+$').hasMatch(key);
 }

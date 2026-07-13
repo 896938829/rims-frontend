@@ -337,7 +337,7 @@ INSERT INTO outbox_resolutions (
   });
 
   test(
-    'expired succeeded parent is pruned while active child remains ready',
+    'expired succeeded parent is retained while active child remains ready',
     () async {
       final old = now.subtract(const Duration(days: 31));
       clock = old;
@@ -351,10 +351,12 @@ INSERT INTO outbox_resolutions (
 
       final result = await repository.prune(accountId: '7');
 
-      expect((result as Success<int>).data, 1);
+      expect((result as Success<int>).data, 0);
       expect(
-        (await repository.list('7')).getOrThrow().single.operationId,
-        'active-child',
+        (await repository.list(
+          '7',
+        )).getOrThrow().map((operation) => operation.operationId),
+        containsAll(['old-parent', 'active-child']),
       );
       expect(
         (await repository.ready('7')).getOrThrow().single.operationId,

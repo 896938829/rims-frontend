@@ -9,6 +9,7 @@ import '../../domain/entities/outbox_operation.dart';
 import '../../domain/entities/outbox_graph.dart';
 import '../../domain/entities/outbox_cleanup_intent.dart';
 import '../../domain/repositories/outbox_repository.dart';
+import '../../domain/services/idempotency_key_validator.dart';
 import '../../domain/services/outbox_state_machine.dart';
 import '../database/offline_database.dart';
 import '../models/cache_record_model.dart';
@@ -48,7 +49,7 @@ final class DriftOutboxRepository implements OutboxRepository {
           operation.state != OutboxState.queued ||
           operation.replacementOf != null ||
           operation.operationId.isEmpty ||
-          operation.idempotencyKey.isEmpty ||
+          !IdempotencyKeyValidator.isValid(operation.idempotencyKey) ||
           byId.containsKey(operation.operationId) ||
           !keys.add(operation.idempotencyKey)) {
         return const FailureResult(
@@ -130,10 +131,12 @@ final class DriftOutboxRepository implements OutboxRepository {
           )..where((row) => row.operationId.isIn(dependencyIds))).get();
           if (dependencies.length != dependencyIds.length ||
               dependencies.any(
-                (operation) => operation.accountId != accountId,
+                (operation) =>
+                    operation.accountId != accountId ||
+                    operation.warehouseId != warehouseId,
               )) {
             throw const _OutboxValidationException(
-              'Dependencies must exist in the same account.',
+              'Dependencies must exist in the same account and warehouse.',
             );
           }
         }
@@ -205,6 +208,11 @@ final class DriftOutboxRepository implements OutboxRepository {
     if (dependencies.contains(operation.operationId)) {
       return const FailureResult(
         ValidationFailure(message: 'An operation cannot depend on itself.'),
+      );
+    }
+    if (!IdempotencyKeyValidator.isValid(operation.idempotencyKey)) {
+      return const FailureResult(
+        ValidationFailure(message: 'Invalid idempotency key.'),
       );
     }
 
@@ -1275,19 +1283,20 @@ LIMIT 1
                   )!,
                 )
                 .get();
-        final expiredIds = <String>{};
+        final expiredCandidates = <String>{};
         for (final operation in operations) {
           if (cleanupOperationIds.contains(operation.operationId)) continue;
           if (!_isExpiredTerminal(operation, currentTime)) continue;
-          final state = OutboxState.values.singleWhere(
-            (candidate) => candidate.wireValue == operation.operationState,
-          );
-          if (state != OutboxState.succeeded &&
-              _hasActiveDescendant(operation.operationId, children, byId)) {
-            continue;
-          }
-          expiredIds.add(operation.operationId);
+          expiredCandidates.add(operation.operationId);
         }
+        final expiredIds = expiredCandidates.where((operationId) {
+          return !_hasRecoverableDescendantOutside(
+            operationId,
+            children,
+            byId,
+            expiredCandidates,
+          );
+        }).toSet();
 
         final resolutions = await (database.select(
           database.offlineOutboxResolutions,
@@ -1398,9 +1407,13 @@ LIMIT 1
       database.offlineOutboxOperations,
     )..where((row) => row.operationId.isIn(dependencies))).get();
     if (parents.length != dependencies.length ||
-        parents.any((parent) => parent.accountId != operation.accountId)) {
+        parents.any(
+          (parent) =>
+              parent.accountId != operation.accountId ||
+              parent.warehouseId != operation.warehouseId,
+        )) {
       throw const _OutboxValidationException(
-        'Dependencies must exist in the same account.',
+        'Dependencies must exist in the same account and warehouse.',
       );
     }
 
@@ -1658,10 +1671,11 @@ WHERE account_id = ?
     };
   }
 
-  bool _hasActiveDescendant(
+  bool _hasRecoverableDescendantOutside(
     String operationId,
     Map<String, Set<String>> children,
     Map<String, OfflineOutboxOperation> operations,
+    Set<String> expiredCandidates,
   ) {
     final pending = <String>[...children[operationId] ?? const <String>{}];
     final visited = <String>{};
@@ -1670,9 +1684,11 @@ WHERE account_id = ?
       if (!visited.add(childId)) continue;
       final child = operations[childId];
       if (child != null &&
+          !expiredCandidates.contains(childId) &&
           (child.operationState == OutboxState.queued.wireValue ||
               child.operationState == OutboxState.syncing.wireValue ||
-              child.operationState == OutboxState.retryableFailure.wireValue)) {
+              child.operationState == OutboxState.retryableFailure.wireValue ||
+              child.operationState == OutboxState.conflict.wireValue)) {
         return true;
       }
       pending.addAll(children[childId] ?? const <String>{});

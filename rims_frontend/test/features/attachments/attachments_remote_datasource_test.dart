@@ -101,6 +101,36 @@ void main() {
   );
 
   test(
+    'snapshot upload sends supplied bytes after the staged path is gone',
+    () async {
+      final adapter = _AttachmentAdapter(jsonBody: _itemBody);
+      final pending = PendingAttachment(
+        requestId: 'request-snapshot-1',
+        binding: AttachmentBinding.document(42),
+        stagedPath: source.path,
+        originalName: 'receipt.pdf',
+        mimeType: 'application/pdf',
+        fileSize: 4,
+      );
+      await source.delete();
+
+      final result = await _dataSource(adapter).uploadBytes(
+        pending,
+        bytes: const [251, 252, 253, 254],
+        onProgress: (_, _) {},
+        cancellation: TransferCancellation(),
+      );
+
+      expect(result.isSuccess, isTrue);
+      expect(adapter.idempotencyKey, 'request-snapshot-1');
+      expect(
+        _containsBytes(adapter.multipartBody, const [251, 252, 253, 254]),
+        isTrue,
+      );
+    },
+  );
+
+  test(
     'replace preserves request id and sends only the replacement file',
     () async {
       final adapter = _AttachmentAdapter(jsonBody: _itemBody);
@@ -261,6 +291,7 @@ final class _AttachmentAdapter implements HttpClientAdapter {
   Map<String, Object?>? jsonData;
   final Map<String, String> multipartFields = {};
   String? multipartFilename;
+  List<int> multipartBody = const [];
 
   @override
   Future<ResponseBody> fetch(
@@ -284,7 +315,7 @@ final class _AttachmentAdapter implements HttpClientAdapter {
       multipartFilename = form.files.single.value.filename;
     }
     if (requestStream != null) {
-      await requestStream.expand((chunk) => chunk).length;
+      multipartBody = await requestStream.expand((chunk) => chunk).toList();
     }
     if (waitForCancellation && cancelFuture != null) {
       await cancelFuture;
@@ -309,4 +340,18 @@ final class _AttachmentAdapter implements HttpClientAdapter {
 
   @override
   void close({bool force = false}) {}
+}
+
+bool _containsBytes(List<int> source, List<int> expected) {
+  for (var start = 0; start <= source.length - expected.length; start += 1) {
+    var matches = true;
+    for (var offset = 0; offset < expected.length; offset += 1) {
+      if (source[start + offset] != expected[offset]) {
+        matches = false;
+        break;
+      }
+    }
+    if (matches) return true;
+  }
+  return false;
 }

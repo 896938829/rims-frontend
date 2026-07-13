@@ -18,6 +18,14 @@ final class StagedAttachment {
   final String sha256;
 }
 
+final class AttachmentUploadSnapshot {
+  AttachmentUploadSnapshot({required this.pending, required List<int> bytes})
+    : bytes = List<int>.unmodifiable(List<int>.of(bytes));
+
+  final PendingAttachment pending;
+  final List<int> bytes;
+}
+
 abstract interface class AttachmentStagingStore {
   Future<Result<StagedAttachment>> stage({
     required String userId,
@@ -71,5 +79,16 @@ abstract interface class OutboxAttachmentStagingStore {
   Future<Result<void>> removeStagedAttachments({
     required String userId,
     required List<String> requestIds,
+  });
+}
+
+abstract interface class OutboxAttachmentUploadStagingStore {
+  Future<Result<AttachmentUploadSnapshot>> prepareUploadSnapshot({
+    required String userId,
+    required String requestId,
+    required int expectedSize,
+    required String expectedSha256,
+    required String? localAggregateId,
+    required int? documentId,
   });
 }

@@ -89,6 +89,117 @@ void runOutboxRepositoryContract(String name, OutboxHarnessFactory create) {
       );
     });
 
+    test(
+      'enqueue paths reject idempotency keys outside the shared URL-safe contract',
+      () async {
+        expect(
+          await repository.enqueue(
+            _operation(
+              'invalid-key-single',
+              clock.value,
+              idempotencyKey: 'bad:key',
+            ),
+          ),
+          isA<FailureResult<OutboxOperation>>(),
+        );
+        expect(
+          await repository.enqueueGraph(
+            OutboxGraph(
+              operations: [
+                _operation(
+                  'invalid-key-graph',
+                  clock.value,
+                  idempotencyKey: 'bad/key',
+                ),
+              ],
+            ),
+          ),
+          isA<FailureResult<List<OutboxOperation>>>(),
+        );
+        expect((await repository.list('7')).successData, isEmpty);
+      },
+    );
+
+    test('enqueue rejects dependencies from another warehouse', () async {
+      await repository.enqueue(_operation('warehouse-parent', clock.value));
+
+      final result = await repository.enqueue(
+        _operation('warehouse-child', clock.value, warehouseId: 12),
+        dependencies: const {'warehouse-parent'},
+      );
+
+      expect(result, isA<FailureResult<OutboxOperation>>());
+      expect(
+        (await repository.list(
+          '7',
+        )).successData.map((item) => item.operationId),
+        ['warehouse-parent'],
+      );
+    });
+
+    test(
+      'enqueueGraph rejects internal and external cross-warehouse edges',
+      () async {
+        await repository.enqueue(_operation('external-parent', clock.value));
+        final external = await repository.enqueueGraph(
+          OutboxGraph(
+            operations: [
+              _operation('external-child', clock.value, warehouseId: 12),
+            ],
+            dependencies: const {
+              'external-child': {'external-parent'},
+            },
+          ),
+        );
+        final internal = await repository.enqueueGraph(
+          OutboxGraph(
+            operations: [
+              _operation('internal-parent', clock.value),
+              _operation('internal-child', clock.value, warehouseId: 12),
+            ],
+            dependencies: const {
+              'internal-child': {'internal-parent'},
+            },
+          ),
+        );
+
+        expect(external, isA<FailureResult<List<OutboxOperation>>>());
+        expect(internal, isA<FailureResult<List<OutboxOperation>>>());
+        expect(
+          (await repository.list(
+            '7',
+          )).successData.map((item) => item.operationId),
+          ['external-parent'],
+        );
+      },
+    );
+
+    test(
+      'concurrent cross-warehouse dependency writes both leave zero children',
+      () async {
+        await repository.enqueue(_operation('concurrent-parent', clock.value));
+
+        final results = await Future.wait([
+          repository.enqueue(
+            _operation('concurrent-child-a', clock.value, warehouseId: 12),
+            dependencies: const {'concurrent-parent'},
+          ),
+          repository.enqueue(
+            _operation('concurrent-child-b', clock.value, warehouseId: 13),
+            dependencies: const {'concurrent-parent'},
+          ),
+        ]);
+
+        expect(results, everyElement(isA<FailureResult<OutboxOperation>>()));
+        expect(
+          (await repository.list(
+            '7',
+          )).successData.map((item) => item.operationId),
+          ['concurrent-parent'],
+        );
+      },
+    );
+
     test('dependency component query returns the complete graph', () async {
       final create = _operation('component-create', clock.value);
       final attachment = _operation(
@@ -627,7 +738,7 @@ void runOutboxRepositoryContract(String name, OutboxHarnessFactory create) {
     });
 
     test(
-      'prune removes expired succeeded parent without changing child readiness',
+      'prune retains an expired succeeded parent output while its child is active',
       () async {
         final old = initialTime.subtract(const Duration(days: 31));
         clock.value = old;
@@ -637,10 +748,10 @@ void runOutboxRepositoryContract(String name, OutboxHarnessFactory create) {
           operationId: 'old-parent',
           next: OutboxState.syncing,
         );
-        await repository.transition(
+        await repository.completeSuccess(
           accountId: '7',
           operationId: 'old-parent',
-          next: OutboxState.succeeded,
+          output: OutboxOperationOutput(version: 1, data: {'documentId': 91}),
         );
         await repository.enqueue(
           _operation('active-child', old),
@@ -652,15 +763,79 @@ void runOutboxRepositoryContract(String name, OutboxHarnessFactory create) {
           (await repository.ready('7')).successData.single.operationId,
           'active-child',
         );
-        expect((await repository.prune(accountId: '7')).successData, 1);
+        expect((await repository.prune(accountId: '7')).successData, 0);
         expect(
           (await repository.ready('7')).successData.single.operationId,
           'active-child',
         );
         expect(
-          (await repository.list('7')).successData.single.operationId,
-          'active-child',
+          (await repository.loadDependencyOutputs(
+            accountId: '7',
+            operationId: 'active-child',
+          )).successData['old-parent']?.data,
+          {'documentId': 91},
         );
+        expect(
+          (await repository.list(
+            '7',
+          )).successData.map((item) => item.operationId),
+          containsAll(['old-parent', 'active-child']),
+        );
+
+        await repository.transition(
+          accountId: '7',
+          operationId: 'active-child',
+          next: OutboxState.syncing,
+        );
+        await repository.transition(
+          accountId: '7',
+          operationId: 'active-child',
+          next: OutboxState.succeeded,
+        );
+        clock.value = initialTime.add(const Duration(days: 8));
+        expect((await repository.prune(accountId: '7')).successData, 2);
+        expect((await repository.list('7')).successData, isEmpty);
+      },
+    );
+
+    test(
+      'conflict descendant protects its succeeded dependency until both expire',
+      () async {
+        final old = initialTime.subtract(const Duration(days: 8));
+        clock.value = old;
+        await repository.enqueue(_operation('conflict-parent', old));
+        await repository.transition(
+          accountId: '7',
+          operationId: 'conflict-parent',
+          next: OutboxState.syncing,
+        );
+        await repository.completeSuccess(
+          accountId: '7',
+          operationId: 'conflict-parent',
+          output: OutboxOperationOutput(version: 1, data: {'documentId': 91}),
+        );
+        await repository.enqueue(
+          _operation('conflict-child', old),
+          dependencies: const {'conflict-parent'},
+        );
+        await repository.transition(
+          accountId: '7',
+          operationId: 'conflict-child',
+          next: OutboxState.syncing,
+        );
+        await repository.transition(
+          accountId: '7',
+          operationId: 'conflict-child',
+          next: OutboxState.conflict,
+        );
+        clock.value = initialTime;
+
+        expect((await repository.prune(accountId: '7')).successData, 0);
+        expect((await repository.list('7')).successData, hasLength(2));
+
+        clock.value = old.add(const Duration(days: 31));
+        expect((await repository.prune(accountId: '7')).successData, 2);
+        expect((await repository.list('7')).successData, isEmpty);
       },
     );
 
@@ -694,8 +869,8 @@ void runOutboxRepositoryContract(String name, OutboxHarnessFactory create) {
         );
         clock.value = initialTime;
 
-        expect((await repository.prune(accountId: '7')).successData, 40);
-        expect((await repository.list('7')).successData, hasLength(1));
+        expect((await repository.prune(accountId: '7')).successData, 0);
+        expect((await repository.list('7')).successData, hasLength(41));
         expect(
           (await repository.ready('7')).successData.single.operationId,
           'chain-active',
@@ -731,8 +906,8 @@ void runOutboxRepositoryContract(String name, OutboxHarnessFactory create) {
         );
         clock.value = initialTime;
 
-        expect((await repository.prune(accountId: '7')).successData, 3);
-        expect((await repository.list('7')).successData, hasLength(1));
+        expect((await repository.prune(accountId: '7')).successData, 0);
+        expect((await repository.list('7')).successData, hasLength(4));
         expect(
           (await repository.ready('7')).successData.single.operationId,
           'fork-active',
@@ -1183,12 +1358,13 @@ OutboxOperation _operation(
   String accountId = '7',
   String? idempotencyKey,
   OutboxOperationKind kind = OutboxOperationKind.documentCreate,
+  int warehouseId = 11,
 }) {
   return OutboxOperation(
     operationId: id,
     idempotencyKey: idempotencyKey ?? 'key-$id',
     accountId: accountId,
-    warehouseId: 11,
+    warehouseId: warehouseId,
     kind: kind,
     payload: const {},
     state: OutboxState.queued,

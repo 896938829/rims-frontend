@@ -79,11 +79,39 @@ void main() {
       expect(failure.traceId, 'trace-forbidden');
     });
 
-    test('maps timeout to NetworkFailure', () {
+    test('maps connection timeout to NetworkFailure', () {
       final failure = const ApiExceptionMapper().map(
         DioException(
           requestOptions: RequestOptions(path: '/test'),
           type: DioExceptionType.connectionTimeout,
+        ),
+      );
+
+      expect(failure, isA<NetworkFailure>());
+    });
+
+    for (final type in const [
+      DioExceptionType.sendTimeout,
+      DioExceptionType.receiveTimeout,
+    ]) {
+      test('maps $type to TransportUnknownFailure', () {
+        final failure = const ApiExceptionMapper().map(
+          DioException(
+            requestOptions: RequestOptions(path: '/documents'),
+            type: type,
+          ),
+        );
+
+        expect(failure, isA<TransportUnknownFailure>());
+      });
+    }
+
+    test('maps connection error to NetworkFailure', () {
+      final failure = const ApiExceptionMapper().map(
+        DioException(
+          requestOptions: RequestOptions(path: '/documents'),
+          type: DioExceptionType.connectionError,
+          error: const SocketException('connection refused'),
         ),
       );
 

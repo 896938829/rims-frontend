@@ -220,6 +220,62 @@ void main() {
     expect(result.failureOrNull, isA<ValidationFailure>());
     expect(dataSource.events, isEmpty);
   });
+
+  test(
+    'lifecycle strictly validates its single direct dependency output',
+    () async {
+      final handler = DocumentOutboxHandler(
+        kind: OutboxOperationKind.documentComplete,
+        remoteDataSource: dataSource,
+        stagingStore: stagingStore,
+        draftRepository: draftRepository,
+        eventBus: eventBus,
+      );
+      final operation = _operation(
+        kind: OutboxOperationKind.documentComplete,
+        operationId: 'complete-document-request-1',
+        idempotencyKey: 'complete-request-1',
+        payload: const {'version': 1},
+      );
+      final valid = OutboxOperationOutput(version: 1, data: {'documentId': 91});
+      final malformed = <Map<String, OutboxOperationOutput>>[
+        {
+          'parent': OutboxOperationOutput(version: 2, data: {'documentId': 91}),
+        },
+        {
+          'parent': OutboxOperationOutput(
+            version: 1,
+            data: {'documentId': 91, 'unexpected': true},
+          ),
+        },
+        {
+          'parent': OutboxOperationOutput(
+            version: 1,
+            data: {'attachmentId': 5},
+          ),
+        },
+        {
+          'parent': OutboxOperationOutput(version: 1, data: {'documentId': 0}),
+        },
+        {
+          'parent': OutboxOperationOutput(
+            version: 1,
+            data: {'documentId': 91, 'lifecycle': 'unknown'},
+          ),
+        },
+        {'parent-a': valid, 'parent-b': valid},
+      ];
+
+      for (final outputs in malformed) {
+        final result = await handler.execute(
+          operation,
+          dependencyOutputs: outputs,
+        );
+        expect(result.failureOrNull, isA<ValidationFailure>());
+      }
+      expect(dataSource.events, isEmpty);
+    },
+  );
 }
 
 Map<String, Object?> _createPayload() => {

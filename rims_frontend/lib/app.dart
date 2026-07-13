@@ -53,6 +53,7 @@ import 'features/offline/domain/repositories/outbox_repository.dart';
 import 'features/offline/domain/entities/outbox_operation.dart';
 import 'features/offline/domain/entities/outbox_cleanup_intent.dart';
 import 'features/offline/domain/services/network_status_service.dart';
+import 'features/offline/domain/services/attachment_staging_protection.dart';
 import 'features/offline/domain/services/outbox_executor.dart';
 import 'features/offline/domain/services/outbox_permission_policy.dart';
 import 'features/offline/domain/services/outbox_state_machine.dart';
@@ -380,13 +381,11 @@ final class _MainAppState extends State<MainApp> {
     }
     final listed = await _outboxRepository.list(accountId);
     if (listed case FailureResult<List<OutboxOperation>>()) return;
-    for (final operation in (listed as Success<List<OutboxOperation>>).data) {
-      if (operation.state == OutboxState.queued ||
-          operation.state == OutboxState.syncing ||
-          operation.state == OutboxState.retryableFailure) {
-        _collectAttachmentRequestIds(operation.payload, protected);
-      }
-    }
+    protected.addAll(
+      AttachmentStagingProtection.requestIdsFor(
+        (listed as Success<List<OutboxOperation>>).data,
+      ),
+    );
     final intents = await _outboxRepository.listCleanupIntents(accountId);
     if (intents case FailureResult<List<OutboxCleanupIntent>>()) return;
     for (final intent in (intents as Success<List<OutboxCleanupIntent>>).data) {
@@ -420,21 +419,4 @@ OutboxRepository outboxRepositoryForOfflineStore(OfflineStore store) {
     );
   }
   return MemoryOutboxRepository(stateMachine: OutboxStateMachine());
-}
-
-void _collectAttachmentRequestIds(
-  Map<String, Object?> payload,
-  Set<String> target,
-) {
-  final requestId = payload['requestId'];
-  if (requestId is String && requestId.isNotEmpty) target.add(requestId);
-  for (final key in const ['attachmentRequestIds']) {
-    final values = payload[key];
-    if (values is List) target.addAll(values.whereType<String>());
-  }
-  final cleanup = payload['cleanup'];
-  if (cleanup is Map) {
-    final values = cleanup['attachmentRequestIds'];
-    if (values is List) target.addAll(values.whereType<String>());
-  }
 }

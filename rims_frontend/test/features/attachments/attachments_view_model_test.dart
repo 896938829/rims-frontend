@@ -1,11 +1,16 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:rims_frontend/core/network/api_client.dart';
 import 'package:rims_frontend/core/pagination/page_data.dart';
 import 'package:rims_frontend/core/result/failure.dart';
 import 'package:rims_frontend/core/result/result.dart';
 import 'package:rims_frontend/features/attachments/data/services/attachment_share_service.dart';
+import 'package:rims_frontend/features/attachments/data/datasources/attachments_remote_datasource.dart';
+import 'package:rims_frontend/features/attachments/data/repositories/attachments_repository_impl.dart';
 import 'package:rims_frontend/features/attachments/domain/entities/attachment.dart';
 import 'package:rims_frontend/features/attachments/domain/repositories/attachments_repository.dart';
 import 'package:rims_frontend/features/attachments/domain/services/attachment_picker.dart';
@@ -263,6 +268,45 @@ void main() {
     },
   );
 
+  for (final type in const [
+    DioExceptionType.sendTimeout,
+    DioExceptionType.receiveTimeout,
+  ]) {
+    test('real $type upload offers queue and marks status-first', () async {
+      final directory = await Directory.systemTemp.createTemp(
+        'rims_timeout_upload_',
+      );
+      addTearDown(() => directory.delete(recursive: true));
+      final file = File('${directory.path}${Platform.pathSeparator}proof.pdf');
+      await file.writeAsBytes(List<int>.filled(128, 7));
+      final staging = _FakeStaging()..staged = _staged(stagedPath: file.path);
+      final outbox = MemoryOutboxRepository(stateMachine: OutboxStateMachine());
+      final repository = AttachmentsRepositoryImpl(
+        remoteDataSource: ApiAttachmentsRemoteDataSource(
+          ApiClient(
+            dio: Dio()..httpClientAdapter = _TimeoutAttachmentAdapter(type),
+            enableLogging: false,
+          ),
+        ),
+        apiBaseUri: Uri.parse('http://localhost:8080'),
+        saveDownload: (_, _) async => '/unused',
+      );
+      final viewModel = _viewModel(
+        repository: repository,
+        staging: staging,
+        outbox: outbox,
+      );
+
+      await viewModel.pickAndUpload(AttachmentPickSource.file);
+      expect(viewModel.offlineUploadReviewFor('stable-request'), isNotNull);
+      expect(await viewModel.confirmOfflineUpload('stable-request'), isTrue);
+      expect(
+        (await outbox.list('3')).successData.single.requiresStatusProbe,
+        isTrue,
+      );
+    });
+  }
+
   test(
     'recovers interrupted staging and resumes after background cancellation',
     () async {
@@ -363,7 +407,7 @@ void main() {
 }
 
 AttachmentsViewModel _viewModel({
-  _FakeRepository? repository,
+  AttachmentsRepository? repository,
   _FakePicker? picker,
   _FakeStaging? staging,
   _FakeShare? share,
@@ -399,19 +443,20 @@ Attachment _attachment({int id = 7, int position = 0}) => Attachment(
   position: position,
 );
 
-StagedAttachment _staged() => StagedAttachment(
-  pending: PendingAttachment(
-    requestId: 'stable-request',
-    binding: AttachmentBinding.document(42),
-    stagedPath: '/support/staged.pdf',
-    originalName: 'receipt.pdf',
-    mimeType: 'application/pdf',
-    fileSize: 128,
-  ),
-  thumbnailPath: null,
-  createdAt: DateTime.utc(2026, 7, 13),
-  sha256: 'stable-hash',
-);
+StagedAttachment _staged({String stagedPath = '/support/staged.pdf'}) =>
+    StagedAttachment(
+      pending: PendingAttachment(
+        requestId: 'stable-request',
+        binding: AttachmentBinding.document(42),
+        stagedPath: stagedPath,
+        originalName: 'receipt.pdf',
+        mimeType: 'application/pdf',
+        fileSize: 128,
+      ),
+      thumbnailPath: null,
+      createdAt: DateTime.utc(2026, 7, 13),
+      sha256: 'stable-hash',
+    );
 
 final class _FakeRepository implements AttachmentsRepository {
   Result<PageData<Attachment>> listResult = Success(
@@ -506,6 +551,7 @@ final class _FakePicker implements AttachmentPicker {
 
 final class _FakeStaging
     implements AttachmentStagingStore, OutboxAttachmentStagingStore {
+  StagedAttachment staged = _staged();
   List<StagedAttachment> recovered = [];
   final List<String> removedRequestIds = [];
   Completer<Result<StagedAttachment>>? loadStagedCompleter;
@@ -517,7 +563,7 @@ final class _FakeStaging
     required AttachmentBinding binding,
     required SelectedAttachmentSource selection,
     required int existingCount,
-  }) async => Success(_staged());
+  }) async => Success(staged);
 
   @override
   Future<Result<List<StagedAttachment>>> recoverForUser(String userId) async =>
@@ -550,7 +596,7 @@ final class _FakeStaging
     required String requestId,
   }) async {
     if (!loadStagedStarted.isCompleted) loadStagedStarted.complete();
-    return loadStagedCompleter?.future ?? Success(_staged());
+    return loadStagedCompleter?.future ?? Success(staged);
   }
 
   @override
@@ -576,6 +622,25 @@ extension _SuccessData<T> on Result<T> {
     Success<T>(:final data) => data,
     FailureResult<T>(:final failure) => throw TestFailure(failure.message),
   };
+}
+
+final class _TimeoutAttachmentAdapter implements HttpClientAdapter {
+  const _TimeoutAttachmentAdapter(this.type);
+
+  final DioExceptionType type;
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    await requestStream?.drain<void>();
+    throw DioException(requestOptions: options, type: type);
+  }
+
+  @override
+  void close({bool force = false}) {}
 }
 
 final class _FakeShare implements AttachmentShareService {

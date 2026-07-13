@@ -10,6 +10,8 @@ import 'package:rims_frontend/features/attachments/domain/entities/attachment.da
 import 'package:rims_frontend/features/attachments/domain/services/attachment_picker.dart';
 import 'package:rims_frontend/core/result/failure.dart';
 import 'package:rims_frontend/core/result/result.dart';
+import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.dart';
+import 'package:rims_frontend/features/offline/domain/services/attachment_staging_protection.dart';
 
 void main() {
   late Directory root;
@@ -169,6 +171,130 @@ void main() {
       );
     },
   );
+
+  test(
+    'outbox snapshot validates and rebinds immutable bytes under one lock',
+    () async {
+      final staged = (await store().stage(
+        userId: '42',
+        binding: AttachmentBinding.documentDraft('draft-1'),
+        selection: selection(),
+        existingCount: 0,
+      )).successData;
+
+      final snapshot = (await store().prepareUploadSnapshot(
+        userId: '42',
+        requestId: staged.pending.requestId,
+        expectedSize: staged.pending.fileSize,
+        expectedSha256: staged.sha256,
+        localAggregateId: 'draft-1',
+        documentId: 91,
+      )).successData;
+
+      expect(snapshot.bytes, [1, 2, 3, 4]);
+      expect(snapshot.pending.binding, AttachmentBinding.document(91));
+      expect(() => snapshot.bytes[0] = 9, throwsUnsupportedError);
+      await File(staged.pending.stagedPath).writeAsBytes([9, 9, 9, 9]);
+      expect(snapshot.bytes, [1, 2, 3, 4]);
+    },
+  );
+
+  test(
+    'concurrent staged-file replacement fails before draft rebind',
+    () async {
+      final staged = (await store().stage(
+        userId: '42',
+        binding: AttachmentBinding.documentDraft('draft-1'),
+        selection: selection(),
+        existingCount: 0,
+      )).successData;
+      final manifestRead = Completer<void>();
+      final continueSnapshot = Completer<void>();
+      final rebuilt = store(
+        onManifestRead: (_) async {
+          if (!manifestRead.isCompleted) {
+            manifestRead.complete();
+            await continueSnapshot.future;
+          }
+        },
+      );
+
+      final pending = rebuilt.prepareUploadSnapshot(
+        userId: '42',
+        requestId: staged.pending.requestId,
+        expectedSize: staged.pending.fileSize,
+        expectedSha256: staged.sha256,
+        localAggregateId: 'draft-1',
+        documentId: 91,
+      );
+      await manifestRead.future;
+      await File(staged.pending.stagedPath).writeAsBytes([7, 7, 7, 7]);
+      continueSnapshot.complete();
+
+      expect((await pending).failureOrNull, isA<ValidationFailure>());
+      expect(
+        (await store().recoverForUser('42')).successData.single.pending.binding,
+        AttachmentBinding.documentDraft('draft-1'),
+      );
+    },
+  );
+
+  test(
+    'missing snapshot file is validation and leaves draft binding unchanged',
+    () async {
+      final staged = (await store().stage(
+        userId: '42',
+        binding: AttachmentBinding.documentDraft('draft-1'),
+        selection: selection(),
+        existingCount: 0,
+      )).successData;
+      await File(staged.pending.stagedPath).delete();
+
+      final result = await store().prepareUploadSnapshot(
+        userId: '42',
+        requestId: staged.pending.requestId,
+        expectedSize: staged.pending.fileSize,
+        expectedSha256: staged.sha256,
+        localAggregateId: 'draft-1',
+        documentId: 91,
+      );
+
+      expect(result.failureOrNull, isA<ValidationFailure>());
+      final manifest = await root
+          .list(recursive: true)
+          .where(
+            (entity) => entity is File && entity.path.endsWith('manifest.json'),
+          )
+          .cast<File>()
+          .single;
+      expect(await manifest.readAsString(), contains('document_draft'));
+    },
+  );
+
+  test('symlink path swap is rejected before draft rebind', () async {
+    final staged = (await store().stage(
+      userId: '42',
+      binding: AttachmentBinding.documentDraft('draft-1'),
+      selection: selection(),
+      existingCount: 0,
+    )).successData;
+    final outside = File('${root.path}${Platform.pathSeparator}outside.pdf');
+    await outside.writeAsBytes([1, 2, 3, 4]);
+    await File(staged.pending.stagedPath).delete();
+    await Link(staged.pending.stagedPath).create(outside.path);
+
+    final result = await store().prepareUploadSnapshot(
+      userId: '42',
+      requestId: staged.pending.requestId,
+      expectedSize: staged.pending.fileSize,
+      expectedSha256: staged.sha256,
+      localAggregateId: 'draft-1',
+      documentId: 91,
+    );
+
+    expect(result.failureOrNull, isA<ValidationFailure>());
+    expect(await outside.readAsBytes(), [1, 2, 3, 4]);
+  });
 
   test('outbox load rejects missing and changed staged files', () async {
     final staged = await store().stage(
@@ -751,6 +877,48 @@ void main() {
   });
 
   test(
+    'process recreation keeps a seven-day-old conflict staging reference',
+    () async {
+      final original = store(now: DateTime.utc(2026, 7, 1));
+      await original.stage(
+        userId: '42',
+        binding: AttachmentBinding.documentDraft('draft-1'),
+        selection: selection(),
+        existingCount: 0,
+      );
+      final conflict = OutboxOperation(
+        operationId: 'upload-request-1',
+        idempotencyKey: 'request-1',
+        accountId: '42',
+        warehouseId: 11,
+        kind: OutboxOperationKind.attachmentUpload,
+        payload: const {'version': 1, 'requestId': 'request-1'},
+        state: OutboxState.conflict,
+        createdAt: DateTime.utc(2026, 7, 1),
+      );
+
+      final rebuilt = store(now: DateTime.utc(2026, 7, 13));
+      await rebuilt.cleanupStale(
+        userId: '42',
+        maxAge: const Duration(days: 7),
+        protectedRequestIds: AttachmentStagingProtection.requestIdsFor([
+          conflict,
+        ]),
+      );
+      expect((await rebuilt.recoverForUser('42')).successData, hasLength(1));
+
+      await rebuilt.cleanupStale(
+        userId: '42',
+        maxAge: const Duration(days: 7),
+        protectedRequestIds: AttachmentStagingProtection.requestIdsFor(
+          const [],
+        ),
+      );
+      expect((await rebuilt.recoverForUser('42')).successData, isEmpty);
+    },
+  );
+
+  test(
     'thumbnail keeps decoded orientation and bounds the longest side',
     () async {
       final recorder = ui.PictureRecorder();
@@ -799,6 +967,11 @@ void main() {
 
 extension<T> on Result<T> {
   T get successData => (this as Success<T>).data;
+
+  Failure? get failureOrNull => switch (this) {
+    FailureResult<T>(:final failure) => failure,
+    _ => null,
+  };
 }
 
 const _orientationSixJpeg =

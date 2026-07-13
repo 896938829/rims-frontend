@@ -18,6 +18,7 @@ import '../../../offline/domain/entities/outbox_operation.dart';
 import '../../../offline/domain/entities/outbox_graph.dart';
 import '../../../offline/domain/repositories/document_draft_repository.dart';
 import '../../../offline/domain/repositories/outbox_repository.dart';
+import '../../../offline/domain/services/idempotency_key_validator.dart';
 
 final class DocumentAction {
   const DocumentAction({
@@ -1610,7 +1611,10 @@ final class DocumentsViewModel extends ChangeNotifier {
       OutboxOperationKind kind, {
       required bool terminal,
     }) {
-      final requestId = '${pending.request.requestId}:${kind.wireValue}';
+      final requestId = IdempotencyKeyValidator.compose(
+        pending.request.requestId,
+        kind.wireValue,
+      );
       final operation = OutboxOperation(
         operationId: '${kind.wireValue}-${pending.request.requestId}',
         idempotencyKey: requestId,
@@ -1669,7 +1673,10 @@ final class DocumentsViewModel extends ChangeNotifier {
     final createdAt = now().toUtc();
     final referenceOperation = OutboxOperation(
       operationId: 'document-reference-${pending.requestId}',
-      idempotencyKey: 'document-reference:${pending.requestId}',
+      idempotencyKey: IdempotencyKeyValidator.compose(
+        pending.requestId,
+        'document-reference',
+      ),
       accountId: pending.accountId,
       warehouseId: pending.warehouseId,
       kind: OutboxOperationKind.documentReference,

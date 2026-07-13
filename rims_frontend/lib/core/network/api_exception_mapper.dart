@@ -23,6 +23,15 @@ final class ApiExceptionMapper {
       );
     }
 
+    if ((error.type == DioExceptionType.sendTimeout ||
+            error.type == DioExceptionType.receiveTimeout) &&
+        error.response == null) {
+      return TransportUnknownFailure(
+        message: _messageFrom(error),
+        cause: error,
+      );
+    }
+
     final statusCode = error.response?.statusCode;
     final envelope = _envelopeFrom(error.response?.data);
     final message = envelope?.message ?? _messageFrom(error);
@@ -121,8 +130,6 @@ final class ApiExceptionMapper {
   bool _isNetworkError(DioException error) {
     return switch (error.type) {
       DioExceptionType.connectionTimeout ||
-      DioExceptionType.sendTimeout ||
-      DioExceptionType.receiveTimeout ||
       DioExceptionType.connectionError => true,
       _ => false,
     };

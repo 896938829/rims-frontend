@@ -9,6 +9,7 @@ import '../../domain/entities/outbox_graph.dart';
 import '../../domain/entities/outbox_cleanup_intent.dart';
 import '../../domain/repositories/document_draft_repository.dart';
 import '../../domain/services/outbox_executor.dart';
+import 'outbox_dependency_output_parser.dart';
 
 final class DocumentOutboxHandler implements OutboxOperationHandler {
   const DocumentOutboxHandler({
@@ -52,6 +53,15 @@ final class DocumentOutboxHandler implements OutboxOperationHandler {
     if (operation.kind != kind) {
       return const FailureResult(
         ValidationFailure(message: 'Document outbox handler kind mismatch.'),
+      );
+    }
+    if ((kind == OutboxOperationKind.documentReference ||
+            kind == OutboxOperationKind.documentCreate) &&
+        dependencyOutputs.isNotEmpty) {
+      return const FailureResult(
+        ValidationFailure(
+          message: 'Document root operation cannot have dependency outputs.',
+        ),
       );
     }
     try {
@@ -113,19 +123,14 @@ final class DocumentOutboxHandler implements OutboxOperationHandler {
     Map<String, OutboxOperationOutput> dependencyOutputs,
   ) async {
     final payload = _DocumentLifecyclePayload.fromJson(operation.payload);
-    final documentIds = dependencyOutputs.values
-        .map((output) => output.data['documentId'])
-        .whereType<int>()
-        .where((id) => id > 0)
-        .toSet();
-    if (documentIds.length != 1) {
-      return const FailureResult(
-        ValidationFailure(
-          message: 'Lifecycle requires one authoritative dependency output.',
-        ),
-      );
-    }
-    final documentId = documentIds.single;
+    final documentId = requireAuthoritativeDocumentId(
+      dependencyOutputs,
+      allowedShapes: const {
+        OutboxDependencyOutputShape.document,
+        OutboxDependencyOutputShape.attachment,
+        OutboxDependencyOutputShape.lifecycle,
+      },
+    );
     final Result<void> result = switch (kind) {
       OutboxOperationKind.documentComplete =>
         await remoteDataSource.completeDocument(

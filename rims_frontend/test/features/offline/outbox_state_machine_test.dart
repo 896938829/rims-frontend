@@ -66,6 +66,24 @@ void main() {
     expect(operation.updatedAt, now);
   });
 
+  for (final failure in const <Failure>[
+    NetworkFailure(),
+    TransportUnknownFailure(),
+  ]) {
+    test('${failure.runtimeType} requires a status probe before replay', () {
+      final result = machine.transition(
+        _operation(state: OutboxState.syncing),
+        OutboxState.retryableFailure,
+        failure: failure,
+      );
+
+      expect(
+        (result as Success<OutboxOperation>).data.requiresStatusProbe,
+        isTrue,
+      );
+    });
+  }
+
   test('entering syncing clears a due retry schedule', () {
     final result = machine.transition(
       _operation(

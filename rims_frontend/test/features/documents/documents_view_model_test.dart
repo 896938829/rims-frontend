@@ -32,6 +32,7 @@ import 'package:rims_frontend/features/offline/data/repositories/memory_outbox_r
 import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.dart';
 import 'package:rims_frontend/features/offline/domain/entities/outbox_operation_output.dart';
 import 'package:rims_frontend/features/offline/domain/repositories/outbox_repository.dart';
+import 'package:rims_frontend/features/offline/domain/services/idempotency_key_validator.dart';
 import 'package:rims_frontend/features/offline/domain/services/outbox_state_machine.dart';
 
 void main() {
@@ -609,6 +610,13 @@ void main() {
         OutboxOperationKind.documentComplete,
       ]);
       expect(queued.first.idempotencyKey, repository.createdRequestIds.single);
+      expect(
+        queued.every(
+          (operation) =>
+              IdempotencyKeyValidator.isValid(operation.idempotencyKey),
+        ),
+        isTrue,
+      );
       expect(queued.first.payload.toString(), isNot(contains('token')));
       expect(queued.first.payload.toString(), isNot(contains('cached')));
       expect(
@@ -760,6 +768,14 @@ void main() {
       ], reason: action);
       expect(queued.first.payload.containsKey('cleanup'), isFalse);
       expect(queued.last.payload.containsKey('cleanup'), isTrue);
+      expect(
+        queued.every(
+          (operation) =>
+              IdempotencyKeyValidator.isValid(operation.idempotencyKey),
+        ),
+        isTrue,
+        reason: action,
+      );
     }
   });
 
@@ -798,6 +814,13 @@ void main() {
       isFalse,
       isFalse,
     ]);
+    expect(
+      queued.every(
+        (operation) =>
+            IdempotencyKeyValidator.isValid(operation.idempotencyKey),
+      ),
+      isTrue,
+    );
     expect(
       queued.take(2).every((item) => !item.payload.containsKey('cleanup')),
       isTrue,
@@ -889,9 +912,8 @@ void main() {
   test(
     'real datasource offers only unknown transport and rejects protocol unknown',
     () async {
-      Future<DocumentsViewModel> createViewModel(
-        HttpClientAdapter adapter,
-      ) async {
+      Future<({DocumentsViewModel viewModel, MemoryOutboxRepository outbox})>
+      createViewModel(HttpClientAdapter adapter) async {
         final outbox = MemoryOutboxRepository(
           stateMachine: OutboxStateMachine(),
         );
@@ -903,30 +925,52 @@ void main() {
             ),
           ),
         );
-        return _draftEnabledViewModel(
+        final viewModel = _draftEnabledViewModel(
           drafts: _FakeDocumentDraftRepository(),
           documents: repository,
           outbox: outbox,
           submissionStagingStore: _OutboxSubmissionStagingStore(),
           draftIdFactory: () => 'real-datasource-draft',
         )..addScannedProduct(_standardItem);
+        return (viewModel: viewModel, outbox: outbox);
       }
 
       final protocolUnknown = await createViewModel(
         _DocumentSubmitAdapter(body: '[]'),
       );
-      await protocolUnknown.createDocument();
+      await protocolUnknown.viewModel.createDocument();
 
-      expect(protocolUnknown.formError, 'Invalid API response');
-      expect(protocolUnknown.offlineSubmissionReview, isNull);
+      expect(protocolUnknown.viewModel.formError, 'Invalid API response');
+      expect(protocolUnknown.viewModel.offlineSubmissionReview, isNull);
 
       final transportUnknown = await createViewModel(
         const _DocumentSubmitAdapter(throwUnknownTransport: true),
       );
-      await transportUnknown.createDocument();
+      await transportUnknown.viewModel.createDocument();
 
-      expect(transportUnknown.offlineSubmissionReview, isNotNull);
-      expect(await transportUnknown.confirmOfflineSubmission(), isTrue);
+      expect(transportUnknown.viewModel.offlineSubmissionReview, isNotNull);
+      expect(
+        await transportUnknown.viewModel.confirmOfflineSubmission(),
+        isTrue,
+      );
+
+      for (final type in const [
+        DioExceptionType.sendTimeout,
+        DioExceptionType.receiveTimeout,
+      ]) {
+        final timedOut = await createViewModel(
+          _DocumentSubmitAdapter(throwType: type),
+        );
+        await timedOut.viewModel.createDocument();
+        expect(timedOut.viewModel.offlineSubmissionReview, isNotNull);
+        expect(await timedOut.viewModel.confirmOfflineSubmission(), isTrue);
+        expect(
+          (await timedOut.outbox.list(
+            '7',
+          )).successData.first.requiresStatusProbe,
+          isTrue,
+        );
+      }
     },
   );
 
@@ -3000,10 +3044,12 @@ final class _DocumentSubmitAdapter implements HttpClientAdapter {
     this.body =
         '{"code":0,"message":"ok","data":{"id":91,"docNo":"DOC-91","docType":2,"docTypeName":"销售出库","statusName":"草稿"}}',
     this.throwUnknownTransport = false,
+    this.throwType,
   });
 
   final String body;
   final bool throwUnknownTransport;
+  final DioExceptionType? throwType;
 
   @override
   Future<ResponseBody> fetch(
@@ -3011,6 +3057,10 @@ final class _DocumentSubmitAdapter implements HttpClientAdapter {
     Stream<Uint8List>? requestStream,
     Future<void>? cancelFuture,
   ) async {
+    if (throwType case final type?) {
+      await requestStream?.drain<void>();
+      throw DioException(requestOptions: options, type: type);
+    }
     if (throwUnknownTransport) {
       throw DioException(
         requestOptions: options,

@@ -752,51 +752,56 @@ void main() {
     OutboxOperationKind.attachmentUpload,
     OutboxOperationKind.documentComplete,
   ]) {
-    test(
-      '$kind transport unknown retries status-first with the same key',
-      () async {
-        final kindHandler = _Handler(kind: kind)
-          ..results.addAll(const [
-            FailureResult(TransportUnknownFailure()),
-            Success<Object?>(null),
-          ]);
-        context = OutboxExecutionContext(
-          accountId: '7',
-          warehouseId: 11,
-          permissionStamp: 'kind@1',
-          allowedKinds: {kind},
-        );
-        final kindExecutor = OutboxExecutor(
-          repository: repository,
-          networkStatusService: network,
-          statusDataSource: status,
-          handlers: [kindHandler],
-          contextReader: () => context,
-          maxStatusProbes: 1,
-          delay: (_) async {},
-        );
-        await repository.enqueue(
-          _operation(
-            kind.wireValue,
-            kind: kind,
-            reviewStamp: '7\u000011\u0000kind@1',
-          ),
-        );
+    for (final failure in const <Failure>[
+      NetworkFailure(),
+      TransportUnknownFailure(),
+    ]) {
+      test(
+        '$kind ${failure.runtimeType} retries status-first with the same key',
+        () async {
+          final kindHandler = _Handler(kind: kind)
+            ..results.addAll([
+              FailureResult(failure),
+              const Success<Object?>(null),
+            ]);
+          context = OutboxExecutionContext(
+            accountId: '7',
+            warehouseId: 11,
+            permissionStamp: 'kind@1',
+            allowedKinds: {kind},
+          );
+          final kindExecutor = OutboxExecutor(
+            repository: repository,
+            networkStatusService: network,
+            statusDataSource: status,
+            handlers: [kindHandler],
+            contextReader: () => context,
+            maxStatusProbes: 1,
+            delay: (_) async {},
+          );
+          await repository.enqueue(
+            _operation(
+              kind.wireValue,
+              kind: kind,
+              reviewStamp: '7\u000011\u0000kind@1',
+            ),
+          );
 
-        await kindExecutor.execute(review({kind.wireValue}));
-        expect((await stored(kind.wireValue)).requiresStatusProbe, isTrue);
-        now = now.add(const Duration(seconds: 3));
-        status.results.add(const FailureResult(NotFoundFailure()));
-        status.onCall = () => expect(kindHandler.calls, [kind.wireValue]);
+          await kindExecutor.execute(review({kind.wireValue}));
+          expect((await stored(kind.wireValue)).requiresStatusProbe, isTrue);
+          now = now.add(const Duration(seconds: 3));
+          status.results.add(const FailureResult(NotFoundFailure()));
+          status.onCall = () => expect(kindHandler.calls, [kind.wireValue]);
 
-        final replay = await kindExecutor.execute(review({kind.wireValue}));
+          final replay = await kindExecutor.execute(review({kind.wireValue}));
 
-        expect(replay.succeededOperationIds, [kind.wireValue]);
-        expect(status.keys, ['key-${kind.wireValue}']);
-        expect(kindHandler.calls, [kind.wireValue, kind.wireValue]);
-        expect(kindHandler.seenKeys.toSet(), {'key-${kind.wireValue}'});
-      },
-    );
+          expect(replay.succeededOperationIds, [kind.wireValue]);
+          expect(status.keys, ['key-${kind.wireValue}']);
+          expect(kindHandler.calls, [kind.wireValue, kind.wireValue]);
+          expect(kindHandler.seenKeys.toSet(), {'key-${kind.wireValue}'});
+        },
+      );
+    }
   }
 }
 

@@ -36,8 +36,17 @@ abstract interface class AttachmentsRemoteDataSource {
   Future<Result<void>> delete(int id);
 }
 
+abstract interface class AttachmentBytesRemoteDataSource {
+  Future<Result<AttachmentModel>> uploadBytes(
+    PendingAttachment pending, {
+    required List<int> bytes,
+    required void Function(int sent, int total) onProgress,
+    required TransferCancellation cancellation,
+  });
+}
+
 final class ApiAttachmentsRemoteDataSource
-    implements AttachmentsRemoteDataSource {
+    implements AttachmentsRemoteDataSource, AttachmentBytesRemoteDataSource {
   const ApiAttachmentsRemoteDataSource(this._apiClient);
 
   final ApiClient _apiClient;
@@ -81,6 +90,30 @@ final class ApiAttachmentsRemoteDataSource
         pending.stagedPath,
         filename: pending.originalName,
       ),
+    });
+    return _sendMultipart(
+      path: ApiEndpoints.fileUpload,
+      form: form,
+      requestId: pending.requestId,
+      onProgress: onProgress,
+      cancellation: cancellation,
+    );
+  }
+
+  @override
+  Future<Result<AttachmentModel>> uploadBytes(
+    PendingAttachment pending, {
+    required List<int> bytes,
+    required void Function(int sent, int total) onProgress,
+    required TransferCancellation cancellation,
+  }) async {
+    if (cancellation.isCancelled) {
+      return const FailureResult(CancellationFailure());
+    }
+    final form = FormData.fromMap({
+      'businessType': pending.binding.businessType,
+      'businessId': pending.binding.businessId.toString(),
+      'file': MultipartFile.fromBytes(bytes, filename: pending.originalName),
     });
     return _sendMultipart(
       path: ApiEndpoints.fileUpload,

@@ -1,14 +1,15 @@
-import 'dart:typed_data';
+import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rims_frontend/core/events/app_event.dart';
 import 'package:rims_frontend/core/events/app_event_bus.dart';
-import 'package:rims_frontend/core/pagination/page_data.dart';
 import 'package:rims_frontend/core/result/failure.dart';
 import 'package:rims_frontend/core/result/result.dart';
 import 'package:rims_frontend/features/attachments/data/datasources/attachments_remote_datasource.dart';
 import 'package:rims_frontend/features/attachments/data/models/attachment_models.dart';
+import 'package:rims_frontend/features/attachments/data/services/file_attachment_staging_store.dart';
 import 'package:rims_frontend/features/attachments/domain/entities/attachment.dart';
+import 'package:rims_frontend/features/attachments/domain/services/attachment_picker.dart';
 import 'package:rims_frontend/features/attachments/domain/services/attachment_staging_store.dart';
 import 'package:rims_frontend/features/offline/data/services/attachment_outbox_handler.dart';
 import 'package:rims_frontend/features/offline/domain/entities/document_draft.dart';
@@ -47,7 +48,7 @@ void main() {
     );
 
     expect(result.failureOrNull, isA<ValidationFailure>());
-    expect(stagingStore.loadCalls, isEmpty);
+    expect(stagingStore.prepareCalls, isEmpty);
     expect(dataSource.uploads, isEmpty);
   });
 
@@ -64,7 +65,7 @@ void main() {
     );
 
     expect(result.failureOrNull, isA<ValidationFailure>());
-    expect(stagingStore.loadCalls, isEmpty);
+    expect(stagingStore.prepareCalls, isEmpty);
     expect(dataSource.uploads, isEmpty);
   });
 
@@ -89,9 +90,11 @@ void main() {
       );
 
       expect(result, isA<Success<Object?>>());
-      expect(stagingStore.loadCalls, [
-        const _LoadCall(userId: '42', requestId: 'attachment-request-1'),
-      ]);
+      expect(stagingStore.prepareCalls.single.userId, '42');
+      expect(
+        stagingStore.prepareCalls.single.requestId,
+        'attachment-request-1',
+      );
       expect(dataSource.uploads.single.requestId, 'attachment-request-1');
       expect(dataSource.uploads.single.binding, AttachmentBinding.document(91));
       expect(stagingStore.rebindCalls, hasLength(1));
@@ -101,7 +104,7 @@ void main() {
   test(
     'missing staged file is permanent validation and never uploads',
     () async {
-      stagingStore.loadResult = const FailureResult(
+      stagingStore.prepareResult = const FailureResult(
         ValidationFailure(message: 'Staged attachment is missing.'),
       );
       final handler = _handler(
@@ -123,6 +126,7 @@ void main() {
 
       expect(result.failureOrNull, isA<ValidationFailure>());
       expect(dataSource.uploads, isEmpty);
+      expect(stagingStore.rebindCalls, isEmpty);
       expect(stagingStore.removeCalls, isEmpty);
     },
   );
@@ -136,7 +140,10 @@ void main() {
       eventBus,
     );
 
-    final result = await handler.execute(_operation());
+    final result = await handler.execute(
+      _operation(),
+      dependencyOutputs: _createDependencyOutput(),
+    );
 
     expect(result.failureOrNull, isA<ValidationFailure>());
     expect(dataSource.uploads, isEmpty);
@@ -154,7 +161,10 @@ void main() {
       eventBus,
     );
 
-    final result = await handler.execute(_operation());
+    final result = await handler.execute(
+      _operation(),
+      dependencyOutputs: _createDependencyOutput(),
+    );
 
     expect(result.failureOrNull, isA<ValidationFailure>());
     expect(stagingStore.removeCalls, isEmpty);
@@ -187,8 +197,59 @@ void main() {
 
       expect(result.failureOrNull, isA<UnknownFailure>());
       expect(dataSource.uploads.single.requestId, 'attachment-request-1');
+      expect(stagingStore.rebindCalls, hasLength(1));
       expect(stagingStore.removeCalls, isEmpty);
       expect(draftRepository.deletedDraftIds, isEmpty);
+    },
+  );
+
+  test(
+    'network failure keeps real rebound staging for process-recreated retry',
+    () async {
+      final root = await Directory.systemTemp.createTemp('rims_outbox_upload_');
+      addTearDown(() => root.delete(recursive: true));
+      final source = File('${root.path}${Platform.pathSeparator}proof.pdf');
+      await source.writeAsBytes([1, 2, 3]);
+      FileAttachmentStagingStore createStore() => FileAttachmentStagingStore(
+        rootDirectory: () async => root,
+        idFactory: () => 'attachment-request-1',
+        thumbnailBuilder: (_, _) async => null,
+      );
+      final fileStore = createStore();
+      final stagedResult = await fileStore.stage(
+        userId: '42',
+        binding: AttachmentBinding.documentDraft('draft-1'),
+        selection: SelectedAttachmentSource(
+          path: source.path,
+          originalName: 'proof.pdf',
+          mimeType: 'application/pdf',
+          fileSize: 3,
+        ),
+        existingCount: 0,
+      );
+      final staged = (stagedResult as Success<StagedAttachment>).data;
+      dataSource.uploadResult = const FailureResult(NetworkFailure());
+      final handler = AttachmentOutboxHandler(
+        remoteDataSource: dataSource,
+        stagingStore: fileStore,
+        draftRepository: draftRepository,
+        eventBus: eventBus,
+      );
+
+      final result = await handler.execute(
+        _operation(payload: {..._payload(), 'expectedSha256': staged.sha256}),
+        dependencyOutputs: _createDependencyOutput(),
+      );
+
+      expect(result.failureOrNull, isA<NetworkFailure>());
+      final recoveredResult = await createStore().loadStaged(
+        userId: '42',
+        requestId: 'attachment-request-1',
+      );
+      final recovered = (recoveredResult as Success<StagedAttachment>).data;
+      expect(recovered.pending.binding, AttachmentBinding.document(91));
+      expect(await File(recovered.pending.stagedPath).readAsBytes(), [1, 2, 3]);
+      expect(dataSource.uploadedBytes.single, [1, 2, 3]);
     },
   );
 
@@ -231,11 +292,48 @@ void main() {
       expect(events.whereType<GlobalRefreshRequestedEvent>(), isEmpty);
     },
   );
+
+  test(
+    'draft upload strictly validates its single create dependency output',
+    () async {
+      final handler = _handler(
+        dataSource,
+        stagingStore,
+        draftRepository,
+        eventBus,
+      );
+      final valid = OutboxOperationOutput(version: 1, data: {'documentId': 91});
+      final malformed = <Map<String, OutboxOperationOutput>>[
+        {
+          'parent': OutboxOperationOutput(version: 2, data: {'documentId': 91}),
+        },
+        {
+          'parent': OutboxOperationOutput(
+            version: 1,
+            data: {'documentId': 91, 'unexpected': true},
+          ),
+        },
+        {
+          'parent': OutboxOperationOutput(version: 1, data: {'documentId': 0}),
+        },
+        {'parent-a': valid, 'parent-b': valid},
+      ];
+
+      for (final outputs in malformed) {
+        final result = await handler.execute(
+          _operation(),
+          dependencyOutputs: outputs,
+        );
+        expect(result.failureOrNull, isA<ValidationFailure>());
+      }
+      expect(dataSource.uploads, isEmpty);
+    },
+  );
 }
 
 AttachmentOutboxHandler _handler(
-  AttachmentsRemoteDataSource dataSource,
-  OutboxAttachmentStagingStore stagingStore,
+  AttachmentBytesRemoteDataSource dataSource,
+  OutboxAttachmentUploadStagingStore stagingStore,
   DocumentDraftRepository draftRepository,
   AppEventBus eventBus,
 ) => AttachmentOutboxHandler(
@@ -271,6 +369,13 @@ OutboxOperation _operation({
   requiresStatusProbe: requiresStatusProbe,
 );
 
+Map<String, OutboxOperationOutput> _createDependencyOutput() => {
+  'create-document-request-1': OutboxOperationOutput(
+    version: 1,
+    data: {'documentId': 91},
+  ),
+};
+
 StagedAttachment _staged({int fileSize = 3, String sha256 = _stableSha256}) =>
     StagedAttachment(
       pending: PendingAttachment(
@@ -286,35 +391,42 @@ StagedAttachment _staged({int fileSize = 3, String sha256 = _stableSha256}) =>
       sha256: sha256,
     );
 
-final class _SubmissionStagingStore implements OutboxAttachmentStagingStore {
+final class _SubmissionStagingStore
+    implements OutboxAttachmentUploadStagingStore {
   StagedAttachment staged = _staged();
-  Result<StagedAttachment>? loadResult;
-  final List<_LoadCall> loadCalls = [];
+  Result<AttachmentUploadSnapshot>? prepareResult;
+  final List<_PrepareCall> prepareCalls = [];
   final List<List<String>> removeCalls = [];
   final List<_RebindCall> rebindCalls = [];
 
   @override
-  Future<Result<StagedAttachment>> loadStaged({
+  Future<Result<AttachmentUploadSnapshot>> prepareUploadSnapshot({
     required String userId,
     required String requestId,
+    required int expectedSize,
+    required String expectedSha256,
+    required String? localAggregateId,
+    required int? documentId,
   }) async {
-    loadCalls.add(_LoadCall(userId: userId, requestId: requestId));
-    return loadResult ?? Success(staged);
-  }
-
-  @override
-  Future<Result<void>> rebindDocumentDraft({
-    required String userId,
-    required String localAggregateId,
-    required int documentId,
-    required List<String> requestIds,
-  }) async {
+    prepareCalls.add(_PrepareCall(userId: userId, requestId: requestId));
+    if (prepareResult case final result?) return result;
+    if (staged.pending.fileSize != expectedSize ||
+        staged.sha256 != expectedSha256) {
+      return const FailureResult(
+        ValidationFailure(message: 'Staged attachment changed after review.'),
+      );
+    }
+    if (localAggregateId == null || documentId == null) {
+      return const FailureResult(
+        ValidationFailure(message: 'Missing draft attachment dependency.'),
+      );
+    }
     rebindCalls.add(
       _RebindCall(
         userId: userId,
         localAggregateId: localAggregateId,
         documentId: documentId,
-        requestIds: List.unmodifiable(requestIds),
+        requestIds: [requestId],
       ),
     );
     staged = StagedAttachment(
@@ -330,16 +442,9 @@ final class _SubmissionStagingStore implements OutboxAttachmentStagingStore {
       createdAt: staged.createdAt,
       sha256: staged.sha256,
     );
-    return const Success(null);
-  }
-
-  @override
-  Future<Result<void>> removeStagedAttachments({
-    required String userId,
-    required List<String> requestIds,
-  }) async {
-    removeCalls.add(List.unmodifiable(requestIds));
-    return const Success(null);
+    return Success(
+      AttachmentUploadSnapshot(pending: staged.pending, bytes: const [1, 2, 3]),
+    );
   }
 }
 
@@ -357,23 +462,14 @@ final class _RebindCall {
   final List<String> requestIds;
 }
 
-final class _LoadCall {
-  const _LoadCall({required this.userId, required this.requestId});
+final class _PrepareCall {
+  const _PrepareCall({required this.userId, required this.requestId});
 
   final String userId;
   final String requestId;
-
-  @override
-  bool operator ==(Object other) =>
-      other is _LoadCall &&
-      other.userId == userId &&
-      other.requestId == requestId;
-
-  @override
-  int get hashCode => Object.hash(userId, requestId);
 }
 
-final class _AttachmentsDataSource implements AttachmentsRemoteDataSource {
+final class _AttachmentsDataSource implements AttachmentBytesRemoteDataSource {
   Result<AttachmentModel> uploadResult = Success(
     AttachmentModel(
       id: 5,
@@ -391,40 +487,19 @@ final class _AttachmentsDataSource implements AttachmentsRemoteDataSource {
     ),
   );
   final List<PendingAttachment> uploads = [];
+  final List<List<int>> uploadedBytes = [];
 
   @override
-  Future<Result<AttachmentModel>> upload(
+  Future<Result<AttachmentModel>> uploadBytes(
     PendingAttachment pending, {
+    required List<int> bytes,
     required void Function(int sent, int total) onProgress,
     required TransferCancellation cancellation,
   }) async {
     uploads.add(pending);
+    uploadedBytes.add(List<int>.of(bytes));
     return uploadResult;
   }
-
-  @override
-  Future<Result<void>> delete(int id) => throw UnimplementedError();
-
-  @override
-  Future<Result<Uint8List>> download(int id) => throw UnimplementedError();
-
-  @override
-  Future<Result<PageData<AttachmentModel>>> list({
-    required AttachmentBinding binding,
-    int page = 1,
-  }) => throw UnimplementedError();
-
-  @override
-  Future<Result<void>> reorder(AttachmentBinding binding, List<int> fileIds) =>
-      throw UnimplementedError();
-
-  @override
-  Future<Result<AttachmentModel>> replace(
-    int id,
-    PendingAttachment pending, {
-    required void Function(int sent, int total) onProgress,
-    required TransferCancellation cancellation,
-  }) => throw UnimplementedError();
 }
 
 final class _DraftRepository implements DocumentDraftRepository {

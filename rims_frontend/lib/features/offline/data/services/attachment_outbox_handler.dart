@@ -9,6 +9,7 @@ import '../../domain/entities/outbox_graph.dart';
 import '../../domain/entities/outbox_cleanup_intent.dart';
 import '../../domain/repositories/document_draft_repository.dart';
 import '../../domain/services/outbox_executor.dart';
+import 'outbox_dependency_output_parser.dart';
 
 final class AttachmentOutboxHandler implements OutboxOperationHandler {
   const AttachmentOutboxHandler({
@@ -18,8 +19,8 @@ final class AttachmentOutboxHandler implements OutboxOperationHandler {
     required this.eventBus,
   });
 
-  final AttachmentsRemoteDataSource remoteDataSource;
-  final OutboxAttachmentStagingStore stagingStore;
+  final AttachmentBytesRemoteDataSource remoteDataSource;
+  final OutboxAttachmentUploadStagingStore stagingStore;
   final DocumentDraftRepository draftRepository;
   final AppEventBus eventBus;
 
@@ -52,54 +53,40 @@ final class AttachmentOutboxHandler implements OutboxOperationHandler {
         ValidationFailure(message: 'Attachment idempotency key changed.'),
       );
     }
-    final dependencyDocumentIds = dependencyOutputs.values
-        .map((output) => output.data['documentId'])
-        .whereType<int>()
-        .where((id) => id > 0)
-        .toSet();
+    int? dependencyDocumentId;
     if (payload.localAggregateId != null) {
-      if (dependencyDocumentIds.length != 1) {
-        return const FailureResult(
-          ValidationFailure(
-            message: 'Draft attachment requires authoritative document output.',
-          ),
+      try {
+        dependencyDocumentId = requireAuthoritativeDocumentId(
+          dependencyOutputs,
+          allowedShapes: const {OutboxDependencyOutputShape.document},
+        );
+      } on FormatException catch (error) {
+        return FailureResult(
+          ValidationFailure(message: error.message, cause: error),
         );
       }
-      final rebound = await stagingStore.rebindDocumentDraft(
-        userId: operation.accountId,
-        localAggregateId: payload.localAggregateId!,
-        documentId: dependencyDocumentIds.single,
-        requestIds: [payload.requestId],
-      );
-      if (rebound case FailureResult<void>(:final failure)) {
-        return FailureResult(failure);
-      }
-    }
-    final loaded = await stagingStore.loadStaged(
-      userId: operation.accountId,
-      requestId: payload.requestId,
-    );
-    if (loaded case FailureResult(:final failure)) {
-      return FailureResult(failure);
-    }
-    final staged = (loaded as Success).data;
-    if (staged.pending.fileSize != payload.expectedSize ||
-        staged.sha256 != payload.expectedSha256) {
-      return const FailureResult(
-        ValidationFailure(message: 'Staged attachment changed after review.'),
-      );
-    }
-    if (staged.pending.binding.businessType == 'document_draft' ||
-        staged.pending.binding.localDraftId != null ||
-        staged.pending.binding.businessId <= 0) {
+    } else if (dependencyOutputs.isNotEmpty) {
       return const FailureResult(
         ValidationFailure(
-          message: 'Draft attachment has no authoritative document binding.',
+          message: 'Standalone attachment cannot have dependency outputs.',
         ),
       );
     }
-    final uploaded = await remoteDataSource.upload(
-      staged.pending,
+    final prepared = await stagingStore.prepareUploadSnapshot(
+      userId: operation.accountId,
+      requestId: payload.requestId,
+      expectedSize: payload.expectedSize,
+      expectedSha256: payload.expectedSha256,
+      localAggregateId: payload.localAggregateId,
+      documentId: dependencyDocumentId,
+    );
+    if (prepared case FailureResult(:final failure)) {
+      return FailureResult(failure);
+    }
+    final snapshot = (prepared as Success<AttachmentUploadSnapshot>).data;
+    final uploaded = await remoteDataSource.uploadBytes(
+      snapshot.pending,
+      bytes: snapshot.bytes,
       onProgress: (_, _) {},
       cancellation: TransferCancellation(),
     );
@@ -114,7 +101,7 @@ final class AttachmentOutboxHandler implements OutboxOperationHandler {
           version: 1,
           data: {
             'attachmentId': model.id,
-            'documentId': staged.pending.binding.businessId,
+            'documentId': snapshot.pending.binding.businessId,
           },
         ),
         cleanup:

@@ -6,6 +6,7 @@ import '../../domain/entities/outbox_operation.dart';
 import '../../domain/entities/outbox_graph.dart';
 import '../../domain/entities/outbox_cleanup_intent.dart';
 import '../../domain/repositories/outbox_repository.dart';
+import '../../domain/services/idempotency_key_validator.dart';
 import '../../domain/services/outbox_state_machine.dart';
 import '../models/cache_record_model.dart';
 
@@ -48,7 +49,7 @@ final class MemoryOutboxRepository implements OutboxRepository {
           operation.state != OutboxState.queued ||
           operation.replacementOf != null ||
           operation.operationId.isEmpty ||
-          operation.idempotencyKey.isEmpty ||
+          !IdempotencyKeyValidator.isValid(operation.idempotencyKey) ||
           requestedById.containsKey(operation.operationId) ||
           !requestedKeys.add(operation.idempotencyKey)) {
         return const FailureResult(
@@ -105,10 +106,13 @@ final class MemoryOutboxRepository implements OutboxRepository {
       for (final dependencyId in entry.value) {
         final dependency =
             requestedById[dependencyId] ?? _operations[dependencyId];
-        if (dependency == null || dependency.accountId != accountId) {
+        if (dependency == null ||
+            dependency.accountId != accountId ||
+            dependency.warehouseId != warehouseId) {
           return const FailureResult(
             ValidationFailure(
-              message: 'Dependencies must exist in the same account.',
+              message:
+                  'Dependencies must exist in the same account and warehouse.',
             ),
           );
         }
@@ -682,16 +686,19 @@ final class MemoryOutboxRepository implements OutboxRepository {
         }
       }
     }
-    final expiredIds = <String>{};
+    final expiredCandidates = <String>{};
     for (final operation in accountOperations.values) {
       if (_cleanupIntents.containsKey(operation.operationId)) continue;
       if (!_isExpiredTerminal(operation, currentTime)) continue;
-      if (operation.state != OutboxState.succeeded &&
-          _hasActiveDescendant(operation.operationId, children)) {
-        continue;
-      }
-      expiredIds.add(operation.operationId);
+      expiredCandidates.add(operation.operationId);
     }
+    final expiredIds = expiredCandidates.where((operationId) {
+      return !_hasRecoverableDescendantOutside(
+        operationId,
+        children,
+        expiredCandidates,
+      );
+    }).toSet();
     final removableResolutionOriginalIds = <String>{};
     for (final entry in _replacementByOriginal.entries) {
       final originalExpired = expiredIds.contains(entry.key);
@@ -736,6 +743,9 @@ final class MemoryOutboxRepository implements OutboxRepository {
         message: 'Replacement ownership can only be created by resolution.',
       );
     }
+    if (!IdempotencyKeyValidator.isValid(operation.idempotencyKey)) {
+      return const ValidationFailure(message: 'Invalid idempotency key.');
+    }
     if (dependencies.contains(operation.operationId)) {
       return const ValidationFailure(
         message: 'An operation cannot depend on itself.',
@@ -765,9 +775,11 @@ final class MemoryOutboxRepository implements OutboxRepository {
     }
     for (final dependency in dependencies) {
       final parent = _operations[dependency];
-      if (parent == null || parent.accountId != operation.accountId) {
+      if (parent == null ||
+          parent.accountId != operation.accountId ||
+          parent.warehouseId != operation.warehouseId) {
         return const ValidationFailure(
-          message: 'Dependencies must exist in the same account.',
+          message: 'Dependencies must exist in the same account and warehouse.',
         );
       }
       if (_hasAncestor(dependency, operation.operationId)) {
@@ -861,9 +873,10 @@ final class MemoryOutboxRepository implements OutboxRepository {
     }
   }
 
-  bool _hasActiveDescendant(
+  bool _hasRecoverableDescendantOutside(
     String operationId,
     Map<String, Set<String>> children,
+    Set<String> expiredCandidates,
   ) {
     final pending = <String>[...children[operationId] ?? const <String>{}];
     final visited = <String>{};
@@ -871,7 +884,11 @@ final class MemoryOutboxRepository implements OutboxRepository {
       final childId = pending.removeLast();
       if (!visited.add(childId)) continue;
       final child = _operations[childId];
-      if (child != null && _isActive(child.state)) return true;
+      if (child != null &&
+          !expiredCandidates.contains(childId) &&
+          _isRecoverable(child.state)) {
+        return true;
+      }
       pending.addAll(children[childId] ?? const <String>{});
     }
     return false;
@@ -951,6 +968,9 @@ bool _isActive(OutboxState state) =>
     state == OutboxState.queued ||
     state == OutboxState.syncing ||
     state == OutboxState.retryableFailure;
+
+bool _isRecoverable(OutboxState state) =>
+    _isActive(state) || state == OutboxState.conflict;
 
 bool _isPending(OutboxState state) =>
     state == OutboxState.queued || state == OutboxState.retryableFailure;

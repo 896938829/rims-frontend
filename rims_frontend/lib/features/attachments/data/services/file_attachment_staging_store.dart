@@ -31,7 +31,8 @@ final class FileAttachmentStagingStore
     implements
         AttachmentStagingStore,
         DraftAttachmentStagingStore,
-        OutboxAttachmentStagingStore {
+        OutboxAttachmentStagingStore,
+        OutboxAttachmentUploadStagingStore {
   static final _accountOperations = _AsyncKeyedLock();
 
   FileAttachmentStagingStore({
@@ -254,6 +255,150 @@ final class FileAttachmentStagingStore
       return FailureResult(
         LocalStorageFailure(
           message: 'Unable to load staged attachment.',
+          cause: error,
+        ),
+      );
+    }
+  }
+
+  @override
+  Future<Result<AttachmentUploadSnapshot>> prepareUploadSnapshot({
+    required String userId,
+    required String requestId,
+    required int expectedSize,
+    required String expectedSha256,
+    required String? localAggregateId,
+    required int? documentId,
+  }) => _withUserLock(
+    userId,
+    () => _prepareUploadSnapshot(
+      userId: userId,
+      requestId: requestId,
+      expectedSize: expectedSize,
+      expectedSha256: expectedSha256,
+      localAggregateId: localAggregateId,
+      documentId: documentId,
+    ),
+  );
+
+  Future<Result<AttachmentUploadSnapshot>> _prepareUploadSnapshot({
+    required String userId,
+    required String requestId,
+    required int expectedSize,
+    required String expectedSha256,
+    required String? localAggregateId,
+    required int? documentId,
+  }) async {
+    if (!RegExp(r'^[A-Za-z0-9_-]+$').hasMatch(requestId) ||
+        expectedSize < 0 ||
+        !RegExp(r'^[a-f0-9]{64}$').hasMatch(expectedSha256) ||
+        (localAggregateId == null && documentId != null) ||
+        (localAggregateId != null &&
+            (localAggregateId.trim().isEmpty ||
+                documentId == null ||
+                documentId <= 0))) {
+      return const FailureResult(
+        ValidationFailure(message: 'Invalid attachment upload snapshot.'),
+      );
+    }
+    try {
+      final directory = await _userDirectory(userId, create: false);
+      if (!await directory.exists()) {
+        return const FailureResult(
+          ValidationFailure(message: 'Staged attachment is missing.'),
+        );
+      }
+      await _completePendingCleanup(directory);
+      final items = await _readManifest(directory);
+      final matches = items
+          .where((item) => item.pending.requestId == requestId)
+          .toList(growable: false);
+      if (matches.length != 1) {
+        return const FailureResult(
+          ValidationFailure(message: 'Staged attachment is missing.'),
+        );
+      }
+      final item = matches.single;
+      final canonicalPath = await _ownedCanonicalStagedPath(directory, item);
+      if (canonicalPath == null) {
+        return const FailureResult(
+          ValidationFailure(message: 'Staged attachment path is not owned.'),
+        );
+      }
+      final file = File(canonicalPath);
+      if (!await file.exists()) {
+        return const FailureResult(
+          ValidationFailure(message: 'Staged attachment is missing.'),
+        );
+      }
+      late final Uint8List bytes;
+      try {
+        bytes = await file.readAsBytes();
+      } on FileSystemException catch (error) {
+        return FailureResult(
+          ValidationFailure(
+            message: 'Staged attachment is missing or changed.',
+            cause: error,
+          ),
+        );
+      }
+      final actualHash = sha256.convert(bytes).toString();
+      if (bytes.length != expectedSize ||
+          bytes.length != item.pending.fileSize ||
+          actualHash != expectedSha256 ||
+          item.sha256 != expectedSha256) {
+        return const FailureResult(
+          ValidationFailure(message: 'Staged attachment changed after review.'),
+        );
+      }
+
+      final binding = item.pending.binding;
+      final isDraft = localAggregateId != null;
+      final isOwnedDraft =
+          binding.businessType == 'document_draft' &&
+          binding.localDraftId == localAggregateId;
+      final isAuthoritative =
+          binding.businessType == 'doc_attachment' &&
+          binding.businessId > 0 &&
+          binding.localDraftId == null;
+      final isExactReplay =
+          isDraft && isAuthoritative && binding.businessId == documentId;
+      if ((isDraft && !isOwnedDraft && !isExactReplay) ||
+          (!isDraft && !isAuthoritative)) {
+        return const FailureResult(
+          ValidationFailure(
+            message: 'Draft attachment ownership changed before upload.',
+          ),
+        );
+      }
+
+      final pending = PendingAttachment(
+        requestId: item.pending.requestId,
+        binding: isDraft
+            ? AttachmentBinding.document(documentId!)
+            : item.pending.binding,
+        stagedPath: canonicalPath,
+        originalName: item.pending.originalName,
+        mimeType: item.pending.mimeType,
+        fileSize: item.pending.fileSize,
+      );
+      if (isOwnedDraft) {
+        final rebound = StagedAttachment(
+          pending: pending,
+          thumbnailPath: item.thumbnailPath,
+          createdAt: item.createdAt,
+          sha256: item.sha256,
+        );
+        await _writeManifest(directory, [
+          for (final candidate in items)
+            if (identical(candidate, item)) rebound else candidate,
+        ]);
+      }
+      return Success(AttachmentUploadSnapshot(pending: pending, bytes: bytes));
+    } on Object catch (error) {
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to prepare staged attachment upload.',
           cause: error,
         ),
       );
@@ -750,6 +895,27 @@ final class FileAttachmentStagingStore
       root: Directory('${directory.path}${Platform.pathSeparator}thumbnails'),
       expectedFilename: '$requestId.png',
     );
+  }
+
+  Future<String?> _ownedCanonicalStagedPath(
+    Directory directory,
+    StagedAttachment item,
+  ) async {
+    final extension = _extension(item.pending.originalName);
+    final stagedRoot = Directory(
+      '${directory.path}${Platform.pathSeparator}staged',
+    );
+    final canonicalRoot = await _canonicalPath(stagedRoot);
+    final canonicalFile = await _canonicalPath(File(item.pending.stagedPath));
+    final comparableRoot = _comparablePath(canonicalRoot);
+    final comparableFile = _comparablePath(canonicalFile);
+    if (_filename(canonicalFile) != '${item.pending.requestId}.$extension' ||
+        !comparableFile.startsWith(
+          '$comparableRoot${Platform.pathSeparator}',
+        )) {
+      return null;
+    }
+    return canonicalFile;
   }
 
   Future<bool> _matchesOwnedPath({
