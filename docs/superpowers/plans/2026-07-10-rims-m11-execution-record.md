@@ -25,11 +25,11 @@ counts, encrypted storage ownership, cleanup, and baseline restore are read.
 | Product/inventory/alerts/barcode | 6 | offline read, stale source/age, no mutation authority | PASS |
 | Documents/details/reports | 7 | offline read and financial field boundary | PASS |
 | Six document draft types | 8, 9 | autosave, reopen, recreation, ownership | PASS |
-| Explicit reviewed queueing | 11-13 | confirmation and immutable payload | immutable outbox PASS; UI pending |
+| Explicit reviewed queueing | 11-13 | confirmation and immutable payload | confirmation/executor PASS; workflow wiring pending |
 | Outbox states and legal transitions | 11 | complete state matrix | PASS |
 | Operation dependency ordering | 11, 13 | attachment -> create -> lifecycle | graph PASS; workflow wiring pending |
 | Client operation/idempotency IDs | 10-13 | backend status and duplicate replay | status API PASS; replay pending |
-| Unknown-result recovery | 10, 12 | status first, replay same key, one effect | status API PASS; coordinator pending |
+| Unknown-result recovery | 10, 12 | status first, replay same key, one effect | PASS |
 | Conflict visibility/resolution | 12, 16 | no overwrite, replacement operation | planned |
 | Session/permission revalidation | 12, 14, 16 | 401/403/account/warehouse probes | planned |
 | Account cleanup and retention | 2, 14 | counts, files, key lifecycle | planned |
@@ -197,6 +197,23 @@ counts, encrypted storage ownership, cleanup, and baseline restore are read.
 | Safety | payloads are recursively immutable; account cleanup removes resolutions and graph rows atomically; programming errors are not disguised as storage failures |
 | Review | independent specification and code-quality reviews APPROVED after all concurrency, lifecycle, and legacy-bypass findings were fixed |
 | GREEN | strict analyze PASS; offline suite PASS (219 tests); full Flutter suite PASS (792 tests); diff check PASS |
+
+## Task 12 Confirmed Foreground Sync Evidence
+
+| Probe | Observed result |
+| --- | --- |
+| RED | executor, persistent review context, stale-sync recovery, status-first unknown handling, command isolation, and Sync Center were absent |
+| Foreground | connectivity changes never start work; one explicit user command owns a serialized batch and revalidates context before every operation |
+| Context | account, warehouse, actual backend permission codes, and stable permission fingerprint gate review and every command |
+| Dependencies | the confirmed batch re-queries ready work so newly satisfied attachment, create, and lifecycle successors continue without duplicate execution |
+| Unknown | stale syncing migrates or recovers as retryable unknown and must probe status before handler activity; absent retries the same key |
+| Replay | completed status acquires a bounded backend lease before same-key replay; expiry delete/create races use CAS and deterministic rereads |
+| Failures | processing waits with bounded probing; 401 pauses the batch, 403 becomes permanent, 409 becomes conflict, and command errors survive reload |
+| Review | review stamp persists account, warehouse, and permission fingerprint with CAS; changed context requires a new explicit confirmation |
+| UI | authenticated Sync Center provides waiting, attention, and completed tabs plus scoped review, retry, cancel, discard, and conflict commands |
+| Parity | Drift and Web memory paths share one outbox repository; session refresh cannot clear command busy state or expose another account's results |
+| Review gate | independent specification and code-quality reviews APPROVED after all permission, lifecycle, lease, migration, and concurrency findings were fixed |
+| GREEN | backend `go test ./...` and race probes PASS; frontend strict analyze PASS, offline suite PASS (272 tests), full suite PASS (849 tests); diff checks PASS |
 
 ## Final Android State Evidence
 

@@ -555,22 +555,22 @@ feat: add deterministic offline outbox
 - Test: `rims_frontend/test/features/offline/outbox_executor_test.dart`
 - Test: `rims_frontend/test/features/offline/sync_center_view_model_test.dart`
 
-- [ ] **Step 1: Write failing tests for current account/warehouse/permission revalidation, explicit confirmation, unknown-result status probe, completed replay, processing wait, absent retry, 401 pause, 403 permanent failure, 409 conflict, bounded backoff, and duplicate delivery.**
+- [x] **Step 1: Write failing tests for current account/warehouse/permission revalidation, explicit confirmation, unknown-result status probe, completed replay, processing wait, absent retry, 401 pause, 403 permanent failure, 409 conflict, bounded backoff, and duplicate delivery.**
 
-- [ ] **Step 2: Implement foreground-only executor.**
+- [x] **Step 2: Implement foreground-only executor.**
 
 The executor receives typed operation handlers. It processes one operation at a
 time, checks dependencies, verifies connectivity and active session, and writes
 every state transition before network activity. It never starts merely because
 connectivity changed.
 
-- [ ] **Step 3: Implement Sync Center.**
+- [x] **Step 3: Implement Sync Center.**
 
 Tabs: waiting, attention, completed. Commands: review and sync, retry selected,
 retry all reviewed, cancel, discard, and resolve conflict. Inventory mutation
 confirmation summarizes warehouse, document type, lines, and stale assumptions.
 
-- [ ] **Step 4: Run tests and commit.**
+- [x] **Step 4: Run tests and commit.**
 
 ```text
 feat: add confirmed foreground synchronization
