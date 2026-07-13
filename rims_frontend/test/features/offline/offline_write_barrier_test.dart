@@ -401,6 +401,57 @@ void main() {
     },
   );
 
+  test('reauthentication lease keeps retained blocks until finalize', () async {
+    final barrier = OfflineWriteBarrier();
+    final ownership = _service(
+      store: MemoryOfflineStore(),
+      scans: const _NoopScans(),
+      keys: MemoryOfflineDatabaseKeyManager(),
+      participants: [barrier],
+    );
+    expect(
+      (await ownership.apply(
+        const OfflineOwnershipIntent.tokenExpiry(accountId: '7'),
+      )).completed,
+      isTrue,
+    );
+    expect(ownership.canSync('7'), isFalse);
+
+    final abandoned = await ownership.prepareReauthentication(accountId: '7');
+    expect(abandoned.report.completed, isTrue);
+    expect(ownership.canAccessOfflineData('7'), isFalse);
+    abandoned.rollback();
+    expect(ownership.canSync('7'), isFalse);
+
+    final accepted = await ownership.prepareReauthentication(accountId: '7');
+    expect(ownership.canAccessOfflineData('7'), isFalse);
+    expect(accepted.finalize().completed, isTrue);
+    expect(ownership.canAccessOfflineData('7'), isTrue);
+    expect(ownership.canSync('7'), isTrue);
+  });
+
+  test(
+    'pending reauthentication lease does not release after a simulated crash',
+    () async {
+      final barrier = OfflineWriteBarrier();
+      final ownership = _service(
+        store: MemoryOfflineStore(),
+        scans: const _NoopScans(),
+        keys: MemoryOfflineDatabaseKeyManager(),
+        participants: [barrier],
+      );
+      await ownership.apply(
+        const OfflineOwnershipIntent.tokenExpiry(accountId: '7'),
+      );
+
+      final pending = await ownership.prepareReauthentication(accountId: '7');
+
+      expect(pending.report.completed, isTrue);
+      expect(ownership.canAccessOfflineData('7'), isFalse);
+      expect(ownership.canSync('7'), isFalse);
+    },
+  );
+
   for (final reason in const [
     OfflineOwnershipReason.accountSwitch,
     OfflineOwnershipReason.revocation,
@@ -739,34 +790,200 @@ void main() {
     );
   }
 
-  test('asynchronous quiescence failure releases attempt handles', () async {
-    final participant = _ThrowingMutationParticipant(throwOnWait: true);
-    final ownership = OfflineOwnershipService(
-      store: MemoryOfflineStore(),
-      files: const _NoopFiles(),
-      scans: const _NoopScans(),
-      reviews: const _NoopReviews(),
-      databaseKeys: MemoryOfflineDatabaseKeyManager(),
-      mutationParticipants: [participant],
-    );
+  for (final reason in const [
+    OfflineOwnershipReason.tokenExpiry,
+    OfflineOwnershipReason.revocation,
+    OfflineOwnershipReason.accountSwitch,
+  ]) {
+    for (final throwAt in [0, 1]) {
+      test('${reason.name} replacement acquisition failure at participant '
+          '$throwAt preserves the old retained generation', () async {
+        final participants = [
+          _ThrowingMutationParticipant(),
+          _ThrowingMutationParticipant(),
+        ];
+        final ownership = OfflineOwnershipService(
+          store: MemoryOfflineStore(),
+          files: const _NoopFiles(),
+          scans: const _NoopScans(),
+          reviews: const _NoopReviews(),
+          databaseKeys: MemoryOfflineDatabaseKeyManager(),
+          mutationParticipants: participants,
+        );
+        expect((await ownership.apply(_intentFor(reason))).completed, isTrue);
+        expect(ownership.canAccessOfflineData('7'), isFalse);
+        expect(
+          participants.map((value) => value.activeBlocks),
+          everyElement(1),
+        );
 
-    expect(
-      (await ownership.apply(
-        const OfflineOwnershipIntent.permissionRefresh(accountId: '7'),
-      )).completed,
-      isFalse,
-    );
-    expect(ownership.canAccessOfflineData('7'), isTrue);
-    expect(ownership.debugGenerationMetadataEntryCount, 0);
+        participants[throwAt].throwOnAcquire = true;
+        expect(
+          () => ownership.apply(_intentFor(reason)),
+          throwsA(isA<StateError>()),
+        );
+        expect(ownership.canAccessOfflineData('7'), isFalse);
+        expect(
+          participants.map((value) => value.activeBlocks),
+          everyElement(1),
+        );
 
-    participant.throwOnWait = false;
-    expect(
-      (await ownership.apply(
-        const OfflineOwnershipIntent.permissionRefresh(accountId: '7'),
-      )).completed,
-      isTrue,
+        await ownership.apply(
+          const OfflineOwnershipIntent.reauthenticated(accountId: '7'),
+        );
+        expect(ownership.canAccessOfflineData('7'), isTrue);
+        expect(
+          participants.map((value) => value.activeBlocks),
+          everyElement(0),
+        );
+      });
+    }
+  }
+
+  for (final throwParticipant in [0, 1]) {
+    test('accountSwitch secondary acquisition failure at participant '
+        '$throwParticipant preserves target primary state', () async {
+      final participants = [
+        _ThrowingMutationParticipant(),
+        _ThrowingMutationParticipant(),
+      ];
+      final ownership = OfflineOwnershipService(
+        store: MemoryOfflineStore(),
+        files: const _NoopFiles(),
+        scans: const _NoopScans(),
+        reviews: const _NoopReviews(),
+        databaseKeys: MemoryOfflineDatabaseKeyManager(),
+        mutationParticipants: participants,
+      );
+      await ownership.apply(
+        const OfflineOwnershipIntent.accountSwitch(
+          previousAccountId: '8',
+          currentAccountId: '9',
+        ),
+      );
+      expect(ownership.canAccessOfflineData('8'), isFalse);
+      participants[throwParticipant].throwOnAcquireCall = 4;
+
+      expect(
+        () => ownership.apply(
+          const OfflineOwnershipIntent.accountSwitch(
+            previousAccountId: '7',
+            currentAccountId: '8',
+          ),
+        ),
+        throwsA(isA<StateError>()),
+      );
+      expect(ownership.canAccessOfflineData('8'), isFalse);
+      expect(participants.map((value) => value.activeBlocks), everyElement(1));
+
+      await ownership.apply(
+        const OfflineOwnershipIntent.reauthenticated(accountId: '8'),
+      );
+      expect(ownership.canAccessOfflineData('8'), isTrue);
+      expect(participants.map((value) => value.activeBlocks), everyElement(0));
+    });
+  }
+
+  for (final reason in const [
+    OfflineOwnershipReason.revocation,
+    OfflineOwnershipReason.tokenExpiry,
+    OfflineOwnershipReason.accountSwitch,
+    OfflineOwnershipReason.permissionRefresh,
+    OfflineOwnershipReason.warehouseSwitch,
+  ]) {
+    test(
+      '${reason.name} quiescence failure remains blocked until retry',
+      () async {
+        final barrier = OfflineWriteBarrier();
+        final participant = _ThrowingMutationParticipant(throwOnWait: true);
+        final store = _AttemptControlledOwnershipStore(reason, [
+          _ControlledOwnershipAttempt.successful(),
+        ]);
+        final ownership = OfflineOwnershipService(
+          store: store,
+          files: const _NoopFiles(),
+          scans: const _NoopScans(),
+          reviews: const _NoopReviews(),
+          databaseKeys: MemoryOfflineDatabaseKeyManager(),
+          mutationParticipants: [barrier, participant],
+        );
+
+        final failed = await ownership.apply(_intentFor(reason));
+
+        expect(failed.completed, isFalse);
+        expect(store.callCount, 0);
+        expect(ownership.canAccessOfflineData('7'), isFalse);
+        expect(ownership.canSync('7'), isFalse);
+        await expectLater(
+          barrier.protect(accountId: '7', operation: () async {}),
+          throwsA(isA<OfflineWriteBlockedException>()),
+        );
+
+        participant.throwOnWait = false;
+        expect((await ownership.apply(_intentFor(reason))).completed, isTrue);
+        if (reason == OfflineOwnershipReason.revocation ||
+            reason == OfflineOwnershipReason.tokenExpiry ||
+            reason == OfflineOwnershipReason.accountSwitch) {
+          await ownership.apply(
+            const OfflineOwnershipIntent.reauthenticated(accountId: '7'),
+          );
+        }
+        expect(ownership.canAccessOfflineData('7'), isTrue);
+        await barrier.protect(accountId: '7', operation: () async {});
+      },
     );
-  });
+  }
+
+  test(
+    'clear command quiescence failure remains blocked until retry',
+    () async {
+      final barrier = OfflineWriteBarrier();
+      final participant = _ThrowingMutationParticipant();
+      final store = MemoryOfflineStore();
+      final now = DateTime.utc(2026, 7, 14);
+      await store.writeCache(
+        CacheRecord(
+          key: const CacheKey(
+            accountId: '7',
+            namespace: 'inventory',
+            entityKey: 'page=1',
+          ),
+          payload: const {'value': 1},
+          schemaVersion: 1,
+          fetchedAt: now,
+          expiresAt: now.add(const Duration(days: 1)),
+        ),
+      );
+      final ownership = OfflineOwnershipService(
+        store: store,
+        files: const _NoopFiles(),
+        scans: const _NoopScans(),
+        reviews: const _NoopReviews(),
+        databaseKeys: MemoryOfflineDatabaseKeyManager(),
+        mutationParticipants: [barrier, participant],
+      );
+      final preview = await ownership.preview(
+        accountId: '7',
+        command: OfflineClearCommand.cache,
+      );
+      participant.throwOnWait = true;
+
+      final failed = await ownership.executeClear(preview);
+
+      expect(failed.completed, isFalse);
+      expect((await store.inspectAccount('7')).cacheEntries, 1);
+      expect(ownership.canAccessOfflineData('7'), isFalse);
+      await expectLater(
+        barrier.protect(accountId: '7', operation: () async {}),
+        throwsA(isA<OfflineWriteBlockedException>()),
+      );
+
+      participant.throwOnWait = false;
+      expect((await ownership.executeClear(preview)).completed, isTrue);
+      expect((await store.inspectAccount('7')).cacheEntries, 0);
+      expect(ownership.canAccessOfflineData('7'), isTrue);
+    },
+  );
 
   test(
     'revocation retained-block acquisition failure releases all handles',
@@ -1438,6 +1655,8 @@ OfflineOwnershipIntent _intentFor(OfflineOwnershipReason reason) =>
           previousWarehouseId: 1,
           currentWarehouseId: 2,
         ),
+      OfflineOwnershipReason.tokenExpiry =>
+        const OfflineOwnershipIntent.tokenExpiry(accountId: '7'),
       _ => throw ArgumentError.value(reason),
     };
 
@@ -1464,6 +1683,7 @@ final class _AttemptControlledOwnershipStore implements OfflineOwnershipStore {
   final OfflineOwnershipReason reason;
   final List<_ControlledOwnershipAttempt> attempts;
   int _callCount = 0;
+  int get callCount => _callCount;
 
   Future<void> _run(OfflineOwnershipReason invokedReason) async {
     if (invokedReason != reason) return;

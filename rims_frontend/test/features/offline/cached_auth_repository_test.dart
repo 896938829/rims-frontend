@@ -21,6 +21,7 @@ import 'package:rims_frontend/features/offline/domain/entities/cache_snapshot.da
 import 'package:rims_frontend/features/offline/domain/entities/document_draft.dart';
 import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.dart';
 import 'package:rims_frontend/features/offline/domain/services/offline_ownership_service.dart';
+import 'package:rims_frontend/features/offline/domain/services/offline_write_barrier.dart';
 import 'package:shared_preferences_platform_interface/in_memory_shared_preferences_async.dart';
 import 'package:shared_preferences_platform_interface/shared_preferences_async_platform_interface.dart';
 
@@ -921,6 +922,116 @@ void main() {
       expect((await rawStore.inspectAccount('8')).cacheEntries, 0);
     },
   );
+
+  test(
+    'cached token commit failure keeps reauthentication blocks until retry succeeds',
+    () async {
+      final barrier = OfflineWriteBarrier();
+      final rawStore = MemoryOfflineStore();
+      final guardedStore = WriteBarrierOfflineStore(
+        delegate: rawStore,
+        barrier: barrier,
+      );
+      final ownership = OfflineOwnershipService(
+        store: rawStore,
+        files: const _NoopOwnedFiles(),
+        scans: const _NoopOwnedScans(),
+        reviews: const _NoopReviewInvalidator(),
+        databaseKeys: MemoryOfflineDatabaseKeyManager(),
+        mutationParticipants: [barrier],
+      );
+      await ownership.apply(
+        const OfflineOwnershipIntent.tokenExpiry(accountId: '8'),
+      );
+      final storage = _FakeSessionStorage()..failTokenCommits = true;
+      final repository = CachedAuthRepository(
+        delegate: _ConcurrentLoginAuthRepository(storage),
+        store: guardedStore,
+        tokenStorage: storage,
+        accountStorage: storage,
+        revocationStorage: storage,
+        ownershipCoordinator: ownership,
+        authTransactionOwnerFactory: () => 'projection-1',
+        onSessionRevoked: () {},
+      );
+      final controller = AuthSessionController(ownershipCoordinator: ownership);
+      addTearDown(controller.dispose);
+      var epoch = controller.beginAuthenticationAttempt();
+      final failedPrepare = await repository.prepareLogin(
+        username: 'bob',
+        password: 'secret',
+      );
+      final failedTransaction =
+          (failedPrepare as Success<AuthSessionTransaction>).data;
+
+      expect(
+        await controller.startSession(
+          failedTransaction.session,
+          expectedEpoch: epoch,
+          transaction: failedTransaction,
+        ),
+        isFalse,
+      );
+      expect(ownership.canAccessOfflineData('8'), isFalse);
+      expect(ownership.canSync('8'), isFalse);
+
+      storage.failTokenCommits = false;
+      epoch = controller.beginAuthenticationAttempt();
+      final retryPrepare = await repository.prepareLogin(
+        username: 'bob',
+        password: 'secret',
+      );
+      final retryTransaction =
+          (retryPrepare as Success<AuthSessionTransaction>).data;
+      expect(ownership.canAccessOfflineData('8'), isFalse);
+      expect(
+        await controller.startSession(
+          retryTransaction.session,
+          expectedEpoch: epoch,
+          transaction: retryTransaction,
+        ),
+        isTrue,
+      );
+      expect(ownership.canAccessOfflineData('8'), isTrue);
+      expect(ownership.canSync('8'), isTrue);
+    },
+  );
+
+  test('aborted cached login keeps the reauthentication block', () async {
+    final barrier = OfflineWriteBarrier();
+    final rawStore = MemoryOfflineStore();
+    final ownership = OfflineOwnershipService(
+      store: rawStore,
+      files: const _NoopOwnedFiles(),
+      scans: const _NoopOwnedScans(),
+      reviews: const _NoopReviewInvalidator(),
+      databaseKeys: MemoryOfflineDatabaseKeyManager(),
+      mutationParticipants: [barrier],
+    );
+    await ownership.apply(
+      const OfflineOwnershipIntent.tokenExpiry(accountId: '8'),
+    );
+    final storage = _FakeSessionStorage();
+    final repository = CachedAuthRepository(
+      delegate: _ConcurrentLoginAuthRepository(storage),
+      store: WriteBarrierOfflineStore(delegate: rawStore, barrier: barrier),
+      tokenStorage: storage,
+      accountStorage: storage,
+      revocationStorage: storage,
+      ownershipCoordinator: ownership,
+      authTransactionOwnerFactory: () => 'projection-1',
+      onSessionRevoked: () {},
+    );
+    final prepared = await repository.prepareLogin(
+      username: 'bob',
+      password: 'secret',
+    );
+    final transaction = (prepared as Success<AuthSessionTransaction>).data;
+
+    expect(await transaction.abort(), const Success<void>(null));
+    expect(ownership.canAccessOfflineData('8'), isFalse);
+    expect(ownership.canSync('8'), isFalse);
+  });
 
   test(
     'superseded controller epoch aborts its real pending token and projection',

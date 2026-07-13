@@ -332,7 +332,22 @@ abstract interface class OfflineOwnershipCoordinator {
   bool canAccessOfflineData(String accountId);
 }
 
-final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
+abstract interface class OfflineReauthenticationLease {
+  OfflineOwnershipReport get report;
+
+  OfflineOwnershipReport finalize();
+
+  void rollback();
+}
+
+abstract interface class OfflineReauthenticationCoordinator {
+  Future<OfflineReauthenticationLease> prepareReauthentication({
+    required String accountId,
+  });
+}
+
+final class OfflineOwnershipService
+    implements OfflineOwnershipCoordinator, OfflineReauthenticationCoordinator {
   OfflineOwnershipService({
     required this.store,
     required this.files,
@@ -357,6 +372,7 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
       {};
   final Map<String, Map<_OwnershipBlockKey, int>>
   _successfulAttemptGenerations = {};
+  final Map<String, List<_ParticipantBlock>> _retainedCommandBlocks = {};
   Future<void> _tail = Future<void>.value();
   int _previewSequence = 0;
   int _attemptGeneration = 0;
@@ -428,13 +444,24 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
       preview.accountId,
     );
     _commandBlockedAccounts.add(preview.accountId);
-    final mutationBlocks = _beginMutationBlocks([
-      OfflineMutationScope.account(preview.accountId),
-    ]);
+    late final List<_ParticipantBlock> mutationBlocks;
+    try {
+      mutationBlocks = _beginMutationBlocks([
+        OfflineMutationScope.account(preview.accountId),
+      ]);
+    } on Object {
+      if (!wasCommandBlocked &&
+          !_retainedCommandBlocks.containsKey(preview.accountId)) {
+        _commandBlockedAccounts.remove(preview.accountId);
+      }
+      rethrow;
+    }
+    var retainForQuiescenceFailure = false;
     return _serialized(() async {
       final failures = <OfflineOwnershipFailure>[];
       await _waitForMutationBlocks(mutationBlocks, failures);
       if (failures.isNotEmpty) {
+        retainForQuiescenceFailure = true;
         return OfflineOwnershipReport(
           reason: null,
           accountId: preview.accountId,
@@ -535,8 +562,14 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
         failures: failures,
       );
     }).whenComplete(() {
-      _releaseMutationBlocks(mutationBlocks);
-      if (!wasCommandBlocked) {
+      if (retainForQuiescenceFailure) {
+        final previous = _retainedCommandBlocks[preview.accountId];
+        _retainedCommandBlocks[preview.accountId] = mutationBlocks;
+        if (previous != null) _releaseMutationBlocks(previous);
+      } else {
+        _releaseMutationBlocks(mutationBlocks);
+        final previous = _retainedCommandBlocks.remove(preview.accountId);
+        if (previous != null) _releaseMutationBlocks(previous);
         _commandBlockedAccounts.remove(preview.accountId);
       }
     });
@@ -548,6 +581,7 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
     late final List<_ParticipantBlock> mutationBlocks;
     try {
       mutationBlocks = _beginMutationBlocks(_mutationScopesFor(intent));
+      if (attempt != null) _activateAttempt(attempt);
     } on Object {
       if (attempt != null) _discardAttempt(attempt);
       rethrow;
@@ -558,6 +592,49 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
       return report;
     });
   }
+
+  @override
+  Future<OfflineReauthenticationLease> prepareReauthentication({
+    required String accountId,
+  }) => _serialized(() async {
+    final failures = <OfflineOwnershipFailure>[];
+    final counts = await _inspectWithFailure(accountId, failures);
+    final captured = <_ReauthenticationGeneration>[];
+    if (failures.isEmpty) {
+      final blocked = _blockedReasons[accountId] ?? const {};
+      final successful = _successfulAttemptGenerations[accountId] ?? const {};
+      final latest = _latestAttemptGenerations[accountId] ?? const {};
+      for (final entry in blocked.entries) {
+        if (entry.key.slot != _OwnershipSlot.primaryPersistent) continue;
+        final generation = latest[entry.key];
+        if (generation == null || successful[entry.key] != generation) {
+          failures.add(
+            const OfflineOwnershipFailure(
+              step: OfflineOwnershipStep.mutationQuiescence,
+              message:
+                  'Offline ownership cleanup must be retried before reauthentication.',
+            ),
+          );
+          break;
+        }
+        captured.add(
+          _ReauthenticationGeneration(key: entry.key, generation: generation),
+        );
+      }
+    }
+    final report = OfflineOwnershipReport(
+      reason: OfflineOwnershipReason.reauthenticated,
+      accountId: accountId,
+      executedCounts: counts,
+      failures: failures,
+    );
+    return _OfflineReauthenticationLease(
+      service: this,
+      accountId: accountId,
+      report: report,
+      generations: captured,
+    );
+  });
 
   Future<OfflineOwnershipReport> _apply(
     OfflineOwnershipIntent intent,
@@ -803,7 +880,19 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
     if (report.failures.any(
       (failure) => failure.step == OfflineOwnershipStep.mutationQuiescence,
     )) {
-      _discardAttempt(attempt);
+      for (final target in attempt.targets) {
+        final isLatest =
+            _latestAttemptGenerations[target.accountId]?[target.key] ==
+            attempt.generation;
+        if (!isLatest) continue;
+        _retainMutationBlocks(
+          target.accountId,
+          target.key,
+          attempt.generation,
+          blocks,
+          includeAllScopes: target.reason == OfflineOwnershipReason.revocation,
+        );
+      }
       _releaseMutationBlocks(blocks);
       return;
     }
@@ -886,14 +975,20 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
     final generation = ++_attemptGeneration;
     final targets = _attemptTargetsFor(intent);
     for (final target in targets) {
+      _blockGeneration(target.accountId, target.key, generation);
+    }
+    return _OwnershipAttempt(generation: generation, targets: targets);
+  }
+
+  void _activateAttempt(_OwnershipAttempt attempt) {
+    for (final target in attempt.targets) {
       final key = target.key;
-      _blockGeneration(target.accountId, key, generation);
       final latest = _latestAttemptGenerations.putIfAbsent(
         target.accountId,
         () => {},
       );
       final superseded = latest[key];
-      latest[key] = generation;
+      latest[key] = attempt.generation;
       final successful = _successfulAttemptGenerations[target.accountId];
       successful?.remove(key);
       if (successful?.isEmpty ?? false) {
@@ -904,7 +999,6 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
         _releaseRetainedMutationBlocks(target.accountId, key, superseded);
       }
     }
-    return _OwnershipAttempt(generation: generation, targets: targets);
   }
 
   void _discardAttempt(_OwnershipAttempt attempt) {
@@ -959,14 +1053,16 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
     String accountId,
     _OwnershipBlockKey key,
     int generation,
-    List<_ParticipantBlock> candidates,
-  ) {
+    List<_ParticipantBlock> candidates, {
+    bool includeAllScopes = false,
+  }) {
     final matching = candidates
         .where(
           (entry) =>
-              !entry.scope.allAccounts &&
-              entry.scope.resolvedAccountIds.length == 1 &&
-              entry.scope.contains(accountId),
+              (includeAllScopes && entry.scope.allAccounts) ||
+              (!entry.scope.allAccounts &&
+                  entry.scope.resolvedAccountIds.length == 1 &&
+                  entry.scope.contains(accountId)),
         )
         .toList(growable: false);
     if (matching.isEmpty) return;
@@ -1039,6 +1135,47 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
     final latest = _latestAttemptGenerations[accountId];
     if (latest?[key] == generation) latest?.remove(key);
     if (latest?.isEmpty ?? false) _latestAttemptGenerations.remove(accountId);
+  }
+
+  OfflineOwnershipReport _finalizeReauthentication(
+    _OfflineReauthenticationLease lease,
+  ) {
+    if (!lease.report.completed) return lease.report;
+    for (final entry in lease.generations) {
+      if (_latestAttemptGenerations[lease.accountId]?[entry.key] !=
+              entry.generation ||
+          _successfulAttemptGenerations[lease.accountId]?[entry.key] !=
+              entry.generation) {
+        return OfflineOwnershipReport(
+          reason: OfflineOwnershipReason.reauthenticated,
+          accountId: lease.accountId,
+          executedCounts: lease.report.executedCounts,
+          failures: const [
+            OfflineOwnershipFailure(
+              step: OfflineOwnershipStep.mutationQuiescence,
+              message: 'Offline ownership state changed during authentication.',
+            ),
+          ],
+        );
+      }
+    }
+    for (final entry in lease.generations) {
+      _unblockGeneration(lease.accountId, entry.key, entry.generation);
+      _releaseRetainedMutationBlocks(
+        lease.accountId,
+        entry.key,
+        entry.generation,
+      );
+      _removeLatestGeneration(lease.accountId, entry.key, entry.generation);
+      final successful = _successfulAttemptGenerations[lease.accountId];
+      if (successful?[entry.key] == entry.generation) {
+        successful?.remove(entry.key);
+      }
+      if (successful?.isEmpty ?? false) {
+        _successfulAttemptGenerations.remove(lease.accountId);
+      }
+    }
+    return lease.report;
   }
 
   Future<void> _clearAccount(
@@ -1227,6 +1364,65 @@ final class _OwnershipAttemptTarget {
         ? _OwnershipSlot.secondaryTransient
         : _OwnershipSlot.primaryPersistent,
   );
+}
+
+final class _ReauthenticationGeneration {
+  const _ReauthenticationGeneration({
+    required this.key,
+    required this.generation,
+  });
+
+  final _OwnershipBlockKey key;
+  final int generation;
+}
+
+enum _ReauthenticationLeaseState { pending, finalized, rolledBack }
+
+final class _OfflineReauthenticationLease
+    implements OfflineReauthenticationLease {
+  _OfflineReauthenticationLease({
+    required this.service,
+    required this.accountId,
+    required this.report,
+    required this.generations,
+  });
+
+  final OfflineOwnershipService service;
+  final String accountId;
+  @override
+  final OfflineOwnershipReport report;
+  final List<_ReauthenticationGeneration> generations;
+  _ReauthenticationLeaseState _state = _ReauthenticationLeaseState.pending;
+
+  @override
+  OfflineOwnershipReport finalize() {
+    if (_state == _ReauthenticationLeaseState.finalized) return report;
+    if (_state == _ReauthenticationLeaseState.rolledBack) {
+      return OfflineOwnershipReport(
+        reason: OfflineOwnershipReason.reauthenticated,
+        accountId: accountId,
+        executedCounts: report.executedCounts,
+        failures: const [
+          OfflineOwnershipFailure(
+            step: OfflineOwnershipStep.mutationQuiescence,
+            message: 'Authentication ownership lease was already rolled back.',
+          ),
+        ],
+      );
+    }
+    final finalized = service._finalizeReauthentication(this);
+    if (finalized.completed) {
+      _state = _ReauthenticationLeaseState.finalized;
+    }
+    return finalized;
+  }
+
+  @override
+  void rollback() {
+    if (_state == _ReauthenticationLeaseState.pending) {
+      _state = _ReauthenticationLeaseState.rolledBack;
+    }
+  }
 }
 
 enum _OwnershipSlot { primaryPersistent, secondaryTransient }

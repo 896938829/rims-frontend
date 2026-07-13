@@ -293,14 +293,30 @@ final class CachedAuthRepository
           return FailureResult(ownershipFailure);
         }
       }
-      final reauthenticationFailure = await _applyOwnership(
-        OfflineOwnershipIntent.reauthenticated(accountId: accountId),
-      );
-      if (reauthenticationFailure != null) {
-        await upstream.abort();
-        return FailureResult(reauthenticationFailure);
+      OfflineReauthenticationLease? reauthenticationLease;
+      final coordinator = ownershipCoordinator;
+      if (coordinator case final OfflineReauthenticationCoordinator preparer) {
+        reauthenticationLease = await preparer.prepareReauthentication(
+          accountId: accountId,
+        );
+        if (!reauthenticationLease.report.completed) {
+          reauthenticationLease.rollback();
+          await upstream.abort();
+          return FailureResult(
+            _ownershipFailureFrom(reauthenticationLease.report),
+          );
+        }
+      } else {
+        final reauthenticationFailure = await _applyOwnership(
+          OfflineOwnershipIntent.reauthenticated(accountId: accountId),
+        );
+        if (reauthenticationFailure != null) {
+          await upstream.abort();
+          return FailureResult(reauthenticationFailure);
+        }
       }
       if (!_isCurrentEpoch(operationEpoch)) {
+        reauthenticationLease?.rollback();
         await upstream.abort();
         return _staleSessionFailure();
       }
@@ -310,11 +326,14 @@ final class CachedAuthRepository
           data,
           expectedEpoch: operationEpoch,
           projectionId: projectionId,
+          privilegedOwnershipWrite: reauthenticationLease != null,
         );
       } on _StaleAuthOperation {
+        reauthenticationLease?.rollback();
         await upstream.abort();
         return _staleSessionFailure();
       } on Object {
+        reauthenticationLease?.rollback();
         await upstream.abort();
         await _rollbackFailedSessionProjection(
           accountId,
@@ -332,6 +351,7 @@ final class CachedAuthRepository
             projectionId,
             propagateFailure: true,
           ),
+          reauthenticationLease: reauthenticationLease,
         ),
       );
     }
@@ -342,13 +362,18 @@ final class CachedAuthRepository
     AuthSessionTransaction transaction,
   ) async {
     final committed = await transaction.commit();
-    return switch (committed) {
-      Success<void>() => Success(transaction.session),
-      FailureResult<void>(failure: final failure) => () async {
+    if (committed case FailureResult<void>(failure: final failure)) {
+      await transaction.abort();
+      return FailureResult(failure);
+    }
+    if (transaction case final OwnershipPreparedAuthSessionTransaction owned) {
+      final finalized = owned.finalizeReauthentication();
+      if (finalized case FailureResult<void>(failure: final failure)) {
         await transaction.abort();
-        return FailureResult<AuthSession>(failure);
-      }(),
-    };
+        return FailureResult(failure);
+      }
+    }
+    return Success(transaction.session);
   }
 
   @override
@@ -440,6 +465,7 @@ final class CachedAuthRepository
     AuthSession session, {
     int? expectedEpoch,
     String? projectionId,
+    bool privilegedOwnershipWrite = false,
   }) async {
     if (!_isCurrentEpoch(expectedEpoch)) throw const _StaleAuthOperation();
     final fetchedAt = now().toUtc();
@@ -456,8 +482,12 @@ final class CachedAuthRepository
       fetchedAt: fetchedAt,
       expiresAt: CachePolicy.references.expiresAt(fetchedAt),
     );
-    await store.writeCache(record);
-    await store.enforceCacheLimit(
+    final projectionStore =
+        privilegedOwnershipWrite && store is WriteBarrierOfflineStore
+        ? (store as WriteBarrierOfflineStore).delegate
+        : store;
+    await projectionStore.writeCache(record);
+    await projectionStore.enforceCacheLimit(
       accountId: accountId,
       warehouseId: null,
       namespace: _namespace,
@@ -705,6 +735,13 @@ final class CachedAuthRepository
     );
   }
 
+  LocalStorageFailure _ownershipFailureFrom(OfflineOwnershipReport report) {
+    return LocalStorageFailure(
+      message: report.failures.map((failure) => failure.message).join(' '),
+      cause: report,
+    );
+  }
+
   Future<Failure?> _preparePermissionRefresh(AuthSession session) async {
     final accountId = session.user.id.toString();
     final record = await store.readCache(
@@ -764,17 +801,37 @@ final class CachedAuthRepository
 
 String _newAuthTransactionOwnerId() => const Uuid().v4();
 
-final class _CachedAuthSessionTransaction implements AuthSessionTransaction {
+final class _CachedAuthSessionTransaction
+    implements AuthSessionTransaction, OwnershipPreparedAuthSessionTransaction {
   const _CachedAuthSessionTransaction({
     required this.session,
     required this.upstream,
     required this.rollbackProjection,
+    required this.reauthenticationLease,
   });
 
   @override
   final AuthSession session;
   final AuthSessionTransaction upstream;
   final Future<void> Function() rollbackProjection;
+  final OfflineReauthenticationLease? reauthenticationLease;
+
+  @override
+  bool get hasPreparedReauthentication => reauthenticationLease != null;
+
+  @override
+  Result<void> finalizeReauthentication() {
+    final lease = reauthenticationLease;
+    if (lease == null) return const Success(null);
+    final report = lease.finalize();
+    if (report.completed) return const Success(null);
+    return FailureResult(
+      LocalStorageFailure(
+        message: report.failures.map((failure) => failure.message).join(' '),
+        cause: report,
+      ),
+    );
+  }
 
   @override
   Future<Result<void>> commit() async {
@@ -790,6 +847,7 @@ final class _CachedAuthSessionTransaction implements AuthSessionTransaction {
       );
     }
     if (result is Success<void>) return result;
+    reauthenticationLease?.rollback();
     try {
       await rollbackProjection();
       return result;
@@ -805,6 +863,7 @@ final class _CachedAuthSessionTransaction implements AuthSessionTransaction {
 
   @override
   Future<Result<void>> abort() async {
+    reauthenticationLease?.rollback();
     Result<void> upstreamResult;
     try {
       upstreamResult = await upstream.abort();

@@ -197,6 +197,101 @@ void main() {
       });
     }
 
+    for (final invalidation in ['revoked', 'expired']) {
+      test(
+        'stale commit failure cannot overwrite $invalidation state',
+        () async {
+          final blocker = Completer<void>();
+          final transaction = _FakeAuthSessionTransaction(
+            commitResult: const FailureResult<void>(
+              LocalStorageFailure(message: 'late commit failed'),
+            ),
+            commitBlocker: blocker,
+          );
+          final controller = AuthSessionController();
+          await controller.startSession(_session);
+          final epoch = controller.beginAuthenticationAttempt();
+
+          final starting = controller.startSession(
+            _beijingActiveSession,
+            expectedEpoch: epoch,
+            transaction: transaction,
+          );
+          await transaction.commitStarted.future;
+          if (invalidation == 'revoked') {
+            controller.invalidateRevokedSession();
+          } else {
+            controller.invalidateExpiredSession();
+          }
+          blocker.complete();
+
+          expect(await starting, isFalse);
+          expect(controller.session, isNull);
+          expect(
+            controller.restoreFailure,
+            invalidation == 'revoked'
+                ? isA<AuthorizationFailure>()
+                : isA<AuthenticationFailure>(),
+          );
+          expect(
+            controller.sessionMessage,
+            isNot(contains('late commit failed')),
+          );
+        },
+      );
+    }
+
+    test('stale commit throw cannot overwrite a newer login', () async {
+      final blocker = Completer<void>();
+      final transaction = _FakeAuthSessionTransaction(
+        throwOnCommit: true,
+        commitBlocker: blocker,
+      );
+      final controller = AuthSessionController();
+      await controller.startSession(_session);
+      final epoch = controller.beginAuthenticationAttempt();
+      final stale = controller.startSession(
+        _beijingActiveSession,
+        expectedEpoch: epoch,
+        transaction: transaction,
+      );
+      await transaction.commitStarted.future;
+
+      expect(await controller.startSession(_multiWarehouseSession), isTrue);
+      blocker.complete();
+
+      expect(await stale, isFalse);
+      expect(controller.session, _multiWarehouseSession);
+      expect(
+        controller.ownershipFailure?.message,
+        isNot('credential commit failed'),
+      );
+    });
+
+    test('disposed controller ignores a late commit failure', () async {
+      final blocker = Completer<void>();
+      final transaction = _FakeAuthSessionTransaction(
+        commitResult: const FailureResult<void>(
+          LocalStorageFailure(message: 'late commit failed'),
+        ),
+        commitBlocker: blocker,
+      );
+      final controller = AuthSessionController();
+      final epoch = controller.beginAuthenticationAttempt();
+      final starting = controller.startSession(
+        _session,
+        expectedEpoch: epoch,
+        transaction: transaction,
+      );
+      await transaction.commitStarted.future;
+      controller.dispose();
+
+      blocker.complete();
+
+      expect(await starting, isFalse);
+      expect(transaction.abortCalls, 1);
+    });
+
     test('shows backend failure message for invalid credentials', () async {
       final sessionController = AuthSessionController();
       final repository = _FakeAuthRepository(
@@ -648,11 +743,14 @@ final class _FakeAuthSessionTransaction implements AuthSessionTransaction {
     this.commitResult = const Success<void>(null),
     this.throwOnCommit = false,
     this.onCommit,
+    this.commitBlocker,
   });
 
   final Result<void> commitResult;
   final bool throwOnCommit;
   final void Function()? onCommit;
+  final Completer<void>? commitBlocker;
+  final Completer<void> commitStarted = Completer<void>();
   int commitCalls = 0;
   int abortCalls = 0;
   bool commitObservedAcceptedSession = false;
@@ -663,7 +761,9 @@ final class _FakeAuthSessionTransaction implements AuthSessionTransaction {
   @override
   Future<Result<void>> commit() async {
     commitCalls += 1;
+    if (!commitStarted.isCompleted) commitStarted.complete();
     onCommit?.call();
+    await commitBlocker?.future;
     if (throwOnCommit) throw StateError('credential commit failed');
     return commitResult;
   }

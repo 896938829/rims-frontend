@@ -24,6 +24,12 @@ abstract interface class AuthSessionTransaction {
   Future<Result<void>> abort();
 }
 
+abstract interface class OwnershipPreparedAuthSessionTransaction {
+  bool get hasPreparedReauthentication;
+
+  Result<void> finalizeReauthentication();
+}
+
 abstract interface class TransactionalAuthRepository {
   Future<Result<AuthSessionTransaction>> prepareLogin({
     required String username,

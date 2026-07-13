@@ -194,17 +194,46 @@ final class AuthSessionController extends ChangeNotifier {
     AuthSessionTransaction? transaction,
   }) async {
     if (_disposed || (expectedEpoch != null && expectedEpoch != _authEpoch)) {
-      await _abortTransaction(transaction);
+      final rejectionEpoch = _authEpoch;
+      final abortFailure = await _abortTransaction(
+        transaction,
+        reportFailure: false,
+      );
+      if (!_disposed &&
+          rejectionEpoch == _authEpoch &&
+          abortFailure != null &&
+          _ownershipFailure == null &&
+          _restoreFailure == null &&
+          _switchWarehouseFailure == null) {
+        _ownershipFailure = abortFailure;
+        _sessionMessage = abortFailure.message;
+        notifyListeners();
+      }
       return false;
     }
     final epoch = ++_authEpoch;
     final previous = _session;
-    if (!await _prepareOwnershipChange(previous, session)) {
-      await _abortTransaction(transaction);
+    final OwnershipPreparedAuthSessionTransaction? ownershipTransaction =
+        transaction is OwnershipPreparedAuthSessionTransaction
+        ? transaction as OwnershipPreparedAuthSessionTransaction
+        : null;
+    final preparedOwnership =
+        ownershipTransaction?.hasPreparedReauthentication ?? false;
+    final ownershipReady = await _prepareOwnershipChange(
+      previous,
+      session,
+      skipReauthentication: preparedOwnership,
+    );
+    if (!_isCurrent(epoch)) {
+      await _abortTransaction(transaction, reportFailure: false);
+      return false;
+    }
+    if (!ownershipReady) {
+      await _abortTransaction(transaction, expectedEpoch: epoch);
       return false;
     }
     if (!_isCurrent(epoch)) {
-      await _abortTransaction(transaction);
+      await _abortTransaction(transaction, reportFailure: false);
       return false;
     }
     if (transaction != null) {
@@ -212,7 +241,12 @@ final class AuthSessionController extends ChangeNotifier {
       try {
         commitResult = await transaction.commit();
       } on Object catch (error) {
+        if (!_isCurrent(epoch)) {
+          await _abortTransaction(transaction, reportFailure: false);
+          return false;
+        }
         return _failSessionTransaction(
+          epoch: epoch,
           previous: previous,
           transaction: transaction,
           failure: LocalStorageFailure(
@@ -221,18 +255,32 @@ final class AuthSessionController extends ChangeNotifier {
           ),
         );
       }
+      if (!_isCurrent(epoch)) {
+        await _abortTransaction(transaction, reportFailure: false);
+        return false;
+      }
       if (commitResult case FailureResult<void>(failure: final failure)) {
         return _failSessionTransaction(
+          epoch: epoch,
           previous: previous,
           transaction: transaction,
           failure: failure,
         );
       }
-      if (!_isCurrent(epoch)) {
-        await _abortTransaction(transaction);
-        return false;
+      if (transaction
+          case final OwnershipPreparedAuthSessionTransaction owned) {
+        final finalized = owned.finalizeReauthentication();
+        if (finalized case FailureResult<void>(failure: final failure)) {
+          return _failSessionTransaction(
+            epoch: epoch,
+            previous: previous,
+            transaction: transaction,
+            failure: failure,
+          );
+        }
       }
     }
+    if (!_isCurrent(epoch)) return false;
     _session = session;
     _credentialsInvalidated = false;
     _restoreFailure = null;
@@ -247,34 +295,50 @@ final class AuthSessionController extends ChangeNotifier {
   }
 
   Future<bool> _failSessionTransaction({
+    required int epoch,
     required AuthSession? previous,
     required AuthSessionTransaction transaction,
     required Failure failure,
   }) async {
-    await _abortTransaction(transaction);
+    final abortFailure = await _abortTransaction(
+      transaction,
+      expectedEpoch: epoch,
+      reportFailure: false,
+    );
+    if (!_isCurrent(epoch)) return false;
+    final visibleFailure = abortFailure ?? failure;
     _session = previous;
     _credentialsInvalidated = previous == null;
-    _ownershipFailure = failure;
-    _sessionMessage = failure.message;
+    _ownershipFailure = visibleFailure;
+    _sessionMessage = visibleFailure.message;
     notifyListeners();
     return false;
   }
 
-  Future<void> _abortTransaction(AuthSessionTransaction? transaction) async {
-    if (transaction == null) return;
+  Future<Failure?> _abortTransaction(
+    AuthSessionTransaction? transaction, {
+    int? expectedEpoch,
+    bool reportFailure = true,
+  }) async {
+    if (transaction == null) return null;
+    Failure? abortFailure;
     try {
       final result = await transaction.abort();
       if (result case FailureResult<void>(failure: final failure)) {
-        _ownershipFailure = failure;
-        _sessionMessage = failure.message;
+        abortFailure = failure;
       }
     } on Object catch (error) {
-      _ownershipFailure = LocalStorageFailure(
-        message: '登录事务清理失败，请重试',
-        cause: error,
-      );
-      _sessionMessage = _ownershipFailure!.message;
+      abortFailure = LocalStorageFailure(message: '登录事务清理失败，请重试', cause: error);
     }
+    if (!reportFailure || _disposed) return abortFailure;
+    if (expectedEpoch != null && !_isCurrent(expectedEpoch)) {
+      return abortFailure;
+    }
+    if (abortFailure != null) {
+      _ownershipFailure = abortFailure;
+      _sessionMessage = abortFailure.message;
+    }
+    return abortFailure;
   }
 
   Future<bool> switchWarehouse({
@@ -452,11 +516,13 @@ final class AuthSessionController extends ChangeNotifier {
 
   Future<bool> _prepareOwnershipChange(
     AuthSession? previous,
-    AuthSession? current,
-  ) async {
+    AuthSession? current, {
+    bool skipReauthentication = false,
+  }) async {
     if (current == null) return true;
     final currentAccountId = current.user.id.toString();
     if (previous == null) {
+      if (skipReauthentication) return true;
       final report = await _runOwnership(
         OfflineOwnershipIntent.reauthenticated(accountId: currentAccountId),
       );
