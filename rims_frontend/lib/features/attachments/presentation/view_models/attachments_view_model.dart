@@ -11,8 +11,10 @@ import '../../domain/services/attachment_share_service.dart';
 import '../../domain/services/attachment_staging_store.dart';
 import '../../../offline/domain/entities/outbox_operation.dart';
 import '../../../offline/domain/entities/outbox_graph.dart';
+import '../../../offline/domain/entities/outbox_cleanup_intent.dart';
 import '../../../offline/domain/repositories/outbox_repository.dart';
 import '../../../offline/domain/services/outbox_executor.dart';
+import '../../../offline/domain/services/attachment_staging_protection.dart';
 
 enum AttachmentTransferState {
   staged,
@@ -308,6 +310,8 @@ final class AttachmentsViewModel extends ChangeNotifier {
   }
 
   Future<void> recoverInterrupted() async {
+    final outboxOwnedRequestIds = await _loadOutboxOwnedRequestIds();
+    if (_disposed) return;
     for (final selection in picker.takeRecovered()) {
       final staged = await stagingStore.stage(
         userId: userId,
@@ -321,7 +325,12 @@ final class AttachmentsViewModel extends ChangeNotifier {
           if (!_queue.any(
             (queued) => queued.requestId == item.pending.requestId,
           )) {
-            _queue.add(AttachmentQueueItem.interrupted(item));
+            _queue.add(
+              _recoveredQueueItem(
+                item,
+                outboxOwnedRequestIds: outboxOwnedRequestIds,
+              ),
+            );
           }
         },
         failure: (failure) => _errorMessage = failure.message,
@@ -335,7 +344,12 @@ final class AttachmentsViewModel extends ChangeNotifier {
         for (final staged in items) {
           if (staged.pending.binding == binding &&
               known.add(staged.pending.requestId)) {
-            _queue.add(AttachmentQueueItem.interrupted(staged));
+            _queue.add(
+              _recoveredQueueItem(
+                staged,
+                outboxOwnedRequestIds: outboxOwnedRequestIds,
+              ),
+            );
           }
         }
       },
@@ -348,6 +362,7 @@ final class AttachmentsViewModel extends ChangeNotifier {
     if (_isPickingOrTransferring || _paused) return;
     final index = _queue.indexWhere((item) => item.requestId == requestId);
     if (index < 0) return;
+    if (_queue[index].state == AttachmentTransferState.queuedForSync) return;
     _queue[index] = _queue[index].copyWith(
       state: AttachmentTransferState.staged,
       sent: 0,
@@ -654,6 +669,40 @@ final class AttachmentsViewModel extends ChangeNotifier {
 
   void _sortAttachments() {
     _attachments.sort((left, right) => left.position.compareTo(right.position));
+  }
+
+  Future<Set<String>?> _loadOutboxOwnedRequestIds() async {
+    final outbox = outboxRepository;
+    if (outbox == null) return const {};
+    final listed = await outbox.list(userId);
+    if (listed case FailureResult<List<OutboxOperation>>(:final failure)) {
+      _errorMessage = failure.message;
+      return null;
+    }
+    final intents = await outbox.listCleanupIntents(userId);
+    if (intents case FailureResult(:final failure)) {
+      _errorMessage = failure.message;
+      return null;
+    }
+    return {
+      ...AttachmentStagingProtection.requestIdsFor(
+        (listed as Success<List<OutboxOperation>>).data,
+      ),
+      ...AttachmentStagingProtection.requestIdsForCleanupIntents(
+        (intents as Success<List<OutboxCleanupIntent>>).data,
+      ),
+    };
+  }
+
+  AttachmentQueueItem _recoveredQueueItem(
+    StagedAttachment staged, {
+    required Set<String>? outboxOwnedRequestIds,
+  }) {
+    final recovered = AttachmentQueueItem.interrupted(staged);
+    if (outboxOwnedRequestIds?.contains(staged.pending.requestId) ?? true) {
+      return recovered.copyWith(state: AttachmentTransferState.queuedForSync);
+    }
+    return recovered;
   }
 
   bool _isOutboxKindAllowed(OutboxOperationKind kind) =>

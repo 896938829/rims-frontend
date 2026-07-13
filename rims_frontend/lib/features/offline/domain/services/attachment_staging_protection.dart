@@ -1,4 +1,5 @@
 import '../entities/outbox_operation.dart';
+import '../entities/outbox_cleanup_intent.dart';
 
 abstract final class AttachmentStagingProtection {
   static Set<String> requestIdsFor(Iterable<OutboxOperation> operations) {
@@ -9,6 +10,12 @@ abstract final class AttachmentStagingProtection {
     }
     return Set.unmodifiable(protected);
   }
+
+  static Set<String> requestIdsForCleanupIntents(
+    Iterable<OutboxCleanupIntent> intents,
+  ) => Set.unmodifiable({
+    for (final intent in intents) ...intent.attachmentRequestIds,
+  });
 
   static bool _isRecoverable(OutboxState state) =>
       state == OutboxState.queued ||

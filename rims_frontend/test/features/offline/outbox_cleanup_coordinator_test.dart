@@ -11,9 +11,54 @@ import 'package:rims_frontend/features/offline/domain/entities/outbox_cleanup_in
 import 'package:rims_frontend/features/offline/domain/entities/outbox_graph.dart';
 import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.dart';
 import 'package:rims_frontend/features/offline/domain/repositories/document_draft_repository.dart';
+import 'package:rims_frontend/features/offline/domain/repositories/outbox_repository.dart';
 import 'package:rims_frontend/features/offline/domain/services/outbox_state_machine.dart';
 
 void main() {
+  test(
+    'cleanup coordinator does not consume intent before success is persisted',
+    () async {
+      final operation = OutboxOperation(
+        operationId: 'operation-queued',
+        idempotencyKey: 'key-queued',
+        accountId: '7',
+        warehouseId: 11,
+        kind: OutboxOperationKind.attachmentUpload,
+        payload: const {},
+        state: OutboxState.syncing,
+        createdAt: DateTime.utc(2026, 7, 13),
+      );
+      final repository = _CleanupRepository(
+        operations: [operation],
+        intents: [
+          OutboxCleanupIntent(
+            operationId: operation.operationId,
+            accountId: operation.accountId,
+            warehouseId: operation.warehouseId,
+            attachmentRequestIds: const ['file-queued'],
+            createdAt: operation.createdAt,
+            updatedAt: operation.updatedAt,
+          ),
+        ],
+      );
+      final staging = _Staging();
+      final eventBus = AppEventBus();
+      final coordinator = OutboxCleanupCoordinator(
+        repository: repository,
+        stagingStore: staging,
+        draftRepository: _Drafts(),
+        eventBus: eventBus,
+      );
+
+      await coordinator.run('7');
+
+      expect(staging.calls, 0);
+      expect(repository.completedOperationIds, isEmpty);
+      expect(repository.recordedFailures, isEmpty);
+      await eventBus.dispose();
+    },
+  );
+
   test(
     'cleanup failure keeps intent and restart retries without network',
     () async {
@@ -87,6 +132,53 @@ void main() {
       await eventBus.dispose();
     },
   );
+}
+
+final class _CleanupRepository implements OutboxRepository {
+  _CleanupRepository({required this.operations, required this.intents});
+
+  final List<OutboxOperation> operations;
+  final List<OutboxCleanupIntent> intents;
+  final List<String> completedOperationIds = [];
+  final List<String> recordedFailures = [];
+
+  @override
+  Future<Result<List<OutboxOperation>>> list(String accountId) async => Success(
+    operations
+        .where((operation) => operation.accountId == accountId)
+        .toList(growable: false),
+  );
+
+  @override
+  Future<Result<List<OutboxCleanupIntent>>> listCleanupIntents(
+    String accountId,
+  ) async => Success(
+    intents
+        .where((intent) => intent.accountId == accountId)
+        .toList(growable: false),
+  );
+
+  @override
+  Future<Result<void>> completeCleanupIntent({
+    required String accountId,
+    required String operationId,
+  }) async {
+    completedOperationIds.add(operationId);
+    return const Success(null);
+  }
+
+  @override
+  Future<Result<void>> recordCleanupFailure({
+    required String accountId,
+    required String operationId,
+    required String failure,
+  }) async {
+    recordedFailures.add(operationId);
+    return const Success(null);
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 extension<T> on Result<T> {

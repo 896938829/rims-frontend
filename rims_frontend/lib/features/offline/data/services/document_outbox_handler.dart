@@ -97,7 +97,8 @@ final class DocumentOutboxHandler implements OutboxOperationHandler {
         ),
       );
     }
-    if (record.status != payload.expectedStatus) {
+    if (record.status != payload.expectedStatus &&
+        record.status != payload.acceptedPostStatus) {
       return const FailureResult(
         ConflictFailure(
           message: 'Authoritative document state changed after review.',
@@ -210,6 +211,7 @@ final class _DocumentReferencePayload {
     required this.documentId,
     required this.expectedDocType,
     required this.expectedStatus,
+    required this.acceptedPostStatus,
     required this.outputMarker,
   });
 
@@ -226,17 +228,17 @@ final class _DocumentReferencePayload {
     final expectedDocType = _positiveInt(json, 'expectedDocType');
     final expectedStatus = _string(json, 'expectedStatus');
     final lifecycleIntent = _string(json, 'lifecycleIntent');
-    final outputMarker = switch (lifecycleIntent) {
+    final (outputMarker, acceptedPostStatus) = switch (lifecycleIntent) {
       'document_complete'
           when expectedDocType != 5 &&
               (expectedStatus == '待提交' || expectedStatus == '草稿') =>
-        'document_complete_reference',
+        ('document_complete_reference', '已完成'),
       'stocktake_confirm'
           when expectedDocType == 5 && expectedStatus == '盘点中' =>
-        'stocktake_confirm_reference',
+        ('stocktake_confirm_reference', '差异已确认'),
       'stocktake_settle'
           when expectedDocType == 5 && expectedStatus == '差异已确认' =>
-        'stocktake_settle_reference',
+        ('stocktake_settle_reference', '已结转'),
       _ => throw const FormatException(
         'Document reference lifecycle intent is inconsistent.',
       ),
@@ -245,6 +247,7 @@ final class _DocumentReferencePayload {
       documentId: documentId,
       expectedDocType: expectedDocType,
       expectedStatus: expectedStatus,
+      acceptedPostStatus: acceptedPostStatus,
       outputMarker: outputMarker,
     );
   }
@@ -252,6 +255,7 @@ final class _DocumentReferencePayload {
   final int documentId;
   final int expectedDocType;
   final String expectedStatus;
+  final String acceptedPostStatus;
   final String outputMarker;
 }
 

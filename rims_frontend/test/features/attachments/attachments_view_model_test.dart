@@ -324,6 +324,53 @@ void main() {
     },
   );
 
+  test(
+    'restart restores outbox-owned staging without direct retry or resume',
+    () async {
+      final repository = _FakeRepository();
+      final staging = _FakeStaging()..recovered = [_staged()];
+      final outbox = MemoryOutboxRepository(stateMachine: OutboxStateMachine());
+      await outbox.enqueue(
+        OutboxOperation(
+          operationId: 'attachment-upload-stable-request',
+          idempotencyKey: 'stable-request',
+          accountId: '3',
+          warehouseId: 11,
+          kind: OutboxOperationKind.attachmentUpload,
+          payload: const {
+            'version': 1,
+            'requestId': 'stable-request',
+            'expectedSize': 128,
+            'expectedSha256': 'stable-hash',
+          },
+          state: OutboxState.queued,
+          createdAt: DateTime.utc(2026, 7, 13),
+        ),
+      );
+      final viewModel = _viewModel(
+        repository: repository,
+        staging: staging,
+        outbox: outbox,
+      );
+
+      await viewModel.recoverInterrupted();
+      expect(
+        viewModel.queue.single.state,
+        AttachmentTransferState.queuedForSync,
+      );
+
+      await viewModel.resume();
+      await viewModel.retry('stable-request');
+
+      expect(repository.uploadedRequestIds, isEmpty);
+      expect(staging.removedRequestIds, isEmpty);
+      expect(
+        (await outbox.list('3')).successData.single.state,
+        OutboxState.queued,
+      );
+    },
+  );
+
   test('download shares the authenticated local file', () async {
     final repository = _FakeRepository();
     final share = _FakeShare();

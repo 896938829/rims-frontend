@@ -17,6 +17,7 @@ import 'package:rims_frontend/features/documents/data/models/document_models.dar
 import 'package:rims_frontend/features/documents/domain/entities/document_data.dart';
 import 'package:rims_frontend/features/offline/data/services/attachment_outbox_handler.dart';
 import 'package:rims_frontend/features/offline/data/services/document_outbox_handler.dart';
+import 'package:rims_frontend/features/offline/data/services/outbox_cleanup_coordinator.dart';
 import 'package:rims_frontend/features/offline/data/datasources/operation_status_remote_datasource.dart';
 import 'package:rims_frontend/features/offline/data/repositories/memory_outbox_repository.dart';
 import 'package:rims_frontend/features/offline/domain/entities/network_reachability.dart';
@@ -468,6 +469,125 @@ void main() {
   );
 
   test(
+    'recreated standalone outbox cleans only after success and never uploads twice',
+    () async {
+      final root = await Directory.systemTemp.createTemp(
+        'rims_standalone_outbox_upload_',
+      );
+      addTearDown(() => root.delete(recursive: true));
+      final source = File('${root.path}${Platform.pathSeparator}proof.pdf');
+      await source.writeAsBytes([1, 2, 3]);
+      FileAttachmentStagingStore createStore() => FileAttachmentStagingStore(
+        rootDirectory: () async => root,
+        idFactory: () => 'standalone-request-1',
+        thumbnailBuilder: (_, _) async => null,
+      );
+      final originalStore = createStore();
+      final staged = (await originalStore.stage(
+        userId: '42',
+        binding: AttachmentBinding.document(91),
+        selection: SelectedAttachmentSource(
+          path: source.path,
+          originalName: 'proof.pdf',
+          mimeType: 'application/pdf',
+          fileSize: 3,
+        ),
+        existingCount: 0,
+      )).successData;
+      final repository = MemoryOutboxRepository(
+        stateMachine: OutboxStateMachine(),
+      );
+      const reviewStamp = '42\u00008\u0000file@1';
+      final operation = OutboxOperation(
+        operationId: 'attachment-upload-standalone-request-1',
+        idempotencyKey: 'standalone-request-1',
+        accountId: '42',
+        warehouseId: 8,
+        kind: OutboxOperationKind.attachmentUpload,
+        payload: {
+          'version': 1,
+          'requestId': 'standalone-request-1',
+          'expectedSize': staged.pending.fileSize,
+          'expectedSha256': staged.sha256,
+        },
+        state: OutboxState.queued,
+        createdAt: DateTime.utc(2026, 7, 13),
+        confirmedAt: DateTime.utc(2026, 7, 13),
+        reviewStamp: reviewStamp,
+        requiresStatusProbe: true,
+      );
+      expect(
+        await repository.enqueueGraph(OutboxGraph(operations: [operation])),
+        isA<Success<Object?>>(),
+      );
+
+      final recreatedStore = createStore();
+      final uploads = _ChainAttachmentsDataSource([]);
+      final coordinator = OutboxCleanupCoordinator(
+        repository: repository,
+        stagingStore: recreatedStore,
+        draftRepository: draftRepository,
+        eventBus: eventBus,
+      );
+      var terminalWasPersistedBeforeCleanup = false;
+      final executor = OutboxExecutor(
+        repository: repository,
+        networkStatusService: const _OnlineNetworkStatusService(),
+        statusDataSource: const _AbsentStatusDataSource(),
+        handlers: [
+          AttachmentOutboxHandler(
+            remoteDataSource: uploads,
+            stagingStore: recreatedStore,
+            draftRepository: draftRepository,
+            eventBus: eventBus,
+          ),
+        ],
+        contextReader: () => const OutboxExecutionContext(
+          accountId: '42',
+          warehouseId: 8,
+          permissionStamp: 'file@1',
+          allowedKinds: {OutboxOperationKind.attachmentUpload},
+        ),
+        delay: (_) async {},
+        onSuccessPersisted: (accountId) async {
+          final persisted = (await repository.list(accountId)).successData;
+          final intents = (await repository.listCleanupIntents(
+            accountId,
+          )).successData;
+          terminalWasPersistedBeforeCleanup =
+              persisted.single.state == OutboxState.succeeded &&
+              intents.single.operationId == operation.operationId;
+          await coordinator.run(accountId);
+        },
+      );
+      const review = OutboxReview(
+        operationIds: {'attachment-upload-standalone-request-1'},
+        accountId: '42',
+        warehouseId: 8,
+        permissionStamp: 'file@1',
+      );
+
+      final report = await executor.execute(review);
+      final repeated = await executor.execute(review);
+
+      expect(report.failure, isNull);
+      expect(report.succeededOperationIds, [operation.operationId]);
+      expect(repeated.failure, isNull);
+      expect(repeated.succeededOperationIds, isEmpty);
+      expect(terminalWasPersistedBeforeCleanup, isTrue);
+      expect(uploads.events, ['upload:standalone-request-1:91']);
+      expect(
+        (await recreatedStore.loadStaged(
+          userId: '42',
+          requestId: 'standalone-request-1',
+        )).failureOrNull,
+        isA<ValidationFailure>(),
+      );
+      expect((await repository.listCleanupIntents('42')).successData, isEmpty);
+    },
+  );
+
+  test(
     'draft attachment rejects cleanup ownership reserved for lifecycle',
     () async {
       final handler = _handler(
@@ -855,6 +975,16 @@ final class _UnexpectedStatusDataSource
   }) => throw StateError('Status probe was not expected.');
 }
 
+final class _AbsentStatusDataSource implements OperationStatusRemoteDataSource {
+  const _AbsentStatusDataSource();
+
+  @override
+  Future<Result<OperationStatus>> loadStatus({
+    required String key,
+    required String scope,
+  }) async => const FailureResult(NotFoundFailure());
+}
+
 final class _OnlineNetworkStatusService implements NetworkStatusService {
   const _OnlineNetworkStatusService();
 
@@ -910,4 +1040,8 @@ extension on Result<dynamic> {
     FailureResult<Object?>(:final failure) => failure,
     _ => null,
   };
+}
+
+extension<T> on Result<T> {
+  T get successData => (this as Success<T>).data;
 }

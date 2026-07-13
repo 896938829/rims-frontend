@@ -198,6 +198,67 @@ void main() {
   );
 
   test(
+    'lifecycle reference accepts only the exact authoritative post-state',
+    () async {
+      final handler = DocumentOutboxHandler(
+        kind: OutboxOperationKind.documentReference,
+        remoteDataSource: dataSource,
+        stagingStore: stagingStore,
+        draftRepository: draftRepository,
+        eventBus: eventBus,
+      );
+      for (final testCase in const [
+        (
+          intent: 'document_complete',
+          docType: 2,
+          preState: '待提交',
+          postState: '已完成',
+          marker: 'document_complete_reference',
+        ),
+        (
+          intent: 'stocktake_confirm',
+          docType: 5,
+          preState: '盘点中',
+          postState: '差异已确认',
+          marker: 'stocktake_confirm_reference',
+        ),
+        (
+          intent: 'stocktake_settle',
+          docType: 5,
+          preState: '差异已确认',
+          postState: '已结转',
+          marker: 'stocktake_settle_reference',
+        ),
+      ]) {
+        dataSource.detailResult = Success(
+          _detail(docType: testCase.docType, status: testCase.postState),
+        );
+
+        final result = await handler.execute(
+          _operation(
+            kind: OutboxOperationKind.documentReference,
+            operationId: 'reference-${testCase.intent}',
+            idempotencyKey: '${testCase.intent}.document_reference',
+            payload: {
+              'version': 1,
+              'documentId': 91,
+              'expectedDocType': testCase.docType,
+              'expectedStatus': testCase.preState,
+              'lifecycleIntent': testCase.intent,
+            },
+          ),
+        );
+
+        expect(result, isA<Success<OutboxHandlerSuccess>>());
+        expect((result as Success<OutboxHandlerSuccess>).data.output.data, {
+          'operationKind': testCase.marker,
+          'documentId': 91,
+        });
+      }
+    },
+  );
+
+  test(
     'settle reference rejects wrong doc type or changed state without settle',
     () async {
       final handler = DocumentOutboxHandler(
@@ -321,7 +382,9 @@ void main() {
   test(
     'executor probes unknown settle before verified reference and replays same key',
     () async {
-      dataSource.detailResult = Success(_detail(docType: 5, status: '差异已确认'));
+      dataSource
+        ..detailResult = Success(_detail(docType: 5, status: '已结转'))
+        ..seedSettledRequest('settle-request-1');
       final repository = MemoryOutboxRepository(
         stateMachine: OutboxStateMachine(),
       );
@@ -348,6 +411,51 @@ void main() {
         'settle:91',
       ]);
       expect(dataSource.lifecycleRequestIds, ['settle-request-1']);
+      expect(dataSource.settleEffects, 1);
+
+      dataSource.events.clear();
+      final repeated = await executor.execute(_settleReview);
+
+      expect(repeated.failure, isNull);
+      expect(repeated.succeededOperationIds, isEmpty);
+      expect(dataSource.events, isEmpty);
+      expect(dataSource.settleEffects, 1);
+    },
+  );
+
+  test(
+    'completed settle lease verifies post-state before same-key replay',
+    () async {
+      dataSource
+        ..detailResult = Success(_detail(docType: 5, status: '已结转'))
+        ..seedSettledRequest('settle-request-1');
+      final repository = MemoryOutboxRepository(
+        stateMachine: OutboxStateMachine(),
+      );
+      await _enqueueReviewedSettleGraph(repository, requiresStatusProbe: true);
+      final executor = _settleExecutor(
+        repository: repository,
+        dataSource: dataSource,
+        stagingStore: stagingStore,
+        draftRepository: draftRepository,
+        eventBus: eventBus,
+        statusDataSource: _CompletedStatus(dataSource.events),
+      );
+
+      final report = await executor.execute(_settleReview);
+
+      expect(report.failure, isNull);
+      expect(report.succeededOperationIds, [
+        'reference-settle-91',
+        'settle-91',
+      ]);
+      expect(dataSource.events, [
+        'status:settle-request-1',
+        'detail:91',
+        'settle:91',
+      ]);
+      expect(dataSource.lifecycleRequestIds, ['settle-request-1']);
+      expect(dataSource.settleEffects, 1);
     },
   );
 
@@ -360,7 +468,15 @@ void main() {
           failure: isA<ValidationFailure>(),
         ),
         (
+          detail: _detail(docType: 2, status: '已结转'),
+          failure: isA<ValidationFailure>(),
+        ),
+        (
           detail: _detail(docType: 5, status: '盘点中'),
+          failure: isA<ConflictFailure>(),
+        ),
+        (
+          detail: _detail(docType: 5, status: '已完成'),
           failure: isA<ConflictFailure>(),
         ),
       ]) {
@@ -863,9 +979,15 @@ final class _DocumentsDataSource implements DocumentsRemoteDataSource {
   final List<String> events = [];
   final List<String> lifecycleRequestIds = [];
   final List<int> detailIds = [];
+  final Set<String> _settledRequestIds = {};
+  int settleEffects = 0;
   Result<DocumentDetailModel> detailResult = Success(
     _detail(docType: 5, status: '差异已确认'),
   );
+
+  void seedSettledRequest(String requestId) {
+    if (_settledRequestIds.add(requestId)) settleEffects += 1;
+  }
 
   @override
   Future<Result<DocumentRecordModel>> createDocument(
@@ -894,6 +1016,7 @@ final class _DocumentsDataSource implements DocumentsRemoteDataSource {
   Future<Result<void>> settleDocument(int id, {String? requestId}) async {
     events.add('settle:$id');
     lifecycleRequestIds.add(requestId ?? '');
+    if (_settledRequestIds.add(requestId ?? '')) settleEffects += 1;
     return const Success(null);
   }
 
@@ -1031,6 +1154,27 @@ final class _AbsentStatus implements OperationStatusRemoteDataSource {
   }) async {
     events.add('status:$key');
     return const FailureResult(NotFoundFailure());
+  }
+}
+
+final class _CompletedStatus implements OperationStatusRemoteDataSource {
+  const _CompletedStatus(this.events);
+
+  final List<String> events;
+
+  @override
+  Future<Result<OperationStatus>> loadStatus({
+    required String key,
+    required String scope,
+  }) async {
+    events.add('status:$key');
+    return Success(
+      OperationStatus(
+        state: OperationState.completed,
+        statusCode: 200,
+        expiresAt: DateTime.now().toUtc().add(const Duration(minutes: 1)),
+      ),
+    );
   }
 }
 
