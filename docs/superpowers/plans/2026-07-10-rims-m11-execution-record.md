@@ -24,7 +24,7 @@ counts, encrypted storage ownership, cleanup, and baseline restore are read.
 | User/warehouse references | 5 | secure-token gate and cached projection | PASS |
 | Product/inventory/alerts/barcode | 6 | offline read, stale source/age, no mutation authority | PASS |
 | Documents/details/reports | 7 | offline read and financial field boundary | PASS |
-| Six document draft types | 8, 9 | autosave, reopen, recreation, ownership | persistence PASS; UI pending |
+| Six document draft types | 8, 9 | autosave, reopen, recreation, ownership | PASS |
 | Explicit reviewed queueing | 11-13 | confirmation and immutable payload | planned |
 | Outbox states and legal transitions | 11 | complete state matrix | planned |
 | Operation dependency ordering | 11, 13 | attachment -> create -> lifecycle | planned |
@@ -154,6 +154,20 @@ counts, encrypted storage ownership, cleanup, and baseline restore are read.
 | Immutability | document requests produce unmodifiable payloads and draft construction snapshots nested maps, lists, and attachment IDs |
 | Lifecycle | 30-day retention keeps the exact boundary; schema-zero product/quantity payloads migrate to version one lines on read |
 | GREEN | strict analyze PASS; offline and document regression suites PASS (153 tests) |
+
+## Task 9 Recoverable Draft UI Evidence
+
+| Probe | Observed result |
+| --- | --- |
+| RED | autosave, management UI, process recovery, attachment binding, submit barriers, and async isolation APIs were absent or failed controlled races |
+| Autosave | all form intent uses a 300 ms debounce and one-flight worker; draft identity and request generations reject stale completions |
+| Recovery | six document types restore lines, transient inputs, warehouse/source intent, non-standard source, role review state, and independent attachments |
+| Attachments | stable draft bindings use account-scoped paths, canonical root validation, per-account serialization, independent duplication, and persistent cleanup compensation |
+| Safety | role downgrade cannot open or submit admin-only drafts; account/warehouse/session changes reject stale async results and cross-scope reads |
+| Submit | form and attachment mutations are barred while submitting; queued saves drain before delete and late attachment operations reconcile by draft CAS |
+| Management | Profile > Data and Cache exposes a dense authenticated draft list with review state and open, duplicate, rename, and confirmed discard workflows |
+| Review | independent specification and code-quality reviews APPROVED after all P0/P1/P2 findings were fixed |
+| GREEN | strict analyze PASS; full Flutter suite PASS (658 tests); diff check PASS |
 
 ## Final Android State Evidence
 

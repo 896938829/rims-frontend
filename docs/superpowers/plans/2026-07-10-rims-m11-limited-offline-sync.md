@@ -447,20 +447,20 @@ feat: persist versioned document drafts
 - Test: `rims_frontend/test/features/offline/drafts_view_model_test.dart`
 - Modify: `rims_frontend/test/features/documents/documents_view_model_test.dart`
 
-- [ ] **Step 1: Write failing tests for debounced autosave, explicit save, reopen, duplicate, rename remark, discard confirmation, account switch, process recreation, and submit-success cleanup.**
+- [x] **Step 1: Write failing tests for debounced autosave, explicit save, reopen, duplicate, rename remark, discard confirmation, account switch, process recreation, and submit-success cleanup.**
 
-- [ ] **Step 2: Integrate one-flight 300 ms autosave into document form changes.**
+- [x] **Step 2: Integrate one-flight 300 ms autosave into document form changes.**
 
 Autosave failures remain visible but do not destroy the in-memory form. A new
 stable draft ID is created before attachment staging binds to it.
 
-- [ ] **Step 3: Add a work-focused draft manager under Profile > Data and Cache.**
+- [x] **Step 3: Add a work-focused draft manager under Profile > Data and Cache.**
 
 Use a dense list with type, warehouse, line count, update time, and review state.
 Commands are open, duplicate, and discard; no marketing card or explanatory
 feature prose.
 
-- [ ] **Step 4: Run tests and commit.**
+- [x] **Step 4: Run tests and commit.**
 
 ```text
 feat: add recoverable document drafts
