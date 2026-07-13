@@ -17,12 +17,16 @@ abstract interface class ConditionalTokenStorage {
 }
 
 abstract interface class AuthTokenTransactionStorage {
-  Future<void> saveAccessTokenForOwner({
+  Future<void> savePendingAccessTokenForOwner({
     required String token,
     required String ownerId,
   });
 
+  Future<bool> commitAccessTokenForOwner(String ownerId);
+
   Future<bool> clearAccessTokenForOwner(String ownerId);
+
+  Future<bool> clearPendingAccessToken();
 }
 
 abstract interface class OfflineDatabaseKeyStorage {
@@ -74,26 +78,54 @@ final class AppSecureStorage
   final FlutterSecureStorage _storage;
 
   @override
-  Future<void> saveAccessToken(String token) =>
-      saveAccessTokenForOwner(token: token, ownerId: const Uuid().v4());
+  Future<void> saveAccessToken(String token) => _writeAccessTokenRecord(
+    _AccessTokenRecord(
+      token: token,
+      ownerId: const Uuid().v4(),
+      state: _AccessTokenState.committed,
+    ),
+  );
 
   @override
-  Future<void> saveAccessTokenForOwner({
+  Future<void> savePendingAccessTokenForOwner({
     required String token,
     required String ownerId,
-  }) => _SecureStorageKeyMutex.run(
-    kAccessTokenKey,
-    () => _storage.write(
-      key: kAccessTokenKey,
-      value: jsonEncode({'version': 1, 'token': token, 'owner_id': ownerId}),
+  }) => _writeAccessTokenRecord(
+    _AccessTokenRecord(
+      token: token,
+      ownerId: ownerId,
+      state: _AccessTokenState.pending,
     ),
   );
 
   @override
   Future<String?> readAccessToken() async {
     final raw = await _storage.read(key: kAccessTokenKey);
-    return raw == null ? null : _decodeAccessTokenRecord(raw).token;
+    if (raw == null) return null;
+    final record = _decodeAccessTokenRecord(raw);
+    return record.state == _AccessTokenState.committed ? record.token : null;
   }
+
+  @override
+  Future<bool> commitAccessTokenForOwner(String ownerId) =>
+      _SecureStorageKeyMutex.run(kAccessTokenKey, () async {
+        final raw = await _storage.read(key: kAccessTokenKey);
+        if (raw == null) return false;
+        final record = _decodeAccessTokenRecord(raw);
+        if (record.ownerId != ownerId) return false;
+        if (record.state == _AccessTokenState.committed) return true;
+        await _storage.write(
+          key: kAccessTokenKey,
+          value: _encodeAccessTokenRecord(
+            _AccessTokenRecord(
+              token: record.token,
+              ownerId: ownerId,
+              state: _AccessTokenState.committed,
+            ),
+          ),
+        );
+        return true;
+      });
 
   @override
   Future<void> clearAccessToken() => _SecureStorageKeyMutex.run(
@@ -123,6 +155,26 @@ final class AppSecureStorage
         await _storage.delete(key: kAccessTokenKey);
         return true;
       });
+
+  @override
+  Future<bool> clearPendingAccessToken() =>
+      _SecureStorageKeyMutex.run(kAccessTokenKey, () async {
+        final raw = await _storage.read(key: kAccessTokenKey);
+        if (raw == null) return false;
+        final record = _decodeAccessTokenRecord(raw);
+        if (record.state != _AccessTokenState.pending) return false;
+        await _storage.delete(key: kAccessTokenKey);
+        return true;
+      });
+
+  Future<void> _writeAccessTokenRecord(_AccessTokenRecord record) =>
+      _SecureStorageKeyMutex.run(
+        kAccessTokenKey,
+        () => _storage.write(
+          key: kAccessTokenKey,
+          value: _encodeAccessTokenRecord(record),
+        ),
+      );
 
   @override
   Future<void> saveOfflineDatabaseKey(String key) {
@@ -184,26 +236,56 @@ final class AppSecureStorage
 }
 
 final class _AccessTokenRecord {
-  const _AccessTokenRecord({required this.token, this.ownerId});
+  const _AccessTokenRecord({
+    required this.token,
+    required this.state,
+    this.ownerId,
+  });
 
   final String token;
   final String? ownerId;
+  final _AccessTokenState state;
 }
+
+enum _AccessTokenState { pending, committed }
+
+String _encodeAccessTokenRecord(_AccessTokenRecord record) => jsonEncode({
+  'version': 2,
+  'state': record.state.name,
+  'token': record.token,
+  'owner_id': record.ownerId,
+});
 
 _AccessTokenRecord _decodeAccessTokenRecord(String raw) {
   if (!raw.trimLeft().startsWith('{')) {
-    return _AccessTokenRecord(token: raw);
+    return _AccessTokenRecord(token: raw, state: _AccessTokenState.committed);
   }
   final decoded = jsonDecode(raw);
-  if (decoded is! Map || decoded['version'] != 1) {
+  if (decoded is! Map) {
     throw const FormatException('Unsupported access token record.');
   }
+  final version = decoded['version'];
   final token = decoded['token'];
   final ownerId = decoded['owner_id'];
   if (token is! String || ownerId is! String || ownerId.isEmpty) {
     throw const FormatException('Invalid access token record.');
   }
-  return _AccessTokenRecord(token: token, ownerId: ownerId);
+  if (version == 1) {
+    return _AccessTokenRecord(
+      token: token,
+      ownerId: ownerId,
+      state: _AccessTokenState.committed,
+    );
+  }
+  if (version != 2) {
+    throw const FormatException('Unsupported access token record.');
+  }
+  final state = switch (decoded['state']) {
+    'pending' => _AccessTokenState.pending,
+    'committed' => _AccessTokenState.committed,
+    _ => throw const FormatException('Invalid access token record.'),
+  };
+  return _AccessTokenRecord(token: token, ownerId: ownerId, state: state);
 }
 
 abstract final class _SecureStorageKeyMutex {

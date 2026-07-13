@@ -444,11 +444,8 @@ void main() {
         );
         expect(ownership.canAccessOfflineData('7'), isFalse);
         if (reason == OfflineOwnershipReason.accountSwitch) {
-          expect(ownership.canAccessOfflineData('8'), isFalse);
-          await expectLater(
-            barrier.protect(accountId: '8', operation: () async {}),
-            throwsA(isA<OfflineWriteBlockedException>()),
-          );
+          expect(ownership.canAccessOfflineData('8'), isTrue);
+          await barrier.protect(accountId: '8', operation: () async {});
         }
 
         expect((await ownership.apply(_intentFor(reason))).completed, isTrue);
@@ -506,6 +503,157 @@ void main() {
       },
     );
   }
+
+  test('overlapping account switches release superseded targets without '
+      'unblocking the latest target', () async {
+    final barrier = OfflineWriteBarrier();
+    final store =
+        _AttemptControlledOwnershipStore(OfflineOwnershipReason.accountSwitch, [
+          _ControlledOwnershipAttempt.blocked(),
+          _ControlledOwnershipAttempt.blocked(),
+        ]);
+    final ownership = OfflineOwnershipService(
+      store: store,
+      files: const _NoopFiles(),
+      scans: const _NoopScans(),
+      reviews: const _NoopReviews(),
+      databaseKeys: MemoryOfflineDatabaseKeyManager(),
+      mutationParticipants: [barrier],
+    );
+
+    final first = ownership.apply(
+      const OfflineOwnershipIntent.accountSwitch(
+        previousAccountId: '7',
+        currentAccountId: '8',
+      ),
+    );
+    await store.attempts[0].started.future;
+    final second = ownership.apply(
+      const OfflineOwnershipIntent.accountSwitch(
+        previousAccountId: '7',
+        currentAccountId: '9',
+      ),
+    );
+
+    store.attempts[0].release.complete();
+    expect((await first).completed, isTrue);
+    await store.attempts[1].started.future;
+    expect(ownership.canAccessOfflineData('8'), isTrue);
+    expect(ownership.canAccessOfflineData('9'), isFalse);
+    await barrier.protect(accountId: '8', operation: () async {});
+    await expectLater(
+      barrier.protect(accountId: '9', operation: () async {}),
+      throwsA(isA<OfflineWriteBlockedException>()),
+    );
+
+    store.attempts[1].release.complete();
+    expect((await second).completed, isTrue);
+    expect(ownership.canAccessOfflineData('9'), isTrue);
+    expect(ownership.canAccessOfflineData('7'), isFalse);
+    await ownership.apply(
+      const OfflineOwnershipIntent.reauthenticated(accountId: '7'),
+    );
+    expect(ownership.canAccessOfflineData('7'), isTrue);
+    expect(ownership.debugGenerationMetadataEntryCount, 0);
+  });
+
+  test(
+    'account switches with different previous accounts share a target safely',
+    () async {
+      final barrier = OfflineWriteBarrier();
+      final store = _AttemptControlledOwnershipStore(
+        OfflineOwnershipReason.accountSwitch,
+        [
+          _ControlledOwnershipAttempt.blocked(fails: true),
+          _ControlledOwnershipAttempt.blocked(),
+          _ControlledOwnershipAttempt.successful(),
+        ],
+      );
+      final ownership = OfflineOwnershipService(
+        store: store,
+        files: const _NoopFiles(),
+        scans: const _NoopScans(),
+        reviews: const _NoopReviews(),
+        databaseKeys: MemoryOfflineDatabaseKeyManager(),
+        mutationParticipants: [barrier],
+      );
+
+      final first = ownership.apply(
+        const OfflineOwnershipIntent.accountSwitch(
+          previousAccountId: '7',
+          currentAccountId: '9',
+        ),
+      );
+      await store.attempts[0].started.future;
+      final second = ownership.apply(
+        const OfflineOwnershipIntent.accountSwitch(
+          previousAccountId: '8',
+          currentAccountId: '9',
+        ),
+      );
+      store.attempts[0].release.complete();
+      expect((await first).completed, isFalse);
+      await store.attempts[1].started.future;
+      expect(ownership.canAccessOfflineData('7'), isFalse);
+      expect(ownership.canAccessOfflineData('9'), isFalse);
+
+      store.attempts[1].release.complete();
+      expect((await second).completed, isTrue);
+      expect(ownership.canAccessOfflineData('9'), isTrue);
+      await ownership.apply(
+        const OfflineOwnershipIntent.reauthenticated(accountId: '8'),
+      );
+      expect(ownership.canAccessOfflineData('8'), isTrue);
+      expect(ownership.canAccessOfflineData('7'), isFalse);
+
+      expect(
+        (await ownership.apply(
+          const OfflineOwnershipIntent.accountSwitch(
+            previousAccountId: '7',
+            currentAccountId: '9',
+          ),
+        )).completed,
+        isTrue,
+      );
+      await ownership.apply(
+        const OfflineOwnershipIntent.reauthenticated(accountId: '7'),
+      );
+      expect(ownership.canAccessOfflineData('7'), isTrue);
+      expect(ownership.canAccessOfflineData('9'), isTrue);
+      expect(ownership.debugGenerationMetadataEntryCount, 0);
+    },
+  );
+
+  test('completed ownership generations are reclaimed', () async {
+    final ownership = OfflineOwnershipService(
+      store: MemoryOfflineStore(),
+      files: const _NoopFiles(),
+      scans: const _NoopScans(),
+      reviews: const _NoopReviews(),
+      databaseKeys: MemoryOfflineDatabaseKeyManager(),
+    );
+
+    for (var index = 0; index < 200; index += 1) {
+      expect(
+        (await ownership.apply(
+          OfflineOwnershipIntent.permissionRefresh(accountId: '$index'),
+        )).completed,
+        isTrue,
+      );
+    }
+    expect(ownership.debugGenerationMetadataEntryCount, 0);
+
+    for (var index = 0; index < 50; index += 1) {
+      final accountId = '$index';
+      await ownership.apply(
+        OfflineOwnershipIntent.tokenExpiry(accountId: accountId),
+      );
+      await ownership.apply(
+        OfflineOwnershipIntent.reauthenticated(accountId: accountId),
+      );
+    }
+    expect(ownership.debugGenerationMetadataEntryCount, 0);
+  });
 
   test(
     'successful account switch is recoverable when the previous account logs in again',

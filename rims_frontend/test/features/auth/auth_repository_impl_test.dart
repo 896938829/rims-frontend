@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rims_frontend/core/result/failure.dart';
 import 'package:rims_frontend/core/result/result.dart';
@@ -299,6 +301,52 @@ void main() {
       expect(storage.ownerId, isNotEmpty);
     });
 
+    test(
+      'raw login keeps its token pending until warehouse bootstrap succeeds',
+      () async {
+        final storage = _FakeTokenStorage();
+        final warehouseBlocker = Completer<void>();
+        final remoteDataSource = _FakeAuthRemoteDataSource(
+          loginResult: const Success(
+            LoginResponseModel(
+              token: 'fresh-token',
+              user: AppUserModel(
+                id: 7,
+                username: 'alice',
+                realName: 'Alice',
+                roleCode: 'user',
+                roleName: 'User',
+              ),
+            ),
+          ),
+          warehousesResult: const Success([
+            WarehouseModel(
+              id: 1,
+              code: 'WH001',
+              name: 'Warehouse',
+              isDefault: true,
+            ),
+          ]),
+          warehouseBlocker: warehouseBlocker,
+        );
+        final repository = AuthRepositoryImpl(
+          remoteDataSource: remoteDataSource,
+          secureStorage: storage,
+          tokenOwnerFactory: () => 'raw-owner',
+        );
+
+        final login = repository.login(username: 'alice', password: 'secret');
+        await remoteDataSource.warehouseStarted.future;
+
+        expect(storage.accessToken, 'fresh-token');
+        expect(await storage.readAccessToken(), isNull);
+        warehouseBlocker.complete();
+        expect(await login, isA<Success<AuthSession>>());
+        expect(await storage.readAccessToken(), 'fresh-token');
+        expect(storage.committedOwnerIds, ['raw-owner']);
+      },
+    );
+
     test('login rejects user without username before saving token', () async {
       final storage = _FakeTokenStorage();
       final remoteDataSource = _FakeAuthRemoteDataSource(
@@ -413,6 +461,105 @@ void main() {
     );
 
     test(
+      'token commit failures are returned as typed failures and stay unreadable',
+      () async {
+        final storage = _FakeTokenStorage()..failCommits = true;
+        final repository = AuthRepositoryImpl(
+          remoteDataSource: _FakeAuthRemoteDataSource(
+            loginResult: const Success(
+              LoginResponseModel(
+                token: 'login-token',
+                user: AppUserModel(
+                  id: 7,
+                  username: 'alice',
+                  realName: 'Alice',
+                  roleCode: 'user',
+                  roleName: 'User',
+                ),
+              ),
+            ),
+            warehousesResult: const Success([]),
+          ),
+          secureStorage: storage,
+          tokenOwnerFactory: () => 'raw-owner',
+        );
+
+        final result = await repository.login(
+          username: 'alice',
+          password: 'secret',
+        );
+
+        expect(
+          result.when(success: (_) => null, failure: (failure) => failure),
+          isA<LocalStorageFailure>(),
+        );
+        expect(await storage.readAccessToken(), isNull);
+      },
+    );
+
+    for (final readError in [
+      const FormatException('malformed token record'),
+      StateError('secure storage read failed'),
+    ]) {
+      test(
+        'token read ${readError.runtimeType} becomes LocalStorageFailure',
+        () async {
+          final storage = _FakeTokenStorage()..readError = readError;
+          final repository = AuthRepositoryImpl(
+            remoteDataSource: _FakeAuthRemoteDataSource(),
+            secureStorage: storage,
+          );
+
+          final result = await repository.restoreSession();
+
+          expect(
+            result.when(success: (_) => null, failure: (failure) => failure),
+            isA<LocalStorageFailure>(),
+          );
+        },
+      );
+    }
+
+    test(
+      'failed bootstrap clear exception becomes LocalStorageFailure',
+      () async {
+        final storage = _FakeTokenStorage()..failClears = true;
+        final repository = AuthRepositoryImpl(
+          remoteDataSource: _FakeAuthRemoteDataSource(
+            loginResult: const Success(
+              LoginResponseModel(
+                token: 'login-token',
+                user: AppUserModel(
+                  id: 7,
+                  username: 'alice',
+                  realName: 'Alice',
+                  roleCode: 'user',
+                  roleName: 'User',
+                ),
+              ),
+            ),
+            warehousesResult: const FailureResult(
+              NetworkFailure(message: 'bootstrap failed'),
+            ),
+          ),
+          secureStorage: storage,
+          tokenOwnerFactory: () => 'raw-owner',
+        );
+
+        final result = await repository.login(
+          username: 'alice',
+          password: 'secret',
+        );
+
+        expect(
+          result.when(success: (_) => null, failure: (failure) => failure),
+          isA<LocalStorageFailure>(),
+        );
+        expect(await storage.readAccessToken(), isNull);
+      },
+    );
+
+    test(
       'switchCurrentWarehouse confirms target warehouse with backend',
       () async {
         final storage = _FakeTokenStorage(accessToken: 'active-token');
@@ -486,7 +633,7 @@ final class _FakeTokenStorage
         TokenStorage,
         ConditionalTokenStorage,
         AuthTokenTransactionStorage {
-  _FakeTokenStorage({this.accessToken});
+  _FakeTokenStorage({this.accessToken}) : tokenCommitted = accessToken != null;
 
   String? accessToken;
   int clearCallCount = 0;
@@ -494,13 +641,20 @@ final class _FakeTokenStorage
   final List<String> conditionalClearAttempts = [];
   final List<String> ownerClearAttempts = [];
   String? ownerId;
+  bool tokenCommitted;
   bool failWrites = false;
+  bool failCommits = false;
+  bool failClears = false;
+  Object? readError;
+  final List<String> committedOwnerIds = [];
 
   @override
   Future<void> clearAccessToken() async {
+    if (failClears) throw StateError('token clear failed');
     clearCallCount += 1;
     accessToken = null;
     ownerId = null;
+    tokenCommitted = false;
   }
 
   @override
@@ -520,7 +674,26 @@ final class _FakeTokenStorage
   }
 
   @override
-  Future<String?> readAccessToken() async => accessToken;
+  Future<bool> clearPendingAccessToken() async {
+    if (accessToken == null || tokenCommitted) return false;
+    await clearAccessToken();
+    return true;
+  }
+
+  @override
+  Future<bool> commitAccessTokenForOwner(String ownerId) async {
+    if (failCommits) throw StateError('token commit failed');
+    if (this.ownerId != ownerId || accessToken == null) return false;
+    tokenCommitted = true;
+    committedOwnerIds.add(ownerId);
+    return true;
+  }
+
+  @override
+  Future<String?> readAccessToken() async {
+    if (readError case final error?) throw error;
+    return tokenCommitted ? accessToken : null;
+  }
 
   @override
   Future<void> saveAccessToken(String token) async {
@@ -528,10 +701,11 @@ final class _FakeTokenStorage
     saveCallCount += 1;
     accessToken = token;
     ownerId = null;
+    tokenCommitted = true;
   }
 
   @override
-  Future<void> saveAccessTokenForOwner({
+  Future<void> savePendingAccessTokenForOwner({
     required String token,
     required String ownerId,
   }) async {
@@ -539,6 +713,7 @@ final class _FakeTokenStorage
     saveCallCount += 1;
     accessToken = token;
     this.ownerId = ownerId;
+    tokenCommitted = false;
   }
 }
 
@@ -556,12 +731,15 @@ final class _FakeAuthRemoteDataSource implements AuthRemoteDataSource {
     this.switchWarehouseResult = const FailureResult<WarehouseModel?>(
       UnknownFailure(),
     ),
+    this.warehouseBlocker,
   });
 
   final Result<AppUserModel> currentUserResult;
   final Result<List<WarehouseModel>> warehousesResult;
   final Result<LoginResponseModel> loginResult;
   final Result<WarehouseModel?> switchWarehouseResult;
+  final Completer<void>? warehouseBlocker;
+  final Completer<void> warehouseStarted = Completer<void>();
   int loadCurrentUserCallCount = 0;
   int loadWarehousesCallCount = 0;
   int? lastSwitchWarehouseId;
@@ -578,6 +756,8 @@ final class _FakeAuthRemoteDataSource implements AuthRemoteDataSource {
   }) async {
     lastWarehouseAccessToken = accessToken;
     loadWarehousesCallCount += 1;
+    if (!warehouseStarted.isCompleted) warehouseStarted.complete();
+    await warehouseBlocker?.future;
     return warehousesResult;
   }
 

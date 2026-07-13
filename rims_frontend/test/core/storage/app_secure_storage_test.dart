@@ -10,19 +10,59 @@ import 'package:rims_frontend/features/offline/data/repositories/cached_auth_rep
 import 'package:rims_frontend/features/offline/data/repositories/memory_offline_store.dart';
 
 void main() {
+  test('pending token is never restored until its owner commits it', () async {
+    final raw = _MemoryFlutterSecureStorage();
+    final storage = AppSecureStorage(storage: raw);
+    await storage.savePendingAccessTokenForOwner(
+      token: 'T',
+      ownerId: 'owner-a',
+    );
+    final restarted = AppSecureStorage(storage: raw);
+
+    expect(await restarted.readAccessToken(), isNull);
+    expect(await restarted.commitAccessTokenForOwner('owner-a'), isTrue);
+    expect(await restarted.readAccessToken(), 'T');
+  });
+
   test('token owner rollback cannot delete a newer equal token', () async {
     final raw = _MemoryFlutterSecureStorage();
     final storage = AppSecureStorage(storage: raw);
-    await storage.saveAccessTokenForOwner(token: 'T', ownerId: 'owner-a');
-    await storage.saveAccessTokenForOwner(token: 'T', ownerId: 'owner-b');
+    await storage.savePendingAccessTokenForOwner(
+      token: 'T',
+      ownerId: 'owner-a',
+    );
+    await storage.savePendingAccessTokenForOwner(
+      token: 'T',
+      ownerId: 'owner-b',
+    );
+    expect(await storage.commitAccessTokenForOwner('owner-b'), isTrue);
     final restarted = AppSecureStorage(storage: raw);
 
-    expect(await restarted.readAccessToken(), 'T');
     expect(await restarted.clearAccessTokenForOwner('owner-a'), isFalse);
     expect(await restarted.readAccessToken(), 'T');
     expect(await restarted.clearAccessTokenForOwner('owner-b'), isTrue);
     expect(await restarted.readAccessToken(), isNull);
   });
+
+  test(
+    'a restarted process safely discards an abandoned pending token',
+    () async {
+      final raw = _MemoryFlutterSecureStorage();
+      final storage = AppSecureStorage(storage: raw);
+      await storage.savePendingAccessTokenForOwner(
+        token: 'crashed-token',
+        ownerId: 'crashed-owner',
+      );
+      final restarted = AppSecureStorage(storage: raw);
+
+      expect(await restarted.readAccessToken(), isNull);
+      expect(await restarted.clearPendingAccessToken(), isTrue);
+      expect(
+        await restarted.commitAccessTokenForOwner('crashed-owner'),
+        isFalse,
+      );
+    },
+  );
 
   test('legacy plain tokens remain readable and clearable', () async {
     final raw = _MemoryFlutterSecureStorage()

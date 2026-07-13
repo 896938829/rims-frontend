@@ -26,41 +26,50 @@ final class AuthRepositoryImpl
 
   @override
   Future<Result<AuthSession?>> restoreSession() async {
-    final token = await secureStorage.readAccessToken();
-    if (token == null || token.isEmpty) {
-      return const Success<AuthSession?>(null);
+    try {
+      await _clearAbandonedPendingToken();
+      final token = await secureStorage.readAccessToken();
+      if (token == null || token.isEmpty) {
+        return const Success<AuthSession?>(null);
+      }
+
+      final userResult = await remoteDataSource.loadCurrentUser();
+      return userResult.when(
+        success: (user) async {
+          final currentUser = user.toEntity();
+          final userFailure = _validateUser(currentUser);
+          if (userFailure != null) {
+            await secureStorage.clearAccessToken();
+            return FailureResult<AuthSession?>(userFailure);
+          }
+
+          final sessionResult = await _sessionFromUserAndToken(
+            token: token,
+            user: currentUser,
+            clearTokenOnAnyFailure: false,
+          );
+
+          return sessionResult;
+        },
+        failure: (failure) async => FailureResult<AuthSession?>(failure),
+      );
+    } on Object catch (error) {
+      return _localStorageFailure(
+        'Unable to read or update the stored credential.',
+        error,
+      );
     }
-
-    final userResult = await remoteDataSource.loadCurrentUser();
-    return userResult.when(
-      success: (user) async {
-        final currentUser = user.toEntity();
-        final userFailure = _validateUser(currentUser);
-        if (userFailure != null) {
-          await secureStorage.clearAccessToken();
-          return FailureResult<AuthSession?>(userFailure);
-        }
-
-        final sessionResult = await _sessionFromUserAndToken(
-          token: token,
-          user: currentUser,
-          clearTokenOnAnyFailure: false,
-        );
-
-        return sessionResult;
-      },
-      failure: (failure) async => FailureResult<AuthSession?>(failure),
-    );
   }
 
   @override
   Future<Result<AuthSession>> login({
     required String username,
     required String password,
-  }) => loginWithTokenOwner(
+  }) => _loginTransaction(
     username: username,
     password: password,
     ownerId: tokenOwnerFactory(),
+    commitOnSuccess: true,
   );
 
   @override
@@ -68,43 +77,79 @@ final class AuthRepositoryImpl
     required String username,
     required String password,
     required String ownerId,
-  }) async {
-    final loginResult = await remoteDataSource.login(
-      username: username,
-      password: password,
-    );
+  }) => _loginTransaction(
+    username: username,
+    password: password,
+    ownerId: ownerId,
+    commitOnSuccess: false,
+  );
 
-    return _sessionFromLoginResult(loginResult, ownerId: ownerId);
+  Future<Result<AuthSession>> _loginTransaction({
+    required String username,
+    required String password,
+    required String ownerId,
+    required bool commitOnSuccess,
+  }) async {
+    try {
+      await _clearAbandonedPendingToken();
+      final loginResult = await remoteDataSource.login(
+        username: username,
+        password: password,
+      );
+      return await _sessionFromLoginResult(
+        loginResult,
+        ownerId: ownerId,
+        commitOnSuccess: commitOnSuccess,
+      );
+    } on Object catch (error) {
+      try {
+        await _clearLoginToken(token: '', ownerId: ownerId);
+      } on Object {
+        // A failed pending rollback remains unreadable by TokenStorage.
+      }
+      return _localStorageFailure(
+        'Unable to complete the credential transaction.',
+        error,
+      );
+    }
   }
 
   @override
   Future<Result<Warehouse>> switchCurrentWarehouse(Warehouse warehouse) async {
-    final switchResult = await remoteDataSource.switchCurrentWarehouse(
-      warehouse.id,
-    );
+    try {
+      final switchResult = await remoteDataSource.switchCurrentWarehouse(
+        warehouse.id,
+      );
 
-    return switchResult.when(
-      success: (warehouseModel) {
-        if (warehouseModel == null) {
-          return Success<Warehouse>(warehouse);
-        }
+      return switchResult.when(
+        success: (warehouseModel) {
+          if (warehouseModel == null) {
+            return Success<Warehouse>(warehouse);
+          }
 
-        return Success<Warehouse>(
-          Warehouse(
-            id: warehouseModel.id,
-            code: warehouseModel.code,
-            name: warehouseModel.name,
-            isDefault: warehouse.isDefault,
-          ),
-        );
-      },
-      failure: FailureResult<Warehouse>.new,
-    );
+          return Success<Warehouse>(
+            Warehouse(
+              id: warehouseModel.id,
+              code: warehouseModel.code,
+              name: warehouseModel.name,
+              isDefault: warehouse.isDefault,
+            ),
+          );
+        },
+        failure: FailureResult<Warehouse>.new,
+      );
+    } on Object catch (error) {
+      return _localStorageFailure(
+        'Unable to complete the warehouse session update.',
+        error,
+      );
+    }
   }
 
   Future<Result<AuthSession>> _sessionFromLoginResult(
     Result<LoginResponseModel> loginResult, {
     required String ownerId,
+    required bool commitOnSuccess,
   }) async {
     return loginResult.when(
       success: (login) async {
@@ -123,7 +168,10 @@ final class AuthRepositoryImpl
 
         try {
           if (secureStorage case final AuthTokenTransactionStorage owned) {
-            await owned.saveAccessTokenForOwner(token: token, ownerId: ownerId);
+            await owned.savePendingAccessTokenForOwner(
+              token: token,
+              ownerId: ownerId,
+            );
           } else {
             await secureStorage.saveAccessToken(token);
           }
@@ -136,12 +184,26 @@ final class AuthRepositoryImpl
           );
         }
 
-        return _sessionFromUserAndToken(
+        final sessionResult = await _sessionFromUserAndToken(
           token: token,
           user: user,
           clearTokenOnAnyFailure: true,
           tokenOwnerId: ownerId,
         );
+        if (sessionResult is! Success<AuthSession> || !commitOnSuccess) {
+          return sessionResult;
+        }
+        if (secureStorage case final AuthTokenTransactionStorage owned) {
+          final committed = await owned.commitAccessTokenForOwner(ownerId);
+          if (!committed) {
+            return const FailureResult<AuthSession>(
+              LocalStorageFailure(
+                message: 'The authenticated credential was superseded.',
+              ),
+            );
+          }
+        }
+        return sessionResult;
       },
       failure: (failure) async => FailureResult<AuthSession>(failure),
     );
@@ -207,6 +269,15 @@ final class AuthRepositoryImpl
       await secureStorage.clearAccessToken();
     }
   }
+
+  Future<void> _clearAbandonedPendingToken() async {
+    if (secureStorage case final AuthTokenTransactionStorage transaction) {
+      await transaction.clearPendingAccessToken();
+    }
+  }
+
+  FailureResult<T> _localStorageFailure<T>(String message, Object error) =>
+      FailureResult<T>(LocalStorageFailure(message: message, cause: error));
 
   T? _firstWhereOrNull<T>(Iterable<T> values, bool Function(T value) test) {
     for (final value in values) {

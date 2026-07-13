@@ -786,6 +786,133 @@ void main() {
   }
 
   test(
+    'cached login commits its pending token only after ownership and projection',
+    () async {
+      final storage = _FakeSessionStorage();
+      final rawStore = MemoryOfflineStore();
+      final ownership = _RecordingOwnershipCoordinator()
+        ..blocker = Completer<void>();
+      final delegate = _ConcurrentLoginAuthRepository(storage);
+      final repository = CachedAuthRepository(
+        delegate: delegate,
+        store: rawStore,
+        tokenStorage: storage,
+        accountStorage: storage,
+        revocationStorage: storage,
+        ownershipCoordinator: ownership,
+        authTransactionOwnerFactory: () => 'cached-owner',
+        onSessionRevoked: () {},
+      );
+
+      final login = repository.login(username: 'bob', password: 'secret');
+      while (ownership.intents.isEmpty) {
+        await Future<void>.delayed(Duration.zero);
+      }
+
+      expect(storage.token, 'token');
+      expect(await storage.readAccessToken(), isNull);
+      expect(storage.accountId, isNull);
+      expect((await rawStore.inspectAccount('8')).cacheEntries, 0);
+
+      ownership.blocker!.complete();
+      expect(await login, isA<Success<AuthSession>>());
+      expect(await storage.readAccessToken(), 'token');
+      expect(storage.committedOwnerIds, ['cached-owner']);
+      expect(storage.accountId, '8');
+      expect((await rawStore.inspectAccount('8')).cacheEntries, 1);
+    },
+  );
+
+  test(
+    'cached commit failure remains unauthenticated across restart',
+    () async {
+      final storage = _FakeSessionStorage()..failTokenCommits = true;
+      final rawStore = MemoryOfflineStore();
+      final repository = CachedAuthRepository(
+        delegate: _ConcurrentLoginAuthRepository(storage),
+        store: rawStore,
+        tokenStorage: storage,
+        accountStorage: storage,
+        revocationStorage: storage,
+        ownershipCoordinator: _RecordingOwnershipCoordinator(),
+        authTransactionOwnerFactory: () => 'cached-owner',
+        onSessionRevoked: () {},
+      );
+
+      final result = await repository.login(
+        username: 'bob',
+        password: 'secret',
+      );
+
+      expect(
+        result.when(success: (_) => null, failure: (failure) => failure),
+        isA<LocalStorageFailure>(),
+      );
+      expect(await storage.readAccessToken(), isNull);
+      expect(storage.accountId, isNull);
+      expect((await rawStore.inspectAccount('8')).cacheEntries, 0);
+
+      storage.failTokenCommits = false;
+      final restarted = CachedAuthRepository(
+        delegate: _FakeAuthRepository(
+          restoreResult: const Success<AuthSession?>(null),
+        ),
+        store: MemoryOfflineStore(),
+        tokenStorage: storage,
+        accountStorage: storage,
+        revocationStorage: storage,
+        onSessionRevoked: () {},
+      );
+      expect(
+        await restarted.restoreSession(),
+        const Success<AuthSession?>(null),
+      );
+      expect(storage.token, isNull);
+    },
+  );
+
+  test(
+    'switch token storage exception is returned as LocalStorageFailure',
+    () async {
+      final storage = _FakeSessionStorage(token: 'token')
+        ..accountId = '7'
+        ..tokenReadError = StateError('secure read failed');
+      final repository = CachedAuthRepository(
+        delegate: _FakeAuthRepository(
+          restoreResult: const Success<AuthSession?>(null),
+          switchResult: const Success(
+            Warehouse(
+              id: 2,
+              code: 'WH2',
+              name: 'Warehouse 2',
+              isDefault: false,
+            ),
+          ),
+        ),
+        store: MemoryOfflineStore(),
+        tokenStorage: storage,
+        accountStorage: storage,
+        revocationStorage: storage,
+        onSessionRevoked: () {},
+      );
+
+      final result = await repository.switchCurrentWarehouse(
+        const Warehouse(
+          id: 2,
+          code: 'WH2',
+          name: 'Warehouse 2',
+          isDefault: false,
+        ),
+      );
+
+      expect(
+        result.when(success: (_) => null, failure: (failure) => failure),
+        isA<LocalStorageFailure>(),
+      );
+    },
+  );
+
+  test(
     'revocation keeps the durable marker until account metadata is cleared',
     () async {
       final delegate = _FakeAuthRepository(
@@ -1216,10 +1343,14 @@ final class _FakeSessionStorage
         AuthenticatedAccountStorage,
         PendingRevocationStorage,
         ConditionalPendingRevocationStorage {
-  _FakeSessionStorage({this.token});
+  _FakeSessionStorage({this.token}) : tokenCommitted = token != null;
 
   String? token;
   String? tokenOwnerId;
+  bool tokenCommitted;
+  bool failTokenCommits = false;
+  Object? tokenReadError;
+  final List<String> committedOwnerIds = [];
   String? accountId;
   String? pendingRevocationAccountId;
   final Map<_RevocationStorageFailure, int> _remainingFailures = {};
@@ -1246,6 +1377,7 @@ final class _FakeSessionStorage
     _throwIf(_RevocationStorageFailure.clearCredential);
     token = null;
     tokenOwnerId = null;
+    tokenCommitted = false;
   }
 
   @override
@@ -1265,21 +1397,42 @@ final class _FakeSessionStorage
   }
 
   @override
-  Future<String?> readAccessToken() async => token;
+  Future<bool> clearPendingAccessToken() async {
+    if (token == null || tokenCommitted) return false;
+    await clearAccessToken();
+    return true;
+  }
+
+  @override
+  Future<bool> commitAccessTokenForOwner(String ownerId) async {
+    if (failTokenCommits) throw StateError('token commit failed');
+    if (tokenOwnerId != ownerId || token == null) return false;
+    tokenCommitted = true;
+    committedOwnerIds.add(ownerId);
+    return true;
+  }
+
+  @override
+  Future<String?> readAccessToken() async {
+    if (tokenReadError case final error?) throw error;
+    return tokenCommitted ? token : null;
+  }
 
   @override
   Future<void> saveAccessToken(String token) async {
     this.token = token;
     tokenOwnerId = null;
+    tokenCommitted = true;
   }
 
   @override
-  Future<void> saveAccessTokenForOwner({
+  Future<void> savePendingAccessTokenForOwner({
     required String token,
     required String ownerId,
   }) async {
     this.token = token;
     tokenOwnerId = ownerId;
+    tokenCommitted = false;
   }
 
   @override
@@ -1537,13 +1690,19 @@ final class _ConcurrentLoginAuthRepository
     required String ownerId,
   }) async {
     if (username == 'alice') {
-      await storage.saveAccessTokenForOwner(token: 'token', ownerId: ownerId);
+      await storage.savePendingAccessTokenForOwner(
+        token: 'token',
+        ownerId: ownerId,
+      );
       aliceStarted.complete();
       await releaseAlice.future;
       return const Success(_session);
     }
     if (bobFails) return const FailureResult(AuthenticationFailure());
-    await storage.saveAccessTokenForOwner(token: 'token', ownerId: ownerId);
+    await storage.savePendingAccessTokenForOwner(
+      token: 'token',
+      ownerId: ownerId,
+    );
     return const Success(_secondSameTokenSession);
   }
 
