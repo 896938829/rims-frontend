@@ -137,7 +137,7 @@ final class _HomePageState extends State<HomePage> {
                       OutlinedButton.icon(
                         onPressed: viewModel.isLoading
                             ? null
-                            : () => unawaited(viewModel.load()),
+                            : () => unawaited(_load()),
                         icon: const Icon(Icons.refresh, size: 18),
                         label: const Text('重试'),
                       ),
@@ -209,7 +209,7 @@ final class _HomePageState extends State<HomePage> {
                 _HomeRetryCard(
                   message: viewModel.recentDocumentsErrorMessage!,
                   isLoading: viewModel.isLoading,
-                  onRetry: () => unawaited(viewModel.load()),
+                  onRetry: () => unawaited(_load()),
                 )
               else if (viewModel.recentDocuments.isEmpty)
                 const _HomeStateCard(label: '暂无最近单据')

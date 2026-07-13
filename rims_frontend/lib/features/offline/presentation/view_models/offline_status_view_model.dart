@@ -26,6 +26,7 @@ final class OfflineStatusViewModel extends ChangeNotifier {
     _networkSubscription = networkStatusService.changes.listen(
       _handleReachability,
     );
+    _synchronizeScope(contextReader(), notify: false);
   }
 
   final NetworkStatusService networkStatusService;
@@ -42,6 +43,8 @@ final class OfflineStatusViewModel extends ChangeNotifier {
   DateTime? _fetchedAt;
   DateTime? _expiresAt;
   bool _hasCachedData = false;
+  String? _scopeAccountId;
+  int? _scopeWarehouseId;
   int _queuedCount = 0;
   int _attentionCount = 0;
   bool _isDisposed = false;
@@ -60,8 +63,7 @@ final class OfflineStatusViewModel extends ChangeNotifier {
 
   bool get isStale {
     final expiresAt = _expiresAt;
-    return _hasCachedData ||
-        (expiresAt != null && !now().toUtc().isBefore(expiresAt.toUtc()));
+    return expiresAt != null && !now().toUtc().isBefore(expiresAt.toUtc());
   }
 
   String get dataAgeLabel {
@@ -75,15 +77,17 @@ final class OfflineStatusViewModel extends ChangeNotifier {
       Duration(inDays: < 1) => '${normalizedAge.inHours} 小时前',
       _ => '${normalizedAge.inDays} 天前',
     };
-    return isStale ? '陈旧缓存 · $ageText' : '数据$ageText';
+    if (isStale) return '陈旧缓存 · $ageText';
+    return _hasCachedData ? '缓存数据 · $ageText' : '数据$ageText';
   }
 
   Future<void> load() => refreshCounts();
 
   Future<void> refreshCounts() async {
-    final generation = ++_loadGeneration;
     final repository = outboxRepository;
     final context = contextReader();
+    _synchronizeScope(context);
+    final generation = ++_loadGeneration;
     if (repository == null || context == null) {
       _setCounts(0, 0);
       return;
@@ -129,10 +133,19 @@ final class OfflineStatusViewModel extends ChangeNotifier {
   }
 
   void updateDataFreshness({
+    required String accountId,
+    required int warehouseId,
     DateTime? fetchedAt,
     DateTime? expiresAt,
     bool hasCachedData = false,
   }) {
+    final context = contextReader();
+    _synchronizeScope(context);
+    if (context == null ||
+        context.accountId != accountId ||
+        context.warehouseId != warehouseId) {
+      return;
+    }
     if (_fetchedAt == fetchedAt &&
         _expiresAt == expiresAt &&
         _hasCachedData == hasCachedData) {
@@ -143,6 +156,32 @@ final class OfflineStatusViewModel extends ChangeNotifier {
     _hasCachedData = hasCachedData;
     _scheduleFreshnessUpdate();
     notifyListeners();
+  }
+
+  void refreshContext() {
+    _synchronizeScope(contextReader());
+  }
+
+  void _synchronizeScope(
+    OutboxExecutionContext? context, {
+    bool notify = true,
+  }) {
+    final accountId = context?.accountId;
+    final warehouseId = context?.warehouseId;
+    if (_scopeAccountId == accountId && _scopeWarehouseId == warehouseId) {
+      return;
+    }
+    _scopeAccountId = accountId;
+    _scopeWarehouseId = warehouseId;
+    _loadGeneration += 1;
+    _freshnessTimer?.cancel();
+    _freshnessTimer = null;
+    _fetchedAt = null;
+    _expiresAt = null;
+    _hasCachedData = false;
+    _queuedCount = 0;
+    _attentionCount = 0;
+    if (notify && !_isDisposed) notifyListeners();
   }
 
   void _scheduleFreshnessUpdate() {

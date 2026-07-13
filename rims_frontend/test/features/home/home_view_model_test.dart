@@ -346,6 +346,7 @@ void main() {
     final eventBus = AppEventBus();
     addTearDown(eventBus.dispose);
     final inventoryRepository = _CountingInventoryRepository();
+    final freshnessReports = <HomeDataFreshness?>[];
 
     await tester.pumpWidget(
       MaterialApp(
@@ -356,18 +357,20 @@ void main() {
           inventoryRepository: inventoryRepository,
           documentsRepository: const _FakeDocumentsRepository(),
           reportsRepository: const _FakeReportsRepository(),
+          onDataFreshnessChanged: freshnessReports.add,
         ),
       ),
     );
-    await tester.pump();
+    await tester.pumpAndSettle();
 
     expect(inventoryRepository.listInventoryCallCount, 1);
+    expect(freshnessReports, [null]);
 
     eventBus.publish(const GlobalRefreshRequestedEvent());
-    await tester.pump();
-    await tester.pump();
+    await tester.pumpAndSettle();
 
     expect(inventoryRepository.listInventoryCallCount, 2);
+    expect(freshnessReports, [null, null]);
   });
 
   testWidgets('HomePage retries loading after an error', (tester) async {
@@ -380,8 +383,16 @@ void main() {
       reportsRepository: const _FakeReportsRepository(),
     );
     await viewModel.load();
+    final freshnessReports = <HomeDataFreshness?>[];
 
-    await tester.pumpWidget(MaterialApp(home: HomePage(viewModel: viewModel)));
+    await tester.pumpWidget(
+      MaterialApp(
+        home: HomePage(
+          viewModel: viewModel,
+          onDataFreshnessChanged: freshnessReports.add,
+        ),
+      ),
+    );
     await tester.pump();
 
     expect(find.text('库存服务不可用'), findsOneWidget);
@@ -398,6 +409,34 @@ void main() {
     expect(inventoryRepository.listInventoryCallCount, 2);
     expect(find.text('库存服务不可用'), findsNothing);
     expect(find.text('低库存'), findsOneWidget);
+    expect(freshnessReports, [null]);
+  });
+
+  testWidgets('recent documents retry reports freshness through page helper', (
+    tester,
+  ) async {
+    final documentsRepository = _RetryRecentDocumentsRepository();
+    final viewModel = HomeViewModel(documentsRepository: documentsRepository);
+    await viewModel.load();
+    final freshnessReports = <HomeDataFreshness?>[];
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: HomePage(
+          viewModel: viewModel,
+          onDataFreshnessChanged: freshnessReports.add,
+        ),
+      ),
+    );
+    await tester.pump();
+    expect(find.text('最近单据刷新失败'), findsOneWidget);
+
+    await tester.tap(find.text('重试'));
+    await tester.pumpAndSettle();
+
+    expect(documentsRepository.listCallCount, 2);
+    expect(find.text('最近单据刷新失败'), findsNothing);
+    expect(freshnessReports, [null]);
   });
 }
 
@@ -1085,6 +1124,47 @@ final class _FailingDocumentsRepository implements DocumentsRepository {
   Future<Result<void>> settleDocument(int id, {String? requestId}) async {
     return const Success<void>(null);
   }
+}
+
+final class _RetryRecentDocumentsRepository implements DocumentsRepository {
+  int listCallCount = 0;
+
+  @override
+  Future<Result<PageData<DocumentRecord>>> listRecentDocuments({
+    int? docType,
+    int page = 1,
+  }) async {
+    listCallCount += 1;
+    if (listCallCount == 1) {
+      return const FailureResult<PageData<DocumentRecord>>(
+        NetworkFailure(message: '最近单据刷新失败'),
+      );
+    }
+    return Success(_homePage([_recentDocument]));
+  }
+
+  @override
+  Future<Result<PageData<TransactionRecord>>> listTransactions({
+    String keyword = '',
+    int page = 1,
+  }) async => Success(_homePage([]));
+
+  @override
+  Future<Result<DocumentRecord>> createDocument(
+    CreateDocumentRequest request,
+  ) async => const Success(_recentDocument);
+
+  @override
+  Future<Result<void>> completeDocument(int id, {String? requestId}) async =>
+      const Success(null);
+
+  @override
+  Future<Result<void>> confirmDocument(int id, {String? requestId}) async =>
+      const Success(null);
+
+  @override
+  Future<Result<void>> settleDocument(int id, {String? requestId}) async =>
+      const Success(null);
 }
 
 final class _SequentialHomeDocumentsRepository implements DocumentsRepository {

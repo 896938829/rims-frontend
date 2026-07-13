@@ -12,6 +12,7 @@ import 'package:rims_frontend/features/auth/domain/entities/auth_session.dart';
 import 'package:rims_frontend/features/auth/domain/entities/warehouse.dart';
 import 'package:rims_frontend/features/auth/domain/repositories/auth_repository.dart';
 import 'package:rims_frontend/features/auth/presentation/view_models/auth_session_controller.dart';
+import 'package:rims_frontend/features/home/presentation/pages/home_page.dart';
 import 'package:rims_frontend/features/home/presentation/view_models/home_view_model.dart';
 import 'package:rims_frontend/features/offline/data/repositories/drift_document_draft_repository.dart';
 import 'package:rims_frontend/features/offline/data/repositories/memory_offline_store.dart';
@@ -207,6 +208,32 @@ void main() {
     expect(find.text('北京仓'), findsWidgets);
     expect(repository.lastSwitchWarehouseId, 2);
   });
+
+  testWidgets(
+    'warehouse switch replaces Home scope before stale completion can report',
+    (tester) async {
+      final sessionController = AuthSessionController()
+        ..startSession(_multiWarehouseSession);
+      await _pumpApp(
+        tester,
+        initialLocation: RoutePaths.shell,
+        sessionController: sessionController,
+        networkStatusService: const _FakeNetworkStatusService(
+          NetworkReachability.online,
+        ),
+      );
+      await tester.pump();
+
+      expect(find.byKey(const Key('home-1-1')), findsOneWidget);
+
+      await sessionController.startSession(_beijingSession);
+      await tester.pump();
+
+      expect(find.byKey(const Key('home-1-1')), findsNothing);
+      expect(find.byKey(const Key('home-1-2')), findsOneWidget);
+      expect(find.byType(HomePage), findsOneWidget);
+    },
+  );
 
   testWidgets('profile warehouse switch restores refreshed session context', (
     tester,

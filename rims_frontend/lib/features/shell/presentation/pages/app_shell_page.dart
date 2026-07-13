@@ -183,17 +183,23 @@ final class _AppShellPageState extends State<AppShellPage> {
         _currentTab != AppTab.profile) {
       return const Center(child: Text('本机离线数据暂不可用，请在个人中心重试'));
     }
+    final currentUser = widget.sessionController.currentUser;
+    final currentWarehouse = widget.sessionController.currentWarehouse;
     return switch (_currentTab) {
       AppTab.home => HomePage(
-        user: widget.sessionController.currentUser,
-        warehouse: widget.sessionController.currentWarehouse,
+        key: ValueKey('home-${currentUser?.id}-${currentWarehouse?.id}'),
+        user: currentUser,
+        warehouse: currentWarehouse,
         documentsRepository: widget.documentsRepository,
         inventoryRepository: widget.inventoryRepository,
         reportsRepository: widget.reportsRepository,
         eventBus: widget.eventBus,
         onQuickActionSelected: _handleHomeQuickAction,
         onDataFreshnessChanged: (freshness) {
+          if (currentUser == null || currentWarehouse == null) return;
           _offlineStatusViewModel?.updateDataFreshness(
+            accountId: currentUser.id.toString(),
+            warehouseId: currentWarehouse.id,
             fetchedAt: freshness?.fetchedAt,
             expiresAt: freshness?.expiresAt,
             hasCachedData: freshness?.hasCachedData ?? false,
@@ -393,6 +399,7 @@ final class _AppShellPageState extends State<AppShellPage> {
   }
 
   void _refreshOfflineStatus() {
+    _offlineStatusViewModel?.refreshContext();
     unawaited(_offlineStatusViewModel?.load());
   }
 

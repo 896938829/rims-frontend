@@ -44,6 +44,8 @@ void main() {
     );
     addTearDown(harness.dispose);
     harness.viewModel.updateDataFreshness(
+      accountId: '7',
+      warehouseId: 11,
       fetchedAt: DateTime.utc(2026, 7, 14, 9),
       expiresAt: DateTime.utc(2026, 7, 14, 10),
     );
@@ -61,20 +63,24 @@ void main() {
     final viewModel = OfflineStatusViewModel(
       networkStatusService: network,
       outboxRepository: null,
-      contextReader: () => null,
+      contextReader: () => _context(),
       now: clock.now,
       scheduleTimer: scheduler.schedule,
     );
     var notifications = 0;
     viewModel.addListener(() => notifications += 1);
     viewModel.updateDataFreshness(
+      accountId: '7',
+      warehouseId: 11,
       fetchedAt: DateTime.utc(2026, 7, 14, 11, 59, 30),
       expiresAt: DateTime.utc(2026, 7, 14, 12, 0, 45),
+      hasCachedData: true,
     );
 
-    expect(viewModel.dataAgeLabel, '数据刚刚更新');
+    expect(viewModel.isStale, isFalse);
+    expect(viewModel.dataAgeLabel, '缓存数据 · 刚刚更新');
     scheduler.advance(const Duration(seconds: 30));
-    expect(viewModel.dataAgeLabel, '数据1 分钟前');
+    expect(viewModel.dataAgeLabel, '缓存数据 · 1 分钟前');
     expect(notifications, 2);
 
     scheduler.advance(const Duration(seconds: 15));
@@ -84,6 +90,94 @@ void main() {
 
     viewModel.dispose();
     expect(scheduler.activeTimerCount, 0);
+    await network.dispose();
+  });
+
+  testWidgets('online fresh cache stays transparent without claiming stale', (
+    tester,
+  ) async {
+    final harness = await _createHarness(
+      reachability: NetworkReachability.online,
+      now: DateTime.utc(2026, 7, 14, 12),
+    );
+    addTearDown(harness.dispose);
+    harness.viewModel.updateDataFreshness(
+      accountId: '7',
+      warehouseId: 11,
+      fetchedAt: DateTime.utc(2026, 7, 14, 11, 59, 30),
+      expiresAt: DateTime.utc(2026, 7, 14, 12, 5),
+      hasCachedData: true,
+    );
+
+    await _pumpBar(tester, harness.viewModel);
+
+    expect(harness.viewModel.isStale, isFalse);
+    expect(find.text('在线，服务可用'), findsOneWidget);
+    expect(find.text('缓存数据 · 刚刚更新'), findsOneWidget);
+    expect(find.textContaining('陈旧缓存'), findsNothing);
+  });
+
+  test('warehouse switch immediately clears prior freshness', () async {
+    final clock = _FakeClock(DateTime.utc(2026, 7, 14, 12));
+    final scheduler = _FakeTimerScheduler(clock);
+    final network = _FakeNetworkStatusService(NetworkReachability.online);
+    var context = _context(warehouseId: 11);
+    final viewModel = OfflineStatusViewModel(
+      networkStatusService: network,
+      outboxRepository: null,
+      contextReader: () => context,
+      now: clock.now,
+      scheduleTimer: scheduler.schedule,
+    );
+    viewModel.updateDataFreshness(
+      accountId: '7',
+      warehouseId: 11,
+      fetchedAt: DateTime.utc(2026, 7, 14, 9),
+      expiresAt: DateTime.utc(2026, 7, 14, 10),
+      hasCachedData: true,
+    );
+    expect(viewModel.dataAgeLabel, '陈旧缓存 · 3 小时前');
+
+    context = _context(warehouseId: 12);
+    viewModel.refreshContext();
+
+    expect(viewModel.dataAgeLabel, '数据时间未知');
+    expect(scheduler.activeTimerCount, 0);
+    viewModel.dispose();
+    await network.dispose();
+  });
+
+  test('late freshness completion from prior warehouse is ignored', () async {
+    final clock = _FakeClock(DateTime.utc(2026, 7, 14, 12));
+    final scheduler = _FakeTimerScheduler(clock);
+    final network = _FakeNetworkStatusService(NetworkReachability.online);
+    var context = _context(warehouseId: 11);
+    final viewModel = OfflineStatusViewModel(
+      networkStatusService: network,
+      outboxRepository: null,
+      contextReader: () => context,
+      now: clock.now,
+      scheduleTimer: scheduler.schedule,
+    );
+    final staleCompletion = Completer<void>();
+    final lateReport = staleCompletion.future.then((_) {
+      viewModel.updateDataFreshness(
+        accountId: '7',
+        warehouseId: 11,
+        fetchedAt: DateTime.utc(2026, 7, 14, 8),
+        expiresAt: DateTime.utc(2026, 7, 14, 9),
+        hasCachedData: true,
+      );
+    });
+
+    context = _context(warehouseId: 12);
+    viewModel.refreshContext();
+    staleCompletion.complete();
+    await lateReport;
+
+    expect(viewModel.dataAgeLabel, '数据时间未知');
+    expect(scheduler.activeTimerCount, 0);
+    viewModel.dispose();
     await network.dispose();
   });
 
@@ -251,17 +345,24 @@ Future<_Harness> _createHarness({
   final viewModel = OfflineStatusViewModel(
     networkStatusService: network,
     outboxRepository: repository,
-    contextReader: () => OutboxExecutionContext(
-      accountId: '7',
-      warehouseId: 11,
-      permissionStamp: 'test',
-      allowedKinds: allowedKinds,
-    ),
+    contextReader: () => _context(allowedKinds: allowedKinds),
     now: clock.now,
     scheduleTimer: scheduler.schedule,
   );
   await viewModel.load();
   return _Harness(network: network, viewModel: viewModel);
+}
+
+OutboxExecutionContext _context({
+  int warehouseId = 11,
+  Set<OutboxOperationKind> allowedKinds = const {...OutboxOperationKind.values},
+}) {
+  return OutboxExecutionContext(
+    accountId: '7',
+    warehouseId: warehouseId,
+    permissionStamp: 'test',
+    allowedKinds: allowedKinds,
+  );
 }
 
 OutboxOperation _operation(
