@@ -244,6 +244,23 @@ counts, encrypted storage ownership, cleanup, and baseline restore are read.
 | Review | independent specification and code-quality reviews APPROVED with no open P0/P1/P2 after ownership, authentication, revocation, supersede, and scan-scope findings were fixed |
 | GREEN | strict analyze PASS; full Flutter suite PASS (1157 tests); diff check PASS |
 
+## Task 15 Global Offline And Stale Experience Evidence
+
+| Probe | Observed result |
+| --- | --- |
+| RED | tests exposed missing global reachability UI, direct offline authoritative requests, stale-age scheduling, warehouse freshness leakage, stale review authority, overlapping Home loads, graph-classification cost, touch-target, and semantics gaps |
+| Reachability | one full-width SafeArea band distinguishes checking, offline, API unreachable, and verified online without treating connectivity hints as backend reachability or covering five-tab content |
+| Freshness | Home captures five data-slice metadata results per load generation; conservative aggregation uses the oldest fetch and earliest expiry, reports partial results as unknown, and binds updates to account, warehouse, and permission scope |
+| Time | injected clock and scheduler update cache age and fresh-to-stale transitions without real waits; scope change and dispose cancel timers and reject late completions |
+| Counts | status and Sync Center share current-account/current-warehouse permission classification; denied-empty loads skip graph reads, denied graphs use one O(V+E) multi-source traversal, and terminal history remains completed |
+| Review safety | permission changes invalidate the full reviewed connected graph while classifying only permission-relevant active nodes, so A-to-denied-to-A never revives an old review stamp |
+| Writes | known offline or unreachable create and lifecycle commands make zero authoritative requests; drafts remain editable and outbox writes require an immutable, scope-bound, explicit reviewed confirmation |
+| Concurrency | enqueue uses a unified busy gate; account, warehouse, permission, context generation, submission epoch, and disposal checks reject stale dialogs, duplicate requests, mutable payloads, and late notifications |
+| Home | latest-request-wins prevents overlapping loads from mixing generations or clearing loading early; retry and global refresh paths use one freshness-reporting helper |
+| UI | queued and attention controls open Sync Center, refresh on return, retain 48-by-48 touch targets, and pass narrow phone, tablet, 2x text, component light/dark, keyboard, SafeArea, and non-duplicated semantics tests |
+| Review | independent specification and code-quality reviews APPROVED after all P0/P1/P2 findings across freshness, scope, review authority, concurrency, graph performance, layout, and accessibility were fixed |
+| GREEN | offline dependency resolution PASS; strict analyze PASS; full Flutter suite PASS (1208 tests); diff check PASS |
+
 ## Final Android State Evidence
 
 | Evidence | Observed result |

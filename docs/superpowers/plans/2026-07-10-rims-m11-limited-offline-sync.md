@@ -648,17 +648,17 @@ feat: enforce offline data ownership
 - Test: `rims_frontend/test/features/offline/offline_status_bar_test.dart`
 - Modify: `rims_frontend/test/app_static_ui_test.dart`
 
-- [ ] **Step 1: Write failing tests for checking, offline, unreachable, stale cache, queued count, conflict count, narrow phone, tablet, text scale 2.0, light/dark, keyboard, and semantics.**
+- [x] **Step 1: Write failing tests for checking, offline, unreachable, stale cache, queued count, conflict count, narrow phone, tablet, text scale 2.0, light/dark, keyboard, and semantics.**
 
-- [ ] **Step 2: Implement a compact full-width status band.**
+- [x] **Step 2: Implement a compact full-width status band.**
 
 It shows network state and data age without covering app content. Tapping queued
 or attention counts opens Sync Center. It is not a floating card and does not
 claim that connectivity implies API reachability.
 
-- [ ] **Step 3: Disable authoritative submit commands offline until the user saves a draft or enters the reviewed queue flow.**
+- [x] **Step 3: Disable authoritative submit commands offline until the user saves a draft or enters the reviewed queue flow.**
 
-- [ ] **Step 4: Run UI tests and commit.**
+- [x] **Step 4: Run UI tests and commit.**
 
 ```text
 feat: surface offline and stale state
