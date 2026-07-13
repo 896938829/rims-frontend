@@ -163,6 +163,18 @@ final class _DataAndCacheCard extends StatelessWidget {
               onTap: () => context.push(RoutePaths.drafts),
             ),
           ),
+          Material(
+            type: MaterialType.transparency,
+            child: ListTile(
+              key: const Key('profile-sync-center-entry'),
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.sync),
+              title: const Text('同步中心'),
+              trailing: const Icon(Icons.chevron_right),
+              onTap: () => context.push(RoutePaths.syncCenter),
+            ),
+          ),
         ],
       ),
     );

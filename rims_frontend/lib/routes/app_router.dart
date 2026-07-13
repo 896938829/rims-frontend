@@ -15,6 +15,11 @@ import '../features/auth/presentation/view_models/auth_session_controller.dart';
 import '../features/documents/domain/repositories/documents_repository.dart';
 import '../features/inventory/domain/repositories/inventory_repository.dart';
 import '../features/offline/domain/repositories/document_draft_repository.dart';
+import '../features/offline/domain/entities/outbox_operation.dart';
+import '../features/offline/domain/repositories/outbox_repository.dart';
+import '../features/offline/domain/services/outbox_executor.dart';
+import '../features/offline/presentation/pages/sync_center_page.dart';
+import '../features/offline/presentation/view_models/sync_center_view_model.dart';
 import '../features/offline/presentation/view_models/drafts_view_model.dart';
 import '../features/offline/presentation/widgets/draft_manager.dart';
 import '../features/reports/domain/repositories/reports_repository.dart';
@@ -36,6 +41,8 @@ GoRouter createAppRouter({
   AppEventBus? eventBus,
   ScanLookupCache? scanLookupCache,
   DocumentDraftRepository? documentDraftRepository,
+  OutboxRepository? outboxRepository,
+  OutboxExecutorPort? outboxExecutor,
   String initialLocation = RoutePaths.login,
 }) {
   return GoRouter(
@@ -80,6 +87,14 @@ GoRouter createAppRouter({
         ),
       ),
       GoRoute(
+        path: RoutePaths.syncCenter,
+        builder: (context, state) => _SyncCenterRoute(
+          repository: outboxRepository,
+          executor: outboxExecutor,
+          sessionController: sessionController,
+        ),
+      ),
+      GoRoute(
         path: RoutePaths.shell,
         builder: (context, state) => AppShellPage(
           authRepository: authRepository,
@@ -100,6 +115,73 @@ GoRouter createAppRouter({
       ),
     ],
   );
+}
+
+final class _SyncCenterRoute extends StatefulWidget {
+  const _SyncCenterRoute({
+    required this.repository,
+    required this.executor,
+    required this.sessionController,
+  });
+
+  final OutboxRepository? repository;
+  final OutboxExecutorPort? executor;
+  final AuthSessionController sessionController;
+
+  @override
+  State<_SyncCenterRoute> createState() => _SyncCenterRouteState();
+}
+
+final class _SyncCenterRouteState extends State<_SyncCenterRoute> {
+  SyncCenterViewModel? _viewModel;
+
+  @override
+  void initState() {
+    super.initState();
+    final repository = widget.repository;
+    final executor = widget.executor;
+    if (repository != null && executor != null) {
+      _viewModel = SyncCenterViewModel(
+        repository: repository,
+        executor: executor,
+        contextReader: _executionContext,
+      );
+    }
+    widget.sessionController.addListener(_handleSessionChanged);
+  }
+
+  OutboxExecutionContext? _executionContext() {
+    final user = widget.sessionController.currentUser;
+    final warehouse = widget.sessionController.currentWarehouse;
+    if (user == null || warehouse == null) return null;
+    return OutboxExecutionContext(
+      accountId: user.id.toString(),
+      warehouseId: warehouse.id,
+      permissionStamp: user.roleCode,
+      allowedKinds: Set.unmodifiable(OutboxOperationKind.values),
+    );
+  }
+
+  void _handleSessionChanged() {
+    final viewModel = _viewModel;
+    if (viewModel != null) unawaited(viewModel.refreshContext());
+  }
+
+  @override
+  void dispose() {
+    widget.sessionController.removeListener(_handleSessionChanged);
+    _viewModel?.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final viewModel = _viewModel;
+    if (viewModel == null) {
+      return const Scaffold(body: Center(child: Text('同步服务不可用')));
+    }
+    return SyncCenterPage(viewModel: viewModel);
+  }
 }
 
 final class _DraftManagerRoute extends StatefulWidget {

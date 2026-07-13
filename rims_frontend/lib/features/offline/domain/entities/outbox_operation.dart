@@ -87,6 +87,7 @@ final class OutboxOperation {
     int? attemptCount,
     String? lastFailureCode,
     String? replacementOf,
+    DateTime? confirmedAt,
   }) {
     return OutboxOperation(
       operationId: operationId,
@@ -98,7 +99,7 @@ final class OutboxOperation {
       state: state ?? this.state,
       createdAt: createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
-      confirmedAt: confirmedAt,
+      confirmedAt: confirmedAt ?? this.confirmedAt,
       nextAttemptAt: clearNextAttemptAt
           ? null
           : nextAttemptAt ?? this.nextAttemptAt,

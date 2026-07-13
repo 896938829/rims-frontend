@@ -69,6 +69,57 @@ final class MemoryOutboxRepository implements OutboxRepository {
   }
 
   @override
+  Future<Result<OutboxOperation>> confirm({
+    required String accountId,
+    required String operationId,
+  }) async {
+    final operation = _operations[operationId];
+    if (operation == null || operation.accountId != accountId) {
+      return const FailureResult(
+        NotFoundFailure(message: 'Offline operation not found.'),
+      );
+    }
+    if (operation.state != OutboxState.queued &&
+        operation.state != OutboxState.retryableFailure) {
+      return const FailureResult(
+        StateFailure(message: 'Only waiting offline work can be reviewed.'),
+      );
+    }
+    final confirmedAt = now().toUtc();
+    final confirmed = operation.copyWith(
+      confirmedAt: confirmedAt,
+      updatedAt: confirmedAt,
+    );
+    _operations[operationId] = confirmed;
+    return Success(confirmed);
+  }
+
+  @override
+  Future<Result<OutboxOperation>> retryNow({
+    required String accountId,
+    required String operationId,
+  }) async {
+    final operation = _operations[operationId];
+    if (operation == null || operation.accountId != accountId) {
+      return const FailureResult(
+        NotFoundFailure(message: 'Offline operation not found.'),
+      );
+    }
+    if (operation.state == OutboxState.queued) return Success(operation);
+    if (operation.state != OutboxState.retryableFailure) {
+      return const FailureResult(
+        StateFailure(message: 'Only retryable offline work can retry now.'),
+      );
+    }
+    final ready = operation.copyWith(
+      updatedAt: now().toUtc(),
+      clearNextAttemptAt: true,
+    );
+    _operations[operationId] = ready;
+    return Success(ready);
+  }
+
+  @override
   Future<Result<OutboxOperation>> transition({
     required String accountId,
     required String operationId,
@@ -116,6 +167,44 @@ final class MemoryOutboxRepository implements OutboxRepository {
       next: OutboxState.cancelled,
       failure: const CancellationFailure(),
     );
+  }
+
+  @override
+  Future<Result<OutboxOperation>> discard({
+    required String accountId,
+    required String operationId,
+  }) async {
+    final operation = _operations[operationId];
+    if (operation == null || operation.accountId != accountId) {
+      return const FailureResult(
+        NotFoundFailure(message: 'Offline operation not found.'),
+      );
+    }
+    if (!_isTerminal(operation.state)) {
+      return const FailureResult(
+        StateFailure(message: 'Only completed offline work can be discarded.'),
+      );
+    }
+    final hasDependent = _dependencies.entries.any(
+      (entry) =>
+          entry.value.contains(operationId) &&
+          _operations[entry.key]?.accountId == accountId,
+    );
+    if (hasDependent) {
+      return const FailureResult(
+        StateFailure(
+          message: 'Offline work with dependents cannot be discarded.',
+        ),
+      );
+    }
+    _operations.remove(operationId);
+    _dependencies.remove(operationId);
+    _payloadFingerprintByOperation.remove(operationId);
+    _replacementByOriginal.removeWhere(
+      (original, replacement) =>
+          original == operationId || replacement == operationId,
+    );
+    return Success(operation);
   }
 
   @override

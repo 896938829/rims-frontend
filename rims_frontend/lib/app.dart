@@ -34,6 +34,10 @@ import 'features/inventory/data/datasources/inventory_remote_datasource.dart';
 import 'features/inventory/data/repositories/inventory_repository_impl.dart';
 import 'features/inventory/domain/repositories/inventory_repository.dart';
 import 'features/offline/domain/services/offline_store.dart';
+import 'features/offline/data/database/offline_database.dart';
+import 'features/offline/data/datasources/operation_status_remote_datasource.dart';
+import 'features/offline/data/repositories/drift_outbox_repository.dart';
+import 'features/offline/data/repositories/memory_outbox_repository.dart';
 import 'features/offline/data/services/connectivity_network_status_service.dart';
 import 'features/offline/data/repositories/cached_auth_repository.dart';
 import 'features/offline/data/repositories/cached_inventory_repository.dart';
@@ -41,7 +45,11 @@ import 'features/offline/data/repositories/cached_documents_repository.dart';
 import 'features/offline/data/repositories/cached_reports_repository.dart';
 import 'features/offline/data/repositories/drift_document_draft_repository.dart';
 import 'features/offline/domain/repositories/document_draft_repository.dart';
+import 'features/offline/domain/entities/outbox_operation.dart';
+import 'features/offline/domain/repositories/outbox_repository.dart';
 import 'features/offline/domain/services/network_status_service.dart';
+import 'features/offline/domain/services/outbox_executor.dart';
+import 'features/offline/domain/services/outbox_state_machine.dart';
 import 'features/reports/data/datasources/reports_remote_datasource.dart';
 import 'features/reports/data/repositories/reports_repository_impl.dart';
 import 'features/reports/domain/repositories/reports_repository.dart';
@@ -54,11 +62,13 @@ class MainApp extends StatefulWidget {
   const MainApp({
     required this.offlineStore,
     this.networkStatusService,
+    this.outboxHandlers = const [],
     super.key,
   });
 
   final OfflineStore offlineStore;
   final NetworkStatusService? networkStatusService;
+  final List<OutboxOperationHandler> outboxHandlers;
 
   @override
   State<MainApp> createState() => _MainAppState();
@@ -85,6 +95,9 @@ final class _MainAppState extends State<MainApp> {
   late final InventoryRepository _inventoryRepository;
   late final ReportsRepository _reportsRepository;
   late final DocumentDraftRepository _documentDraftRepository;
+  late final OutboxRepository _outboxRepository;
+  late final OperationStatusRemoteDataSource _operationStatusDataSource;
+  late final OutboxExecutor _outboxExecutor;
   late final AdminRepositoryImpl _adminRepository;
   late final GoRouter _router;
   late final NetworkStatusService _networkStatusService;
@@ -190,6 +203,20 @@ final class _MainAppState extends State<MainApp> {
     _documentDraftRepository = DriftDocumentDraftRepository(
       store: widget.offlineStore,
     );
+    _outboxRepository = widget.offlineStore is OfflineDatabase
+        ? DriftOutboxRepository(
+            database: widget.offlineStore as OfflineDatabase,
+            stateMachine: OutboxStateMachine(),
+          )
+        : MemoryOutboxRepository(stateMachine: OutboxStateMachine());
+    _operationStatusDataSource = ApiOperationStatusRemoteDataSource(_apiClient);
+    _outboxExecutor = OutboxExecutor(
+      repository: _outboxRepository,
+      networkStatusService: _networkStatusService,
+      statusDataSource: _operationStatusDataSource,
+      handlers: widget.outboxHandlers,
+      contextReader: _outboxExecutionContext,
+    );
     _adminRepository = AdminRepositoryImpl(
       remoteDataSource: ApiAdminRemoteDataSource(_apiClient),
     );
@@ -207,6 +234,8 @@ final class _MainAppState extends State<MainApp> {
       sessionController: _sessionController,
       scanLookupCache: _scanLookupCache,
       documentDraftRepository: _documentDraftRepository,
+      outboxRepository: _outboxRepository,
+      outboxExecutor: _outboxExecutor,
     );
     _tokenExpiredSubscription = _eventBus.on<TokenExpiredEvent>().listen((_) {
       unawaited(_authRepository.logout());
@@ -235,6 +264,18 @@ final class _MainAppState extends State<MainApp> {
         });
     unawaited(_sessionController.restoreSession(_authRepository));
     unawaited(_networkStatusService.verify());
+  }
+
+  OutboxExecutionContext? _outboxExecutionContext() {
+    final user = _sessionController.currentUser;
+    final warehouse = _sessionController.currentWarehouse;
+    if (user == null || warehouse == null) return null;
+    return OutboxExecutionContext(
+      accountId: user.id.toString(),
+      warehouseId: warehouse.id,
+      permissionStamp: user.roleCode,
+      allowedKinds: Set.unmodifiable(OutboxOperationKind.values),
+    );
   }
 
   @override

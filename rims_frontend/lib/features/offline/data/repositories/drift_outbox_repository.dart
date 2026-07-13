@@ -177,6 +177,133 @@ ORDER BY operation.created_at ASC, operation.operation_id ASC
   }
 
   @override
+  Future<Result<OutboxOperation>> confirm({
+    required String accountId,
+    required String operationId,
+  }) async {
+    return _updateWaitingOperation(
+      accountId: accountId,
+      operationId: operationId,
+      allowQueued: true,
+      message: 'Unable to confirm offline operation.',
+      update: (operation, timestamp) =>
+          operation.copyWith(confirmedAt: timestamp, updatedAt: timestamp),
+      companion: (timestamp) => OfflineOutboxOperationsCompanion(
+        confirmedAt: Value(timestamp),
+        updatedAt: Value(timestamp),
+      ),
+    );
+  }
+
+  @override
+  Future<Result<OutboxOperation>> retryNow({
+    required String accountId,
+    required String operationId,
+  }) async {
+    final existing = await _findResult(accountId, operationId);
+    if (existing case FailureResult<OutboxOperation>()) return existing;
+    final operation = (existing as Success<OutboxOperation>).data;
+    if (operation.state == OutboxState.queued) return Success(operation);
+    if (operation.state != OutboxState.retryableFailure) {
+      return const FailureResult(
+        StateFailure(message: 'Only retryable offline work can retry now.'),
+      );
+    }
+    return _updateWaitingOperation(
+      accountId: accountId,
+      operationId: operationId,
+      allowQueued: false,
+      message: 'Unable to schedule offline retry.',
+      update: (operation, timestamp) =>
+          operation.copyWith(updatedAt: timestamp, clearNextAttemptAt: true),
+      companion: (timestamp) => OfflineOutboxOperationsCompanion(
+        nextAttemptAt: const Value(null),
+        updatedAt: Value(timestamp),
+      ),
+    );
+  }
+
+  Future<Result<OutboxOperation>> _findResult(
+    String accountId,
+    String operationId,
+  ) async {
+    try {
+      final row = await _find(accountId, operationId);
+      if (row == null) {
+        return const FailureResult(
+          NotFoundFailure(message: 'Offline operation not found.'),
+        );
+      }
+      return Success(_toDomainOperation(row));
+    } on StateError catch (error) {
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to read offline operation.',
+          cause: error,
+        ),
+      );
+    } on Exception catch (error) {
+      if (!_isStorageException(error)) rethrow;
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to read offline operation.',
+          cause: error,
+        ),
+      );
+    }
+  }
+
+  Future<Result<OutboxOperation>> _updateWaitingOperation({
+    required String accountId,
+    required String operationId,
+    required bool allowQueued,
+    required String message,
+    required OutboxOperation Function(
+      OutboxOperation operation,
+      DateTime timestamp,
+    )
+    update,
+    required OfflineOutboxOperationsCompanion Function(DateTime timestamp)
+    companion,
+  }) async {
+    final existing = await _findResult(accountId, operationId);
+    if (existing case FailureResult<OutboxOperation>()) return existing;
+    final operation = (existing as Success<OutboxOperation>).data;
+    final allowed =
+        operation.state == OutboxState.retryableFailure ||
+        (allowQueued && operation.state == OutboxState.queued);
+    if (!allowed) {
+      return const FailureResult(
+        StateFailure(message: 'Only waiting offline work can be updated.'),
+      );
+    }
+    final timestamp = now().toUtc();
+    try {
+      final changed =
+          await (database.update(database.offlineOutboxOperations)..where(
+                (entry) =>
+                    entry.operationId.equals(operationId) &
+                    entry.accountId.equals(accountId) &
+                    entry.operationState.equals(operation.state.wireValue),
+              ))
+              .write(companion(timestamp));
+      if (changed != 1) {
+        return const FailureResult(
+          ConflictFailure(
+            message: 'Offline operation state changed concurrently.',
+          ),
+        );
+      }
+      return Success(update(operation, timestamp));
+    } on StateError catch (error) {
+      return FailureResult(LocalStorageFailure(message: message, cause: error));
+    } on Exception catch (error) {
+      if (!_isStorageException(error)) rethrow;
+      return FailureResult(LocalStorageFailure(message: message, cause: error));
+    }
+  }
+
+  @override
   Future<Result<OutboxOperation>> transition({
     required String accountId,
     required String operationId,
@@ -271,6 +398,77 @@ ORDER BY operation.created_at ASC, operation.operation_id ASC
       next: OutboxState.cancelled,
       failure: const CancellationFailure(),
     );
+  }
+
+  @override
+  Future<Result<OutboxOperation>> discard({
+    required String accountId,
+    required String operationId,
+  }) async {
+    try {
+      return await database.transaction(() async {
+        final row = await _find(accountId, operationId);
+        if (row == null) {
+          return const FailureResult(
+            NotFoundFailure(message: 'Offline operation not found.'),
+          );
+        }
+        final operation = _toDomainOperation(row);
+        if (!_isTerminal(operation.state)) {
+          return const FailureResult(
+            StateFailure(
+              message: 'Only completed offline work can be discarded.',
+            ),
+          );
+        }
+        final dependent = await database
+            .customSelect(
+              '''
+SELECT 1
+FROM outbox_dependencies AS edge
+JOIN outbox_operations AS operation
+  ON operation.operation_id = edge.operation_id
+WHERE edge.dependency_id = ? AND operation.account_id = ?
+LIMIT 1
+''',
+              variables: [Variable(operationId), Variable(accountId)],
+              readsFrom: {
+                database.offlineOutboxDependencies,
+                database.offlineOutboxOperations,
+              },
+            )
+            .getSingleOrNull();
+        if (dependent != null) {
+          return const FailureResult(
+            StateFailure(
+              message: 'Offline work with dependents cannot be discarded.',
+            ),
+          );
+        }
+        await (database.delete(database.offlineOutboxOperations)..where(
+              (entry) =>
+                  entry.operationId.equals(operationId) &
+                  entry.accountId.equals(accountId),
+            ))
+            .go();
+        return Success(operation);
+      });
+    } on StateError catch (error) {
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to discard offline operation.',
+          cause: error,
+        ),
+      );
+    } on Exception catch (error) {
+      if (!_isStorageException(error)) rethrow;
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to discard offline operation.',
+          cause: error,
+        ),
+      );
+    }
   }
 
   @override

@@ -12,6 +12,16 @@ abstract interface class OutboxRepository {
 
   Future<Result<List<OutboxOperation>>> ready(String accountId);
 
+  Future<Result<OutboxOperation>> confirm({
+    required String accountId,
+    required String operationId,
+  });
+
+  Future<Result<OutboxOperation>> retryNow({
+    required String accountId,
+    required String operationId,
+  });
+
   Future<Result<OutboxOperation>> transition({
     required String accountId,
     required String operationId,
@@ -20,6 +30,11 @@ abstract interface class OutboxRepository {
   });
 
   Future<Result<OutboxOperation>> cancel({
+    required String accountId,
+    required String operationId,
+  });
+
+  Future<Result<OutboxOperation>> discard({
     required String accountId,
     required String operationId,
   });
