@@ -240,7 +240,10 @@ final class _OfflineWriteBarrierBlock implements OfflineMutationBlock {
 }
 
 final class WriteBarrierOfflineStore
-    implements OfflineStore, ConditionalCacheRecordStorage {
+    implements
+        OfflineStore,
+        ConditionalCacheRecordStorage,
+        AuthSessionProjectionTransactionStorage {
   const WriteBarrierOfflineStore({
     required this.delegate,
     required this.barrier,
@@ -248,6 +251,12 @@ final class WriteBarrierOfflineStore
 
   final OfflineStore delegate;
   final OfflineWriteBarrier barrier;
+
+  @override
+  bool get supportsAuthSessionProjectionTransactions =>
+      delegate is AuthSessionProjectionTransactionStorage &&
+      (delegate as AuthSessionProjectionTransactionStorage)
+          .supportsAuthSessionProjectionTransactions;
 
   @override
   Future<void> writeCache(CacheRecord record) => barrier.protect(
@@ -320,6 +329,51 @@ final class WriteBarrierOfflineStore
         schemaVersion: schemaVersion,
         payloadField: payloadField,
         expectedValue: expectedValue,
+      );
+    },
+  );
+
+  @override
+  Future<bool> deleteAuthSessionProjectionIfOwned({
+    required CacheKey key,
+    required int schemaVersion,
+    required String ownerId,
+    required int attemptVersion,
+  }) => barrier.protect(
+    accountId: key.accountId,
+    operation: () {
+      final transactional = delegate is AuthSessionProjectionTransactionStorage
+          ? delegate as AuthSessionProjectionTransactionStorage
+          : null;
+      if (transactional == null) return Future.value(false);
+      return transactional.deleteAuthSessionProjectionIfOwned(
+        key: key,
+        schemaVersion: schemaVersion,
+        ownerId: ownerId,
+        attemptVersion: attemptVersion,
+      );
+    },
+  );
+
+  @override
+  Future<bool> saveAuthSessionProjectionIfCurrent(
+    CacheRecord record, {
+    required String ownerId,
+    required int attemptVersion,
+  }) => barrier.protect(
+    accountId: record.key.accountId,
+    operation: () {
+      final transactional = delegate is AuthSessionProjectionTransactionStorage
+          ? delegate as AuthSessionProjectionTransactionStorage
+          : null;
+      if (transactional == null ||
+          !transactional.supportsAuthSessionProjectionTransactions) {
+        return Future.value(false);
+      }
+      return transactional.saveAuthSessionProjectionIfCurrent(
+        record,
+        ownerId: ownerId,
+        attemptVersion: attemptVersion,
       );
     },
   );

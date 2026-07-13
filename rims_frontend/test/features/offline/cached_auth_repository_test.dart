@@ -21,6 +21,7 @@ import 'package:rims_frontend/features/offline/domain/entities/cache_snapshot.da
 import 'package:rims_frontend/features/offline/domain/entities/document_draft.dart';
 import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.dart';
 import 'package:rims_frontend/features/offline/domain/services/offline_ownership_service.dart';
+import 'package:rims_frontend/features/offline/domain/services/offline_store.dart';
 import 'package:rims_frontend/features/offline/domain/services/offline_write_barrier.dart';
 import 'package:shared_preferences_platform_interface/in_memory_shared_preferences_async.dart';
 import 'package:shared_preferences_platform_interface/shared_preferences_async_platform_interface.dart';
@@ -524,9 +525,9 @@ void main() {
     expect(storage.accountId, isNull);
     expect(await journal.readAccountIds(), {'7'});
 
-    final loginDelegate = _FakeAuthRepository(
-      restoreResult: const Success<AuthSession?>(null),
-      loginResult: const Success(_session),
+    final loginDelegate = _ImmediateProvisionalAuthRepository(
+      storage,
+      session: _session,
     );
     final restartedOwnership = _RecordingOwnershipCoordinator()
       ..failNext = true;
@@ -562,9 +563,9 @@ void main() {
       final journal = MemoryPendingRevocationJournal();
       await journal.addAccountId('7');
       await journal.addAccountId('8');
-      final delegate = _FakeAuthRepository(
-        restoreResult: const Success<AuthSession?>(null),
-        loginResult: const Success(_session),
+      final delegate = _ImmediateProvisionalAuthRepository(
+        storage,
+        session: _session,
       );
       final ownership = _AccountFailingOwnershipCoordinator({'8'});
       final repository = CachedAuthRepository(
@@ -588,9 +589,9 @@ void main() {
       expect(await journal.readAccountIds(), {'8'});
       expect(storage.pendingRevocationAccountId, '8');
 
-      final restartedDelegate = _FakeAuthRepository(
-        restoreResult: const Success<AuthSession?>(null),
-        loginResult: const Success(_session),
+      final restartedDelegate = _ImmediateProvisionalAuthRepository(
+        storage,
+        session: _session,
       );
       final restarted = CachedAuthRepository(
         delegate: restartedDelegate,
@@ -1024,6 +1025,104 @@ void main() {
       );
       expect(delegate.prepareCalls, 0);
       expect(await storage.readAccessToken(), isNull);
+    },
+  );
+
+  test(
+    'ownership login rejects an ordinary repository before network',
+    () async {
+      final storage = _FakeSessionStorage();
+      final delegate = _FakeAuthRepository(
+        restoreResult: const Success(null),
+        loginResult: Success(_session),
+      );
+      final repository = CachedAuthRepository(
+        delegate: delegate,
+        store: MemoryOfflineStore(),
+        tokenStorage: storage,
+        accountStorage: storage,
+        revocationStorage: storage,
+        ownershipCoordinator: _RecordingOwnershipCoordinator(),
+        onSessionRevoked: () {},
+      );
+
+      final result = await repository.prepareLogin(
+        username: 'alice',
+        password: 'secret',
+      );
+
+      expect(result, isA<FailureResult<AuthSessionTransaction>>());
+      expect(delegate.loginCalls, 0);
+    },
+  );
+
+  test('ownership login rejects basic token storage before network', () async {
+    final transactionStorage = _FakeSessionStorage();
+    final delegate = _ConcurrentLoginAuthRepository(transactionStorage);
+    final basicTokenStorage = _BasicTokenStorage();
+    final repository = CachedAuthRepository(
+      delegate: delegate,
+      store: MemoryOfflineStore(),
+      tokenStorage: basicTokenStorage,
+      accountStorage: transactionStorage,
+      revocationStorage: transactionStorage,
+      ownershipCoordinator: _RecordingOwnershipCoordinator(),
+      onSessionRevoked: () {},
+    );
+
+    expect(
+      await repository.prepareLogin(username: 'bob', password: 'secret'),
+      isA<FailureResult<AuthSessionTransaction>>(),
+    );
+    expect(delegate.prepareCalls, 0);
+  });
+
+  test(
+    'ownership login rejects nontransactional account storage before network',
+    () async {
+      final storage = _FakeSessionStorage();
+      final delegate = _ConcurrentLoginAuthRepository(storage);
+      final repository = CachedAuthRepository(
+        delegate: delegate,
+        store: MemoryOfflineStore(),
+        tokenStorage: storage,
+        accountStorage: _BasicAccountStorage(),
+        revocationStorage: storage,
+        ownershipCoordinator: _RecordingOwnershipCoordinator(),
+        onSessionRevoked: () {},
+      );
+
+      expect(
+        await repository.prepareLogin(username: 'bob', password: 'secret'),
+        isA<FailureResult<AuthSessionTransaction>>(),
+      );
+      expect(delegate.prepareCalls, 0);
+    },
+  );
+
+  test(
+    'ownership login rejects nontransactional projection store before network',
+    () async {
+      final storage = _FakeSessionStorage();
+      final delegate = _ConcurrentLoginAuthRepository(storage);
+      final repository = CachedAuthRepository(
+        delegate: delegate,
+        store: WriteBarrierOfflineStore(
+          delegate: _BasicOfflineStore(),
+          barrier: OfflineWriteBarrier(),
+        ),
+        tokenStorage: storage,
+        accountStorage: storage,
+        revocationStorage: storage,
+        ownershipCoordinator: _RecordingOwnershipCoordinator(),
+        onSessionRevoked: () {},
+      );
+
+      expect(
+        await repository.prepareLogin(username: 'bob', password: 'secret'),
+        isA<FailureResult<AuthSessionTransaction>>(),
+      );
+      expect(delegate.prepareCalls, 0);
     },
   );
 
@@ -1864,6 +1963,7 @@ final class _FakeSessionStorage
   final List<String> committedOwnerIds = [];
   String? accountId;
   String? accountProjectionId;
+  int? accountProjectionAttemptVersion;
   String? pendingRevocationAccountId;
   final Map<_RevocationStorageFailure, int> _remainingFailures = {};
   final List<String> conditionalClearAttempts = [];
@@ -1977,6 +2077,7 @@ final class _FakeSessionStorage
     _throwIf(_RevocationStorageFailure.clearAccount);
     accountId = null;
     accountProjectionId = null;
+    accountProjectionAttemptVersion = null;
   }
 
   @override
@@ -1986,28 +2087,40 @@ final class _FakeSessionStorage
   Future<void> saveAuthenticatedAccountId(String accountId) async {
     this.accountId = accountId;
     accountProjectionId = null;
+    accountProjectionAttemptVersion = null;
   }
 
   @override
-  Future<void> saveAuthenticatedAccountProjection({
+  Future<bool> saveAuthenticatedAccountProjection({
     required String accountId,
-    required String projectionId,
+    required String ownerId,
+    required int attemptVersion,
   }) async {
     if (failAccountProjectionWrites) {
       throw StateError('account projection write failed');
     }
+    if ((accountProjectionAttemptVersion ?? -1) > attemptVersion) return false;
     this.accountId = accountId;
-    accountProjectionId = projectionId;
+    accountProjectionId = ownerId;
+    accountProjectionAttemptVersion = attemptVersion;
+    return true;
   }
 
   @override
-  Future<bool> clearAuthenticatedAccountProjection(String projectionId) async {
+  Future<bool> clearAuthenticatedAccountProjection({
+    required String ownerId,
+    required int attemptVersion,
+  }) async {
     if (failAccountProjectionClears) {
       throw StateError('account projection clear failed');
     }
-    if (accountProjectionId != projectionId) return false;
+    if (accountProjectionId != ownerId ||
+        accountProjectionAttemptVersion != attemptVersion) {
+      return false;
+    }
     accountId = null;
     accountProjectionId = null;
+    accountProjectionAttemptVersion = null;
     return true;
   }
 
@@ -2036,6 +2149,39 @@ final class _FakeSessionStorage
     _throwIf(_RevocationStorageFailure.saveMarker);
     pendingRevocationAccountId = accountId;
   }
+}
+
+final class _BasicTokenStorage implements TokenStorage {
+  String? token;
+
+  @override
+  Future<void> clearAccessToken() async => token = null;
+
+  @override
+  Future<String?> readAccessToken() async => token;
+
+  @override
+  Future<void> saveAccessToken(String token) async => this.token = token;
+}
+
+final class _BasicAccountStorage implements AuthenticatedAccountStorage {
+  String? accountId;
+
+  @override
+  Future<void> clearAuthenticatedAccountId() async => accountId = null;
+
+  @override
+  Future<String?> readAuthenticatedAccountId() async => accountId;
+
+  @override
+  Future<void> saveAuthenticatedAccountId(String accountId) async {
+    this.accountId = accountId;
+  }
+}
+
+final class _BasicOfflineStore implements OfflineStore {
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
 enum _RevocationStorageFailure {
@@ -2225,7 +2371,10 @@ final class _FakeAuthRepository implements AuthRepository {
 }
 
 final class _ConcurrentLoginAuthRepository
-    implements AuthRepository, TransactionalAuthRepository {
+    implements
+        AuthRepository,
+        TransactionalAuthRepository,
+        ProvisionalTransactionalAuthRepository {
   _ConcurrentLoginAuthRepository(this.storage);
 
   final _FakeSessionStorage storage;
@@ -2234,6 +2383,9 @@ final class _ConcurrentLoginAuthRepository
   bool bobFails = false;
   int prepareCalls = 0;
   int _ownerSequence = 0;
+
+  @override
+  Object get tokenTransactionStorageIdentity => storage;
 
   @override
   Future<Result<AuthSession>> login({
@@ -2303,6 +2455,79 @@ final class _ConcurrentLoginAuthRepository
       Success(warehouse);
 }
 
+final class _ImmediateProvisionalAuthRepository
+    implements
+        AuthRepository,
+        TransactionalAuthRepository,
+        ProvisionalTransactionalAuthRepository {
+  _ImmediateProvisionalAuthRepository(this.storage, {required this.session});
+
+  final _FakeSessionStorage storage;
+  final AuthSession session;
+  int loginCalls = 0;
+
+  @override
+  Object get tokenTransactionStorageIdentity => storage;
+
+  @override
+  Future<Result<AuthSessionTransaction>> prepareLogin({
+    required String username,
+    required String password,
+  }) async {
+    loginCalls += 1;
+    final ownerId = 'immediate-owner-$loginCalls';
+    final attemptVersion = await storage.beginAccessTokenAttempt(ownerId);
+    final saved = await storage.savePendingAccessTokenForOwner(
+      token: session.accessToken,
+      ownerId: ownerId,
+      attemptVersion: attemptVersion,
+    );
+    if (!saved) {
+      return const FailureResult(
+        LocalStorageFailure(message: 'credential superseded'),
+      );
+    }
+    return Success(
+      _FakeStoredSessionTransaction(
+        storage: storage,
+        ownerId: ownerId,
+        attemptVersion: attemptVersion,
+        session: session,
+      ),
+    );
+  }
+
+  @override
+  Future<Result<AuthSession>> login({
+    required String username,
+    required String password,
+  }) async {
+    final prepared = await prepareLogin(username: username, password: password);
+    return switch (prepared) {
+      Success<AuthSessionTransaction>(data: final transaction) => () async {
+        final committed = await transaction.commit();
+        return switch (committed) {
+          Success<void>() => Success(transaction.session),
+          FailureResult<void>(failure: final failure) =>
+            FailureResult<AuthSession>(failure),
+        };
+      }(),
+      FailureResult<AuthSessionTransaction>(failure: final failure) =>
+        FailureResult<AuthSession>(failure),
+    };
+  }
+
+  @override
+  Future<void> logout() => storage.clearAccessToken();
+
+  @override
+  Future<Result<AuthSession?>> restoreSession() async => const Success(null);
+
+  @override
+  Future<Result<Warehouse>> switchCurrentWarehouse(Warehouse warehouse) async =>
+      Success(warehouse);
+}
+
 final class _ReleaseThrowingParticipant implements OfflineMutationParticipant {
   bool throwOnRelease = false;
   int activeBlocks = 0;
@@ -2335,7 +2560,8 @@ final class _ReleaseThrowingBlock implements OfflineMutationBlock {
   Future<void> waitForQuiescence() async {}
 }
 
-final class _FakeStoredSessionTransaction implements AuthSessionTransaction {
+final class _FakeStoredSessionTransaction
+    implements AuthSessionTransaction, ProvisionalAuthSessionTransaction {
   const _FakeStoredSessionTransaction({
     required this.storage,
     required this.ownerId,
@@ -2346,6 +2572,12 @@ final class _FakeStoredSessionTransaction implements AuthSessionTransaction {
   final _FakeSessionStorage storage;
   final String ownerId;
   final int attemptVersion;
+
+  @override
+  String get transactionOwnerId => ownerId;
+
+  @override
+  int get transactionAttemptVersion => attemptVersion;
 
   @override
   final AuthSession session;

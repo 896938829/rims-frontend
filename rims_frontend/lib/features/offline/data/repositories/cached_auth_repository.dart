@@ -37,6 +37,8 @@ final class CachedAuthRepository
   static const String _namespace = 'auth.session';
   static const String _entityKey = 'projection';
   static const String _projectionIdField = '_local_projection_id';
+  static const String _projectionAttemptVersionField =
+      '_local_transaction_attempt_version';
 
   final AuthRepository delegate;
   final OfflineStore store;
@@ -262,6 +264,10 @@ final class CachedAuthRepository
         ),
       );
     }
+    if (configuredCoordinator != null) {
+      final capabilityFailure = _provisionalCapabilityFailure();
+      if (capabilityFailure != null) return FailureResult(capabilityFailure);
+    }
     final Result<AuthSessionTransaction> prepared;
     if (delegate case final TransactionalAuthRepository transactional) {
       prepared = await transactional.prepareLogin(
@@ -283,6 +289,19 @@ final class CachedAuthRepository
       };
     }
     if (prepared case Success<AuthSessionTransaction>(data: final upstream)) {
+      final provisional = switch (upstream) {
+        final ProvisionalAuthSessionTransaction value => value,
+        _ => null,
+      };
+      if (configuredCoordinator != null && provisional == null) {
+        await upstream.abort();
+        return const FailureResult(
+          LocalStorageFailure(
+            message:
+                'Authentication repository returned a non-provisional login transaction.',
+          ),
+        );
+      }
       final data = upstream.session;
       if (!_isCurrentEpoch(operationEpoch)) {
         await upstream.abort();
@@ -323,11 +342,15 @@ final class CachedAuthRepository
         return _staleSessionFailure();
       }
       final projectionId = authTransactionOwnerFactory();
+      final projectionAttemptVersion = configuredCoordinator != null
+          ? provisional?.transactionAttemptVersion
+          : null;
       try {
         Future<CacheRecord> writeProjection() => _writeSession(
           data,
           expectedEpoch: operationEpoch,
           projectionId: projectionId,
+          projectionAttemptVersion: projectionAttemptVersion,
         );
         if (reauthenticationLease == null) {
           await writeProjection();
@@ -345,6 +368,7 @@ final class CachedAuthRepository
           () => _rollbackFailedSessionProjection(
             accountId,
             projectionId,
+            projectionAttemptVersion: projectionAttemptVersion,
             propagateFailure: true,
           ),
         );
@@ -358,6 +382,7 @@ final class CachedAuthRepository
           rollbackProjection: () => _rollbackFailedSessionProjection(
             accountId,
             projectionId,
+            projectionAttemptVersion: projectionAttemptVersion,
             propagateFailure: true,
           ),
           reauthenticationLease: reauthenticationLease,
@@ -485,23 +510,37 @@ final class CachedAuthRepository
     AuthSession session, {
     int? expectedEpoch,
     String? projectionId,
+    int? projectionAttemptVersion,
   }) async {
     if (!_isCurrentEpoch(expectedEpoch)) throw const _StaleAuthOperation();
     final fetchedAt = now().toUtc();
     final accountId = session.user.id.toString();
+    final payload = <String, Object?>{..._encodeSession(session)};
+    if (projectionId != null) {
+      payload[_projectionIdField] = projectionId;
+      if (projectionAttemptVersion != null) {
+        payload[_projectionAttemptVersionField] = projectionAttemptVersion;
+      }
+    }
     final record = CacheRecord(
       key: _cacheKey(accountId),
-      payload: {
-        ..._encodeSession(session),
-        ...projectionId == null
-            ? const <String, Object?>{}
-            : {_projectionIdField: projectionId},
-      },
+      payload: payload,
       schemaVersion: CachePolicy.references.schemaVersion,
       fetchedAt: fetchedAt,
       expiresAt: CachePolicy.references.expiresAt(fetchedAt),
     );
-    await store.writeCache(record);
+    if (projectionId != null && projectionAttemptVersion != null) {
+      final projectionStorage =
+          store as AuthSessionProjectionTransactionStorage;
+      final saved = await projectionStorage.saveAuthSessionProjectionIfCurrent(
+        record,
+        ownerId: projectionId,
+        attemptVersion: projectionAttemptVersion,
+      );
+      if (!saved) throw const _StaleAuthOperation();
+    } else {
+      await store.writeCache(record);
+    }
     await store.enforceCacheLimit(
       accountId: accountId,
       warehouseId: null,
@@ -512,6 +551,7 @@ final class CachedAuthRepository
       await _rollbackFailedSessionProjection(
         accountId,
         projectionId,
+        projectionAttemptVersion: projectionAttemptVersion,
         propagateFailure: projectionId != null,
       );
       throw const _StaleAuthOperation();
@@ -520,11 +560,15 @@ final class CachedAuthRepository
         accountStorage is AuthenticatedAccountTransactionStorage
         ? accountStorage as AuthenticatedAccountTransactionStorage
         : null;
-    if (projectionId != null && transactional != null) {
-      await transactional.saveAuthenticatedAccountProjection(
+    if (projectionId != null &&
+        projectionAttemptVersion != null &&
+        transactional != null) {
+      final saved = await transactional.saveAuthenticatedAccountProjection(
         accountId: accountId,
-        projectionId: projectionId,
+        ownerId: projectionId,
+        attemptVersion: projectionAttemptVersion,
       );
+      if (!saved) throw const _StaleAuthOperation();
     } else {
       await accountStorage.saveAuthenticatedAccountId(accountId);
     }
@@ -532,6 +576,7 @@ final class CachedAuthRepository
       await _rollbackFailedSessionProjection(
         accountId,
         projectionId,
+        projectionAttemptVersion: projectionAttemptVersion,
         propagateFailure: projectionId != null,
       );
       throw const _StaleAuthOperation();
@@ -542,6 +587,7 @@ final class CachedAuthRepository
   Future<void> _rollbackFailedSessionProjection(
     String accountId,
     String? projectionId, {
+    int? projectionAttemptVersion,
     bool propagateFailure = false,
   }) async {
     Object? firstError;
@@ -549,7 +595,18 @@ final class CachedAuthRepository
       if (projectionId == null) {
         await _deleteSessionProjection(accountId);
       } else {
-        if (store case final ConditionalCacheRecordStorage conditional) {
+        final projectionStorage =
+            store is AuthSessionProjectionTransactionStorage
+            ? store as AuthSessionProjectionTransactionStorage
+            : null;
+        if (projectionAttemptVersion != null && projectionStorage != null) {
+          await projectionStorage.deleteAuthSessionProjectionIfOwned(
+            key: _cacheKey(accountId),
+            schemaVersion: CachePolicy.references.schemaVersion,
+            ownerId: projectionId,
+            attemptVersion: projectionAttemptVersion,
+          );
+        } else if (store case final ConditionalCacheRecordStorage conditional) {
           await conditional.deleteCacheRecordIfPayloadMatches(
             key: _cacheKey(accountId),
             schemaVersion: CachePolicy.references.schemaVersion,
@@ -566,8 +623,13 @@ final class CachedAuthRepository
           accountStorage is AuthenticatedAccountTransactionStorage
           ? accountStorage as AuthenticatedAccountTransactionStorage
           : null;
-      if (projectionId != null && transactional != null) {
-        await transactional.clearAuthenticatedAccountProjection(projectionId);
+      if (projectionId != null &&
+          projectionAttemptVersion != null &&
+          transactional != null) {
+        await transactional.clearAuthenticatedAccountProjection(
+          ownerId: projectionId,
+          attemptVersion: projectionAttemptVersion,
+        );
       } else if (await accountStorage.readAuthenticatedAccountId() ==
           accountId) {
         await accountStorage.clearAuthenticatedAccountId();
@@ -776,6 +838,42 @@ final class CachedAuthRepository
   ) => lease == null
       ? Future<T>.sync(operation)
       : lease.runScopedWrite(operation);
+
+  LocalStorageFailure? _provisionalCapabilityFailure() {
+    final repository = delegate is ProvisionalTransactionalAuthRepository
+        ? delegate as ProvisionalTransactionalAuthRepository
+        : null;
+    if (repository == null) {
+      return const LocalStorageFailure(
+        message:
+            'Authentication repository does not support provisional credential transactions.',
+      );
+    }
+    if (tokenStorage is! AuthTokenTransactionStorage ||
+        !identical(repository.tokenTransactionStorageIdentity, tokenStorage)) {
+      return const LocalStorageFailure(
+        message:
+            'Authentication token storage does not support the required owner/version transaction.',
+      );
+    }
+    if (accountStorage is! AuthenticatedAccountTransactionStorage) {
+      return const LocalStorageFailure(
+        message:
+            'Authenticated account storage does not support owner/version rollback.',
+      );
+    }
+    final projectionStorage = store is AuthSessionProjectionTransactionStorage
+        ? store as AuthSessionProjectionTransactionStorage
+        : null;
+    if (projectionStorage == null ||
+        !projectionStorage.supportsAuthSessionProjectionTransactions) {
+      return const LocalStorageFailure(
+        message:
+            'Session projection storage does not support scoped transaction rollback.',
+      );
+    }
+    return null;
+  }
 
   Future<Failure?> _preparePermissionRefresh(AuthSession session) async {
     final accountId = session.user.id.toString();

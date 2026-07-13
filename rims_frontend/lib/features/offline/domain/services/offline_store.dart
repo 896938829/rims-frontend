@@ -59,3 +59,20 @@ abstract interface class ConditionalCacheRecordStorage {
     required Object? expectedValue,
   });
 }
+
+abstract interface class AuthSessionProjectionTransactionStorage {
+  bool get supportsAuthSessionProjectionTransactions;
+
+  Future<bool> saveAuthSessionProjectionIfCurrent(
+    CacheRecord record, {
+    required String ownerId,
+    required int attemptVersion,
+  });
+
+  Future<bool> deleteAuthSessionProjectionIfOwned({
+    required CacheKey key,
+    required int schemaVersion,
+    required String ownerId,
+    required int attemptVersion,
+  });
+}

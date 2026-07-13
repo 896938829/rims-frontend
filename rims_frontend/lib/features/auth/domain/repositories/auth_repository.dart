@@ -37,6 +37,18 @@ abstract interface class TransactionalAuthRepository {
   });
 }
 
+abstract interface class ProvisionalTransactionalAuthRepository
+    implements TransactionalAuthRepository {
+  Object get tokenTransactionStorageIdentity;
+}
+
+abstract interface class ProvisionalAuthSessionTransaction
+    implements AuthSessionTransaction {
+  String get transactionOwnerId;
+
+  int get transactionAttemptVersion;
+}
+
 abstract interface class AuthRepository {
   Future<Result<AuthSession?>> restoreSession();
 

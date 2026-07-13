@@ -30,6 +30,7 @@ final class OfflineDatabase extends _$OfflineDatabase
     implements
         OfflineStore,
         ConditionalCacheRecordStorage,
+        AuthSessionProjectionTransactionStorage,
         OfflineOwnershipStore {
   OfflineDatabase.forTesting(super.executor);
 
@@ -49,6 +50,9 @@ final class OfflineDatabase extends _$OfflineDatabase
            ),
          ),
        );
+
+  @override
+  bool get supportsAuthSessionProjectionTransactions => true;
 
   @override
   int get schemaVersion => 6;
@@ -308,6 +312,71 @@ ON outbox_operations (operation_id, account_id)
           ..where((entry) => entry.cacheId.equals(row.cacheId)))
         .go()
         .then((deleted) => deleted == 1);
+  });
+
+  @override
+  Future<bool> deleteAuthSessionProjectionIfOwned({
+    required CacheKey key,
+    required int schemaVersion,
+    required String ownerId,
+    required int attemptVersion,
+  }) => transaction(() async {
+    final row =
+        await (select(offlineCacheEntries)..where(
+              (entry) => entry.cacheId.equals(_cacheId(key, schemaVersion)),
+            ))
+            .getSingleOrNull();
+    if (row == null) return false;
+    final payload = CacheRecordModel.decodePayload(row.payload);
+    if (payload['_local_projection_id'] != ownerId ||
+        payload['_local_transaction_attempt_version'] != attemptVersion) {
+      return false;
+    }
+    return (delete(offlineCacheEntries)
+          ..where((entry) => entry.cacheId.equals(row.cacheId)))
+        .go()
+        .then((deleted) => deleted == 1);
+  });
+
+  @override
+  Future<bool> saveAuthSessionProjectionIfCurrent(
+    CacheRecord record, {
+    required String ownerId,
+    required int attemptVersion,
+  }) => transaction(() async {
+    if (record.payload['_local_projection_id'] != ownerId ||
+        record.payload['_local_transaction_attempt_version'] !=
+            attemptVersion) {
+      return false;
+    }
+    final cacheId = _cacheId(record.key, record.schemaVersion);
+    final existing = await (select(
+      offlineCacheEntries,
+    )..where((entry) => entry.cacheId.equals(cacheId))).getSingleOrNull();
+    if (existing != null) {
+      final payload = CacheRecordModel.decodePayload(existing.payload);
+      final currentVersion = payload['_local_transaction_attempt_version'];
+      final currentOwner = payload['_local_projection_id'];
+      if (currentVersion is int &&
+          (currentVersion > attemptVersion ||
+              (currentVersion == attemptVersion && currentOwner != ownerId))) {
+        return false;
+      }
+    }
+    await into(offlineCacheEntries).insertOnConflictUpdate(
+      OfflineCacheEntriesCompanion.insert(
+        cacheId: cacheId,
+        accountId: record.key.accountId,
+        warehouseId: Value(record.key.warehouseId),
+        namespace: record.key.namespace,
+        entityKey: record.key.entityKey,
+        payload: CacheRecordModel.canonicalJson(record.payload),
+        recordSchemaVersion: record.schemaVersion,
+        fetchedAt: record.fetchedAt.toUtc(),
+        expiresAt: record.expiresAt.toUtc(),
+      ),
+    );
+    return true;
   });
 
   @override

@@ -379,7 +379,7 @@ void main() {
         const OfflineOwnershipIntent.logout(accountId: '7'),
       );
       final storage = _SessionStorage();
-      final delegate = _LoginAuthRepository();
+      final delegate = _PendingAuthRepository(storage);
       final repository = CachedAuthRepository(
         delegate: delegate,
         store: guardedStore,
@@ -924,6 +924,92 @@ void main() {
     );
   }
 
+  test(
+    'acquisition rollback releases every handle and retains failed releases',
+    () async {
+      final releaseThrowing = _ThrowingMutationParticipant()
+        ..throwOnReleaseCall = 1;
+      final barrier = OfflineWriteBarrier();
+      final acquireThrowing = _ThrowingMutationParticipant(
+        throwOnAcquire: true,
+      );
+      final ownership = OfflineOwnershipService(
+        store: MemoryOfflineStore(),
+        files: const _NoopFiles(),
+        scans: const _NoopScans(),
+        reviews: const _NoopReviews(),
+        databaseKeys: MemoryOfflineDatabaseKeyManager(),
+        mutationParticipants: [releaseThrowing, barrier, acquireThrowing],
+      );
+
+      await expectLater(
+        ownership.apply(
+          const OfflineOwnershipIntent.permissionRefresh(accountId: '7'),
+        ),
+        throwsA(isA<OfflineMutationAcquisitionException>()),
+      );
+
+      expect(releaseThrowing.activeBlocks, 1);
+      expect(ownership.canAccessOfflineData('7'), isFalse);
+      await expectLater(
+        barrier.protect(accountId: '7', operation: () async {}),
+        completes,
+      );
+
+      releaseThrowing.throwOnReleaseCall = null;
+      acquireThrowing.throwOnAcquire = false;
+      expect(
+        (await ownership.apply(
+          const OfflineOwnershipIntent.permissionRefresh(accountId: '7'),
+        )).completed,
+        isTrue,
+      );
+      expect(releaseThrowing.activeBlocks, 0);
+      expect(ownership.canAccessOfflineData('7'), isTrue);
+      expect(ownership.debugGenerationMetadataEntryCount, 0);
+    },
+  );
+
+  test('acquisition rollback aggregates every release failure', () async {
+    final first = _ThrowingMutationParticipant()..throwOnReleaseCall = 1;
+    final second = _ThrowingMutationParticipant()..throwOnReleaseCall = 1;
+    final acquireThrowing = _ThrowingMutationParticipant(throwOnAcquire: true);
+    final ownership = OfflineOwnershipService(
+      store: MemoryOfflineStore(),
+      files: const _NoopFiles(),
+      scans: const _NoopScans(),
+      reviews: const _NoopReviews(),
+      databaseKeys: MemoryOfflineDatabaseKeyManager(),
+      mutationParticipants: [first, second, acquireThrowing],
+    );
+
+    final error = await ownership
+        .apply(const OfflineOwnershipIntent.permissionRefresh(accountId: '7'))
+        .then<Object?>((_) => null, onError: (Object error) => error);
+
+    expect(error, isA<OfflineMutationAcquisitionException>());
+    expect(
+      (error! as OfflineMutationAcquisitionException).releaseFailures,
+      hasLength(2),
+    );
+    expect(first.releaseCalls, 1);
+    expect(second.releaseCalls, 1);
+    expect(ownership.canAccessOfflineData('7'), isFalse);
+
+    first.throwOnReleaseCall = null;
+    second.throwOnReleaseCall = null;
+    acquireThrowing.throwOnAcquire = false;
+    expect(
+      (await ownership.apply(
+        const OfflineOwnershipIntent.permissionRefresh(accountId: '7'),
+      )).completed,
+      isTrue,
+    );
+    expect(first.activeBlocks, 0);
+    expect(second.activeBlocks, 0);
+    expect(ownership.debugGenerationMetadataEntryCount, 0);
+  });
+
   for (final reason in const [
     OfflineOwnershipReason.tokenExpiry,
     OfflineOwnershipReason.revocation,
@@ -1218,7 +1304,7 @@ void main() {
       );
       final storage = _SessionStorage();
       final repository = CachedAuthRepository(
-        delegate: _LoginAuthRepository(),
+        delegate: _PendingAuthRepository(storage),
         store: guardedStore,
         tokenStorage: storage,
         accountStorage: storage,
@@ -2076,25 +2162,98 @@ final class _NoopReviews implements OfflineReviewInvalidator {
 final class _SessionStorage
     implements
         TokenStorage,
+        AuthTokenTransactionStorage,
         AuthenticatedAccountStorage,
+        AuthenticatedAccountTransactionStorage,
         PendingRevocationStorage {
   String? token;
+  String? tokenOwnerId;
+  int latestAttemptVersion = 0;
+  int? tokenAttemptVersion;
+  bool tokenCommitted = true;
   String? accountId;
+  String? accountOwnerId;
+  int? accountAttemptVersion;
   String? pendingRevocationAccountId;
   int pendingMarkerWriteFailuresRemaining = 0;
   int pendingMarkerWriteCalls = 0;
 
   @override
-  Future<void> clearAccessToken() async => token = null;
+  Future<void> clearAccessToken() async {
+    token = null;
+    tokenOwnerId = null;
+    tokenAttemptVersion = null;
+    tokenCommitted = false;
+  }
 
   @override
-  Future<String?> readAccessToken() async => token;
+  Future<String?> readAccessToken() async => tokenCommitted ? token : null;
 
   @override
-  Future<void> saveAccessToken(String token) async => this.token = token;
+  Future<void> saveAccessToken(String token) async {
+    this.token = token;
+    tokenOwnerId = null;
+    tokenAttemptVersion = null;
+    tokenCommitted = true;
+  }
 
   @override
-  Future<void> clearAuthenticatedAccountId() async => accountId = null;
+  Future<int> beginAccessTokenAttempt(String ownerId) async =>
+      ++latestAttemptVersion;
+
+  @override
+  Future<bool> savePendingAccessTokenForOwner({
+    required String token,
+    required String ownerId,
+    required int attemptVersion,
+  }) async {
+    if (attemptVersion != latestAttemptVersion) return false;
+    this.token = token;
+    tokenOwnerId = ownerId;
+    tokenAttemptVersion = attemptVersion;
+    tokenCommitted = false;
+    return true;
+  }
+
+  @override
+  Future<bool> commitAccessTokenForOwner(
+    String ownerId, {
+    required int attemptVersion,
+  }) async {
+    if (tokenOwnerId != ownerId ||
+        tokenAttemptVersion != attemptVersion ||
+        latestAttemptVersion != attemptVersion) {
+      return false;
+    }
+    tokenCommitted = true;
+    return true;
+  }
+
+  @override
+  Future<bool> clearAccessTokenForOwner(
+    String ownerId, {
+    required int attemptVersion,
+  }) async {
+    if (tokenOwnerId != ownerId || tokenAttemptVersion != attemptVersion) {
+      return false;
+    }
+    await clearAccessToken();
+    return true;
+  }
+
+  @override
+  Future<bool> clearPendingAccessToken() async {
+    if (token == null || tokenCommitted) return false;
+    await clearAccessToken();
+    return true;
+  }
+
+  @override
+  Future<void> clearAuthenticatedAccountId() async {
+    accountId = null;
+    accountOwnerId = null;
+    accountAttemptVersion = null;
+  }
 
   @override
   Future<String?> readAuthenticatedAccountId() async => accountId;
@@ -2102,6 +2261,33 @@ final class _SessionStorage
   @override
   Future<void> saveAuthenticatedAccountId(String accountId) async {
     this.accountId = accountId;
+    accountOwnerId = null;
+    accountAttemptVersion = null;
+  }
+
+  @override
+  Future<bool> saveAuthenticatedAccountProjection({
+    required String accountId,
+    required String ownerId,
+    required int attemptVersion,
+  }) async {
+    if ((accountAttemptVersion ?? -1) > attemptVersion) return false;
+    this.accountId = accountId;
+    accountOwnerId = ownerId;
+    accountAttemptVersion = attemptVersion;
+    return true;
+  }
+
+  @override
+  Future<bool> clearAuthenticatedAccountProjection({
+    required String ownerId,
+    required int attemptVersion,
+  }) async {
+    if (accountOwnerId != ownerId || accountAttemptVersion != attemptVersion) {
+      return false;
+    }
+    await clearAuthenticatedAccountId();
+    return true;
   }
 
   @override
@@ -2124,20 +2310,64 @@ final class _SessionStorage
   }
 }
 
-final class _PendingAuthRepository implements AuthRepository {
+final class _PendingAuthRepository
+    implements
+        AuthRepository,
+        TransactionalAuthRepository,
+        ProvisionalTransactionalAuthRepository {
   _PendingAuthRepository(this.storage);
 
   final _SessionStorage storage;
   int loginCalls = 0;
 
   @override
+  Object get tokenTransactionStorageIdentity => storage;
+
+  @override
   Future<Result<AuthSession>> login({
     required String username,
     required String password,
   }) async {
+    final prepared = await prepareLogin(username: username, password: password);
+    return switch (prepared) {
+      Success<AuthSessionTransaction>(data: final transaction) => () async {
+        final committed = await transaction.commit();
+        return switch (committed) {
+          Success<void>() => Success(transaction.session),
+          FailureResult<void>(failure: final failure) =>
+            FailureResult<AuthSession>(failure),
+        };
+      }(),
+      FailureResult<AuthSessionTransaction>(failure: final failure) =>
+        FailureResult<AuthSession>(failure),
+    };
+  }
+
+  @override
+  Future<Result<AuthSessionTransaction>> prepareLogin({
+    required String username,
+    required String password,
+  }) async {
     loginCalls += 1;
-    await storage.saveAccessToken('new-token');
-    return const Success(_authSession);
+    final ownerId = 'pending-owner-$loginCalls';
+    final attemptVersion = await storage.beginAccessTokenAttempt(ownerId);
+    final saved = await storage.savePendingAccessTokenForOwner(
+      token: 'new-token',
+      ownerId: ownerId,
+      attemptVersion: attemptVersion,
+    );
+    if (!saved) {
+      return const FailureResult(
+        LocalStorageFailure(message: 'credential superseded'),
+      );
+    }
+    return Success(
+      _PendingAuthSessionTransaction(
+        storage: storage,
+        ownerId: ownerId,
+        attemptVersion: attemptVersion,
+      ),
+    );
   }
 
   @override
@@ -2152,23 +2382,46 @@ final class _PendingAuthRepository implements AuthRepository {
       Success(warehouse);
 }
 
-final class _LoginAuthRepository implements AuthRepository {
-  @override
-  Future<Result<AuthSession>> login({
-    required String username,
-    required String password,
-  }) async => const Success(_authSession);
+final class _PendingAuthSessionTransaction
+    implements AuthSessionTransaction, ProvisionalAuthSessionTransaction {
+  const _PendingAuthSessionTransaction({
+    required this.storage,
+    required this.ownerId,
+    required this.attemptVersion,
+  });
+
+  final _SessionStorage storage;
+  final String ownerId;
+  final int attemptVersion;
 
   @override
-  Future<void> logout() async {}
+  AuthSession get session => _authSession;
 
   @override
-  Future<Result<AuthSession?>> restoreSession() async =>
-      const Success<AuthSession?>(null);
+  String get transactionOwnerId => ownerId;
 
   @override
-  Future<Result<Warehouse>> switchCurrentWarehouse(Warehouse warehouse) async =>
-      Success(warehouse);
+  int get transactionAttemptVersion => attemptVersion;
+
+  @override
+  Future<Result<void>> abort() async {
+    await storage.clearAccessTokenForOwner(
+      ownerId,
+      attemptVersion: attemptVersion,
+    );
+    return const Success(null);
+  }
+
+  @override
+  Future<Result<void>> commit() async =>
+      await storage.commitAccessTokenForOwner(
+        ownerId,
+        attemptVersion: attemptVersion,
+      )
+      ? const Success(null)
+      : const FailureResult(
+          LocalStorageFailure(message: 'credential superseded'),
+        );
 }
 
 const _authWarehouse = Warehouse(

@@ -53,12 +53,16 @@ abstract interface class AuthenticatedAccountStorage {
 }
 
 abstract interface class AuthenticatedAccountTransactionStorage {
-  Future<void> saveAuthenticatedAccountProjection({
+  Future<bool> saveAuthenticatedAccountProjection({
     required String accountId,
-    required String projectionId,
+    required String ownerId,
+    required int attemptVersion,
   });
 
-  Future<bool> clearAuthenticatedAccountProjection(String projectionId);
+  Future<bool> clearAuthenticatedAccountProjection({
+    required String ownerId,
+    required int attemptVersion,
+  });
 }
 
 abstract interface class PendingRevocationStorage {
@@ -278,20 +282,33 @@ final class AppSecureStorage
       );
 
   @override
-  Future<void> saveAuthenticatedAccountProjection({
+  Future<bool> saveAuthenticatedAccountProjection({
     required String accountId,
-    required String projectionId,
-  }) => _SecureStorageKeyMutex.run(
-    kAuthenticatedAccountIdKey,
-    () => _storage.write(
+    required String ownerId,
+    required int attemptVersion,
+  }) => _SecureStorageKeyMutex.run(kAuthenticatedAccountIdKey, () async {
+    final raw = await _storage.read(key: kAuthenticatedAccountIdKey);
+    if (raw != null && raw.trimLeft().startsWith('{')) {
+      final decoded = jsonDecode(raw);
+      final currentVersion = decoded is Map ? decoded['attempt_version'] : null;
+      final currentOwner = decoded is Map ? decoded['owner_id'] : null;
+      if (currentVersion is int &&
+          (currentVersion > attemptVersion ||
+              (currentVersion == attemptVersion && currentOwner != ownerId))) {
+        return false;
+      }
+    }
+    await _storage.write(
       key: kAuthenticatedAccountIdKey,
       value: jsonEncode({
-        'version': 1,
+        'version': 2,
         'account_id': accountId,
-        'projection_id': projectionId,
+        'owner_id': ownerId,
+        'attempt_version': attemptVersion,
       }),
-    ),
-  );
+    );
+    return true;
+  });
 
   @override
   Future<String?> readAuthenticatedAccountId() {
@@ -299,9 +316,12 @@ final class AppSecureStorage
       if (raw == null || !raw.trimLeft().startsWith('{')) return raw;
       final decoded = jsonDecode(raw);
       if (decoded is! Map ||
-          decoded['version'] != 1 ||
+          (decoded['version'] != 1 && decoded['version'] != 2) ||
           decoded['account_id'] is! String ||
-          decoded['projection_id'] is! String) {
+          (decoded['version'] == 1 && decoded['projection_id'] is! String) ||
+          (decoded['version'] == 2 &&
+              (decoded['owner_id'] is! String ||
+                  decoded['attempt_version'] is! int))) {
         throw const FormatException('Invalid authenticated account record.');
       }
       return decoded['account_id']! as String;
@@ -315,17 +335,21 @@ final class AppSecureStorage
   );
 
   @override
-  Future<bool> clearAuthenticatedAccountProjection(String projectionId) =>
-      _SecureStorageKeyMutex.run(kAuthenticatedAccountIdKey, () async {
-        final raw = await _storage.read(key: kAuthenticatedAccountIdKey);
-        if (raw == null || !raw.trimLeft().startsWith('{')) return false;
-        final decoded = jsonDecode(raw);
-        if (decoded is! Map || decoded['projection_id'] != projectionId) {
-          return false;
-        }
-        await _storage.delete(key: kAuthenticatedAccountIdKey);
-        return true;
-      });
+  Future<bool> clearAuthenticatedAccountProjection({
+    required String ownerId,
+    required int attemptVersion,
+  }) => _SecureStorageKeyMutex.run(kAuthenticatedAccountIdKey, () async {
+    final raw = await _storage.read(key: kAuthenticatedAccountIdKey);
+    if (raw == null || !raw.trimLeft().startsWith('{')) return false;
+    final decoded = jsonDecode(raw);
+    if (decoded is! Map ||
+        decoded['owner_id'] != ownerId ||
+        decoded['attempt_version'] != attemptVersion) {
+      return false;
+    }
+    await _storage.delete(key: kAuthenticatedAccountIdKey);
+    return true;
+  });
 
   @override
   Future<void> savePendingRevocationAccountId(String accountId) =>

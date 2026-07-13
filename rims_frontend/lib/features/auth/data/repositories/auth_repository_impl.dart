@@ -13,7 +13,8 @@ final class AuthRepositoryImpl
     implements
         AuthRepository,
         AuthCredentialInvalidator,
-        TransactionalAuthRepository {
+        TransactionalAuthRepository,
+        ProvisionalTransactionalAuthRepository {
   const AuthRepositoryImpl({
     required this.remoteDataSource,
     required this.secureStorage,
@@ -23,6 +24,9 @@ final class AuthRepositoryImpl
   final AuthRemoteDataSource remoteDataSource;
   final TokenStorage secureStorage;
   final String Function() tokenOwnerFactory;
+
+  @override
+  Object get tokenTransactionStorageIdentity => secureStorage;
 
   @override
   Future<Result<AuthSession?>> restoreSession() async {
@@ -346,7 +350,8 @@ final class AuthRepositoryImpl
 
 String _newTokenOwnerId() => const Uuid().v4();
 
-final class _StoredAuthSessionTransaction implements AuthSessionTransaction {
+final class _StoredAuthSessionTransaction
+    implements AuthSessionTransaction, ProvisionalAuthSessionTransaction {
   const _StoredAuthSessionTransaction({
     required this.session,
     required this.storage,
@@ -359,6 +364,12 @@ final class _StoredAuthSessionTransaction implements AuthSessionTransaction {
   final AuthTokenTransactionStorage storage;
   final String ownerId;
   final int attemptVersion;
+
+  @override
+  String get transactionOwnerId => ownerId;
+
+  @override
+  int get transactionAttemptVersion => attemptVersion;
 
   @override
   Future<Result<void>> commit() async {

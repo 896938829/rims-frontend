@@ -14,6 +14,7 @@ final class MemoryOfflineStore
     implements
         OfflineStore,
         ConditionalCacheRecordStorage,
+        AuthSessionProjectionTransactionStorage,
         OutboxRepositoryOwner,
         OfflineOwnershipStore {
   MemoryOfflineStore({DateTime Function()? now})
@@ -28,6 +29,9 @@ final class MemoryOfflineStore
   final Map<String, CacheRecord> _cache = {};
   final Map<String, DocumentDraft> _drafts = {};
   final Map<String, String> _legacyOperationAccounts = {};
+
+  @override
+  bool get supportsAuthSessionProjectionTransactions => true;
 
   @override
   Future<void> writeCache(CacheRecord record) async {
@@ -111,6 +115,48 @@ final class MemoryOfflineStore
     final record = _cache[storageKey];
     if (record?.payload[payloadField] != expectedValue) return false;
     return _cache.remove(storageKey) != null;
+  }
+
+  @override
+  Future<bool> deleteAuthSessionProjectionIfOwned({
+    required CacheKey key,
+    required int schemaVersion,
+    required String ownerId,
+    required int attemptVersion,
+  }) async {
+    final storageKey = _cacheKey(key, schemaVersion);
+    final record = _cache[storageKey];
+    if (record?.payload['_local_projection_id'] != ownerId ||
+        record?.payload['_local_transaction_attempt_version'] !=
+            attemptVersion) {
+      return false;
+    }
+    return _cache.remove(storageKey) != null;
+  }
+
+  @override
+  Future<bool> saveAuthSessionProjectionIfCurrent(
+    CacheRecord record, {
+    required String ownerId,
+    required int attemptVersion,
+  }) async {
+    if (record.payload['_local_projection_id'] != ownerId ||
+        record.payload['_local_transaction_attempt_version'] !=
+            attemptVersion) {
+      return false;
+    }
+    final storageKey = _cacheKey(record.key, record.schemaVersion);
+    final existing = _cache[storageKey];
+    final currentVersion =
+        existing?.payload['_local_transaction_attempt_version'];
+    final currentOwner = existing?.payload['_local_projection_id'];
+    if (currentVersion is int &&
+        (currentVersion > attemptVersion ||
+            (currentVersion == attemptVersion && currentOwner != ownerId))) {
+      return false;
+    }
+    _cache[storageKey] = record;
+    return true;
   }
 
   @override

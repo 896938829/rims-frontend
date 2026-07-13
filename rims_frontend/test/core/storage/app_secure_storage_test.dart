@@ -191,6 +191,46 @@ void main() {
     expect(await storage.readAccessToken(), isNull);
   });
 
+  test(
+    'authenticated account pointer uses owner and attempt version CAS',
+    () async {
+      final storage = AppSecureStorage(storage: _MemoryFlutterSecureStorage());
+
+      expect(
+        await storage.saveAuthenticatedAccountProjection(
+          accountId: '8',
+          ownerId: 'owner-b',
+          attemptVersion: 2,
+        ),
+        isTrue,
+      );
+      expect(
+        await storage.saveAuthenticatedAccountProjection(
+          accountId: '7',
+          ownerId: 'owner-a',
+          attemptVersion: 1,
+        ),
+        isFalse,
+      );
+      expect(await storage.readAuthenticatedAccountId(), '8');
+      expect(
+        await storage.clearAuthenticatedAccountProjection(
+          ownerId: 'owner-a',
+          attemptVersion: 1,
+        ),
+        isFalse,
+      );
+      expect(
+        await storage.clearAuthenticatedAccountProjection(
+          ownerId: 'owner-b',
+          attemptVersion: 2,
+        ),
+        isTrue,
+      );
+      expect(await storage.readAuthenticatedAccountId(), isNull);
+    },
+  );
+
   test('a new auth attempt safely migrates a legacy committed token', () async {
     final raw = _MemoryFlutterSecureStorage()
       ..values[AppSecureStorage.kAccessTokenKey] = 'legacy-token';

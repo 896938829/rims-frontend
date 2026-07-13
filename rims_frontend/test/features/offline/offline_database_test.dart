@@ -7,6 +7,7 @@ import 'package:rims_frontend/features/offline/data/repositories/memory_offline_
 import 'package:rims_frontend/features/offline/domain/entities/cache_snapshot.dart';
 import 'package:rims_frontend/features/offline/domain/entities/document_draft.dart';
 import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.dart';
+import 'package:rims_frontend/features/offline/domain/services/offline_store.dart';
 import 'package:rims_frontend/features/offline/domain/services/outbox_state_machine.dart';
 
 void main() {
@@ -113,6 +114,64 @@ void main() {
     );
     expect(await database.readCache(key, schemaVersion: 1), isNull);
   });
+
+  test(
+    'session projection CAS rejects an older attempt in memory and Drift',
+    () async {
+      const key = CacheKey(
+        accountId: '7',
+        namespace: 'auth.session',
+        entityKey: 'projection',
+      );
+      final now = DateTime.utc(2026, 7, 14);
+      for (final store in <AuthSessionProjectionTransactionStorage>[
+        MemoryOfflineStore(),
+        database,
+      ]) {
+        final newer = CacheRecord(
+          key: key,
+          payload: const {
+            '_local_projection_id': 'owner-b',
+            '_local_transaction_attempt_version': 2,
+          },
+          schemaVersion: 1,
+          fetchedAt: now,
+          expiresAt: now.add(const Duration(days: 1)),
+        );
+        final stale = CacheRecord(
+          key: key,
+          payload: const {
+            '_local_projection_id': 'owner-a',
+            '_local_transaction_attempt_version': 1,
+          },
+          schemaVersion: 1,
+          fetchedAt: now,
+          expiresAt: now.add(const Duration(days: 1)),
+        );
+
+        expect(
+          await store.saveAuthSessionProjectionIfCurrent(
+            newer,
+            ownerId: 'owner-b',
+            attemptVersion: 2,
+          ),
+          isTrue,
+        );
+        expect(
+          await store.saveAuthSessionProjectionIfCurrent(
+            stale,
+            ownerId: 'owner-a',
+            attemptVersion: 1,
+          ),
+          isFalse,
+        );
+        final offlineStore = store as OfflineStore;
+        final current = await offlineStore.readCache(key, schemaVersion: 1);
+        expect(current?.payload['_local_projection_id'], 'owner-b');
+        expect(current?.payload['_local_transaction_attempt_version'], 2);
+      }
+    },
+  );
 
   test('schema uses the stable physical table names', () async {
     final rows = await database
