@@ -141,7 +141,7 @@ final class AuthRepositoryImpl
       },
       failure: (failure) async {
         if (clearTokenOnAnyFailure) {
-          await secureStorage.clearAccessToken();
+          await _clearAccessTokenIfMatches(token);
         }
         return FailureResult<AuthSession>(failure);
       },
@@ -155,6 +155,16 @@ final class AuthRepositoryImpl
 
   @override
   Future<void> expireCredentials() => logout();
+
+  Future<void> _clearAccessTokenIfMatches(String token) async {
+    if (secureStorage case final ConditionalTokenStorage conditional) {
+      await conditional.clearAccessTokenIfMatches(token);
+      return;
+    }
+    if (await secureStorage.readAccessToken() == token) {
+      await secureStorage.clearAccessToken();
+    }
+  }
 
   T? _firstWhereOrNull<T>(Iterable<T> values, bool Function(T value) test) {
     for (final value in values) {

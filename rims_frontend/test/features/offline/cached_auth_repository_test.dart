@@ -21,6 +21,8 @@ import 'package:rims_frontend/features/offline/domain/entities/cache_snapshot.da
 import 'package:rims_frontend/features/offline/domain/entities/document_draft.dart';
 import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.dart';
 import 'package:rims_frontend/features/offline/domain/services/offline_ownership_service.dart';
+import 'package:shared_preferences_platform_interface/in_memory_shared_preferences_async.dart';
+import 'package:shared_preferences_platform_interface/shared_preferences_async_platform_interface.dart';
 
 void main() {
   final now = DateTime.utc(2026, 7, 13, 12);
@@ -553,6 +555,175 @@ void main() {
   });
 
   test(
+    'pending revocations are retried per account without clearing later failures',
+    () async {
+      final storage = _FakeSessionStorage()..pendingRevocationAccountId = '7';
+      final journal = MemoryPendingRevocationJournal();
+      await journal.addAccountId('7');
+      await journal.addAccountId('8');
+      final delegate = _FakeAuthRepository(
+        restoreResult: const Success<AuthSession?>(null),
+        loginResult: const Success(_session),
+      );
+      final ownership = _AccountFailingOwnershipCoordinator({'8'});
+      final repository = CachedAuthRepository(
+        delegate: delegate,
+        store: MemoryOfflineStore(),
+        tokenStorage: storage,
+        accountStorage: storage,
+        revocationStorage: storage,
+        revocationJournal: journal,
+        ownershipCoordinator: ownership,
+        onSessionRevoked: () {},
+      );
+
+      final first = await repository.login(
+        username: 'alice',
+        password: 'secret',
+      );
+
+      expect(first, isA<FailureResult<AuthSession>>());
+      expect(delegate.loginCalls, 0);
+      expect(await journal.readAccountIds(), {'8'});
+      expect(storage.pendingRevocationAccountId, '8');
+
+      final restartedDelegate = _FakeAuthRepository(
+        restoreResult: const Success<AuthSession?>(null),
+        loginResult: const Success(_session),
+      );
+      final restarted = CachedAuthRepository(
+        delegate: restartedDelegate,
+        store: MemoryOfflineStore(),
+        tokenStorage: storage,
+        accountStorage: storage,
+        revocationStorage: storage,
+        revocationJournal: journal,
+        ownershipCoordinator: _AccountFailingOwnershipCoordinator({}),
+        onSessionRevoked: () {},
+      );
+
+      expect(
+        await restarted.login(username: 'alice', password: 'secret'),
+        isA<Success<AuthSession>>(),
+      );
+      expect(restartedDelegate.loginCalls, 1);
+      expect(await journal.readAccountIds(), isEmpty);
+      expect(storage.pendingRevocationAccountId, isNull);
+    },
+  );
+
+  test(
+    'pending revocation journal mutations do not lose another account',
+    () async {
+      final journal = MemoryPendingRevocationJournal();
+
+      await Future.wait([
+        journal.addAccountId('7'),
+        journal.addAccountId('8'),
+        journal.removeAccountId('7'),
+      ]);
+
+      expect(await journal.readAccountIds(), {'8'});
+    },
+  );
+
+  test(
+    'shared preferences revocation journal serializes concurrent mutations',
+    () async {
+      final previousPlatform = SharedPreferencesAsyncPlatform.instance;
+      SharedPreferencesAsyncPlatform.instance =
+          InMemorySharedPreferencesAsync.empty();
+      addTearDown(
+        () => SharedPreferencesAsyncPlatform.instance = previousPlatform,
+      );
+      final journal = SharedPreferencesPendingRevocationJournal();
+
+      await Future.wait([
+        journal.addAccountId('7'),
+        journal.addAccountId('8'),
+        journal.removeAccountId('7'),
+      ]);
+
+      final restarted = SharedPreferencesPendingRevocationJournal();
+      expect(await restarted.readAccountIds(), {'8'});
+    },
+  );
+
+  test('stale login rolls back only its own durable token', () async {
+    var epoch = 0;
+    final storage = _FakeSessionStorage();
+    final delegate = _ConcurrentLoginAuthRepository(storage);
+    final repository = CachedAuthRepository(
+      delegate: delegate,
+      store: MemoryOfflineStore(),
+      tokenStorage: storage,
+      accountStorage: storage,
+      revocationStorage: storage,
+      ownershipCoordinator: _RecordingOwnershipCoordinator(),
+      authEpochReader: () => epoch,
+      onSessionRevoked: () {},
+    );
+    final stale = repository.login(username: 'alice', password: 'secret');
+    await delegate.aliceStarted.future;
+    epoch += 1;
+
+    final current = await repository.login(username: 'bob', password: 'secret');
+    delegate.releaseAlice.complete();
+    final staleResult = await stale;
+
+    expect(current, isA<Success<AuthSession>>());
+    expect(staleResult, isA<FailureResult<AuthSession>>());
+    expect(storage.token, 'token-8');
+    expect(storage.conditionalClearAttempts, ['token-7']);
+  });
+
+  test(
+    'failed newer login cannot leave the stale login token durable',
+    () async {
+      var epoch = 0;
+      final storage = _FakeSessionStorage();
+      final delegate = _ConcurrentLoginAuthRepository(storage)..bobFails = true;
+      final repository = CachedAuthRepository(
+        delegate: delegate,
+        store: MemoryOfflineStore(),
+        tokenStorage: storage,
+        accountStorage: storage,
+        revocationStorage: storage,
+        ownershipCoordinator: _RecordingOwnershipCoordinator(),
+        authEpochReader: () => epoch,
+        onSessionRevoked: () {},
+      );
+      final stale = repository.login(username: 'alice', password: 'secret');
+      await delegate.aliceStarted.future;
+      epoch += 1;
+
+      expect(
+        await repository.login(username: 'bob', password: 'secret'),
+        isA<FailureResult<AuthSession>>(),
+      );
+      delegate.releaseAlice.complete();
+      expect(await stale, isA<FailureResult<AuthSession>>());
+
+      expect(storage.token, isNull);
+      expect(storage.conditionalClearAttempts, ['token-7']);
+      final restarted = CachedAuthRepository(
+        delegate: _FakeAuthRepository(
+          restoreResult: const Success<AuthSession?>(null),
+        ),
+        store: MemoryOfflineStore(),
+        tokenStorage: storage,
+        accountStorage: storage,
+        revocationStorage: storage,
+        onSessionRevoked: () {},
+      );
+      expect(
+        await restarted.restoreSession(),
+        const Success<AuthSession?>(null),
+      );
+    },
+  );
+
+  test(
     'revocation keeps the durable marker until account metadata is cleared',
     () async {
       final delegate = _FakeAuthRepository(
@@ -935,6 +1106,39 @@ final class _RecordingOwnershipCoordinator
   bool canSync(String accountId) => true;
 }
 
+final class _AccountFailingOwnershipCoordinator
+    implements OfflineOwnershipCoordinator {
+  _AccountFailingOwnershipCoordinator(this.failRevocationsFor);
+
+  final Set<String> failRevocationsFor;
+
+  @override
+  Future<OfflineOwnershipReport> apply(OfflineOwnershipIntent intent) async {
+    final fails =
+        intent.reason == OfflineOwnershipReason.revocation &&
+        failRevocationsFor.contains(intent.accountId);
+    return OfflineOwnershipReport(
+      reason: intent.reason,
+      accountId: intent.accountId,
+      executedCounts: const OfflineOwnershipCounts(),
+      failures: fails
+          ? const [
+              OfflineOwnershipFailure(
+                step: OfflineOwnershipStep.store,
+                message: 'cleanup failed',
+              ),
+            ]
+          : const [],
+    );
+  }
+
+  @override
+  bool canAccessOfflineData(String accountId) => true;
+
+  @override
+  bool canSync(String accountId) => true;
+}
+
 AuthSession? _sessionFrom(Result<AuthSession?> result) {
   return result.when(
     success: (session) => session,
@@ -945,14 +1149,17 @@ AuthSession? _sessionFrom(Result<AuthSession?> result) {
 final class _FakeSessionStorage
     implements
         TokenStorage,
+        ConditionalTokenStorage,
         AuthenticatedAccountStorage,
-        PendingRevocationStorage {
+        PendingRevocationStorage,
+        ConditionalPendingRevocationStorage {
   _FakeSessionStorage({this.token});
 
   String? token;
   String? accountId;
   String? pendingRevocationAccountId;
   final Map<_RevocationStorageFailure, int> _remainingFailures = {};
+  final List<String> conditionalClearAttempts = [];
 
   void failNext(_RevocationStorageFailure failure, {int times = 1}) {
     _remainingFailures[failure] = times;
@@ -973,6 +1180,14 @@ final class _FakeSessionStorage
   Future<void> clearAccessToken() async {
     _throwIf(_RevocationStorageFailure.clearCredential);
     token = null;
+  }
+
+  @override
+  Future<bool> clearAccessTokenIfMatches(String expectedToken) async {
+    conditionalClearAttempts.add(expectedToken);
+    if (token != expectedToken) return false;
+    await clearAccessToken();
+    return true;
   }
 
   @override
@@ -999,6 +1214,15 @@ final class _FakeSessionStorage
   Future<void> clearPendingRevocationAccountId() async {
     _throwIf(_RevocationStorageFailure.clearMarker);
     pendingRevocationAccountId = null;
+  }
+
+  @override
+  Future<bool> clearPendingRevocationAccountIdIfMatches(
+    String expectedAccountId,
+  ) async {
+    if (pendingRevocationAccountId != expectedAccountId) return false;
+    await clearPendingRevocationAccountId();
+    return true;
   }
 
   @override
@@ -1147,6 +1371,42 @@ final class _FakeAuthRepository implements AuthRepository {
   }
 }
 
+final class _ConcurrentLoginAuthRepository implements AuthRepository {
+  _ConcurrentLoginAuthRepository(this.storage);
+
+  final _FakeSessionStorage storage;
+  final Completer<void> aliceStarted = Completer<void>();
+  final Completer<void> releaseAlice = Completer<void>();
+  bool bobFails = false;
+
+  @override
+  Future<Result<AuthSession>> login({
+    required String username,
+    required String password,
+  }) async {
+    if (username == 'alice') {
+      await storage.saveAccessToken('token-7');
+      aliceStarted.complete();
+      await releaseAlice.future;
+      return const Success(_account7TokenSession);
+    }
+    if (bobFails) return const FailureResult(AuthenticationFailure());
+    await storage.saveAccessToken('token-8');
+    return const Success(_secondAccountSession);
+  }
+
+  @override
+  Future<void> logout() => storage.clearAccessToken();
+
+  @override
+  Future<Result<AuthSession?>> restoreSession() async =>
+      const Success<AuthSession?>(null);
+
+  @override
+  Future<Result<Warehouse>> switchCurrentWarehouse(Warehouse warehouse) async =>
+      Success(warehouse);
+}
+
 final class _ThrowingCredentialRepository
     implements AuthRepository, AuthCredentialInvalidator {
   bool failExpiry = true;
@@ -1203,6 +1463,12 @@ const _admin = AppUser(
 );
 const _session = AuthSession(
   accessToken: 'token',
+  user: _user,
+  currentWarehouse: _warehouse11,
+  warehouses: [_warehouse11, _warehouse12],
+);
+const _account7TokenSession = AuthSession(
+  accessToken: 'token-7',
   user: _user,
   currentWarehouse: _warehouse11,
   warehouses: [_warehouse11, _warehouse12],

@@ -354,6 +354,7 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
   final Map<String, Set<OfflineOwnershipReason>> _blockedReasons = {};
   final Set<String> _commandBlockedAccounts = {};
   final Set<String> _successfulRevocations = {};
+  final Map<String, Set<OfflineOwnershipReason>> _recoverableReasonsReady = {};
   Future<void> _tail = Future<void>.value();
   int _previewSequence = 0;
 
@@ -431,7 +432,11 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
         );
       }
       final currentRevision = currentSnapshot.revisionFor(preview.command);
-      if (executedCounts != preview.counts ||
+      if (!_sameCommandCounts(
+            preview.command,
+            executedCounts,
+            preview.counts,
+          ) ||
           currentRevision != preview.contentRevision) {
         return OfflineOwnershipReport(
           reason: null,
@@ -638,12 +643,10 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
         );
       case OfflineOwnershipReason.reauthenticated:
         if (failures.isEmpty) {
-          _unblock(intent.accountId, OfflineOwnershipReason.logout);
-          _unblock(intent.accountId, OfflineOwnershipReason.tokenExpiry);
-          _unblock(
-            intent.accountId,
-            OfflineOwnershipReason.invalidSessionProjection,
-          );
+          final ready = _recoverableReasonsReady[intent.accountId] ?? const {};
+          for (final reason in ready) {
+            _unblock(intent.accountId, reason);
+          }
           if (_successfulRevocations.remove(intent.accountId)) {
             _unblock(intent.accountId, OfflineOwnershipReason.revocation);
           }
@@ -757,29 +760,38 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
     List<_ParticipantBlock> blocks,
   ) {
     if (intent.reason == OfflineOwnershipReason.reauthenticated) {
-      if (report.completed &&
-          !(_blockedReasons[intent.accountId]?.contains(
-                OfflineOwnershipReason.revocation,
-              ) ??
-              false)) {
-        _releaseRetainedMutationBlocks(
-          intent.accountId,
-          OfflineOwnershipReason.logout,
-        );
-        _releaseRetainedMutationBlocks(
-          intent.accountId,
-          OfflineOwnershipReason.tokenExpiry,
-        );
-        _releaseRetainedMutationBlocks(
-          intent.accountId,
-          OfflineOwnershipReason.invalidSessionProjection,
-        );
-        _releaseRetainedMutationBlocks(
-          intent.accountId,
-          OfflineOwnershipReason.revocation,
-        );
+      if (report.completed) {
+        final ready = _recoverableReasonsReady[intent.accountId];
+        if (ready != null) {
+          for (final reason in ready.toList(growable: false)) {
+            if (!(_blockedReasons[intent.accountId]?.contains(reason) ??
+                false)) {
+              _releaseRetainedMutationBlocks(intent.accountId, reason);
+              ready.remove(reason);
+            }
+          }
+          if (ready.isEmpty) _recoverableReasonsReady.remove(intent.accountId);
+        }
+        if (!(_blockedReasons[intent.accountId]?.contains(
+              OfflineOwnershipReason.revocation,
+            ) ??
+            false)) {
+          _releaseRetainedMutationBlocks(
+            intent.accountId,
+            OfflineOwnershipReason.revocation,
+          );
+        }
       }
       return;
+    }
+    if (report.completed &&
+        (intent.reason == OfflineOwnershipReason.logout ||
+            intent.reason == OfflineOwnershipReason.tokenExpiry ||
+            intent.reason == OfflineOwnershipReason.invalidSessionProjection ||
+            intent.reason == OfflineOwnershipReason.accountSwitch)) {
+      _recoverableReasonsReady
+          .putIfAbsent(intent.accountId, () => {})
+          .add(intent.reason);
     }
     switch (intent.reason) {
       case OfflineOwnershipReason.logout ||
@@ -863,11 +875,13 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
       case OfflineOwnershipReason.logout ||
           OfflineOwnershipReason.tokenExpiry ||
           OfflineOwnershipReason.invalidSessionProjection:
+        _recoverableReasonsReady[intent.accountId]?.remove(intent.reason);
         _block(intent.accountId, intent.reason);
       case OfflineOwnershipReason.revocation:
         _successfulRevocations.remove(intent.accountId);
         _block(intent.accountId, intent.reason);
       case OfflineOwnershipReason.accountSwitch:
+        _recoverableReasonsReady[intent.accountId]?.remove(intent.reason);
         _block(intent.accountId, intent.reason);
         final current = intent.currentAccountId;
         if (current != null) _block(current, intent.reason);
@@ -1096,3 +1110,18 @@ String _stableRevision(Iterable<String> values) {
   }
   return hash.toRadixString(16).padLeft(16, '0');
 }
+
+bool _sameCommandCounts(
+  OfflineClearCommand command,
+  OfflineOwnershipCounts left,
+  OfflineOwnershipCounts right,
+) => switch (command) {
+  OfflineClearCommand.cache =>
+    left.cacheEntries == right.cacheEntries &&
+        left.downloads == right.downloads,
+  OfflineClearCommand.offlineWork =>
+    left.drafts == right.drafts &&
+        left.outboxOperations == right.outboxOperations &&
+        left.stagedTransfers == right.stagedTransfers &&
+        left.scanSessions == right.scanSessions,
+};

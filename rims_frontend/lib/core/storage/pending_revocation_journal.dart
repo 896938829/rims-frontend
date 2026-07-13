@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:shared_preferences/shared_preferences.dart';
 
 abstract interface class PendingRevocationJournal {
@@ -5,7 +7,7 @@ abstract interface class PendingRevocationJournal {
 
   Future<void> addAccountId(String accountId);
 
-  Future<void> clear();
+  Future<void> removeAccountId(String accountId);
 }
 
 final class MemoryPendingRevocationJournal implements PendingRevocationJournal {
@@ -17,7 +19,9 @@ final class MemoryPendingRevocationJournal implements PendingRevocationJournal {
   }
 
   @override
-  Future<void> clear() async => _accountIds.clear();
+  Future<void> removeAccountId(String accountId) async {
+    _accountIds.remove(accountId);
+  }
 
   @override
   Future<Set<String>> readAccountIds() async => Set.unmodifiable(_accountIds);
@@ -44,11 +48,40 @@ final class SharedPreferencesPendingRevocationJournal
 
   @override
   Future<void> addAccountId(String accountId) async {
-    final ids = await readAccountIds()
-      ..add(accountId);
-    await _delegate.setStringList(key, ids.toList()..sort());
+    await _PendingRevocationJournalMutex.run(key, () async {
+      final ids = await readAccountIds()
+        ..add(accountId);
+      await _delegate.setStringList(key, ids.toList()..sort());
+    });
   }
 
   @override
-  Future<void> clear() => _delegate.remove(key);
+  Future<void> removeAccountId(String accountId) =>
+      _PendingRevocationJournalMutex.run(key, () async {
+        final ids = await readAccountIds()
+          ..remove(accountId);
+        if (ids.isEmpty) {
+          await _delegate.remove(key);
+        } else {
+          await _delegate.setStringList(key, ids.toList()..sort());
+        }
+      });
+}
+
+abstract final class _PendingRevocationJournalMutex {
+  static final Map<String, Future<void>> _tails = {};
+
+  static Future<T> run<T>(String key, Future<T> Function() operation) {
+    final previous = _tails[key] ?? Future<void>.value();
+    final released = Completer<void>();
+    _tails[key] = released.future;
+    return previous.catchError((Object _) {}).then((_) async {
+      try {
+        return await operation();
+      } finally {
+        released.complete();
+        if (identical(_tails[key], released.future)) _tails.remove(key);
+      }
+    });
+  }
 }

@@ -368,6 +368,90 @@ void main() {
       expect(fixture.files.clearedDownloads, isEmpty);
     });
 
+    test('clear-cache ignores offline-work-only snapshot changes', () async {
+      final store = _FakeOwnershipStore(
+        snapshots: {
+          '7': const OfflineStoreOwnershipSnapshot(
+            cacheEntries: 1,
+            drafts: 1,
+            outboxOperations: 1,
+            contentIdentities: {'cache:stable', 'draft:old', 'outbox:old'},
+          ),
+        },
+      );
+      final fixture = _Fixture(store: store);
+      final preview = await fixture.service.preview(
+        accountId: '7',
+        command: OfflineClearCommand.cache,
+      );
+      store.snapshots['7'] = const OfflineStoreOwnershipSnapshot(
+        cacheEntries: 1,
+        drafts: 2,
+        outboxOperations: 2,
+        contentIdentities: {'cache:stable', 'draft:new', 'outbox:new'},
+      );
+
+      final report = await fixture.service.executeClear(preview);
+
+      expect(report.completed, isTrue);
+      expect(store.clearCacheCalls, ['7']);
+    });
+
+    test('clear-offline-work ignores cache-only snapshot changes', () async {
+      final store = _FakeOwnershipStore(
+        snapshots: {
+          '7': const OfflineStoreOwnershipSnapshot(
+            cacheEntries: 1,
+            drafts: 1,
+            contentIdentities: {'cache:old', 'draft:stable'},
+          ),
+        },
+      );
+      final fixture = _Fixture(store: store);
+      final preview = await fixture.service.preview(
+        accountId: '7',
+        command: OfflineClearCommand.offlineWork,
+      );
+      store.snapshots['7'] = const OfflineStoreOwnershipSnapshot(
+        cacheEntries: 2,
+        drafts: 1,
+        contentIdentities: {'cache:new', 'draft:stable'},
+      );
+
+      final report = await fixture.service.executeClear(preview);
+
+      expect(report.completed, isTrue);
+      expect(store.clearOfflineWorkCalls, ['7']);
+    });
+
+    test(
+      'equal-count offline-work replacement requires reconfirmation',
+      () async {
+        final store = _FakeOwnershipStore(
+          snapshots: {
+            '7': const OfflineStoreOwnershipSnapshot(
+              drafts: 1,
+              contentIdentities: {'draft:old'},
+            ),
+          },
+        );
+        final fixture = _Fixture(store: store);
+        final preview = await fixture.service.preview(
+          accountId: '7',
+          command: OfflineClearCommand.offlineWork,
+        );
+        store.snapshots['7'] = const OfflineStoreOwnershipSnapshot(
+          drafts: 1,
+          contentIdentities: {'draft:new'},
+        );
+
+        final report = await fixture.service.executeClear(preview);
+
+        expect(report.requiresReconfirmation, isTrue);
+        expect(store.clearOfflineWorkCalls, isEmpty);
+      },
+    );
+
     test('ownership mutations are serialized', () async {
       final blocker = Completer<void>();
       final store = _FakeOwnershipStore(clearBlocker: blocker.future);
@@ -441,6 +525,17 @@ void main() {
         await _exerciseOwnershipStore(store, store);
       },
     );
+
+    test('Memory cache revision is canonical and payload-sensitive', () async {
+      final store = MemoryOfflineStore();
+      await _expectCanonicalCacheRevision(store, store);
+    });
+
+    test('Drift cache revision is canonical and payload-sensitive', () async {
+      final store = OfflineDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(store.close);
+      await _expectCanonicalCacheRevision(store, store);
+    });
   });
 
   test('review invalidation is account and warehouse scoped', () async {
@@ -564,6 +659,61 @@ Future<void> _exerciseOwnershipStore(
 
   await ownership.clearAccountOfflineWork('7');
   expect((await ownership.inspectAccount('7')).drafts, 0);
+}
+
+Future<void> _expectCanonicalCacheRevision(
+  OfflineStore store,
+  OfflineOwnershipStore ownership,
+) async {
+  final now = DateTime.utc(2026, 7, 14, 9);
+  const key = CacheKey(
+    accountId: '7',
+    warehouseId: 11,
+    namespace: 'inventory',
+    entityKey: 'page-1',
+  );
+  Future<void> write(Map<String, Object?> payload) => store.writeCache(
+    CacheRecord(
+      key: key,
+      payload: payload,
+      schemaVersion: 1,
+      fetchedAt: now,
+      expiresAt: now.add(const Duration(hours: 1)),
+    ),
+  );
+
+  await write(const {
+    'a': 1,
+    'nested': {
+      'x': 2,
+      'y': [3, 4],
+    },
+  });
+  final first = (await ownership.inspectAccount('7')).contentIdentities.single;
+  await write(const {
+    'nested': {
+      'y': [3, 4],
+      'x': 2,
+    },
+    'a': 1,
+  });
+  final reordered = (await ownership.inspectAccount(
+    '7',
+  )).contentIdentities.single;
+  await write(const {
+    'a': 1,
+    'nested': {
+      'x': 9,
+      'y': [3, 4],
+    },
+  });
+  final changed = (await ownership.inspectAccount(
+    '7',
+  )).contentIdentities.single;
+
+  expect(reordered, first);
+  expect(changed, isNot(first));
+  expect(changed, isNot(contains('nested')));
 }
 
 final class _Fixture {

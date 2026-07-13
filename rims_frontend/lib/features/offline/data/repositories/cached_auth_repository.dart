@@ -45,7 +45,7 @@ final class CachedAuthRepository
   final void Function() onSessionRevoked;
   final void Function()? onSessionExpired;
   final DateTime Function() now;
-  String? _volatilePendingRevocationAccountId;
+  final Set<String> _volatilePendingRevocationAccountIds = {};
   bool _revocationInvalidated = false;
 
   @override
@@ -63,7 +63,8 @@ final class CachedAuthRepository
       return await _restoreSession();
     } on Object catch (error) {
       final failure =
-          _revocationInvalidated || _volatilePendingRevocationAccountId != null
+          _revocationInvalidated ||
+              _volatilePendingRevocationAccountIds.isNotEmpty
           ? RevocationCleanupFailure(
               message: 'Revoked credential cleanup could not be completed.',
               cause: error,
@@ -170,10 +171,7 @@ final class CachedAuthRepository
     }
     if (failure is AuthorizationFailure) {
       if (accountId != null) {
-        final revocationFailure = await _completeRevocation(
-          accountId,
-          persistMarker: true,
-        );
+        final revocationFailure = await _completeRevocation(accountId);
         if (revocationFailure != null) {
           return FailureResult(revocationFailure);
         }
@@ -219,7 +217,10 @@ final class CachedAuthRepository
     if (pendingFailure != null) return FailureResult(pendingFailure);
     final result = await delegate.login(username: username, password: password);
     if (result case Success<AuthSession>(:final data)) {
-      if (!_isCurrentEpoch(operationEpoch)) return _staleSessionFailure();
+      if (!_isCurrentEpoch(operationEpoch)) {
+        await _rollbackAccessToken(data.accessToken);
+        return _staleSessionFailure();
+      }
       final previousAccountId = await accountStorage
           .readAuthenticatedAccountId();
       final accountId = data.user.id.toString();
@@ -231,7 +232,7 @@ final class CachedAuthRepository
           ),
         );
         if (ownershipFailure != null) {
-          await delegate.logout();
+          await _rollbackAccessToken(data.accessToken);
           return FailureResult(ownershipFailure);
         }
       }
@@ -239,11 +240,19 @@ final class CachedAuthRepository
         OfflineOwnershipIntent.reauthenticated(accountId: accountId),
       );
       if (reauthenticationFailure != null) {
-        await delegate.logout();
+        await _rollbackAccessToken(data.accessToken);
         return FailureResult(reauthenticationFailure);
       }
-      if (!_isCurrentEpoch(operationEpoch)) return _staleSessionFailure();
-      await _writeSession(data, expectedEpoch: operationEpoch);
+      if (!_isCurrentEpoch(operationEpoch)) {
+        await _rollbackAccessToken(data.accessToken);
+        return _staleSessionFailure();
+      }
+      try {
+        await _writeSession(data, expectedEpoch: operationEpoch);
+      } on _StaleAuthOperation {
+        await _rollbackAccessToken(data.accessToken);
+        return _staleSessionFailure();
+      }
     }
     return result;
   }
@@ -377,27 +386,24 @@ final class CachedAuthRepository
 
   Future<RevocationCleanupFailure?> _completeRevocation(
     String accountId, {
-    required bool persistMarker,
     bool notifyRevocation = true,
   }) async {
-    _volatilePendingRevocationAccountId = accountId;
+    _volatilePendingRevocationAccountIds.add(accountId);
     _revocationInvalidated = true;
     if (notifyRevocation) onSessionRevoked();
     Object? firstError;
-    var hasDurableMarker = !persistMarker;
-    if (persistMarker) {
-      try {
+    try {
+      await revocationJournal?.addAccountId(accountId);
+    } on Object catch (error) {
+      firstError = error;
+    }
+    try {
+      final primary = await revocationStorage.readPendingRevocationAccountId();
+      if (primary == null || primary == accountId) {
         await revocationStorage.savePendingRevocationAccountId(accountId);
-        hasDurableMarker = true;
-      } on Object catch (error) {
-        firstError = error;
       }
-      try {
-        await revocationJournal?.addAccountId(accountId);
-        hasDurableMarker = hasDurableMarker || revocationJournal != null;
-      } on Object catch (error) {
-        firstError ??= error;
-      }
+    } on Object catch (error) {
+      firstError ??= error;
     }
     // Quarantine every independently recoverable projection before cleanup.
     try {
@@ -421,10 +427,10 @@ final class CachedAuthRepository
     if (ownershipFailure != null) {
       firstError ??= ownershipFailure;
     }
-    if (firstError == null && hasDurableMarker) {
+    if (firstError == null) {
       try {
-        await revocationStorage.clearPendingRevocationAccountId();
-        await revocationJournal?.clear();
+        await revocationJournal?.removeAccountId(accountId);
+        await _clearPendingRevocationIfMatches(accountId);
       } on Object catch (error) {
         firstError = error;
       }
@@ -437,8 +443,8 @@ final class CachedAuthRepository
         cause: firstError,
       );
     }
-    _volatilePendingRevocationAccountId = null;
-    _revocationInvalidated = false;
+    _volatilePendingRevocationAccountIds.remove(accountId);
+    _revocationInvalidated = _volatilePendingRevocationAccountIds.isNotEmpty;
     return null;
   }
 
@@ -462,22 +468,55 @@ final class CachedAuthRepository
     }
     if (primaryReadError != null &&
         journalPending.isEmpty &&
-        _volatilePendingRevocationAccountId == null) {
+        _volatilePendingRevocationAccountIds.isEmpty) {
       return RevocationCleanupFailure(
         message: 'Pending credential revocation could not be verified.',
         cause: primaryReadError,
       );
     }
-    final pendingRevocation =
-        durablePendingRevocation ??
-        journalPending.firstOrNull ??
-        _volatilePendingRevocationAccountId;
-    if (pendingRevocation == null) return null;
-    return _completeRevocation(
-      pendingRevocation,
-      persistMarker: durablePendingRevocation == null,
-      notifyRevocation: false,
-    );
+    final pendingRevocations = <String>{
+      ..._volatilePendingRevocationAccountIds,
+      ...journalPending,
+      ?durablePendingRevocation,
+    };
+    if (pendingRevocations.isEmpty) return null;
+    _volatilePendingRevocationAccountIds.addAll(pendingRevocations);
+    _revocationInvalidated = true;
+    final ordered = pendingRevocations.toList()..sort();
+    if (durablePendingRevocation != null) {
+      ordered
+        ..remove(durablePendingRevocation)
+        ..insert(0, durablePendingRevocation);
+    }
+    for (final accountId in ordered) {
+      final failure = await _completeRevocation(
+        accountId,
+        notifyRevocation: false,
+      );
+      if (failure != null) return failure;
+    }
+    return null;
+  }
+
+  Future<void> _rollbackAccessToken(String expectedToken) async {
+    if (tokenStorage case final ConditionalTokenStorage conditional) {
+      await conditional.clearAccessTokenIfMatches(expectedToken);
+      return;
+    }
+    if (await tokenStorage.readAccessToken() == expectedToken) {
+      await tokenStorage.clearAccessToken();
+    }
+  }
+
+  Future<void> _clearPendingRevocationIfMatches(String accountId) async {
+    if (revocationStorage
+        case final ConditionalPendingRevocationStorage conditional) {
+      await conditional.clearPendingRevocationAccountIdIfMatches(accountId);
+      return;
+    }
+    if (await revocationStorage.readPendingRevocationAccountId() == accountId) {
+      await revocationStorage.clearPendingRevocationAccountId();
+    }
   }
 
   Future<Failure?> _applyOwnership(OfflineOwnershipIntent intent) async {

@@ -9,6 +9,7 @@ import '../../domain/entities/cache_snapshot.dart';
 import '../../domain/entities/document_draft.dart';
 import '../../domain/entities/outbox_operation.dart';
 import '../../domain/services/offline_store.dart';
+import '../../domain/services/offline_content_revision.dart';
 import '../../domain/services/offline_ownership_service.dart';
 import '../models/cache_record_model.dart';
 import 'offline_tables.dart';
@@ -534,7 +535,9 @@ ON outbox_operations (operation_id, account_id)
       },
       contentIdentities: {
         for (final row in cacheRows)
-          'cache:${row.cacheId}:${row.recordSchemaVersion}:${row.fetchedAt.toIso8601String()}',
+          'cache:${row.cacheId}:${row.recordSchemaVersion}:'
+              '${row.fetchedAt.toIso8601String()}:'
+              '${canonicalOfflineContentDigest(jsonDecode(row.payload))}',
         for (final draft in drafts)
           'draft:${draft.id}:${draft.version}:${draft.updatedAt.toIso8601String()}:'
               '${(draft.attachmentStagingIds.toList()..sort()).join(',')}',

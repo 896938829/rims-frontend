@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
 abstract interface class TokenStorage {
@@ -6,6 +8,10 @@ abstract interface class TokenStorage {
   Future<String?> readAccessToken();
 
   Future<void> clearAccessToken();
+}
+
+abstract interface class ConditionalTokenStorage {
+  Future<bool> clearAccessTokenIfMatches(String expectedToken);
 }
 
 abstract interface class OfflineDatabaseKeyStorage {
@@ -30,12 +36,20 @@ abstract interface class PendingRevocationStorage {
   Future<void> clearPendingRevocationAccountId();
 }
 
+abstract interface class ConditionalPendingRevocationStorage {
+  Future<bool> clearPendingRevocationAccountIdIfMatches(
+    String expectedAccountId,
+  );
+}
+
 final class AppSecureStorage
     implements
         TokenStorage,
+        ConditionalTokenStorage,
         OfflineDatabaseKeyStorage,
         AuthenticatedAccountStorage,
-        PendingRevocationStorage {
+        PendingRevocationStorage,
+        ConditionalPendingRevocationStorage {
   const AppSecureStorage({FlutterSecureStorage? storage})
     : _storage = storage ?? const FlutterSecureStorage();
 
@@ -48,9 +62,10 @@ final class AppSecureStorage
   final FlutterSecureStorage _storage;
 
   @override
-  Future<void> saveAccessToken(String token) {
-    return _storage.write(key: kAccessTokenKey, value: token);
-  }
+  Future<void> saveAccessToken(String token) => _SecureStorageKeyMutex.run(
+    kAccessTokenKey,
+    () => _storage.write(key: kAccessTokenKey, value: token),
+  );
 
   @override
   Future<String?> readAccessToken() {
@@ -58,9 +73,20 @@ final class AppSecureStorage
   }
 
   @override
-  Future<void> clearAccessToken() {
-    return _storage.delete(key: kAccessTokenKey);
-  }
+  Future<void> clearAccessToken() => _SecureStorageKeyMutex.run(
+    kAccessTokenKey,
+    () => _storage.delete(key: kAccessTokenKey),
+  );
+
+  @override
+  Future<bool> clearAccessTokenIfMatches(String expectedToken) =>
+      _SecureStorageKeyMutex.run(kAccessTokenKey, () async {
+        if (await _storage.read(key: kAccessTokenKey) != expectedToken) {
+          return false;
+        }
+        await _storage.delete(key: kAccessTokenKey);
+        return true;
+      });
 
   @override
   Future<void> saveOfflineDatabaseKey(String key) {
@@ -88,12 +114,14 @@ final class AppSecureStorage
   }
 
   @override
-  Future<void> savePendingRevocationAccountId(String accountId) {
-    return _storage.write(
-      key: kPendingRevocationAccountIdKey,
-      value: accountId,
-    );
-  }
+  Future<void> savePendingRevocationAccountId(String accountId) =>
+      _SecureStorageKeyMutex.run(
+        kPendingRevocationAccountIdKey,
+        () => _storage.write(
+          key: kPendingRevocationAccountIdKey,
+          value: accountId,
+        ),
+      );
 
   @override
   Future<String?> readPendingRevocationAccountId() {
@@ -101,7 +129,38 @@ final class AppSecureStorage
   }
 
   @override
-  Future<void> clearPendingRevocationAccountId() {
-    return _storage.delete(key: kPendingRevocationAccountIdKey);
+  Future<void> clearPendingRevocationAccountId() => _SecureStorageKeyMutex.run(
+    kPendingRevocationAccountIdKey,
+    () => _storage.delete(key: kPendingRevocationAccountIdKey),
+  );
+
+  @override
+  Future<bool> clearPendingRevocationAccountIdIfMatches(
+    String expectedAccountId,
+  ) => _SecureStorageKeyMutex.run(kPendingRevocationAccountIdKey, () async {
+    if (await _storage.read(key: kPendingRevocationAccountIdKey) !=
+        expectedAccountId) {
+      return false;
+    }
+    await _storage.delete(key: kPendingRevocationAccountIdKey);
+    return true;
+  });
+}
+
+abstract final class _SecureStorageKeyMutex {
+  static final Map<String, Future<void>> _tails = {};
+
+  static Future<T> run<T>(String key, Future<T> Function() operation) {
+    final previous = _tails[key] ?? Future<void>.value();
+    final released = Completer<void>();
+    _tails[key] = released.future;
+    return previous.catchError((Object _) {}).then((_) async {
+      try {
+        return await operation();
+      } finally {
+        released.complete();
+        if (identical(_tails[key], released.future)) _tails.remove(key);
+      }
+    });
   }
 }

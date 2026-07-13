@@ -339,6 +339,42 @@ void main() {
     });
 
     test(
+      'failed warehouse bootstrap conditionally rolls back its login token',
+      () async {
+        final storage = _FakeTokenStorage(accessToken: 'old-token');
+        final repository = AuthRepositoryImpl(
+          remoteDataSource: _FakeAuthRemoteDataSource(
+            loginResult: const Success(
+              LoginResponseModel(
+                token: 'login-token',
+                user: AppUserModel(
+                  id: 7,
+                  username: 'alice',
+                  realName: 'Alice',
+                  roleCode: 'user',
+                  roleName: 'User',
+                ),
+              ),
+            ),
+            warehousesResult: const FailureResult(
+              NetworkFailure(message: 'bootstrap failed'),
+            ),
+          ),
+          secureStorage: storage,
+        );
+
+        final result = await repository.login(
+          username: 'alice',
+          password: 'secret',
+        );
+
+        expect(result, isA<FailureResult<AuthSession>>());
+        expect(storage.accessToken, isNull);
+        expect(storage.conditionalClearAttempts, ['login-token']);
+      },
+    );
+
+    test(
       'switchCurrentWarehouse confirms target warehouse with backend',
       () async {
         final storage = _FakeTokenStorage(accessToken: 'active-token');
@@ -407,17 +443,26 @@ void main() {
   });
 }
 
-final class _FakeTokenStorage implements TokenStorage {
+final class _FakeTokenStorage implements TokenStorage, ConditionalTokenStorage {
   _FakeTokenStorage({this.accessToken});
 
   String? accessToken;
   int clearCallCount = 0;
   int saveCallCount = 0;
+  final List<String> conditionalClearAttempts = [];
 
   @override
   Future<void> clearAccessToken() async {
     clearCallCount += 1;
     accessToken = null;
+  }
+
+  @override
+  Future<bool> clearAccessTokenIfMatches(String expectedToken) async {
+    conditionalClearAttempts.add(expectedToken);
+    if (accessToken != expectedToken) return false;
+    await clearAccessToken();
+    return true;
   }
 
   @override

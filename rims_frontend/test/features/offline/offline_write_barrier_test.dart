@@ -402,6 +402,114 @@ void main() {
   );
 
   test(
+    'successful account switch is recoverable when the previous account logs in again',
+    () async {
+      final barrier = OfflineWriteBarrier();
+      final rawStore = MemoryOfflineStore();
+      final guardedStore = WriteBarrierOfflineStore(
+        delegate: rawStore,
+        barrier: barrier,
+      );
+      final ownership = _service(
+        store: rawStore,
+        scans: const _NoopScans(),
+        keys: MemoryOfflineDatabaseKeyManager(),
+        participants: [barrier],
+      );
+      expect(
+        (await ownership.apply(
+          const OfflineOwnershipIntent.accountSwitch(
+            previousAccountId: '7',
+            currentAccountId: '8',
+          ),
+        )).completed,
+        isTrue,
+      );
+      await ownership.apply(
+        const OfflineOwnershipIntent.logout(accountId: '8'),
+      );
+      final storage = _SessionStorage();
+      final repository = CachedAuthRepository(
+        delegate: _LoginAuthRepository(),
+        store: guardedStore,
+        tokenStorage: storage,
+        accountStorage: storage,
+        revocationStorage: storage,
+        onSessionRevoked: () {},
+        ownershipCoordinator: ownership,
+      );
+
+      final result = await repository.login(
+        username: 'alice',
+        password: 'secret',
+      );
+
+      expect(result, isA<Success<AuthSession>>());
+      expect(ownership.canAccessOfflineData('7'), isTrue);
+      await guardedStore.saveDraft(
+        DocumentDraft(
+          id: 'after-account-switch-return',
+          accountId: '7',
+          warehouseId: 1,
+          payload: const {},
+          createdAt: DateTime.utc(2026, 7, 14),
+          updatedAt: DateTime.utc(2026, 7, 14),
+        ),
+      );
+      expect((await rawStore.inspectAccount('7')).drafts, 1);
+    },
+  );
+
+  test(
+    'failed account-switch cleanup remains blocked on reauthentication',
+    () async {
+      final barrier = OfflineWriteBarrier();
+      final rawStore = MemoryOfflineStore();
+      final guardedStore = WriteBarrierOfflineStore(
+        delegate: rawStore,
+        barrier: barrier,
+      );
+      final files = _FailingOwnedFiles()..failNextClearAccount = true;
+      final ownership = OfflineOwnershipService(
+        store: rawStore,
+        files: files,
+        scans: const _NoopScans(),
+        reviews: const _NoopReviews(),
+        databaseKeys: MemoryOfflineDatabaseKeyManager(),
+        mutationParticipants: [barrier],
+      );
+      expect(
+        (await ownership.apply(
+          const OfflineOwnershipIntent.accountSwitch(
+            previousAccountId: '7',
+            currentAccountId: '8',
+          ),
+        )).completed,
+        isFalse,
+      );
+
+      await ownership.apply(
+        const OfflineOwnershipIntent.reauthenticated(accountId: '7'),
+      );
+
+      expect(ownership.canAccessOfflineData('7'), isFalse);
+      await expectLater(
+        guardedStore.saveDraft(
+          DocumentDraft(
+            id: 'still-blocked',
+            accountId: '7',
+            warehouseId: 1,
+            payload: const {},
+            createdAt: DateTime.utc(2026, 7, 14),
+            updatedAt: DateTime.utc(2026, 7, 14),
+          ),
+        ),
+        throwsA(isA<OfflineWriteBlockedException>()),
+      );
+    },
+  );
+
+  test(
     'failed revocation retry cannot release a retained barrier through reauthentication',
     () async {
       final barrier = OfflineWriteBarrier();
@@ -927,6 +1035,7 @@ final class _NoopFiles implements OfflineOwnedFileStore {
 }
 
 final class _FailingOwnedFiles implements OfflineOwnedFileStore {
+  bool failNextClearAccount = false;
   bool failNextClearAll = false;
   int clearAllCalls = 0;
 
@@ -934,7 +1043,11 @@ final class _FailingOwnedFiles implements OfflineOwnedFileStore {
   Future<void> clearAccountFiles(
     String accountId, {
     required Set<String> retainStagedRequestIds,
-  }) async {}
+  }) async {
+    if (!failNextClearAccount) return;
+    failNextClearAccount = false;
+    throw StateError('account file cleanup failed');
+  }
 
   @override
   Future<void> clearAllFiles() async {

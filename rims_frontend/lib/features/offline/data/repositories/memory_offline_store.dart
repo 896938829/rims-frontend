@@ -6,6 +6,7 @@ import '../../domain/entities/outbox_operation.dart';
 import '../../domain/repositories/outbox_repository.dart';
 import '../../domain/services/offline_store.dart';
 import '../../domain/services/offline_ownership_service.dart';
+import '../../domain/services/offline_content_revision.dart';
 import '../../domain/services/outbox_state_machine.dart';
 import 'memory_outbox_repository.dart';
 
@@ -199,7 +200,8 @@ final class MemoryOfflineStore
           if (record.key.accountId == accountId)
             'cache:${record.key.namespace}:${record.key.warehouseId}:'
                 '${record.key.entityKey}:${record.schemaVersion}:'
-                '${record.fetchedAt.toIso8601String()}',
+                '${record.fetchedAt.toIso8601String()}:'
+                '${canonicalOfflineContentDigest(record.payload)}',
         for (final draft in drafts)
           'draft:${draft.id}:${draft.version}:${draft.updatedAt.toIso8601String()}:'
               '${(draft.attachmentStagingIds.toList()..sort()).join(',')}',
