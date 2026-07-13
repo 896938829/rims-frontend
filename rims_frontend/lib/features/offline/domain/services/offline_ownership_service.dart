@@ -1090,14 +1090,10 @@ final class OfflineOwnershipService
     List<_ParticipantBlock> mutationBlocks,
   ) {
     final releaseFailures = <Object>[];
-    final superseded = <_SupersededOwnershipGeneration>[];
     for (final target in attempt.targets) {
       final generation =
           _latestAttemptGenerations[target.accountId]?[target.key];
       if (generation == null) continue;
-      superseded.add(
-        _SupersededOwnershipGeneration(target: target, generation: generation),
-      );
       final retained =
           _retainedMutationBlocks[target.accountId]?[target.key]?[generation];
       if (retained == null) continue;
@@ -1108,16 +1104,7 @@ final class OfflineOwnershipService
       releaseFailures.addAll(released.failures);
     }
     if (releaseFailures.isNotEmpty) {
-      for (final previous in superseded) {
-        _retainMutationBlocks(
-          previous.target.accountId,
-          previous.target.key,
-          previous.generation,
-          mutationBlocks,
-          includeAllScopes:
-              previous.target.reason == OfflineOwnershipReason.revocation,
-        );
-      }
+      _registerOrphanedMutationBlocks(mutationBlocks);
       throw OfflineMutationReleaseException(releaseFailures);
     }
 
@@ -1270,14 +1257,27 @@ final class OfflineOwnershipService
       } on Object catch (error) {
         failures.add(error);
         unreleased.add(entry);
-        entry.retained = true;
-        _orphanedMutationBlocks[key] = entry;
+        _registerOrphanedMutationBlock(entry, key: key);
       }
     }
     return _MutationBlockReleaseResult(
       failures: failures,
       unreleased: unreleased,
     );
+  }
+
+  void _registerOrphanedMutationBlocks(Iterable<_ParticipantBlock> blocks) {
+    for (final entry in blocks) {
+      _registerOrphanedMutationBlock(entry);
+    }
+  }
+
+  void _registerOrphanedMutationBlock(
+    _ParticipantBlock entry, {
+    _PhysicalMutationBlockKey? key,
+  }) {
+    entry.retained = true;
+    _orphanedMutationBlocks[key ?? _PhysicalMutationBlockKey(entry)] = entry;
   }
 
   bool _isBlocked(String accountId) =>
@@ -1685,16 +1685,6 @@ final class _OwnershipAttempt {
 
   final int generation;
   final List<_OwnershipAttemptTarget> targets;
-}
-
-final class _SupersededOwnershipGeneration {
-  const _SupersededOwnershipGeneration({
-    required this.target,
-    required this.generation,
-  });
-
-  final _OwnershipAttemptTarget target;
-  final int generation;
 }
 
 final class _MutationBlockReleaseResult {

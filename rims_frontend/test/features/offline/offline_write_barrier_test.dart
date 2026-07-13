@@ -1277,7 +1277,7 @@ void main() {
       );
 
       expect(ownership.canAccessOfflineData('7'), isFalse);
-      expect(ownership.debugOrphanedMutationBlockCount, 1);
+      expect(ownership.debugOrphanedMutationBlockCount, 3);
       await expectLater(
         barrier.protect(accountId: '7', operation: () async {}),
         throwsA(isA<OfflineWriteBlockedException>()),
@@ -1298,6 +1298,67 @@ void main() {
       expect(ownership.canAccessOfflineData('7'), isTrue);
       expect(throwing.activeBlocks, 0);
       expect(ownership.debugGenerationMetadataEntryCount, 0);
+    },
+  );
+
+  test(
+    'revocation supersede keeps global replacement visible to every account',
+    () async {
+      final throwing = _ThrowingMutationParticipant();
+      final barrier = OfflineWriteBarrier();
+      final ownership = OfflineOwnershipService(
+        store: MemoryOfflineStore(),
+        files: const _NoopFiles(),
+        scans: const _NoopScans(),
+        reviews: const _NoopReviews(),
+        databaseKeys: MemoryOfflineDatabaseKeyManager(),
+        mutationParticipants: [throwing, barrier],
+      );
+      expect(
+        (await ownership.apply(
+          const OfflineOwnershipIntent.revocation(accountId: 'A'),
+        )).completed,
+        isTrue,
+      );
+      throwing.throwOnReleaseCall = throwing.releaseCalls + 1;
+
+      await expectLater(
+        ownership.apply(
+          const OfflineOwnershipIntent.revocation(accountId: 'A'),
+        ),
+        throwsA(isA<OfflineMutationReleaseException>()),
+      );
+
+      expect(ownership.canAccessOfflineData('A'), isFalse);
+      expect(ownership.canAccessOfflineData('B'), isFalse);
+      await expectLater(
+        barrier.protect(accountId: 'B', operation: () async {}),
+        throwsA(isA<OfflineWriteBlockedException>()),
+      );
+
+      throwing.throwOnReleaseCall = null;
+      expect(
+        (await ownership.apply(
+          const OfflineOwnershipIntent.permissionRefresh(accountId: 'B'),
+        )).completed,
+        isTrue,
+      );
+
+      expect(ownership.canAccessOfflineData('B'), isTrue);
+      expect(ownership.canAccessOfflineData('A'), isFalse);
+      expect(ownership.debugOrphanedMutationBlockCount, 1);
+      await barrier.protect(accountId: 'B', operation: () async {});
+
+      expect(
+        (await ownership.apply(
+          const OfflineOwnershipIntent.reauthenticated(accountId: 'A'),
+        )).completed,
+        isTrue,
+      );
+      expect(ownership.canAccessOfflineData('A'), isTrue);
+      expect(ownership.debugOrphanedMutationBlockCount, 0);
+      expect(ownership.debugGenerationMetadataEntryCount, 0);
+      expect(throwing.activeBlocks, 0);
     },
   );
 
