@@ -316,6 +316,152 @@ void runOutboxRepositoryContract(String name, OutboxHarnessFactory create) {
       expect((await repository.list('7')).successData, hasLength(2));
     });
 
+    test(
+      'ordinary enqueue rejects public replacement ownership pollution',
+      () async {
+        final polluted = _operation(
+          'polluted',
+          clock.value,
+        ).copyWith(replacementOf: 'conflict');
+
+        final result = await repository.enqueue(polluted);
+
+        expect(result, isA<FailureResult<OutboxOperation>>());
+        expect(
+          (result as FailureResult<OutboxOperation>).failure,
+          isA<ValidationFailure>(),
+        );
+        expect((await repository.list('7')).successData, isEmpty);
+      },
+    );
+
+    test(
+      'conflict replacement validates initial state and ownership scope',
+      () async {
+        await repository.enqueue(
+          _operation('validation-conflict', clock.value),
+        );
+        await repository.transition(
+          accountId: '7',
+          operationId: 'validation-conflict',
+          next: OutboxState.syncing,
+        );
+        await repository.transition(
+          accountId: '7',
+          operationId: 'validation-conflict',
+          next: OutboxState.conflict,
+        );
+
+        final invalidReplacements = [
+          OutboxOperation(
+            operationId: 'retryable-replacement',
+            idempotencyKey: 'key-retryable-replacement',
+            accountId: '7',
+            warehouseId: 11,
+            kind: OutboxOperationKind.documentCreate,
+            payload: const {},
+            state: OutboxState.retryableFailure,
+            createdAt: clock.value,
+            confirmedAt: clock.value,
+          ),
+          _operation('cross-account-replacement', clock.value, accountId: '8'),
+          OutboxOperation(
+            operationId: 'cross-warehouse-replacement',
+            idempotencyKey: 'key-cross-warehouse-replacement',
+            accountId: '7',
+            warehouseId: 12,
+            kind: OutboxOperationKind.documentCreate,
+            payload: const {},
+            state: OutboxState.queued,
+            createdAt: clock.value,
+            confirmedAt: clock.value,
+          ),
+          OutboxOperation(
+            operationId: 'reused-key-replacement',
+            idempotencyKey: 'key-validation-conflict',
+            accountId: '7',
+            warehouseId: 11,
+            kind: OutboxOperationKind.documentCreate,
+            payload: const {},
+            state: OutboxState.queued,
+            createdAt: clock.value,
+            confirmedAt: clock.value,
+          ),
+        ];
+
+        for (final replacement in invalidReplacements) {
+          final result = await repository.resolveConflict(
+            accountId: '7',
+            conflictedOperationId: 'validation-conflict',
+            replacement: replacement,
+          );
+          expect(result, isA<FailureResult<OutboxOperation>>());
+          expect(
+            (result as FailureResult<OutboxOperation>).failure,
+            isA<ValidationFailure>(),
+          );
+        }
+        final invalidDependency = await repository.resolveConflict(
+          accountId: '7',
+          conflictedOperationId: 'validation-conflict',
+          replacement: _operation(
+            'missing-dependency-replacement',
+            clock.value,
+          ),
+          dependencies: const {'missing'},
+        );
+        expect(
+          (invalidDependency as FailureResult<OutboxOperation>).failure,
+          isA<ValidationFailure>(),
+        );
+        expect((await repository.list('7')).successData, hasLength(1));
+      },
+    );
+
+    test('idempotent replay fingerprints sorted dependency ids', () async {
+      await repository.enqueue(_operation('dep-a', clock.value));
+      await repository.enqueue(_operation('dep-b', clock.value));
+      await repository.enqueue(_operation('fingerprint-conflict', clock.value));
+      await repository.transition(
+        accountId: '7',
+        operationId: 'fingerprint-conflict',
+        next: OutboxState.syncing,
+      );
+      await repository.transition(
+        accountId: '7',
+        operationId: 'fingerprint-conflict',
+        next: OutboxState.conflict,
+      );
+      final replacement = _operation('fingerprint-replacement', clock.value);
+
+      final first = await repository.resolveConflict(
+        accountId: '7',
+        conflictedOperationId: 'fingerprint-conflict',
+        replacement: replacement,
+        dependencies: {'dep-b', 'dep-a'},
+      );
+      final reorderedReplay = await repository.resolveConflict(
+        accountId: '7',
+        conflictedOperationId: 'fingerprint-conflict',
+        replacement: replacement,
+        dependencies: {'dep-a', 'dep-b'},
+      );
+      final differentDependencies = await repository.resolveConflict(
+        accountId: '7',
+        conflictedOperationId: 'fingerprint-conflict',
+        replacement: replacement,
+        dependencies: const {'dep-a'},
+      );
+
+      expect(first, isA<Success<OutboxOperation>>());
+      expect(reorderedReplay, isA<Success<OutboxOperation>>());
+      expect(
+        (differentDependencies as FailureResult<OutboxOperation>).failure,
+        isA<ConflictFailure>(),
+      );
+      expect((await repository.list('7')).successData, hasLength(4));
+    });
+
     test('enqueue keeps a recursive immutable payload snapshot', () async {
       final line = <String, Object?>{'quantity': 1};
       final lines = <Object?>[line];
@@ -363,7 +509,62 @@ void runOutboxRepositoryContract(String name, OutboxHarnessFactory create) {
         throwsUnsupportedError,
       );
     });
+
+    test(
+      'payload serialization StateError is never a storage failure',
+      () async {
+        final invalid = OutboxOperation(
+          operationId: 'invalid-json',
+          idempotencyKey: 'key-invalid-json',
+          accountId: '7',
+          warehouseId: 11,
+          kind: OutboxOperationKind.documentCreate,
+          payload: {'invalid': _ThrowingJsonObject()},
+          state: OutboxState.queued,
+          createdAt: clock.value,
+          confirmedAt: clock.value,
+        );
+
+        await expectLater(repository.enqueue(invalid), throwsStateError);
+
+        await repository.enqueue(
+          _operation('serialization-conflict', clock.value),
+        );
+        await repository.transition(
+          accountId: '7',
+          operationId: 'serialization-conflict',
+          next: OutboxState.syncing,
+        );
+        await repository.transition(
+          accountId: '7',
+          operationId: 'serialization-conflict',
+          next: OutboxState.conflict,
+        );
+        await expectLater(
+          repository.resolveConflict(
+            accountId: '7',
+            conflictedOperationId: 'serialization-conflict',
+            replacement: OutboxOperation(
+              operationId: 'invalid-replacement',
+              idempotencyKey: 'key-invalid-replacement',
+              accountId: '7',
+              warehouseId: 11,
+              kind: OutboxOperationKind.documentCreate,
+              payload: {'invalid': _ThrowingJsonObject()},
+              state: OutboxState.queued,
+              createdAt: clock.value,
+              confirmedAt: clock.value,
+            ),
+          ),
+          throwsStateError,
+        );
+      },
+    );
   });
+}
+
+final class _ThrowingJsonObject {
+  Object? toJson() => throw StateError('custom serialization failed');
 }
 
 extension<T> on Result<T> {

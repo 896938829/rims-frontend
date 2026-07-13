@@ -59,6 +59,7 @@ class OfflineOutboxOperations extends Table {
   @override
   List<Set<Column<Object>>> get uniqueKeys => [
     {accountId, idempotencyKey},
+    {operationId, accountId},
   ];
 }
 
@@ -81,4 +82,30 @@ class OfflineOutboxDependencies extends Table {
 
   @override
   Set<Column<Object>> get primaryKey => {operationId, dependencyId};
+}
+
+class OfflineOutboxResolutions extends Table {
+  @override
+  String get tableName => 'outbox_resolutions';
+
+  TextColumn get originalOperationId => text()();
+  TextColumn get replacementOperationId => text()();
+  TextColumn get accountId => text()();
+  TextColumn get dependencyFingerprint => text()();
+
+  @override
+  Set<Column<Object>> get primaryKey => {originalOperationId};
+
+  @override
+  List<Set<Column<Object>>> get uniqueKeys => [
+    {replacementOperationId},
+  ];
+
+  @override
+  List<String> get customConstraints => [
+    'FOREIGN KEY (original_operation_id, account_id) '
+        'REFERENCES outbox_operations (operation_id, account_id)',
+    'FOREIGN KEY (replacement_operation_id, account_id) '
+        'REFERENCES outbox_operations (operation_id, account_id)',
+  ];
 }

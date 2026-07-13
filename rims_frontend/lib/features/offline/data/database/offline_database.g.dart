@@ -1392,6 +1392,7 @@ class $OfflineOutboxOperationsTable extends OfflineOutboxOperations
   @override
   List<Set<GeneratedColumn>> get uniqueKeys => [
     {accountId, idempotencyKey},
+    {operationId, accountId},
   ];
   @override
   OfflineOutboxOperation map(Map<String, dynamic> data, {String? tablePrefix}) {
@@ -2182,6 +2183,377 @@ class OfflineOutboxDependenciesCompanion
   }
 }
 
+class $OfflineOutboxResolutionsTable extends OfflineOutboxResolutions
+    with TableInfo<$OfflineOutboxResolutionsTable, OfflineOutboxResolution> {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $OfflineOutboxResolutionsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _originalOperationIdMeta =
+      const VerificationMeta('originalOperationId');
+  @override
+  late final GeneratedColumn<String> originalOperationId =
+      GeneratedColumn<String>(
+        'original_operation_id',
+        aliasedName,
+        false,
+        type: DriftSqlType.string,
+        requiredDuringInsert: true,
+      );
+  static const VerificationMeta _replacementOperationIdMeta =
+      const VerificationMeta('replacementOperationId');
+  @override
+  late final GeneratedColumn<String> replacementOperationId =
+      GeneratedColumn<String>(
+        'replacement_operation_id',
+        aliasedName,
+        false,
+        type: DriftSqlType.string,
+        requiredDuringInsert: true,
+      );
+  static const VerificationMeta _accountIdMeta = const VerificationMeta(
+    'accountId',
+  );
+  @override
+  late final GeneratedColumn<String> accountId = GeneratedColumn<String>(
+    'account_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _dependencyFingerprintMeta =
+      const VerificationMeta('dependencyFingerprint');
+  @override
+  late final GeneratedColumn<String> dependencyFingerprint =
+      GeneratedColumn<String>(
+        'dependency_fingerprint',
+        aliasedName,
+        false,
+        type: DriftSqlType.string,
+        requiredDuringInsert: true,
+      );
+  @override
+  List<GeneratedColumn> get $columns => [
+    originalOperationId,
+    replacementOperationId,
+    accountId,
+    dependencyFingerprint,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'outbox_resolutions';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<OfflineOutboxResolution> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('original_operation_id')) {
+      context.handle(
+        _originalOperationIdMeta,
+        originalOperationId.isAcceptableOrUnknown(
+          data['original_operation_id']!,
+          _originalOperationIdMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_originalOperationIdMeta);
+    }
+    if (data.containsKey('replacement_operation_id')) {
+      context.handle(
+        _replacementOperationIdMeta,
+        replacementOperationId.isAcceptableOrUnknown(
+          data['replacement_operation_id']!,
+          _replacementOperationIdMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_replacementOperationIdMeta);
+    }
+    if (data.containsKey('account_id')) {
+      context.handle(
+        _accountIdMeta,
+        accountId.isAcceptableOrUnknown(data['account_id']!, _accountIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_accountIdMeta);
+    }
+    if (data.containsKey('dependency_fingerprint')) {
+      context.handle(
+        _dependencyFingerprintMeta,
+        dependencyFingerprint.isAcceptableOrUnknown(
+          data['dependency_fingerprint']!,
+          _dependencyFingerprintMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_dependencyFingerprintMeta);
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {originalOperationId};
+  @override
+  List<Set<GeneratedColumn>> get uniqueKeys => [
+    {replacementOperationId},
+  ];
+  @override
+  OfflineOutboxResolution map(
+    Map<String, dynamic> data, {
+    String? tablePrefix,
+  }) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return OfflineOutboxResolution(
+      originalOperationId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}original_operation_id'],
+      )!,
+      replacementOperationId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}replacement_operation_id'],
+      )!,
+      accountId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}account_id'],
+      )!,
+      dependencyFingerprint: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}dependency_fingerprint'],
+      )!,
+    );
+  }
+
+  @override
+  $OfflineOutboxResolutionsTable createAlias(String alias) {
+    return $OfflineOutboxResolutionsTable(attachedDatabase, alias);
+  }
+}
+
+class OfflineOutboxResolution extends DataClass
+    implements Insertable<OfflineOutboxResolution> {
+  final String originalOperationId;
+  final String replacementOperationId;
+  final String accountId;
+  final String dependencyFingerprint;
+  const OfflineOutboxResolution({
+    required this.originalOperationId,
+    required this.replacementOperationId,
+    required this.accountId,
+    required this.dependencyFingerprint,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['original_operation_id'] = Variable<String>(originalOperationId);
+    map['replacement_operation_id'] = Variable<String>(replacementOperationId);
+    map['account_id'] = Variable<String>(accountId);
+    map['dependency_fingerprint'] = Variable<String>(dependencyFingerprint);
+    return map;
+  }
+
+  OfflineOutboxResolutionsCompanion toCompanion(bool nullToAbsent) {
+    return OfflineOutboxResolutionsCompanion(
+      originalOperationId: Value(originalOperationId),
+      replacementOperationId: Value(replacementOperationId),
+      accountId: Value(accountId),
+      dependencyFingerprint: Value(dependencyFingerprint),
+    );
+  }
+
+  factory OfflineOutboxResolution.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return OfflineOutboxResolution(
+      originalOperationId: serializer.fromJson<String>(
+        json['originalOperationId'],
+      ),
+      replacementOperationId: serializer.fromJson<String>(
+        json['replacementOperationId'],
+      ),
+      accountId: serializer.fromJson<String>(json['accountId']),
+      dependencyFingerprint: serializer.fromJson<String>(
+        json['dependencyFingerprint'],
+      ),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'originalOperationId': serializer.toJson<String>(originalOperationId),
+      'replacementOperationId': serializer.toJson<String>(
+        replacementOperationId,
+      ),
+      'accountId': serializer.toJson<String>(accountId),
+      'dependencyFingerprint': serializer.toJson<String>(dependencyFingerprint),
+    };
+  }
+
+  OfflineOutboxResolution copyWith({
+    String? originalOperationId,
+    String? replacementOperationId,
+    String? accountId,
+    String? dependencyFingerprint,
+  }) => OfflineOutboxResolution(
+    originalOperationId: originalOperationId ?? this.originalOperationId,
+    replacementOperationId:
+        replacementOperationId ?? this.replacementOperationId,
+    accountId: accountId ?? this.accountId,
+    dependencyFingerprint: dependencyFingerprint ?? this.dependencyFingerprint,
+  );
+  OfflineOutboxResolution copyWithCompanion(
+    OfflineOutboxResolutionsCompanion data,
+  ) {
+    return OfflineOutboxResolution(
+      originalOperationId: data.originalOperationId.present
+          ? data.originalOperationId.value
+          : this.originalOperationId,
+      replacementOperationId: data.replacementOperationId.present
+          ? data.replacementOperationId.value
+          : this.replacementOperationId,
+      accountId: data.accountId.present ? data.accountId.value : this.accountId,
+      dependencyFingerprint: data.dependencyFingerprint.present
+          ? data.dependencyFingerprint.value
+          : this.dependencyFingerprint,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('OfflineOutboxResolution(')
+          ..write('originalOperationId: $originalOperationId, ')
+          ..write('replacementOperationId: $replacementOperationId, ')
+          ..write('accountId: $accountId, ')
+          ..write('dependencyFingerprint: $dependencyFingerprint')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    originalOperationId,
+    replacementOperationId,
+    accountId,
+    dependencyFingerprint,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is OfflineOutboxResolution &&
+          other.originalOperationId == this.originalOperationId &&
+          other.replacementOperationId == this.replacementOperationId &&
+          other.accountId == this.accountId &&
+          other.dependencyFingerprint == this.dependencyFingerprint);
+}
+
+class OfflineOutboxResolutionsCompanion
+    extends UpdateCompanion<OfflineOutboxResolution> {
+  final Value<String> originalOperationId;
+  final Value<String> replacementOperationId;
+  final Value<String> accountId;
+  final Value<String> dependencyFingerprint;
+  final Value<int> rowid;
+  const OfflineOutboxResolutionsCompanion({
+    this.originalOperationId = const Value.absent(),
+    this.replacementOperationId = const Value.absent(),
+    this.accountId = const Value.absent(),
+    this.dependencyFingerprint = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  OfflineOutboxResolutionsCompanion.insert({
+    required String originalOperationId,
+    required String replacementOperationId,
+    required String accountId,
+    required String dependencyFingerprint,
+    this.rowid = const Value.absent(),
+  }) : originalOperationId = Value(originalOperationId),
+       replacementOperationId = Value(replacementOperationId),
+       accountId = Value(accountId),
+       dependencyFingerprint = Value(dependencyFingerprint);
+  static Insertable<OfflineOutboxResolution> custom({
+    Expression<String>? originalOperationId,
+    Expression<String>? replacementOperationId,
+    Expression<String>? accountId,
+    Expression<String>? dependencyFingerprint,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (originalOperationId != null)
+        'original_operation_id': originalOperationId,
+      if (replacementOperationId != null)
+        'replacement_operation_id': replacementOperationId,
+      if (accountId != null) 'account_id': accountId,
+      if (dependencyFingerprint != null)
+        'dependency_fingerprint': dependencyFingerprint,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  OfflineOutboxResolutionsCompanion copyWith({
+    Value<String>? originalOperationId,
+    Value<String>? replacementOperationId,
+    Value<String>? accountId,
+    Value<String>? dependencyFingerprint,
+    Value<int>? rowid,
+  }) {
+    return OfflineOutboxResolutionsCompanion(
+      originalOperationId: originalOperationId ?? this.originalOperationId,
+      replacementOperationId:
+          replacementOperationId ?? this.replacementOperationId,
+      accountId: accountId ?? this.accountId,
+      dependencyFingerprint:
+          dependencyFingerprint ?? this.dependencyFingerprint,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (originalOperationId.present) {
+      map['original_operation_id'] = Variable<String>(
+        originalOperationId.value,
+      );
+    }
+    if (replacementOperationId.present) {
+      map['replacement_operation_id'] = Variable<String>(
+        replacementOperationId.value,
+      );
+    }
+    if (accountId.present) {
+      map['account_id'] = Variable<String>(accountId.value);
+    }
+    if (dependencyFingerprint.present) {
+      map['dependency_fingerprint'] = Variable<String>(
+        dependencyFingerprint.value,
+      );
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('OfflineOutboxResolutionsCompanion(')
+          ..write('originalOperationId: $originalOperationId, ')
+          ..write('replacementOperationId: $replacementOperationId, ')
+          ..write('accountId: $accountId, ')
+          ..write('dependencyFingerprint: $dependencyFingerprint, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$OfflineDatabase extends GeneratedDatabase {
   _$OfflineDatabase(QueryExecutor e) : super(e);
   $OfflineDatabaseManager get managers => $OfflineDatabaseManager(this);
@@ -2193,6 +2565,8 @@ abstract class _$OfflineDatabase extends GeneratedDatabase {
       $OfflineOutboxOperationsTable(this);
   late final $OfflineOutboxDependenciesTable offlineOutboxDependencies =
       $OfflineOutboxDependenciesTable(this);
+  late final $OfflineOutboxResolutionsTable offlineOutboxResolutions =
+      $OfflineOutboxResolutionsTable(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -2202,6 +2576,7 @@ abstract class _$OfflineDatabase extends GeneratedDatabase {
     offlineDocumentDrafts,
     offlineOutboxOperations,
     offlineOutboxDependencies,
+    offlineOutboxResolutions,
   ];
   @override
   StreamQueryUpdateRules get streamUpdateRules => const StreamQueryUpdateRules([
@@ -3803,6 +4178,212 @@ typedef $$OfflineOutboxDependenciesTableProcessedTableManager =
       OfflineOutboxDependency,
       PrefetchHooks Function({bool operationId, bool dependencyId})
     >;
+typedef $$OfflineOutboxResolutionsTableCreateCompanionBuilder =
+    OfflineOutboxResolutionsCompanion Function({
+      required String originalOperationId,
+      required String replacementOperationId,
+      required String accountId,
+      required String dependencyFingerprint,
+      Value<int> rowid,
+    });
+typedef $$OfflineOutboxResolutionsTableUpdateCompanionBuilder =
+    OfflineOutboxResolutionsCompanion Function({
+      Value<String> originalOperationId,
+      Value<String> replacementOperationId,
+      Value<String> accountId,
+      Value<String> dependencyFingerprint,
+      Value<int> rowid,
+    });
+
+class $$OfflineOutboxResolutionsTableFilterComposer
+    extends Composer<_$OfflineDatabase, $OfflineOutboxResolutionsTable> {
+  $$OfflineOutboxResolutionsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get originalOperationId => $composableBuilder(
+    column: $table.originalOperationId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get replacementOperationId => $composableBuilder(
+    column: $table.replacementOperationId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get accountId => $composableBuilder(
+    column: $table.accountId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get dependencyFingerprint => $composableBuilder(
+    column: $table.dependencyFingerprint,
+    builder: (column) => ColumnFilters(column),
+  );
+}
+
+class $$OfflineOutboxResolutionsTableOrderingComposer
+    extends Composer<_$OfflineDatabase, $OfflineOutboxResolutionsTable> {
+  $$OfflineOutboxResolutionsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get originalOperationId => $composableBuilder(
+    column: $table.originalOperationId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get replacementOperationId => $composableBuilder(
+    column: $table.replacementOperationId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get accountId => $composableBuilder(
+    column: $table.accountId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get dependencyFingerprint => $composableBuilder(
+    column: $table.dependencyFingerprint,
+    builder: (column) => ColumnOrderings(column),
+  );
+}
+
+class $$OfflineOutboxResolutionsTableAnnotationComposer
+    extends Composer<_$OfflineDatabase, $OfflineOutboxResolutionsTable> {
+  $$OfflineOutboxResolutionsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get originalOperationId => $composableBuilder(
+    column: $table.originalOperationId,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get replacementOperationId => $composableBuilder(
+    column: $table.replacementOperationId,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get accountId =>
+      $composableBuilder(column: $table.accountId, builder: (column) => column);
+
+  GeneratedColumn<String> get dependencyFingerprint => $composableBuilder(
+    column: $table.dependencyFingerprint,
+    builder: (column) => column,
+  );
+}
+
+class $$OfflineOutboxResolutionsTableTableManager
+    extends
+        RootTableManager<
+          _$OfflineDatabase,
+          $OfflineOutboxResolutionsTable,
+          OfflineOutboxResolution,
+          $$OfflineOutboxResolutionsTableFilterComposer,
+          $$OfflineOutboxResolutionsTableOrderingComposer,
+          $$OfflineOutboxResolutionsTableAnnotationComposer,
+          $$OfflineOutboxResolutionsTableCreateCompanionBuilder,
+          $$OfflineOutboxResolutionsTableUpdateCompanionBuilder,
+          (
+            OfflineOutboxResolution,
+            BaseReferences<
+              _$OfflineDatabase,
+              $OfflineOutboxResolutionsTable,
+              OfflineOutboxResolution
+            >,
+          ),
+          OfflineOutboxResolution,
+          PrefetchHooks Function()
+        > {
+  $$OfflineOutboxResolutionsTableTableManager(
+    _$OfflineDatabase db,
+    $OfflineOutboxResolutionsTable table,
+  ) : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$OfflineOutboxResolutionsTableFilterComposer(
+                $db: db,
+                $table: table,
+              ),
+          createOrderingComposer: () =>
+              $$OfflineOutboxResolutionsTableOrderingComposer(
+                $db: db,
+                $table: table,
+              ),
+          createComputedFieldComposer: () =>
+              $$OfflineOutboxResolutionsTableAnnotationComposer(
+                $db: db,
+                $table: table,
+              ),
+          updateCompanionCallback:
+              ({
+                Value<String> originalOperationId = const Value.absent(),
+                Value<String> replacementOperationId = const Value.absent(),
+                Value<String> accountId = const Value.absent(),
+                Value<String> dependencyFingerprint = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => OfflineOutboxResolutionsCompanion(
+                originalOperationId: originalOperationId,
+                replacementOperationId: replacementOperationId,
+                accountId: accountId,
+                dependencyFingerprint: dependencyFingerprint,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String originalOperationId,
+                required String replacementOperationId,
+                required String accountId,
+                required String dependencyFingerprint,
+                Value<int> rowid = const Value.absent(),
+              }) => OfflineOutboxResolutionsCompanion.insert(
+                originalOperationId: originalOperationId,
+                replacementOperationId: replacementOperationId,
+                accountId: accountId,
+                dependencyFingerprint: dependencyFingerprint,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map((e) => (e.readTable(table), BaseReferences(db, table, e)))
+              .toList(),
+          prefetchHooksCallback: null,
+        ),
+      );
+}
+
+typedef $$OfflineOutboxResolutionsTableProcessedTableManager =
+    ProcessedTableManager<
+      _$OfflineDatabase,
+      $OfflineOutboxResolutionsTable,
+      OfflineOutboxResolution,
+      $$OfflineOutboxResolutionsTableFilterComposer,
+      $$OfflineOutboxResolutionsTableOrderingComposer,
+      $$OfflineOutboxResolutionsTableAnnotationComposer,
+      $$OfflineOutboxResolutionsTableCreateCompanionBuilder,
+      $$OfflineOutboxResolutionsTableUpdateCompanionBuilder,
+      (
+        OfflineOutboxResolution,
+        BaseReferences<
+          _$OfflineDatabase,
+          $OfflineOutboxResolutionsTable,
+          OfflineOutboxResolution
+        >,
+      ),
+      OfflineOutboxResolution,
+      PrefetchHooks Function()
+    >;
 
 class $OfflineDatabaseManager {
   final _$OfflineDatabase _db;
@@ -3820,5 +4401,10 @@ class $OfflineDatabaseManager {
       $$OfflineOutboxDependenciesTableTableManager(
         _db,
         _db.offlineOutboxDependencies,
+      );
+  $$OfflineOutboxResolutionsTableTableManager get offlineOutboxResolutions =>
+      $$OfflineOutboxResolutionsTableTableManager(
+        _db,
+        _db.offlineOutboxResolutions,
       );
 }

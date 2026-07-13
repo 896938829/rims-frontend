@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:rims_frontend/core/result/failure.dart';
 import 'package:rims_frontend/core/result/result.dart';
 import 'package:rims_frontend/features/offline/data/database/offline_database.dart';
 import 'package:rims_frontend/features/offline/data/repositories/drift_outbox_repository.dart';
@@ -41,7 +42,7 @@ void main() {
         .customSelect('PRAGMA foreign_keys')
         .getSingle();
 
-    expect(version.read<int>('user_version'), 3);
+    expect(version.read<int>('user_version'), 4);
     expect(migratedRows, hasLength(2));
     expect(
       migratedRows.every(
@@ -128,7 +129,7 @@ void main() {
       replacement: replacement,
     );
 
-    expect(version.read<int>('user_version'), 3);
+    expect(version.read<int>('user_version'), 4);
     expect(
       columns.map((row) => row.read<String>('name')),
       contains('replacement_of'),
@@ -145,6 +146,67 @@ void main() {
     expect(replay, isA<Success<OutboxOperation>>());
     expect((await repository.list('7')).successData, hasLength(2));
   });
+
+  test(
+    'real v3 file migrates replacement ownership and dependency fingerprint',
+    () async {
+      final directory = await Directory.systemTemp.createTemp('rims-v3-db-');
+      addTearDown(() => directory.delete(recursive: true));
+      final file = File('${directory.path}${Platform.pathSeparator}offline.db');
+      final createdAt = DateTime.utc(2026, 7, 1);
+      _createV3Fixture(file.path, createdAt);
+
+      final database = OfflineDatabase.forTesting(NativeDatabase(file));
+      addTearDown(database.close);
+      final repository = DriftOutboxRepository(
+        database: database,
+        stateMachine: OutboxStateMachine(now: () => createdAt),
+        now: () => createdAt,
+      );
+
+      final version = await database
+          .customSelect('PRAGMA user_version')
+          .getSingle();
+      final resolution = await database
+          .customSelect('SELECT * FROM outbox_resolutions')
+          .getSingle();
+      final foreignKeys = await database
+          .customSelect('PRAGMA foreign_key_list(outbox_resolutions)')
+          .get();
+      final replacement = _operation('replacement', createdAt);
+
+      final replay = await repository.resolveConflict(
+        accountId: '7',
+        conflictedOperationId: 'conflict',
+        replacement: replacement,
+        dependencies: {'dep-b', 'dep-a'},
+      );
+      final changedDependencies = await repository.resolveConflict(
+        accountId: '7',
+        conflictedOperationId: 'conflict',
+        replacement: replacement,
+        dependencies: const {'dep-a'},
+      );
+
+      expect(version.read<int>('user_version'), 4);
+      expect(resolution.read<String>('original_operation_id'), 'conflict');
+      expect(
+        resolution.read<String>('replacement_operation_id'),
+        'replacement',
+      );
+      expect(resolution.read<String>('account_id'), '7');
+      expect(
+        resolution.read<String>('dependency_fingerprint'),
+        '["dep-a","dep-b"]',
+      );
+      expect(foreignKeys, hasLength(4));
+      expect(replay, isA<Success<OutboxOperation>>());
+      expect(
+        (changedDependencies as FailureResult<OutboxOperation>).failure,
+        isA<ConflictFailure>(),
+      );
+    },
+  );
 }
 
 extension<T> on Result<T> {
@@ -312,6 +374,48 @@ INSERT INTO outbox_operations (
   'conflict', $timestamp, NULL, $timestamp, 0)
 ''');
     database.execute('PRAGMA user_version = 2');
+  } finally {
+    database.close();
+  }
+}
+
+void _createV3Fixture(String path, DateTime createdAt) {
+  _createV2Fixture(path, createdAt);
+  final database = sqlite.sqlite3.open(path);
+  try {
+    database.execute('PRAGMA foreign_keys = ON');
+    database.execute(
+      'ALTER TABLE outbox_operations ADD COLUMN replacement_of TEXT NULL',
+    );
+    database.execute(
+      'CREATE UNIQUE INDEX outbox_replacement_once '
+      'ON outbox_operations(replacement_of) '
+      'WHERE replacement_of IS NOT NULL',
+    );
+    final timestamp = createdAt.millisecondsSinceEpoch ~/ 1000;
+    for (final id in ['dep-a', 'dep-b']) {
+      database.execute('''
+INSERT INTO outbox_operations (
+  operation_id, idempotency_key, account_id, warehouse_id, operation_kind,
+  payload, operation_state, created_at, updated_at, confirmed_at,
+  attempt_count, replacement_of
+) VALUES ('$id', 'key-$id', '7', 11, 'document_create', '{}', 'succeeded',
+  $timestamp, $timestamp, $timestamp, 0, NULL)
+''');
+    }
+    database.execute('''
+INSERT INTO outbox_operations (
+  operation_id, idempotency_key, account_id, warehouse_id, operation_kind,
+  payload, operation_state, created_at, updated_at, confirmed_at,
+  attempt_count, replacement_of
+) VALUES ('replacement', 'key-replacement', '7', 11, 'document_create', '{}',
+  'queued', $timestamp, $timestamp, $timestamp, 0, 'conflict')
+''');
+    database.execute(
+      "INSERT INTO outbox_dependencies (operation_id, dependency_id) VALUES "
+      "('replacement', 'dep-b'), ('replacement', 'dep-a')",
+    );
+    database.execute('PRAGMA user_version = 3');
   } finally {
     database.close();
   }

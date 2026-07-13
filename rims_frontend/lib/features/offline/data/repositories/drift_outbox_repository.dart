@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:drift/drift.dart';
 import 'package:drift/native.dart';
 
@@ -37,18 +39,26 @@ final class DriftOutboxRepository implements OutboxRepository {
         ValidationFailure(message: 'New outbox operations must be pending.'),
       );
     }
+    if (operation.replacementOf != null) {
+      return const FailureResult(
+        ValidationFailure(
+          message: 'Replacement ownership can only be created by resolution.',
+        ),
+      );
+    }
     if (dependencies.contains(operation.operationId)) {
       return const FailureResult(
         ValidationFailure(message: 'An operation cannot depend on itself.'),
       );
     }
 
+    final payloadJson = _serializePayload(operation.payload);
     try {
       await database.transaction(() async {
         await _validateCapacity(operation.accountId);
         await _validateIdentity(operation);
         await _validateDependencies(operation, dependencies);
-        await _insertOperation(operation, dependencies);
+        await _insertOperation(operation, dependencies, payloadJson);
       });
       return Success(operation);
     } on _OutboxValidationException catch (error) {
@@ -199,6 +209,13 @@ ORDER BY operation.created_at ASC, operation.operation_id ASC
         NotFoundFailure(message: 'Offline operation not found.'),
       );
     }
+    if (_isTerminal(current.state) && _isTerminal(next)) {
+      return const FailureResult(
+        ConflictFailure(
+          message: 'Offline operation already reached a terminal state.',
+        ),
+      );
+    }
     final result = stateMachine.transition(current, next, failure: failure);
     if (result case FailureResult<OutboxOperation>()) return result;
     final updated = (result as Success<OutboxOperation>).data;
@@ -263,45 +280,84 @@ ORDER BY operation.created_at ASC, operation.operation_id ASC
     required OutboxOperation replacement,
     Set<String> dependencies = const {},
   }) async {
+    if (replacement.replacementOf != null ||
+        replacement.state != OutboxState.queued ||
+        replacement.accountId != accountId) {
+      return const FailureResult(
+        ValidationFailure(
+          message: 'Conflict replacement must be a new queued operation.',
+        ),
+      );
+    }
+    final payloadJson = _serializePayload(replacement.payload);
+    final dependencyFingerprint = _dependencyFingerprint(dependencies);
     final claimed = replacement.copyWith(replacementOf: conflictedOperationId);
     try {
-      final existing = await _findReplacement(accountId, conflictedOperationId);
-      if (existing != null) {
-        return _replayOrConflict(existing, claimed);
-      }
-      final original = await _find(accountId, conflictedOperationId);
-      if (original == null ||
-          original.operationState != OutboxState.conflict.wireValue) {
-        return const FailureResult(
-          StateFailure(message: 'Only a conflicted operation can be resolved.'),
+      return await database.transaction(() async {
+        final existing = await _findResolution(
+          accountId,
+          conflictedOperationId,
         );
-      }
-      if (replacement.accountId != accountId ||
-          replacement.operationId == original.operationId ||
-          replacement.idempotencyKey == original.idempotencyKey) {
-        return const FailureResult(
-          ValidationFailure(
-            message: 'Conflict resolution requires a new operation and key.',
-          ),
-        );
-      }
-      await database.transaction(() async {
+        if (existing != null) {
+          return _replayOrConflict(
+            existing.replacement,
+            claimed,
+            existing.edgeDependencyFingerprint,
+            dependencyFingerprint,
+          );
+        }
+        final original = await _find(accountId, conflictedOperationId);
+        if (original == null ||
+            original.operationState != OutboxState.conflict.wireValue) {
+          return const FailureResult(
+            StateFailure(
+              message: 'Only a conflicted operation can be resolved.',
+            ),
+          );
+        }
+        if (replacement.operationId == original.operationId ||
+            replacement.idempotencyKey == original.idempotencyKey ||
+            replacement.warehouseId != original.warehouseId ||
+            replacement.kind.wireValue != original.operationKind) {
+          return const FailureResult(
+            ValidationFailure(
+              message: 'Conflict replacement does not match original scope.',
+            ),
+          );
+        }
         await _validateCapacity(accountId);
         await _validateIdentity(claimed);
         await _validateDependencies(claimed, dependencies);
-        await _insertOperation(claimed, dependencies);
+        await _insertOperation(claimed, dependencies, payloadJson);
+        await database
+            .into(database.offlineOutboxResolutions)
+            .insert(
+              OfflineOutboxResolutionsCompanion.insert(
+                originalOperationId: conflictedOperationId,
+                replacementOperationId: claimed.operationId,
+                accountId: accountId,
+                dependencyFingerprint: dependencyFingerprint,
+              ),
+            );
+        return Success(claimed);
       });
-      return Success(claimed);
     } on _OutboxValidationException catch (error) {
       return FailureResult(ValidationFailure(message: error.message));
     } on _OutboxCapacityException catch (error) {
       return FailureResult(StateFailure(message: error.message));
     } on SqliteException catch (error) {
-      final existing = await _findReplacementAfterClaimRace(
+      final existing = await _findResolutionAfterClaimRace(
         accountId,
         conflictedOperationId,
       );
-      if (existing != null) return _replayOrConflict(existing, claimed);
+      if (existing != null) {
+        return _replayOrConflict(
+          existing.replacement,
+          claimed,
+          existing.edgeDependencyFingerprint,
+          dependencyFingerprint,
+        );
+      }
       return FailureResult(
         LocalStorageFailure(
           message: 'Unable to resolve offline conflict.',
@@ -368,7 +424,35 @@ ORDER BY operation.created_at ASC, operation.operation_id ASC
           expiredIds.add(operation.operationId);
         }
 
+        final resolutions = await (database.select(
+          database.offlineOutboxResolutions,
+        )..where((resolution) => resolution.accountId.equals(accountId))).get();
+        final removableResolutionOriginalIds = <String>{};
+        for (final resolution in resolutions) {
+          final originalExpired = expiredIds.contains(
+            resolution.originalOperationId,
+          );
+          final replacementExpired = expiredIds.contains(
+            resolution.replacementOperationId,
+          );
+          if (originalExpired && replacementExpired) {
+            removableResolutionOriginalIds.add(resolution.originalOperationId);
+          } else if (originalExpired || replacementExpired) {
+            expiredIds
+              ..remove(resolution.originalOperationId)
+              ..remove(resolution.replacementOperationId);
+          }
+        }
+
         if (expiredIds.isEmpty) return 0;
+        if (removableResolutionOriginalIds.isNotEmpty) {
+          await (database.delete(database.offlineOutboxResolutions)..where(
+                (resolution) => resolution.originalOperationId.isIn(
+                  removableResolutionOriginalIds,
+                ),
+              ))
+              .go();
+        }
         await (database.delete(database.offlineOutboxDependencies)..where(
               (edge) =>
                   edge.operationId.isIn(expiredIds) |
@@ -489,25 +573,58 @@ SELECT 1 AS found FROM ancestors WHERE operation_id = ? LIMIT 1
         .getSingleOrNull();
   }
 
-  Future<OfflineOutboxOperation?> _findReplacement(
-    String accountId,
-    String conflictedOperationId,
-  ) {
-    return (database.select(database.offlineOutboxOperations)..where(
-          (row) =>
-              row.accountId.equals(accountId) &
-              row.replacementOf.equals(conflictedOperationId),
-        ))
-        .getSingleOrNull();
+  Future<
+    ({
+      OfflineOutboxResolution resolution,
+      OfflineOutboxOperation replacement,
+      String edgeDependencyFingerprint,
+    })?
+  >
+  _findResolution(String accountId, String conflictedOperationId) async {
+    final resolution =
+        await (database.select(database.offlineOutboxResolutions)..where(
+              (row) =>
+                  row.accountId.equals(accountId) &
+                  row.originalOperationId.equals(conflictedOperationId),
+            ))
+            .getSingleOrNull();
+    if (resolution == null) return null;
+    final replacement = await _find(
+      accountId,
+      resolution.replacementOperationId,
+    );
+    if (replacement == null) {
+      throw StateError('Outbox resolution replacement is missing.');
+    }
+    final edges =
+        await (database.select(database.offlineOutboxDependencies)..where(
+              (edge) =>
+                  edge.operationId.equals(resolution.replacementOperationId),
+            ))
+            .get();
+    return (
+      resolution: resolution,
+      replacement: replacement,
+      edgeDependencyFingerprint: _dependencyFingerprint(
+        edges.map((edge) => edge.dependencyId).toSet(),
+      ),
+    );
   }
 
-  Future<OfflineOutboxOperation?> _findReplacementAfterClaimRace(
+  Future<
+    ({
+      OfflineOutboxResolution resolution,
+      OfflineOutboxOperation replacement,
+      String edgeDependencyFingerprint,
+    })?
+  >
+  _findResolutionAfterClaimRace(
     String accountId,
     String conflictedOperationId,
   ) async {
     try {
       for (var attempt = 0; attempt < 3; attempt += 1) {
-        final existing = await _findReplacement(
+        final existing = await _findResolution(
           accountId,
           conflictedOperationId,
         );
@@ -526,6 +643,8 @@ SELECT 1 AS found FROM ancestors WHERE operation_id = ? LIMIT 1
   Result<OutboxOperation> _replayOrConflict(
     OfflineOutboxOperation existing,
     OutboxOperation requested,
+    String storedDependencyFingerprint,
+    String requestedDependencyFingerprint,
   ) {
     final operation = _toDomainOperation(existing);
     final isSameRequest =
@@ -533,8 +652,9 @@ SELECT 1 AS found FROM ancestors WHERE operation_id = ? LIMIT 1
         operation.idempotencyKey == requested.idempotencyKey &&
         operation.kind == requested.kind &&
         operation.warehouseId == requested.warehouseId &&
-        CacheRecordModel.canonicalJson(operation.payload) ==
-            CacheRecordModel.canonicalJson(requested.payload);
+        _serializePayload(operation.payload) ==
+            _serializePayload(requested.payload) &&
+        storedDependencyFingerprint == requestedDependencyFingerprint;
     if (isSameRequest) return Success(operation);
     return const FailureResult(
       ConflictFailure(
@@ -546,6 +666,7 @@ SELECT 1 AS found FROM ancestors WHERE operation_id = ? LIMIT 1
   Future<void> _insertOperation(
     OutboxOperation operation,
     Set<String> dependencies,
+    String payloadJson,
   ) async {
     await database
         .into(database.offlineOutboxOperations)
@@ -556,7 +677,7 @@ SELECT 1 AS found FROM ancestors WHERE operation_id = ? LIMIT 1
             accountId: operation.accountId,
             warehouseId: operation.warehouseId,
             operationKind: operation.kind.wireValue,
-            payload: CacheRecordModel.canonicalJson(operation.payload),
+            payload: payloadJson,
             operationState: operation.state.wireValue,
             createdAt: operation.createdAt.toUtc(),
             updatedAt: Value(operation.updatedAt.toUtc()),
@@ -729,3 +850,28 @@ bool _isStorageException(Exception error) =>
     error is DriftWrappedException ||
     error is InvalidDataException ||
     error is FormatException;
+
+String _dependencyFingerprint(Set<String> dependencies) {
+  final sorted = dependencies.toList()..sort();
+  return jsonEncode(sorted);
+}
+
+String _serializePayload(Map<String, Object?> payload) {
+  try {
+    return CacheRecordModel.canonicalJson(payload);
+  } on JsonUnsupportedObjectError catch (error) {
+    final cause = error.cause;
+    if (cause is StateError) throw cause;
+    rethrow;
+  }
+}
+
+bool _isTerminal(OutboxState state) => switch (state) {
+  OutboxState.succeeded ||
+  OutboxState.conflict ||
+  OutboxState.permanentFailure ||
+  OutboxState.cancelled => true,
+  OutboxState.queued ||
+  OutboxState.syncing ||
+  OutboxState.retryableFailure => false,
+};

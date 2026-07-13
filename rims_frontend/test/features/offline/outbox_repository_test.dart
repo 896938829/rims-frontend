@@ -197,6 +197,23 @@ void main() {
     },
   );
 
+  test('resolution table rejects cross-account ownership directly', () async {
+    await repository.enqueue(_operation('original'));
+    await repository.enqueue(_operation('replacement', accountId: '8'));
+
+    await expectLater(
+      database.customStatement('''
+INSERT INTO outbox_resolutions (
+  original_operation_id,
+  replacement_operation_id,
+  account_id,
+  dependency_fingerprint
+) VALUES ('original', 'replacement', '7', '[]')
+'''),
+      throwsA(isA<SqliteException>()),
+    );
+  });
+
   test('conflict resolution rejects reused operation id or key', () async {
     final original = _operation('original');
     await repository.enqueue(original);
@@ -533,6 +550,22 @@ void main() {
         operationId: 'malformed',
         next: OutboxState.syncing,
       );
+
+      _expectLocalStorageFailure(result);
+    },
+  );
+
+  test(
+    'corrupt stored payload maps FormatException to storage failure',
+    () async {
+      await repository.enqueue(_operation('corrupt-payload'));
+      await database.customUpdate(
+        "UPDATE outbox_operations SET payload = '[' "
+        "WHERE operation_id = 'corrupt-payload'",
+        updates: {database.offlineOutboxOperations},
+      );
+
+      final result = await repository.list('7');
 
       _expectLocalStorageFailure(result);
     },

@@ -20,6 +20,7 @@ part 'offline_database.g.dart';
     OfflineDocumentDrafts,
     OfflineOutboxOperations,
     OfflineOutboxDependencies,
+    OfflineOutboxResolutions,
   ],
 )
 final class OfflineDatabase extends _$OfflineDatabase implements OfflineStore {
@@ -43,7 +44,7 @@ final class OfflineDatabase extends _$OfflineDatabase implements OfflineStore {
        );
 
   @override
-  int get schemaVersion => 3;
+  int get schemaVersion => 4;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -65,9 +66,57 @@ final class OfflineDatabase extends _$OfflineDatabase implements OfflineStore {
           offlineOutboxOperations.replacementOf,
         );
       }
+      if (from < 4) {
+        await customStatement('''
+CREATE UNIQUE INDEX IF NOT EXISTS outbox_operation_account_identity
+ON outbox_operations (operation_id, account_id)
+''');
+        await migrator.createTable(offlineOutboxResolutions);
+        if (from >= 3) {
+          await customStatement('''
+INSERT INTO outbox_resolutions (
+  original_operation_id,
+  replacement_operation_id,
+  account_id,
+  dependency_fingerprint
+)
+SELECT
+  replacement.replacement_of,
+  replacement.operation_id,
+  replacement.account_id,
+  COALESCE((
+    SELECT '[' || group_concat(json_quote(sorted_edges.dependency_id), ',') || ']'
+    FROM (
+      SELECT dependency_id
+      FROM outbox_dependencies
+      WHERE operation_id = replacement.operation_id
+      ORDER BY dependency_id
+    ) AS sorted_edges
+  ), '[]')
+FROM outbox_operations AS replacement
+JOIN outbox_operations AS original
+  ON original.operation_id = replacement.replacement_of
+ AND original.account_id = replacement.account_id
+ AND original.operation_state = 'conflict'
+WHERE replacement.replacement_of IS NOT NULL
+''');
+          await customStatement('''
+UPDATE outbox_operations
+SET replacement_of = NULL
+WHERE replacement_of IS NOT NULL
+  AND operation_id NOT IN (
+    SELECT replacement_operation_id FROM outbox_resolutions
+  )
+''');
+        }
+      }
     },
     beforeOpen: (details) async {
       await customStatement('PRAGMA foreign_keys = ON');
+      await customStatement('''
+CREATE UNIQUE INDEX IF NOT EXISTS outbox_operation_account_identity
+ON outbox_operations (operation_id, account_id)
+''');
       await customStatement(
         'CREATE UNIQUE INDEX IF NOT EXISTS outbox_replacement_once '
         'ON outbox_operations(replacement_of) '

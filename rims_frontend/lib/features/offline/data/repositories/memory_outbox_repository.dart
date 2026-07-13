@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
 import '../../domain/entities/outbox_operation.dart';
@@ -20,6 +22,7 @@ final class MemoryOutboxRepository implements OutboxRepository {
   final Duration failedRetention;
   final Map<String, OutboxOperation> _operations = {};
   final Map<String, Set<String>> _dependencies = {};
+  final Map<String, String> _replacementByOriginal = {};
 
   @override
   Future<Result<OutboxOperation>> enqueue(
@@ -28,6 +31,7 @@ final class MemoryOutboxRepository implements OutboxRepository {
   }) async {
     final failure = _validateEnqueue(operation, dependencies);
     if (failure != null) return FailureResult(failure);
+    _validatePayload(operation.payload);
     _operations[operation.operationId] = operation;
     _dependencies[operation.operationId] = Set.unmodifiable(dependencies);
     return Success(operation);
@@ -74,6 +78,13 @@ final class MemoryOutboxRepository implements OutboxRepository {
         NotFoundFailure(message: 'Offline operation not found.'),
       );
     }
+    if (_isTerminal(current.state) && _isTerminal(next)) {
+      return const FailureResult(
+        ConflictFailure(
+          message: 'Offline operation already reached a terminal state.',
+        ),
+      );
+    }
     final result = stateMachine.transition(current, next, failure: failure);
     if (result case FailureResult<OutboxOperation>()) return result;
     if (!identical(_operations[operationId], current)) {
@@ -111,15 +122,30 @@ final class MemoryOutboxRepository implements OutboxRepository {
     required OutboxOperation replacement,
     Set<String> dependencies = const {},
   }) async {
-    final existing = _operations.values
-        .where(
-          (operation) =>
-              operation.accountId == accountId &&
-              operation.replacementOf == conflictedOperationId,
-        )
-        .firstOrNull;
+    if (replacement.replacementOf != null ||
+        replacement.state != OutboxState.queued ||
+        replacement.accountId != accountId) {
+      return const FailureResult(
+        ValidationFailure(
+          message: 'Conflict replacement must be a new queued operation.',
+        ),
+      );
+    }
+    _validatePayload(replacement.payload);
+    final dependencyFingerprint = _dependencyFingerprint(dependencies);
+    final existingId = _replacementByOriginal[conflictedOperationId];
+    final existing = existingId == null ? null : _operations[existingId];
     final claimed = replacement.copyWith(replacementOf: conflictedOperationId);
-    if (existing != null) return _replayOrConflict(existing, claimed);
+    if (existing != null) {
+      return _replayOrConflict(
+        existing,
+        claimed,
+        _dependencyFingerprint(
+          _dependencies[existing.operationId] ?? const <String>{},
+        ),
+        dependencyFingerprint,
+      );
+    }
 
     final original = _operations[conflictedOperationId];
     if (original == null ||
@@ -131,17 +157,24 @@ final class MemoryOutboxRepository implements OutboxRepository {
     }
     if (replacement.accountId != accountId ||
         replacement.operationId == original.operationId ||
-        replacement.idempotencyKey == original.idempotencyKey) {
+        replacement.idempotencyKey == original.idempotencyKey ||
+        replacement.warehouseId != original.warehouseId ||
+        replacement.kind != original.kind) {
       return const FailureResult(
         ValidationFailure(
           message: 'Conflict resolution requires a new operation and key.',
         ),
       );
     }
-    final validation = _validateEnqueue(claimed, dependencies);
+    final validation = _validateEnqueue(
+      claimed,
+      dependencies,
+      allowReplacement: true,
+    );
     if (validation != null) return FailureResult(validation);
     _operations[claimed.operationId] = claimed;
     _dependencies[claimed.operationId] = Set.unmodifiable(dependencies);
+    _replacementByOriginal[conflictedOperationId] = claimed.operationId;
     return Success(claimed);
   }
 
@@ -172,6 +205,21 @@ final class MemoryOutboxRepository implements OutboxRepository {
       }
       expiredIds.add(operation.operationId);
     }
+    final removableResolutionOriginalIds = <String>{};
+    for (final entry in _replacementByOriginal.entries) {
+      final originalExpired = expiredIds.contains(entry.key);
+      final replacementExpired = expiredIds.contains(entry.value);
+      if (originalExpired && replacementExpired) {
+        removableResolutionOriginalIds.add(entry.key);
+      } else if (originalExpired || replacementExpired) {
+        expiredIds
+          ..remove(entry.key)
+          ..remove(entry.value);
+      }
+    }
+    for (final originalId in removableResolutionOriginalIds) {
+      _replacementByOriginal.remove(originalId);
+    }
     for (final operationId in expiredIds) {
       _operations.remove(operationId);
       _dependencies.remove(operationId);
@@ -186,12 +234,18 @@ final class MemoryOutboxRepository implements OutboxRepository {
 
   Failure? _validateEnqueue(
     OutboxOperation operation,
-    Set<String> dependencies,
-  ) {
+    Set<String> dependencies, {
+    bool allowReplacement = false,
+  }) {
     if (operation.state != OutboxState.queued &&
         operation.state != OutboxState.retryableFailure) {
       return const ValidationFailure(
         message: 'New outbox operations must be pending.',
+      );
+    }
+    if (!allowReplacement && operation.replacementOf != null) {
+      return const ValidationFailure(
+        message: 'Replacement ownership can only be created by resolution.',
       );
     }
     if (dependencies.contains(operation.operationId)) {
@@ -298,12 +352,15 @@ final class MemoryOutboxRepository implements OutboxRepository {
   Result<OutboxOperation> _replayOrConflict(
     OutboxOperation existing,
     OutboxOperation requested,
+    String storedDependencyFingerprint,
+    String requestedDependencyFingerprint,
   ) {
     if (existing.operationId == requested.operationId &&
         existing.idempotencyKey == requested.idempotencyKey &&
         existing.kind == requested.kind &&
         existing.warehouseId == requested.warehouseId &&
-        _deepEquals(existing.payload, requested.payload)) {
+        _deepEquals(existing.payload, requested.payload) &&
+        storedDependencyFingerprint == requestedDependencyFingerprint) {
       return Success(existing);
     }
     return const FailureResult(
@@ -367,3 +424,28 @@ bool _deepEquals(Object? left, Object? right) {
   }
   return left == right;
 }
+
+String _dependencyFingerprint(Set<String> dependencies) {
+  final sorted = dependencies.toList()..sort();
+  return sorted.join('\u0000');
+}
+
+void _validatePayload(Map<String, Object?> payload) {
+  try {
+    jsonEncode(payload);
+  } on JsonUnsupportedObjectError catch (error) {
+    final cause = error.cause;
+    if (cause is StateError) throw cause;
+    rethrow;
+  }
+}
+
+bool _isTerminal(OutboxState state) => switch (state) {
+  OutboxState.succeeded ||
+  OutboxState.conflict ||
+  OutboxState.permanentFailure ||
+  OutboxState.cancelled => true,
+  OutboxState.queued ||
+  OutboxState.syncing ||
+  OutboxState.retryableFailure => false,
+};
