@@ -1225,6 +1225,43 @@ class $OfflineOutboxOperationsTable extends OfflineOutboxOperations
     type: DriftSqlType.string,
     requiredDuringInsert: false,
   );
+  static const VerificationMeta _reviewStampMeta = const VerificationMeta(
+    'reviewStamp',
+  );
+  @override
+  late final GeneratedColumn<String> reviewStamp = GeneratedColumn<String>(
+    'review_stamp',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _requiresStatusProbeMeta =
+      const VerificationMeta('requiresStatusProbe');
+  @override
+  late final GeneratedColumn<bool> requiresStatusProbe = GeneratedColumn<bool>(
+    'requires_status_probe',
+    aliasedName,
+    false,
+    type: DriftSqlType.bool,
+    requiredDuringInsert: false,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'CHECK ("requires_status_probe" IN (0, 1))',
+    ),
+    defaultValue: const Constant(false),
+  );
+  static const VerificationMeta _syncingStartedAtMeta = const VerificationMeta(
+    'syncingStartedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> syncingStartedAt =
+      GeneratedColumn<DateTime>(
+        'syncing_started_at',
+        aliasedName,
+        true,
+        type: DriftSqlType.dateTime,
+        requiredDuringInsert: false,
+      );
   @override
   List<GeneratedColumn> get $columns => [
     operationId,
@@ -1241,6 +1278,9 @@ class $OfflineOutboxOperationsTable extends OfflineOutboxOperations
     attemptCount,
     lastFailureCode,
     replacementOf,
+    reviewStamp,
+    requiresStatusProbe,
+    syncingStartedAt,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -1384,6 +1424,33 @@ class $OfflineOutboxOperationsTable extends OfflineOutboxOperations
         ),
       );
     }
+    if (data.containsKey('review_stamp')) {
+      context.handle(
+        _reviewStampMeta,
+        reviewStamp.isAcceptableOrUnknown(
+          data['review_stamp']!,
+          _reviewStampMeta,
+        ),
+      );
+    }
+    if (data.containsKey('requires_status_probe')) {
+      context.handle(
+        _requiresStatusProbeMeta,
+        requiresStatusProbe.isAcceptableOrUnknown(
+          data['requires_status_probe']!,
+          _requiresStatusProbeMeta,
+        ),
+      );
+    }
+    if (data.containsKey('syncing_started_at')) {
+      context.handle(
+        _syncingStartedAtMeta,
+        syncingStartedAt.isAcceptableOrUnknown(
+          data['syncing_started_at']!,
+          _syncingStartedAtMeta,
+        ),
+      );
+    }
     return context;
   }
 
@@ -1454,6 +1521,18 @@ class $OfflineOutboxOperationsTable extends OfflineOutboxOperations
         DriftSqlType.string,
         data['${effectivePrefix}replacement_of'],
       ),
+      reviewStamp: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}review_stamp'],
+      ),
+      requiresStatusProbe: attachedDatabase.typeMapping.read(
+        DriftSqlType.bool,
+        data['${effectivePrefix}requires_status_probe'],
+      )!,
+      syncingStartedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}syncing_started_at'],
+      ),
     );
   }
 
@@ -1479,6 +1558,9 @@ class OfflineOutboxOperation extends DataClass
   final int attemptCount;
   final String? lastFailureCode;
   final String? replacementOf;
+  final String? reviewStamp;
+  final bool requiresStatusProbe;
+  final DateTime? syncingStartedAt;
   const OfflineOutboxOperation({
     required this.operationId,
     required this.idempotencyKey,
@@ -1494,6 +1576,9 @@ class OfflineOutboxOperation extends DataClass
     required this.attemptCount,
     this.lastFailureCode,
     this.replacementOf,
+    this.reviewStamp,
+    required this.requiresStatusProbe,
+    this.syncingStartedAt,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -1521,6 +1606,13 @@ class OfflineOutboxOperation extends DataClass
     }
     if (!nullToAbsent || replacementOf != null) {
       map['replacement_of'] = Variable<String>(replacementOf);
+    }
+    if (!nullToAbsent || reviewStamp != null) {
+      map['review_stamp'] = Variable<String>(reviewStamp);
+    }
+    map['requires_status_probe'] = Variable<bool>(requiresStatusProbe);
+    if (!nullToAbsent || syncingStartedAt != null) {
+      map['syncing_started_at'] = Variable<DateTime>(syncingStartedAt);
     }
     return map;
   }
@@ -1551,6 +1643,13 @@ class OfflineOutboxOperation extends DataClass
       replacementOf: replacementOf == null && nullToAbsent
           ? const Value.absent()
           : Value(replacementOf),
+      reviewStamp: reviewStamp == null && nullToAbsent
+          ? const Value.absent()
+          : Value(reviewStamp),
+      requiresStatusProbe: Value(requiresStatusProbe),
+      syncingStartedAt: syncingStartedAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(syncingStartedAt),
     );
   }
 
@@ -1574,6 +1673,13 @@ class OfflineOutboxOperation extends DataClass
       attemptCount: serializer.fromJson<int>(json['attemptCount']),
       lastFailureCode: serializer.fromJson<String?>(json['lastFailureCode']),
       replacementOf: serializer.fromJson<String?>(json['replacementOf']),
+      reviewStamp: serializer.fromJson<String?>(json['reviewStamp']),
+      requiresStatusProbe: serializer.fromJson<bool>(
+        json['requiresStatusProbe'],
+      ),
+      syncingStartedAt: serializer.fromJson<DateTime?>(
+        json['syncingStartedAt'],
+      ),
     );
   }
   @override
@@ -1594,6 +1700,9 @@ class OfflineOutboxOperation extends DataClass
       'attemptCount': serializer.toJson<int>(attemptCount),
       'lastFailureCode': serializer.toJson<String?>(lastFailureCode),
       'replacementOf': serializer.toJson<String?>(replacementOf),
+      'reviewStamp': serializer.toJson<String?>(reviewStamp),
+      'requiresStatusProbe': serializer.toJson<bool>(requiresStatusProbe),
+      'syncingStartedAt': serializer.toJson<DateTime?>(syncingStartedAt),
     };
   }
 
@@ -1612,6 +1721,9 @@ class OfflineOutboxOperation extends DataClass
     int? attemptCount,
     Value<String?> lastFailureCode = const Value.absent(),
     Value<String?> replacementOf = const Value.absent(),
+    Value<String?> reviewStamp = const Value.absent(),
+    bool? requiresStatusProbe,
+    Value<DateTime?> syncingStartedAt = const Value.absent(),
   }) => OfflineOutboxOperation(
     operationId: operationId ?? this.operationId,
     idempotencyKey: idempotencyKey ?? this.idempotencyKey,
@@ -1633,6 +1745,11 @@ class OfflineOutboxOperation extends DataClass
     replacementOf: replacementOf.present
         ? replacementOf.value
         : this.replacementOf,
+    reviewStamp: reviewStamp.present ? reviewStamp.value : this.reviewStamp,
+    requiresStatusProbe: requiresStatusProbe ?? this.requiresStatusProbe,
+    syncingStartedAt: syncingStartedAt.present
+        ? syncingStartedAt.value
+        : this.syncingStartedAt,
   );
   OfflineOutboxOperation copyWithCompanion(
     OfflineOutboxOperationsCompanion data,
@@ -1672,6 +1789,15 @@ class OfflineOutboxOperation extends DataClass
       replacementOf: data.replacementOf.present
           ? data.replacementOf.value
           : this.replacementOf,
+      reviewStamp: data.reviewStamp.present
+          ? data.reviewStamp.value
+          : this.reviewStamp,
+      requiresStatusProbe: data.requiresStatusProbe.present
+          ? data.requiresStatusProbe.value
+          : this.requiresStatusProbe,
+      syncingStartedAt: data.syncingStartedAt.present
+          ? data.syncingStartedAt.value
+          : this.syncingStartedAt,
     );
   }
 
@@ -1691,7 +1817,10 @@ class OfflineOutboxOperation extends DataClass
           ..write('nextAttemptAt: $nextAttemptAt, ')
           ..write('attemptCount: $attemptCount, ')
           ..write('lastFailureCode: $lastFailureCode, ')
-          ..write('replacementOf: $replacementOf')
+          ..write('replacementOf: $replacementOf, ')
+          ..write('reviewStamp: $reviewStamp, ')
+          ..write('requiresStatusProbe: $requiresStatusProbe, ')
+          ..write('syncingStartedAt: $syncingStartedAt')
           ..write(')'))
         .toString();
   }
@@ -1712,6 +1841,9 @@ class OfflineOutboxOperation extends DataClass
     attemptCount,
     lastFailureCode,
     replacementOf,
+    reviewStamp,
+    requiresStatusProbe,
+    syncingStartedAt,
   );
   @override
   bool operator ==(Object other) =>
@@ -1730,7 +1862,10 @@ class OfflineOutboxOperation extends DataClass
           other.nextAttemptAt == this.nextAttemptAt &&
           other.attemptCount == this.attemptCount &&
           other.lastFailureCode == this.lastFailureCode &&
-          other.replacementOf == this.replacementOf);
+          other.replacementOf == this.replacementOf &&
+          other.reviewStamp == this.reviewStamp &&
+          other.requiresStatusProbe == this.requiresStatusProbe &&
+          other.syncingStartedAt == this.syncingStartedAt);
 }
 
 class OfflineOutboxOperationsCompanion
@@ -1749,6 +1884,9 @@ class OfflineOutboxOperationsCompanion
   final Value<int> attemptCount;
   final Value<String?> lastFailureCode;
   final Value<String?> replacementOf;
+  final Value<String?> reviewStamp;
+  final Value<bool> requiresStatusProbe;
+  final Value<DateTime?> syncingStartedAt;
   final Value<int> rowid;
   const OfflineOutboxOperationsCompanion({
     this.operationId = const Value.absent(),
@@ -1765,6 +1903,9 @@ class OfflineOutboxOperationsCompanion
     this.attemptCount = const Value.absent(),
     this.lastFailureCode = const Value.absent(),
     this.replacementOf = const Value.absent(),
+    this.reviewStamp = const Value.absent(),
+    this.requiresStatusProbe = const Value.absent(),
+    this.syncingStartedAt = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   OfflineOutboxOperationsCompanion.insert({
@@ -1782,6 +1923,9 @@ class OfflineOutboxOperationsCompanion
     this.attemptCount = const Value.absent(),
     this.lastFailureCode = const Value.absent(),
     this.replacementOf = const Value.absent(),
+    this.reviewStamp = const Value.absent(),
+    this.requiresStatusProbe = const Value.absent(),
+    this.syncingStartedAt = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : operationId = Value(operationId),
        idempotencyKey = Value(idempotencyKey),
@@ -1806,6 +1950,9 @@ class OfflineOutboxOperationsCompanion
     Expression<int>? attemptCount,
     Expression<String>? lastFailureCode,
     Expression<String>? replacementOf,
+    Expression<String>? reviewStamp,
+    Expression<bool>? requiresStatusProbe,
+    Expression<DateTime>? syncingStartedAt,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -1823,6 +1970,10 @@ class OfflineOutboxOperationsCompanion
       if (attemptCount != null) 'attempt_count': attemptCount,
       if (lastFailureCode != null) 'last_failure_code': lastFailureCode,
       if (replacementOf != null) 'replacement_of': replacementOf,
+      if (reviewStamp != null) 'review_stamp': reviewStamp,
+      if (requiresStatusProbe != null)
+        'requires_status_probe': requiresStatusProbe,
+      if (syncingStartedAt != null) 'syncing_started_at': syncingStartedAt,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -1842,6 +1993,9 @@ class OfflineOutboxOperationsCompanion
     Value<int>? attemptCount,
     Value<String?>? lastFailureCode,
     Value<String?>? replacementOf,
+    Value<String?>? reviewStamp,
+    Value<bool>? requiresStatusProbe,
+    Value<DateTime?>? syncingStartedAt,
     Value<int>? rowid,
   }) {
     return OfflineOutboxOperationsCompanion(
@@ -1859,6 +2013,9 @@ class OfflineOutboxOperationsCompanion
       attemptCount: attemptCount ?? this.attemptCount,
       lastFailureCode: lastFailureCode ?? this.lastFailureCode,
       replacementOf: replacementOf ?? this.replacementOf,
+      reviewStamp: reviewStamp ?? this.reviewStamp,
+      requiresStatusProbe: requiresStatusProbe ?? this.requiresStatusProbe,
+      syncingStartedAt: syncingStartedAt ?? this.syncingStartedAt,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -1908,6 +2065,15 @@ class OfflineOutboxOperationsCompanion
     if (replacementOf.present) {
       map['replacement_of'] = Variable<String>(replacementOf.value);
     }
+    if (reviewStamp.present) {
+      map['review_stamp'] = Variable<String>(reviewStamp.value);
+    }
+    if (requiresStatusProbe.present) {
+      map['requires_status_probe'] = Variable<bool>(requiresStatusProbe.value);
+    }
+    if (syncingStartedAt.present) {
+      map['syncing_started_at'] = Variable<DateTime>(syncingStartedAt.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -1931,6 +2097,9 @@ class OfflineOutboxOperationsCompanion
           ..write('attemptCount: $attemptCount, ')
           ..write('lastFailureCode: $lastFailureCode, ')
           ..write('replacementOf: $replacementOf, ')
+          ..write('reviewStamp: $reviewStamp, ')
+          ..write('requiresStatusProbe: $requiresStatusProbe, ')
+          ..write('syncingStartedAt: $syncingStartedAt, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -3170,6 +3339,9 @@ typedef $$OfflineOutboxOperationsTableCreateCompanionBuilder =
       Value<int> attemptCount,
       Value<String?> lastFailureCode,
       Value<String?> replacementOf,
+      Value<String?> reviewStamp,
+      Value<bool> requiresStatusProbe,
+      Value<DateTime?> syncingStartedAt,
       Value<int> rowid,
     });
 typedef $$OfflineOutboxOperationsTableUpdateCompanionBuilder =
@@ -3188,6 +3360,9 @@ typedef $$OfflineOutboxOperationsTableUpdateCompanionBuilder =
       Value<int> attemptCount,
       Value<String?> lastFailureCode,
       Value<String?> replacementOf,
+      Value<String?> reviewStamp,
+      Value<bool> requiresStatusProbe,
+      Value<DateTime?> syncingStartedAt,
       Value<int> rowid,
     });
 
@@ -3342,6 +3517,21 @@ class $$OfflineOutboxOperationsTableFilterComposer
     builder: (column) => ColumnFilters(column),
   );
 
+  ColumnFilters<String> get reviewStamp => $composableBuilder(
+    column: $table.reviewStamp,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<bool> get requiresStatusProbe => $composableBuilder(
+    column: $table.requiresStatusProbe,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get syncingStartedAt => $composableBuilder(
+    column: $table.syncingStartedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
   Expression<bool> dependentOperation(
     Expression<bool> Function($$OfflineOutboxDependenciesTableFilterComposer f)
     f,
@@ -3475,6 +3665,21 @@ class $$OfflineOutboxOperationsTableOrderingComposer
     column: $table.replacementOf,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<String> get reviewStamp => $composableBuilder(
+    column: $table.reviewStamp,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<bool> get requiresStatusProbe => $composableBuilder(
+    column: $table.requiresStatusProbe,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get syncingStartedAt => $composableBuilder(
+    column: $table.syncingStartedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $$OfflineOutboxOperationsTableAnnotationComposer
@@ -3545,6 +3750,21 @@ class $$OfflineOutboxOperationsTableAnnotationComposer
 
   GeneratedColumn<String> get replacementOf => $composableBuilder(
     column: $table.replacementOf,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get reviewStamp => $composableBuilder(
+    column: $table.reviewStamp,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<bool> get requiresStatusProbe => $composableBuilder(
+    column: $table.requiresStatusProbe,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<DateTime> get syncingStartedAt => $composableBuilder(
+    column: $table.syncingStartedAt,
     builder: (column) => column,
   );
 
@@ -3659,6 +3879,9 @@ class $$OfflineOutboxOperationsTableTableManager
                 Value<int> attemptCount = const Value.absent(),
                 Value<String?> lastFailureCode = const Value.absent(),
                 Value<String?> replacementOf = const Value.absent(),
+                Value<String?> reviewStamp = const Value.absent(),
+                Value<bool> requiresStatusProbe = const Value.absent(),
+                Value<DateTime?> syncingStartedAt = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => OfflineOutboxOperationsCompanion(
                 operationId: operationId,
@@ -3675,6 +3898,9 @@ class $$OfflineOutboxOperationsTableTableManager
                 attemptCount: attemptCount,
                 lastFailureCode: lastFailureCode,
                 replacementOf: replacementOf,
+                reviewStamp: reviewStamp,
+                requiresStatusProbe: requiresStatusProbe,
+                syncingStartedAt: syncingStartedAt,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -3693,6 +3919,9 @@ class $$OfflineOutboxOperationsTableTableManager
                 Value<int> attemptCount = const Value.absent(),
                 Value<String?> lastFailureCode = const Value.absent(),
                 Value<String?> replacementOf = const Value.absent(),
+                Value<String?> reviewStamp = const Value.absent(),
+                Value<bool> requiresStatusProbe = const Value.absent(),
+                Value<DateTime?> syncingStartedAt = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => OfflineOutboxOperationsCompanion.insert(
                 operationId: operationId,
@@ -3709,6 +3938,9 @@ class $$OfflineOutboxOperationsTableTableManager
                 attemptCount: attemptCount,
                 lastFailureCode: lastFailureCode,
                 replacementOf: replacementOf,
+                reviewStamp: reviewStamp,
+                requiresStatusProbe: requiresStatusProbe,
+                syncingStartedAt: syncingStartedAt,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0

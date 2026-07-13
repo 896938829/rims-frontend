@@ -485,14 +485,22 @@ void main() {
 
   test('dynamically drains a reviewed dependency chain exactly once', () async {
     await repository.enqueue(
-      _operation('attachment', kind: OutboxOperationKind.attachmentUpload),
+      _operation(
+        'attachment',
+        kind: OutboxOperationKind.attachmentUpload,
+        reviewStamp: '7\u000011\u0000chain@1',
+      ),
     );
     await repository.enqueue(
-      _operation('create'),
+      _operation('create', reviewStamp: '7\u000011\u0000chain@1'),
       dependencies: const {'attachment'},
     );
     await repository.enqueue(
-      _operation('complete', kind: OutboxOperationKind.documentComplete),
+      _operation(
+        'complete',
+        kind: OutboxOperationKind.documentComplete,
+        reviewStamp: '7\u000011\u0000chain@1',
+      ),
       dependencies: const {'create'},
     );
     final attachmentHandler = _Handler(
@@ -543,6 +551,7 @@ OutboxOperation _operation(
   String id, {
   Map<String, Object?> payload = const {},
   OutboxOperationKind kind = OutboxOperationKind.documentCreate,
+  String reviewStamp = '7\u000011\u0000stock:write@1',
 }) {
   final now = DateTime.utc(2026, 7, 13, 8);
   return OutboxOperation(
@@ -555,6 +564,7 @@ OutboxOperation _operation(
     state: OutboxState.queued,
     createdAt: now,
     confirmedAt: now,
+    reviewStamp: reviewStamp,
   );
 }
 

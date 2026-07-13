@@ -51,11 +51,15 @@ final class MemoryOutboxRepository implements OutboxRepository {
   }
 
   @override
-  Future<Result<List<OutboxOperation>>> ready(String accountId) async {
+  Future<Result<List<OutboxOperation>>> ready(
+    String accountId, {
+    String? reviewStamp,
+  }) async {
     final currentTime = now().toUtc();
     final operations = _operations.values.where((operation) {
       if (operation.accountId != accountId ||
           !operation.isConfirmed ||
+          (reviewStamp != null && operation.reviewStamp != reviewStamp) ||
           (operation.state != OutboxState.queued &&
               operation.state != OutboxState.retryableFailure) ||
           (operation.nextAttemptAt?.isAfter(currentTime) ?? false)) {
@@ -72,6 +76,8 @@ final class MemoryOutboxRepository implements OutboxRepository {
   Future<Result<OutboxOperation>> confirm({
     required String accountId,
     required String operationId,
+    String? reviewStamp,
+    DateTime? expectedUpdatedAt,
   }) async {
     final operation = _operations[operationId];
     if (operation == null || operation.accountId != accountId) {
@@ -85,13 +91,59 @@ final class MemoryOutboxRepository implements OutboxRepository {
         StateFailure(message: 'Only waiting offline work can be reviewed.'),
       );
     }
+    if (expectedUpdatedAt != null &&
+        operation.updatedAt.toUtc() != expectedUpdatedAt.toUtc()) {
+      return const FailureResult(
+        ConflictFailure(message: 'Offline review context changed.'),
+      );
+    }
+    if (operation.reviewStamp != null &&
+        reviewStamp != null &&
+        operation.reviewStamp != reviewStamp) {
+      return const FailureResult(
+        ConflictFailure(message: 'Offline review context changed.'),
+      );
+    }
     final confirmedAt = now().toUtc();
     final confirmed = operation.copyWith(
       confirmedAt: confirmedAt,
       updatedAt: confirmedAt,
+      reviewStamp: reviewStamp,
     );
     _operations[operationId] = confirmed;
     return Success(confirmed);
+  }
+
+  @override
+  Future<Result<int>> recoverStaleSyncing({
+    required String accountId,
+    required DateTime staleBefore,
+    required Set<String> operationIds,
+  }) async {
+    var count = 0;
+    final recoveredAt = now().toUtc();
+    for (final entry in _operations.entries.toList(growable: false)) {
+      final operation = entry.value;
+      final startedAt = operation.syncingStartedAt;
+      if (operation.accountId != accountId ||
+          !operationIds.contains(operation.operationId) ||
+          operation.state != OutboxState.syncing ||
+          startedAt == null ||
+          startedAt.isAfter(staleBefore.toUtc())) {
+        continue;
+      }
+      _operations[entry.key] = operation.copyWith(
+        state: OutboxState.retryableFailure,
+        updatedAt: recoveredAt,
+        nextAttemptAt: recoveredAt,
+        attemptCount: operation.attemptCount + 1,
+        lastFailureCode: 'unknown_result',
+        requiresStatusProbe: true,
+        clearSyncingStartedAt: true,
+      );
+      count += 1;
+    }
+    return Success(count);
   }
 
   @override

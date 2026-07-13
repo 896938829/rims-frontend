@@ -42,7 +42,7 @@ void main() {
         .customSelect('PRAGMA foreign_keys')
         .getSingle();
 
-    expect(version.read<int>('user_version'), 4);
+    expect(version.read<int>('user_version'), 5);
     expect(migratedRows, hasLength(2));
     expect(
       migratedRows.every(
@@ -52,8 +52,22 @@ void main() {
     );
     expect(foreignKeys, hasLength(2));
     expect(foreignKeysEnabled.read<int>('foreign_keys'), 1);
+    expect((await repository.ready('7')).successData, isEmpty);
+    final child = (await repository.list(
+      '7',
+    )).successData.singleWhere((operation) => operation.operationId == 'child');
+    expect(child.confirmedAt, isNull);
+    await repository.confirm(
+      accountId: '7',
+      operationId: 'child',
+      reviewStamp: '7\u000011\u0000document:create',
+      expectedUpdatedAt: child.updatedAt,
+    );
     expect(
-      (await repository.ready('7')).successData.single.operationId,
+      (await repository.ready(
+        '7',
+        reviewStamp: '7\u000011\u0000document:create',
+      )).successData.single.operationId,
       'child',
     );
 
@@ -129,7 +143,7 @@ void main() {
       replacement: replacement,
     );
 
-    expect(version.read<int>('user_version'), 4);
+    expect(version.read<int>('user_version'), 5);
     expect(
       columns.map((row) => row.read<String>('name')),
       contains('replacement_of'),
@@ -191,7 +205,7 @@ void main() {
         dependencies: const {'dep-a'},
       );
 
-      expect(version.read<int>('user_version'), 4);
+      expect(version.read<int>('user_version'), 5);
       expect(resolution.read<String>('original_operation_id'), 'conflict');
       expect(
         resolution.read<String>('replacement_operation_id'),
@@ -214,6 +228,52 @@ void main() {
       );
     },
   );
+
+  test('real v4 file adds recovery and review context columns', () async {
+    final directory = await Directory.systemTemp.createTemp('rims-v4-db-');
+    addTearDown(() => directory.delete(recursive: true));
+    final file = File('${directory.path}${Platform.pathSeparator}offline.db');
+    final createdAt = DateTime.utc(2026, 7, 1);
+    _createV4Fixture(file.path, createdAt);
+
+    final database = OfflineDatabase.forTesting(NativeDatabase(file));
+    addTearDown(database.close);
+    final version = await database
+        .customSelect('PRAGMA user_version')
+        .getSingle();
+    final columns = await database
+        .customSelect('PRAGMA table_info(outbox_operations)')
+        .get();
+    final rows = await database
+        .customSelect(
+          'SELECT confirmed_at, review_stamp, requires_status_probe, '
+          'syncing_started_at FROM outbox_operations',
+        )
+        .get();
+
+    expect(version.read<int>('user_version'), 5);
+    expect(
+      columns.map((row) => row.read<String>('name')),
+      containsAll([
+        'review_stamp',
+        'requires_status_probe',
+        'syncing_started_at',
+      ]),
+    );
+    expect(rows.every((row) => row.read<int?>('confirmed_at') == null), isTrue);
+    expect(
+      rows.every((row) => row.read<String?>('review_stamp') == null),
+      isTrue,
+    );
+    expect(
+      rows.every((row) => row.read<int>('requires_status_probe') == 0),
+      isTrue,
+    );
+    expect(
+      rows.every((row) => row.read<int?>('syncing_started_at') == null),
+      isTrue,
+    );
+  });
 }
 
 extension<T> on Result<T> {
@@ -423,6 +483,39 @@ INSERT INTO outbox_operations (
       "('replacement', 'dep-b'), ('replacement', 'dep-a')",
     );
     database.execute('PRAGMA user_version = 3');
+  } finally {
+    database.close();
+  }
+}
+
+void _createV4Fixture(String path, DateTime createdAt) {
+  _createV3Fixture(path, createdAt);
+  final database = sqlite.sqlite3.open(path);
+  try {
+    database.execute('''
+CREATE UNIQUE INDEX outbox_operation_account_identity
+ON outbox_operations (operation_id, account_id)
+''');
+    database.execute('''
+CREATE TABLE outbox_resolutions (
+  original_operation_id TEXT NOT NULL PRIMARY KEY,
+  replacement_operation_id TEXT NOT NULL UNIQUE,
+  account_id TEXT NOT NULL,
+  dependency_fingerprint TEXT NOT NULL,
+  FOREIGN KEY (original_operation_id, account_id)
+    REFERENCES outbox_operations (operation_id, account_id),
+  FOREIGN KEY (replacement_operation_id, account_id)
+    REFERENCES outbox_operations (operation_id, account_id)
+)
+''');
+    database.execute('''
+INSERT INTO outbox_resolutions (
+  original_operation_id, replacement_operation_id, account_id,
+  dependency_fingerprint
+) VALUES ('conflict', 'replacement', '7', '["dep-a","dep-b"]')
+''');
+    database.execute('DROP INDEX outbox_replacement_once');
+    database.execute('PRAGMA user_version = 4');
   } finally {
     database.close();
   }

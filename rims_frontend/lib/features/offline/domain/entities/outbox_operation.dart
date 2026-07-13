@@ -59,6 +59,9 @@ final class OutboxOperation {
     this.attemptCount = 0,
     this.lastFailureCode,
     this.replacementOf,
+    this.reviewStamp,
+    this.requiresStatusProbe = false,
+    this.syncingStartedAt,
   }) : payload = _freezeMap(payload),
        updatedAt = updatedAt ?? createdAt;
 
@@ -76,6 +79,9 @@ final class OutboxOperation {
   final int attemptCount;
   final String? lastFailureCode;
   final String? replacementOf;
+  final String? reviewStamp;
+  final bool requiresStatusProbe;
+  final DateTime? syncingStartedAt;
 
   bool get isConfirmed => confirmedAt != null;
 
@@ -88,6 +94,11 @@ final class OutboxOperation {
     String? lastFailureCode,
     String? replacementOf,
     DateTime? confirmedAt,
+    String? reviewStamp,
+    bool clearReview = false,
+    bool? requiresStatusProbe,
+    DateTime? syncingStartedAt,
+    bool clearSyncingStartedAt = false,
   }) {
     return OutboxOperation(
       operationId: operationId,
@@ -99,13 +110,18 @@ final class OutboxOperation {
       state: state ?? this.state,
       createdAt: createdAt,
       updatedAt: updatedAt ?? this.updatedAt,
-      confirmedAt: confirmedAt ?? this.confirmedAt,
+      confirmedAt: clearReview ? null : confirmedAt ?? this.confirmedAt,
       nextAttemptAt: clearNextAttemptAt
           ? null
           : nextAttemptAt ?? this.nextAttemptAt,
       attemptCount: attemptCount ?? this.attemptCount,
       lastFailureCode: lastFailureCode ?? this.lastFailureCode,
       replacementOf: replacementOf ?? this.replacementOf,
+      reviewStamp: clearReview ? null : reviewStamp ?? this.reviewStamp,
+      requiresStatusProbe: requiresStatusProbe ?? this.requiresStatusProbe,
+      syncingStartedAt: clearSyncingStartedAt
+          ? null
+          : syncingStartedAt ?? this.syncingStartedAt,
     );
   }
 }

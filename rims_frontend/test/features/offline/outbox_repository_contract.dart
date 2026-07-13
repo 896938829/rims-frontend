@@ -40,6 +40,60 @@ void runOutboxRepositoryContract(String name, OutboxHarnessFactory create) {
 
     tearDown(() => harness.close());
 
+    test('persists exact review context and rejects stale CAS', () async {
+      await repository.enqueue(_operation('review-context', clock.value));
+      final current = (await repository.list('7')).successData.single;
+      final confirmed = await repository.confirm(
+        accountId: '7',
+        operationId: current.operationId,
+        reviewStamp: '7\u000011\u0000document:create',
+        expectedUpdatedAt: current.updatedAt,
+      );
+
+      expect(
+        confirmed.successData.reviewStamp,
+        '7\u000011\u0000document:create',
+      );
+      expect(
+        (await repository.ready(
+          '7',
+          reviewStamp: '7\u000011\u0000document:create',
+        )).successData,
+        hasLength(1),
+      );
+      expect(
+        await repository.confirm(
+          accountId: '7',
+          operationId: current.operationId,
+          reviewStamp: '7\u000012\u0000document:create',
+          expectedUpdatedAt: current.updatedAt,
+        ),
+        isA<FailureResult<OutboxOperation>>(),
+      );
+    });
+
+    test('transactionally recovers stale syncing as unknown result', () async {
+      await repository.enqueue(_operation('stale-sync', clock.value));
+      await repository.transition(
+        accountId: '7',
+        operationId: 'stale-sync',
+        next: OutboxState.syncing,
+      );
+      clock.value = initialTime.add(const Duration(minutes: 6));
+
+      final recovered = await repository.recoverStaleSyncing(
+        accountId: '7',
+        staleBefore: clock.value.subtract(const Duration(minutes: 5)),
+        operationIds: const {'stale-sync'},
+      );
+
+      expect(recovered.successData, 1);
+      final operation = (await repository.list('7')).successData.single;
+      expect(operation.state, OutboxState.retryableFailure);
+      expect(operation.requiresStatusProbe, isTrue);
+      expect(operation.syncingStartedAt, isNull);
+    });
+
     test('retry readiness honors attempt and injected backoff', () async {
       await repository.enqueue(_operation('retry', clock.value));
       await repository.transition(

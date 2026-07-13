@@ -438,9 +438,16 @@ final class _DeferredRepository implements OutboxRepository {
   Future<Result<OutboxOperation>> confirm({
     required String accountId,
     required String operationId,
+    String? reviewStamp,
+    DateTime? expectedUpdatedAt,
   }) =>
       confirmResult?.future ??
-      delegate.confirm(accountId: accountId, operationId: operationId);
+      delegate.confirm(
+        accountId: accountId,
+        operationId: operationId,
+        reviewStamp: reviewStamp,
+        expectedUpdatedAt: expectedUpdatedAt,
+      );
 
   @override
   Future<Result<OutboxOperation>> enqueue(
@@ -449,8 +456,21 @@ final class _DeferredRepository implements OutboxRepository {
   }) => delegate.enqueue(operation, dependencies: dependencies);
 
   @override
-  Future<Result<List<OutboxOperation>>> ready(String accountId) =>
-      delegate.ready(accountId);
+  Future<Result<List<OutboxOperation>>> ready(
+    String accountId, {
+    String? reviewStamp,
+  }) => delegate.ready(accountId, reviewStamp: reviewStamp);
+
+  @override
+  Future<Result<int>> recoverStaleSyncing({
+    required String accountId,
+    required DateTime staleBefore,
+    required Set<String> operationIds,
+  }) => delegate.recoverStaleSyncing(
+    accountId: accountId,
+    staleBefore: staleBefore,
+    operationIds: operationIds,
+  );
 
   @override
   Future<Result<OutboxOperation>> retryNow({

@@ -54,8 +54,17 @@ final class _SyncCenterPageState extends State<SyncCenterPage>
             child: Column(
               children: [
                 _CommandBar(viewModel: widget.viewModel),
-                if (widget.viewModel.failure != null)
-                  _FailureBand(message: widget.viewModel.failure!.message),
+                if (widget.viewModel.commandFailure != null)
+                  _FailureBand(
+                    key: const ValueKey('sync-command-failure'),
+                    message: widget.viewModel.commandFailure!.message,
+                    onDismiss: widget.viewModel.dismissCommandFailure,
+                  ),
+                if (widget.viewModel.loadFailure != null)
+                  _FailureBand(
+                    key: const ValueKey('sync-load-failure'),
+                    message: widget.viewModel.loadFailure!.message,
+                  ),
                 if (widget.viewModel.isBusy)
                   const LinearProgressIndicator(minHeight: 2),
                 Expanded(
@@ -192,9 +201,10 @@ final class _CommandBar extends StatelessWidget {
 }
 
 final class _FailureBand extends StatelessWidget {
-  const _FailureBand({required this.message});
+  const _FailureBand({required this.message, this.onDismiss, super.key});
 
   final String message;
+  final VoidCallback? onDismiss;
 
   @override
   Widget build(BuildContext context) {
@@ -207,6 +217,12 @@ final class _FailureBand extends StatelessWidget {
             const Icon(Icons.error_outline, color: AppColors.error, size: 18),
             const SizedBox(width: 8),
             Expanded(child: Text(message, style: AppTextStyles.bodySmall)),
+            if (onDismiss != null)
+              IconButton(
+                tooltip: '关闭错误',
+                onPressed: onDismiss,
+                icon: const Icon(Icons.close, size: 18),
+              ),
           ],
         ),
       ),

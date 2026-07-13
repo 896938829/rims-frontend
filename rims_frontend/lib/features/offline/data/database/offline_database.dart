@@ -44,7 +44,7 @@ final class OfflineDatabase extends _$OfflineDatabase implements OfflineStore {
        );
 
   @override
-  int get schemaVersion => 4;
+  int get schemaVersion => 5;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -109,6 +109,24 @@ WHERE replacement_of IS NOT NULL
   )
 ''');
         }
+      }
+      if (from < 5) {
+        await migrator.addColumn(
+          offlineOutboxOperations,
+          offlineOutboxOperations.reviewStamp,
+        );
+        await migrator.addColumn(
+          offlineOutboxOperations,
+          offlineOutboxOperations.requiresStatusProbe,
+        );
+        await migrator.addColumn(
+          offlineOutboxOperations,
+          offlineOutboxOperations.syncingStartedAt,
+        );
+        await customStatement(
+          'UPDATE outbox_operations SET confirmed_at = NULL '
+          'WHERE review_stamp IS NULL',
+        );
       }
     },
     beforeOpen: (details) async {
@@ -385,6 +403,9 @@ ON outbox_operations (operation_id, account_id)
           attemptCount: Value(operation.attemptCount),
           lastFailureCode: Value(operation.lastFailureCode),
           replacementOf: Value(operation.replacementOf),
+          reviewStamp: Value(operation.reviewStamp),
+          requiresStatusProbe: Value(operation.requiresStatusProbe),
+          syncingStartedAt: Value(operation.syncingStartedAt?.toUtc()),
         ),
       );
       for (final dependency in dependencies) {
@@ -521,6 +542,9 @@ ON outbox_operations (operation_id, account_id)
       attemptCount: row.attemptCount,
       lastFailureCode: row.lastFailureCode,
       replacementOf: row.replacementOf,
+      reviewStamp: row.reviewStamp,
+      requiresStatusProbe: row.requiresStatusProbe,
+      syncingStartedAt: row.syncingStartedAt,
     );
   }
 }

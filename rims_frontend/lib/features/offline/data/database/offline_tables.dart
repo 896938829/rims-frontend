@@ -52,6 +52,10 @@ class OfflineOutboxOperations extends Table {
   IntColumn get attemptCount => integer().withDefault(const Constant(0))();
   TextColumn get lastFailureCode => text().nullable()();
   TextColumn get replacementOf => text().nullable()();
+  TextColumn get reviewStamp => text().nullable()();
+  BoolColumn get requiresStatusProbe =>
+      boolean().withDefault(const Constant(false))();
+  DateTimeColumn get syncingStartedAt => dateTime().nullable()();
 
   @override
   Set<Column<Object>> get primaryKey => {operationId};

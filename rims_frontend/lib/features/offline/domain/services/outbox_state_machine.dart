@@ -38,6 +38,8 @@ final class OutboxStateMachine {
           attemptCount: attemptCount,
           nextAttemptAt: transitionedAt.add(retryBackoff(attemptCount)),
           lastFailureCode: failureCode,
+          requiresStatusProbe: failure is NetworkFailure,
+          clearSyncingStartedAt: true,
         ),
       );
     }
@@ -48,6 +50,11 @@ final class OutboxStateMachine {
         updatedAt: transitionedAt,
         clearNextAttemptAt: next == OutboxState.syncing,
         lastFailureCode: failureCode,
+        requiresStatusProbe: next == OutboxState.syncing
+            ? operation.requiresStatusProbe
+            : false,
+        syncingStartedAt: next == OutboxState.syncing ? transitionedAt : null,
+        clearSyncingStartedAt: next != OutboxState.syncing,
       ),
     );
   }

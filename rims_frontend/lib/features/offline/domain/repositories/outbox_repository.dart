@@ -10,11 +10,22 @@ abstract interface class OutboxRepository {
 
   Future<Result<List<OutboxOperation>>> list(String accountId);
 
-  Future<Result<List<OutboxOperation>>> ready(String accountId);
+  Future<Result<List<OutboxOperation>>> ready(
+    String accountId, {
+    String? reviewStamp,
+  });
 
   Future<Result<OutboxOperation>> confirm({
     required String accountId,
     required String operationId,
+    String? reviewStamp,
+    DateTime? expectedUpdatedAt,
+  });
+
+  Future<Result<int>> recoverStaleSyncing({
+    required String accountId,
+    required DateTime staleBefore,
+    required Set<String> operationIds,
   });
 
   Future<Result<OutboxOperation>> retryNow({

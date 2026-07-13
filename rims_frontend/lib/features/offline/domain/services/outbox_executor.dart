@@ -29,6 +29,9 @@ final class OutboxExecutionContext {
   final int warehouseId;
   final String permissionStamp;
   final Set<OutboxOperationKind> allowedKinds;
+
+  String get reviewStamp =>
+      '$accountId\u0000$warehouseId\u0000$permissionStamp';
 }
 
 final class OutboxReview {
@@ -75,11 +78,15 @@ final class OutboxExecutor implements OutboxExecutorPort {
     OutboxDelay? delay,
     ProbeBackoff? probeBackoff,
     this.maxStatusProbes = 3,
+    DateTime Function()? now,
+    this.minimumReplayWindow = const Duration(seconds: 15),
+    this.staleSyncingThreshold = const Duration(minutes: 5),
   }) : handlers = Map.unmodifiable({
          for (final handler in handlers) handler.kind: handler,
        }),
        delay = delay ?? Future<void>.delayed,
-       probeBackoff = probeBackoff ?? _defaultProbeBackoff {
+       probeBackoff = probeBackoff ?? _defaultProbeBackoff,
+       now = now ?? DateTime.now {
     if (maxStatusProbes < 1) {
       throw ArgumentError.value(maxStatusProbes, 'maxStatusProbes');
     }
@@ -93,6 +100,9 @@ final class OutboxExecutor implements OutboxExecutorPort {
   final OutboxDelay delay;
   final ProbeBackoff probeBackoff;
   final int maxStatusProbes;
+  final DateTime Function() now;
+  final Duration minimumReplayWindow;
+  final Duration staleSyncingThreshold;
   bool _isExecuting = false;
 
   @override
@@ -119,6 +129,29 @@ final class OutboxExecutor implements OutboxExecutorPort {
 
     _isExecuting = true;
     try {
+      final persistedReviewFailure = await _validatePersistedReview(
+        review,
+        const {},
+      );
+      if (persistedReviewFailure != null) {
+        return OutboxExecutionReport(
+          paused: true,
+          reviewInvalidated: true,
+          skippedOperationReasons: _skipAll(
+            review.operationIds,
+            'review_invalidated',
+          ),
+          failure: persistedReviewFailure,
+        );
+      }
+      final recovery = await repository.recoverStaleSyncing(
+        accountId: review.accountId,
+        staleBefore: now().toUtc().subtract(staleSyncingThreshold),
+        operationIds: review.operationIds,
+      );
+      if (recovery case FailureResult<int>(:final failure)) {
+        return OutboxExecutionReport(failure: failure);
+      }
       final succeeded = <String>[];
       final processed = <String>{};
       final skipped = <String, String>{};
@@ -142,7 +175,10 @@ final class OutboxExecutor implements OutboxExecutorPort {
           );
         }
 
-        final readyResult = await repository.ready(review.accountId);
+        final readyResult = await repository.ready(
+          review.accountId,
+          reviewStamp: _reviewStamp(review),
+        );
         if (readyResult case FailureResult<List<OutboxOperation>>(
           :final failure,
         )) {
@@ -159,7 +195,28 @@ final class OutboxExecutor implements OutboxExecutorPort {
                   !processed.contains(operation.operationId),
             )
             .toList(growable: false);
-        if (candidates.isEmpty) break;
+        if (candidates.isEmpty) {
+          final reviewedFailure = await _validatePersistedReview(
+            review,
+            processed,
+          );
+          if (reviewedFailure != null) {
+            _markRemaining(
+              review.operationIds,
+              processed,
+              skipped,
+              'review_invalidated',
+            );
+            return OutboxExecutionReport(
+              succeededOperationIds: List.unmodifiable(succeeded),
+              paused: true,
+              reviewInvalidated: true,
+              skippedOperationReasons: Map.unmodifiable(skipped),
+              failure: reviewedFailure,
+            );
+          }
+          break;
+        }
         final operation = candidates.first;
         final operationFailure = _validateOperation(review, operation);
         if (operationFailure != null) {
@@ -295,6 +352,33 @@ final class OutboxExecutor implements OutboxExecutorPort {
     return null;
   }
 
+  Future<Failure?> _validatePersistedReview(
+    OutboxReview review,
+    Set<String> processed,
+  ) async {
+    final listed = await repository.list(review.accountId);
+    if (listed case FailureResult<List<OutboxOperation>>(:final failure)) {
+      return failure;
+    }
+    final byId = {
+      for (final operation in (listed as Success<List<OutboxOperation>>).data)
+        operation.operationId: operation,
+    };
+    for (final id in review.operationIds) {
+      if (processed.contains(id)) continue;
+      final operation = byId[id];
+      if (operation == null) continue;
+      final failure = _validateOperation(review, operation);
+      if (failure != null) return failure;
+      if (operation.reviewStamp != _reviewStamp(review)) {
+        return const AuthorizationFailure(
+          message: 'The operation must be reviewed in the current context.',
+        );
+      }
+    }
+    return null;
+  }
+
   Future<_OperationOutcome> _executeOne(OutboxOperation operation) async {
     final handler = handlers[operation.kind];
     if (handler == null) {
@@ -302,9 +386,7 @@ final class OutboxExecutor implements OutboxExecutorPort {
         failure: StateFailure(message: 'No handler for offline operation.'),
       );
     }
-    final hadUnknownResult =
-        operation.state == OutboxState.retryableFailure &&
-        operation.lastFailureCode == 'NetworkFailure';
+    final hadUnknownResult = operation.requiresStatusProbe;
     final syncing = await repository.transition(
       accountId: operation.accountId,
       operationId: operation.operationId,
@@ -340,6 +422,22 @@ final class OutboxExecutor implements OutboxExecutorPort {
       }
       final status = (result as Success<OperationStatus>).data;
       if (status.state == OperationState.completed) {
+        if (!status.expiresAt.isAfter(now().toUtc().add(minimumReplayWindow))) {
+          const failure = StateFailure(
+            message: 'Completed operation replay lease is not safely valid.',
+          );
+          final transitioned = await repository.transition(
+            accountId: operation.accountId,
+            operationId: operation.operationId,
+            next: OutboxState.permanentFailure,
+            failure: failure,
+          );
+          return transitioned.when(
+            success: (_) => const _OperationOutcome(failure: failure),
+            failure: (transitionFailure) =>
+                _OperationOutcome(failure: transitionFailure),
+          );
+        }
         return _handleResult(operation, await handler.execute(operation));
       }
       if (probe < maxStatusProbes) {
@@ -351,6 +449,9 @@ final class OutboxExecutor implements OutboxExecutorPort {
       const NetworkFailure(message: 'Operation is still processing remotely.'),
     );
   }
+
+  String _reviewStamp(OutboxReview review) =>
+      '${review.accountId}\u0000${review.warehouseId}\u0000${review.permissionStamp}';
 
   Future<_OperationOutcome> _handleResult(
     OutboxOperation operation,

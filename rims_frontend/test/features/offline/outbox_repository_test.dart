@@ -30,6 +30,33 @@ void main() {
 
   tearDown(() => database.close());
 
+  test('new repository instance recovers persisted interrupted sync', () async {
+    await repository.enqueue(_operation('recreated'));
+    await repository.transition(
+      accountId: '7',
+      operationId: 'recreated',
+      next: OutboxState.syncing,
+    );
+    clock = now.add(const Duration(minutes: 6));
+    final recreated = DriftOutboxRepository(
+      database: database,
+      stateMachine: OutboxStateMachine(now: () => clock),
+      now: () => clock,
+    );
+
+    expect(
+      (await recreated.recoverStaleSyncing(
+        accountId: '7',
+        staleBefore: clock.subtract(const Duration(minutes: 5)),
+        operationIds: const {'recreated'},
+      )).getOrThrow(),
+      1,
+    );
+    final stored = (await recreated.list('7')).getOrThrow().single;
+    expect(stored.requiresStatusProbe, isTrue);
+    expect(stored.state, OutboxState.retryableFailure);
+  });
+
   test(
     'enqueue rejects self, missing, and cross-account dependencies atomically',
     () async {

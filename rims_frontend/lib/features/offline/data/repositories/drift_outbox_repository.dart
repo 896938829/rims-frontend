@@ -114,7 +114,10 @@ final class DriftOutboxRepository implements OutboxRepository {
   }
 
   @override
-  Future<Result<List<OutboxOperation>>> ready(String accountId) async {
+  Future<Result<List<OutboxOperation>>> ready(
+    String accountId, {
+    String? reviewStamp,
+  }) async {
     final currentTime = now().toUtc();
     try {
       final rows = await database
@@ -124,6 +127,7 @@ SELECT operation.*
 FROM outbox_operations AS operation
 WHERE operation.account_id = ?
   AND operation.confirmed_at IS NOT NULL
+  AND (? IS NULL OR operation.review_stamp = ?)
   AND operation.operation_state IN (?, ?)
   AND (operation.next_attempt_at IS NULL OR operation.next_attempt_at <= ?)
   AND NOT EXISTS (
@@ -138,6 +142,8 @@ ORDER BY operation.created_at ASC, operation.operation_id ASC
 ''',
             variables: [
               Variable(accountId),
+              Variable<String>(reviewStamp),
+              Variable<String>(reviewStamp),
               Variable(OutboxState.queued.wireValue),
               Variable(OutboxState.retryableFailure.wireValue),
               Variable(currentTime),
@@ -180,19 +186,112 @@ ORDER BY operation.created_at ASC, operation.operation_id ASC
   Future<Result<OutboxOperation>> confirm({
     required String accountId,
     required String operationId,
+    String? reviewStamp,
+    DateTime? expectedUpdatedAt,
   }) async {
-    return _updateWaitingOperation(
-      accountId: accountId,
-      operationId: operationId,
-      allowQueued: true,
-      message: 'Unable to confirm offline operation.',
-      update: (operation, timestamp) =>
-          operation.copyWith(confirmedAt: timestamp, updatedAt: timestamp),
-      companion: (timestamp) => OfflineOutboxOperationsCompanion(
-        confirmedAt: Value(timestamp),
-        updatedAt: Value(timestamp),
-      ),
-    );
+    final existing = await _findResult(accountId, operationId);
+    if (existing case FailureResult<OutboxOperation>()) return existing;
+    final operation = (existing as Success<OutboxOperation>).data;
+    if (operation.state != OutboxState.queued &&
+        operation.state != OutboxState.retryableFailure) {
+      return const FailureResult(
+        StateFailure(message: 'Only waiting offline work can be reviewed.'),
+      );
+    }
+    if (expectedUpdatedAt != null &&
+        operation.updatedAt.toUtc() != expectedUpdatedAt.toUtc()) {
+      return const FailureResult(
+        ConflictFailure(message: 'Offline review context changed.'),
+      );
+    }
+    final timestamp = now().toUtc();
+    try {
+      final changed = await database.customUpdate(
+        '''
+UPDATE outbox_operations
+SET confirmed_at = ?, review_stamp = ?, updated_at = ?
+WHERE account_id = ? AND operation_id = ? AND operation_state = ?
+  AND (? IS NULL OR updated_at = ?)
+  AND (review_stamp IS NULL OR review_stamp = ?)
+''',
+        variables: [
+          Variable(timestamp),
+          Variable<String>(reviewStamp),
+          Variable(timestamp),
+          Variable(accountId),
+          Variable(operationId),
+          Variable(operation.state.wireValue),
+          Variable<DateTime>(expectedUpdatedAt?.toUtc()),
+          Variable<DateTime>(expectedUpdatedAt?.toUtc()),
+          Variable<String>(reviewStamp),
+        ],
+        updates: {database.offlineOutboxOperations},
+      );
+      if (changed != 1) {
+        return const FailureResult(
+          ConflictFailure(message: 'Offline review context changed.'),
+        );
+      }
+      return Success(
+        operation.copyWith(
+          confirmedAt: timestamp,
+          reviewStamp: reviewStamp,
+          updatedAt: timestamp,
+        ),
+      );
+    } on Exception catch (error) {
+      if (!_isStorageException(error)) rethrow;
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to confirm offline operation.',
+          cause: error,
+        ),
+      );
+    }
+  }
+
+  @override
+  Future<Result<int>> recoverStaleSyncing({
+    required String accountId,
+    required DateTime staleBefore,
+    required Set<String> operationIds,
+  }) async {
+    if (operationIds.isEmpty) return const Success(0);
+    final timestamp = now().toUtc();
+    final sortedIds = operationIds.toList()..sort();
+    final placeholders = List.filled(sortedIds.length, '?').join(', ');
+    try {
+      final changed = await database.customUpdate(
+        '''
+UPDATE outbox_operations
+SET operation_state = ?, updated_at = ?, next_attempt_at = ?,
+    attempt_count = attempt_count + 1, last_failure_code = 'unknown_result',
+    requires_status_probe = 1, syncing_started_at = NULL
+WHERE account_id = ? AND operation_state = ?
+  AND syncing_started_at IS NOT NULL AND syncing_started_at <= ?
+  AND operation_id IN ($placeholders)
+''',
+        variables: [
+          Variable(OutboxState.retryableFailure.wireValue),
+          Variable(timestamp),
+          Variable(timestamp),
+          Variable(accountId),
+          Variable(OutboxState.syncing.wireValue),
+          Variable(staleBefore.toUtc()),
+          for (final operationId in sortedIds) Variable(operationId),
+        ],
+        updates: {database.offlineOutboxOperations},
+      );
+      return Success(changed);
+    } on Exception catch (error) {
+      if (!_isStorageException(error)) rethrow;
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to recover interrupted synchronization.',
+          cause: error,
+        ),
+      );
+    }
   }
 
   @override
@@ -909,6 +1008,9 @@ SELECT 1 AS found FROM ancestors WHERE operation_id = ? LIMIT 1
             attemptCount: Value(operation.attemptCount),
             lastFailureCode: Value(operation.lastFailureCode),
             replacementOf: Value(operation.replacementOf),
+            reviewStamp: Value(operation.reviewStamp),
+            requiresStatusProbe: Value(operation.requiresStatusProbe),
+            syncingStartedAt: Value(operation.syncingStartedAt?.toUtc()),
           ),
         );
     for (final dependency in dependencies) {
@@ -931,7 +1033,8 @@ SELECT 1 AS found FROM ancestors WHERE operation_id = ? LIMIT 1
       '''
 UPDATE outbox_operations
 SET operation_state = ?, updated_at = ?, next_attempt_at = ?,
-    attempt_count = ?, last_failure_code = ?
+    attempt_count = ?, last_failure_code = ?, requires_status_probe = ?,
+    syncing_started_at = ?
 WHERE account_id = ? AND operation_id = ? AND operation_state = ?
 ''',
       variables: [
@@ -940,6 +1043,8 @@ WHERE account_id = ? AND operation_id = ? AND operation_state = ?
         Variable(operation.nextAttemptAt?.toUtc()),
         Variable(operation.attemptCount),
         Variable(operation.lastFailureCode),
+        Variable(operation.requiresStatusProbe),
+        Variable(operation.syncingStartedAt?.toUtc()),
         Variable(operation.accountId),
         Variable(operation.operationId),
         Variable(expectedState),
@@ -1052,6 +1157,9 @@ WHERE account_id = ?
       attemptCount: row.attemptCount,
       lastFailureCode: row.lastFailureCode,
       replacementOf: row.replacementOf,
+      reviewStamp: row.reviewStamp,
+      requiresStatusProbe: row.requiresStatusProbe,
+      syncingStartedAt: row.syncingStartedAt,
     );
   }
 }
