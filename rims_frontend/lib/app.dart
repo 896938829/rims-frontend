@@ -61,6 +61,7 @@ import 'features/offline/domain/services/outbox_executor.dart';
 import 'features/offline/domain/services/outbox_permission_policy.dart';
 import 'features/offline/domain/services/outbox_state_machine.dart';
 import 'features/offline/domain/services/offline_ownership_service.dart';
+import 'features/offline/domain/services/offline_write_barrier.dart';
 import 'features/reports/data/datasources/reports_remote_datasource.dart';
 import 'features/reports/data/repositories/reports_repository_impl.dart';
 import 'features/reports/domain/repositories/reports_repository.dart';
@@ -93,8 +94,10 @@ final class _MainAppState extends State<MainApp> {
   final AppEventBus _eventBus = AppEventBus();
   final OutboxPermissionPolicy _outboxPermissionPolicy =
       const OutboxPermissionPolicy();
+  final OfflineWriteBarrier _offlineWriteBarrier = OfflineWriteBarrier();
+  late final OfflineStore _offlineStore;
   late final ScanLookupCache _scanLookupCache;
-  final ScanSessionStore _scanSessionStore = ScanSessionStore();
+  late final ScanSessionStore _scanSessionStore;
   late final AttachmentPicker _attachmentPicker;
   late final FileAttachmentStagingStore _attachmentStagingStore;
   late final AttachmentsRepositoryImpl _attachmentsRepository;
@@ -131,9 +134,24 @@ final class _MainAppState extends State<MainApp> {
     _attachmentStagingStore = FileAttachmentStagingStore(
       rootDirectory: getApplicationSupportDirectory,
       idFactory: const Uuid().v4,
+      writeBarrier: _offlineWriteBarrier,
     );
-    _outboxRepository = outboxRepositoryForOfflineStore(widget.offlineStore);
-    _scanLookupCache = ScanLookupCache(offlineStore: widget.offlineStore);
+    _offlineStore = WriteBarrierOfflineStore(
+      delegate: widget.offlineStore,
+      barrier: _offlineWriteBarrier,
+    );
+    final ownershipOutboxRepository = outboxRepositoryForOfflineStore(
+      widget.offlineStore,
+    );
+    _outboxRepository = WriteBarrierOutboxRepository(
+      delegate: ownershipOutboxRepository,
+      barrier: _offlineWriteBarrier,
+    );
+    _scanSessionStore = ScanSessionStore(writeBarrier: _offlineWriteBarrier);
+    _scanLookupCache = ScanLookupCache(
+      offlineStore: widget.offlineStore,
+      writeBarrier: _offlineWriteBarrier,
+    );
     final ownershipStore = widget.offlineStore;
     if (ownershipStore is! OfflineOwnershipStore) {
       throw StateError('Offline store must support ownership operations.');
@@ -154,8 +172,9 @@ final class _MainAppState extends State<MainApp> {
         sessions: _scanSessionStore,
         lookupCache: _scanLookupCache,
       ),
-      reviews: OutboxReviewInvalidator(repository: _outboxRepository),
+      reviews: OutboxReviewInvalidator(repository: ownershipOutboxRepository),
       databaseKeys: databaseKeyManager,
+      mutationParticipants: [_offlineWriteBarrier],
     );
     _sessionController = AuthSessionController(
       eventBus: _eventBus,
@@ -206,7 +225,7 @@ final class _MainAppState extends State<MainApp> {
     );
     _authRepository = CachedAuthRepository(
       delegate: authRepository,
-      store: widget.offlineStore,
+      store: _offlineStore,
       tokenStorage: _secureStorage,
       accountStorage: _secureStorage,
       revocationStorage: _secureStorage,
@@ -219,7 +238,7 @@ final class _MainAppState extends State<MainApp> {
     );
     _documentsRepository = CachedDocumentsRepository(
       delegate: documentsRepository,
-      store: widget.offlineStore,
+      store: _offlineStore,
       accountIdReader: () => _sessionController.currentUser?.id.toString(),
       warehouseIdReader: () => _sessionController.currentWarehouse?.id,
     );
@@ -228,7 +247,7 @@ final class _MainAppState extends State<MainApp> {
     );
     _inventoryRepository = CachedInventoryRepository(
       delegate: inventoryRepository,
-      store: widget.offlineStore,
+      store: _offlineStore,
       accountIdReader: () => _sessionController.currentUser?.id.toString(),
       warehouseIdReader: () => _sessionController.currentWarehouse?.id,
     );
@@ -237,14 +256,14 @@ final class _MainAppState extends State<MainApp> {
     );
     _reportsRepository = CachedReportsRepository(
       delegate: reportsRepository,
-      store: widget.offlineStore,
+      store: _offlineStore,
       accountIdReader: () => _sessionController.currentUser?.id.toString(),
       warehouseIdReader: () => _sessionController.currentWarehouse?.id,
       canViewFinancialMetricsReader: () =>
           _sessionController.currentUser?.isAdmin == true,
     );
     _documentDraftRepository = DriftDocumentDraftRepository(
-      store: widget.offlineStore,
+      store: _offlineStore,
     );
     _operationStatusDataSource = ApiOperationStatusRemoteDataSource(_apiClient);
     final handlers = <OutboxOperationKind, OutboxOperationHandler>{
@@ -283,6 +302,7 @@ final class _MainAppState extends State<MainApp> {
       handlers: handlers.values,
       contextReader: _outboxExecutionContext,
       onSuccessPersisted: _outboxCleanupCoordinator.run,
+      writeBarrier: _offlineWriteBarrier,
     );
     _offlineOwnershipService.attachMutationParticipant(_outboxExecutor);
     _adminRepository = AdminRepositoryImpl(

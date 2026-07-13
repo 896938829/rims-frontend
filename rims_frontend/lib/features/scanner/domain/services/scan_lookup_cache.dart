@@ -5,6 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../../../inventory/domain/entities/inventory_item.dart';
 import '../../../offline/domain/entities/cache_snapshot.dart';
 import '../../../offline/domain/services/offline_store.dart';
+import '../../../offline/domain/services/offline_write_barrier.dart';
 import '../entities/scan_data.dart';
 
 abstract interface class AsyncScanStorage {
@@ -148,6 +149,7 @@ final class ScanLookupCache {
   ScanLookupCache({
     AsyncScanStorage? storage,
     this.offlineStore,
+    this.writeBarrier,
     this.ttl = const Duration(hours: 24),
     this.maxEntries = 500,
     DateTime Function()? now,
@@ -160,6 +162,7 @@ final class ScanLookupCache {
 
   final AsyncScanStorage storage;
   final OfflineStore? offlineStore;
+  final OfflineWriteBarrier? writeBarrier;
   final Duration ttl;
   final int maxEntries;
   final DateTime Function() _now;
@@ -169,6 +172,21 @@ final class ScanLookupCache {
   }
 
   Future<void> put({
+    required String userId,
+    required int warehouseId,
+    required String barcode,
+    required InventoryItem item,
+  }) => _protect(
+    userId,
+    () => _put(
+      userId: userId,
+      warehouseId: warehouseId,
+      barcode: barcode,
+      item: item,
+    ),
+  );
+
+  Future<void> _put({
     required String userId,
     required int warehouseId,
     required String barcode,
@@ -219,6 +237,15 @@ final class ScanLookupCache {
   }
 
   Future<CachedScanLookup?> get({
+    required String userId,
+    required int warehouseId,
+    required String barcode,
+  }) => _protect(
+    userId,
+    () => _get(userId: userId, warehouseId: warehouseId, barcode: barcode),
+  );
+
+  Future<CachedScanLookup?> _get({
     required String userId,
     required int warehouseId,
     required String barcode,
@@ -449,6 +476,13 @@ final class ScanLookupCache {
       storageKey(userId: userId, warehouseId: warehouseId),
       value,
     );
+  }
+
+  Future<T> _protect<T>(String accountId, Future<T> Function() operation) {
+    final barrier = writeBarrier;
+    return barrier == null
+        ? Future<T>.sync(operation)
+        : barrier.protect(accountId: accountId, operation: operation);
   }
 }
 

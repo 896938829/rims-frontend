@@ -576,9 +576,26 @@ final class _BlockingMutationParticipant implements OfflineMutationParticipant {
   final Completer<void> release = Completer<void>();
 
   @override
+  OfflineMutationBlock blockMutations(OfflineMutationScope scope) =>
+      _BlockingMutationBlock(started: started, releaseGate: release);
+}
+
+final class _BlockingMutationBlock implements OfflineMutationBlock {
+  const _BlockingMutationBlock({
+    required this.started,
+    required this.releaseGate,
+  });
+
+  final Completer<void> started;
+  final Completer<void> releaseGate;
+
+  @override
+  void release() {}
+
+  @override
   Future<void> waitForQuiescence() async {
-    started.complete();
-    await release.future;
+    if (!started.isCompleted) started.complete();
+    await releaseGate.future;
   }
 }
 

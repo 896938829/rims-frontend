@@ -3,6 +3,7 @@ import 'dart:convert';
 import '../entities/scan_data.dart';
 import 'scan_lookup_cache.dart';
 import '../../../offline/domain/services/offline_ownership_service.dart';
+import '../../../offline/domain/services/offline_write_barrier.dart';
 
 final class ScanSessionSnapshot {
   const ScanSessionSnapshot({required this.mode, required this.lines});
@@ -12,13 +13,14 @@ final class ScanSessionSnapshot {
 }
 
 final class ScanSessionStore implements OfflineOwnedScanStore {
-  ScanSessionStore({AsyncScanStorage? storage})
+  ScanSessionStore({AsyncScanStorage? storage, this.writeBarrier})
     : storage = storage ?? SharedPreferencesAsyncScanStorage();
 
   static const int schemaVersion = 1;
   static const String _keyPrefix = 'rims.scanner.session.v1.';
 
   final AsyncScanStorage storage;
+  final OfflineWriteBarrier? writeBarrier;
 
   static String storageKey({required String userId, required int warehouseId}) {
     return '$_keyPrefix${Uri.encodeComponent(userId)}.$warehouseId';
@@ -28,7 +30,7 @@ final class ScanSessionStore implements OfflineOwnedScanStore {
     required String userId,
     required int warehouseId,
     required ScanSessionSnapshot session,
-  }) {
+  }) => _protect(userId, () {
     final value = jsonEncode(<String, Object?>{
       'schemaVersion': schemaVersion,
       'userId': userId,
@@ -45,12 +47,12 @@ final class ScanSessionStore implements OfflineOwnedScanStore {
       storageKey(userId: userId, warehouseId: warehouseId),
       value,
     );
-  }
+  });
 
   Future<ScanSessionSnapshot?> restore({
     required String userId,
     required int warehouseId,
-  }) async {
+  }) => _protect(userId, () async {
     final key = storageKey(userId: userId, warehouseId: warehouseId);
     final raw = await storage.read(key);
     if (raw == null) {
@@ -95,13 +97,20 @@ final class ScanSessionStore implements OfflineOwnedScanStore {
       await storage.delete(key);
       return null;
     }
-  }
+  });
 
   Future<void> clear({required String userId, required int warehouseId}) {
-    return storage.delete(storageKey(userId: userId, warehouseId: warehouseId));
+    return _protect(
+      userId,
+      () =>
+          storage.delete(storageKey(userId: userId, warehouseId: warehouseId)),
+    );
   }
 
-  Future<void> clearForUser(String userId) async {
+  Future<void> clearForUser(String userId) =>
+      _protect(userId, () => _clearForUser(userId));
+
+  Future<void> _clearForUser(String userId) async {
     final prefix = '$_keyPrefix${Uri.encodeComponent(userId)}.';
     final matchingKeys = await storage.keys(prefix: prefix);
     await Future.wait(matchingKeys.map(storage.delete));
@@ -114,11 +123,18 @@ final class ScanSessionStore implements OfflineOwnedScanStore {
   }
 
   @override
-  Future<void> clearForAccount(String accountId) => clearForUser(accountId);
+  Future<void> clearForAccount(String accountId) => _clearForUser(accountId);
 
   @override
   Future<void> clearAll() async {
     final matchingKeys = await storage.keys(prefix: _keyPrefix);
     await Future.wait(matchingKeys.map(storage.delete));
+  }
+
+  Future<T> _protect<T>(String accountId, Future<T> Function() operation) {
+    final barrier = writeBarrier;
+    return barrier == null
+        ? Future<T>.sync(operation)
+        : barrier.protect(accountId: accountId, operation: operation);
   }
 }

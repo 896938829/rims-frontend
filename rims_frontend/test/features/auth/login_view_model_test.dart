@@ -9,6 +9,7 @@ import 'package:rims_frontend/features/auth/domain/entities/warehouse.dart';
 import 'package:rims_frontend/features/auth/domain/repositories/auth_repository.dart';
 import 'package:rims_frontend/features/auth/presentation/view_models/auth_session_controller.dart';
 import 'package:rims_frontend/features/auth/presentation/view_models/login_view_model.dart';
+import 'package:rims_frontend/features/offline/domain/services/offline_ownership_service.dart';
 
 void main() {
   group('LoginViewModel', () {
@@ -107,6 +108,48 @@ void main() {
     });
 
     test(
+      'logout keeps the real session and repository credentials until ownership cleanup succeeds',
+      () async {
+        final ownership = OfflineOwnershipService(
+          store: const _EmptyOwnershipStore(),
+          files: _RetryingOwnedFiles(),
+          scans: const _EmptyOwnedScans(),
+          reviews: const _EmptyReviewInvalidator(),
+          databaseKeys: MemoryOfflineDatabaseKeyManager(),
+        );
+        final repository = _FakeAuthRepository();
+        final sessionController = AuthSessionController(
+          ownershipCoordinator: ownership,
+        );
+        await sessionController.startSession(_session);
+
+        final failed = await sessionController.logout(
+          authRepository: repository,
+        );
+
+        expect(failed?.completed, isFalse);
+        expect(repository.logoutCallCount, 0);
+        expect(sessionController.session, _session);
+        expect(sessionController.accessToken, _session.accessToken);
+        expect(sessionController.ownershipFailure, isNotNull);
+        expect(
+          sessionController.ownershipFailure?.message,
+          contains('Unable to clear account offline files.'),
+        );
+
+        final retried = await sessionController.logout(
+          authRepository: repository,
+        );
+
+        expect(retried?.completed, isTrue);
+        expect(repository.logoutCallCount, 1);
+        expect(sessionController.session, isNull);
+        expect(sessionController.accessToken, isNull);
+        expect(sessionController.ownershipFailure, isNull);
+      },
+    );
+
+    test(
       'restoreSession exposes restoring state and starts restored session',
       () async {
         final completer = Completer<Result<AuthSession?>>();
@@ -202,6 +245,28 @@ void main() {
         expect(sessionController.currentUser, isNull);
         expect(sessionController.restoreFailure?.message, '登录已过期');
         expect(sessionController.sessionMessage, '登录已过期');
+      },
+    );
+
+    test(
+      'refreshSession recovers from a thrown repository exception without leaving an old token usable',
+      () async {
+        final sessionController = AuthSessionController();
+        await sessionController.startSession(_session);
+        final repository = _FakeAuthRepository(
+          restoreFuture: Future<Result<AuthSession?>>.error(
+            StateError('secure storage failed'),
+          ),
+        );
+
+        await sessionController.refreshSession(repository);
+
+        expect(sessionController.isRestoring, isFalse);
+        expect(sessionController.session, isNull);
+        expect(sessionController.accessToken, isNull);
+        expect(sessionController.canAuthenticateRequests, isFalse);
+        expect(sessionController.restoreFailure, isA<LocalStorageFailure>());
+        expect(sessionController.restoreFailure?.message, contains('会话恢复失败'));
       },
     );
 
@@ -337,6 +402,7 @@ final class _FakeAuthRepository implements AuthRepository {
   final Future<Result<AuthSession?>>? restoreFuture;
   int loginCallCount = 0;
   int restoreCallCount = 0;
+  int logoutCallCount = 0;
   int? lastSwitchWarehouseId;
   String? lastUsername;
   String? lastPassword;
@@ -365,5 +431,92 @@ final class _FakeAuthRepository implements AuthRepository {
   }
 
   @override
-  Future<void> logout() async {}
+  Future<void> logout() async {
+    logoutCallCount += 1;
+  }
+}
+
+final class _EmptyOwnershipStore implements OfflineOwnershipStore {
+  const _EmptyOwnershipStore();
+
+  @override
+  Future<void> clearAccountCache(String accountId) async {}
+
+  @override
+  Future<void> clearAccountOfflineWork(String accountId) async {}
+
+  @override
+  Future<void> clearAllSensitiveData() async {}
+
+  @override
+  Future<void> clearOwnedAccount(
+    String accountId, {
+    required bool preserveDrafts,
+  }) async {}
+
+  @override
+  Future<void> discardSessionProjection(String accountId) async {}
+
+  @override
+  Future<void> invalidatePermissionScopedCache(String accountId) async {}
+
+  @override
+  Future<void> invalidateWarehouseCache({
+    required String accountId,
+    required int warehouseId,
+  }) async {}
+
+  @override
+  Future<OfflineStoreOwnershipSnapshot> inspectAccount(
+    String accountId,
+  ) async => const OfflineStoreOwnershipSnapshot();
+}
+
+final class _RetryingOwnedFiles implements OfflineOwnedFileStore {
+  int calls = 0;
+
+  @override
+  Future<void> clearAccountFiles(
+    String accountId, {
+    required Set<String> retainStagedRequestIds,
+  }) async {
+    calls += 1;
+    if (calls == 1) throw StateError('staging cleanup failed');
+  }
+
+  @override
+  Future<void> clearAllFiles() async {}
+
+  @override
+  Future<void> clearDownloads(String accountId) async {}
+
+  @override
+  Future<void> clearStagedTransfers(String accountId) async {}
+
+  @override
+  Future<OfflineFileOwnershipSnapshot> inspectAccount(String accountId) async =>
+      const OfflineFileOwnershipSnapshot();
+}
+
+final class _EmptyOwnedScans implements OfflineOwnedScanStore {
+  const _EmptyOwnedScans();
+
+  @override
+  Future<void> clearAll() async {}
+
+  @override
+  Future<void> clearForAccount(String accountId) async {}
+
+  @override
+  Future<int> countForAccount(String accountId) async => 0;
+}
+
+final class _EmptyReviewInvalidator implements OfflineReviewInvalidator {
+  const _EmptyReviewInvalidator();
+
+  @override
+  Future<void> invalidate({
+    required String accountId,
+    int? warehouseId,
+  }) async {}
 }

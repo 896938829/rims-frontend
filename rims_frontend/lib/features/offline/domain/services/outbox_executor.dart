@@ -11,6 +11,7 @@ import '../repositories/outbox_repository.dart';
 import 'network_status_service.dart';
 import 'idempotency_key_validator.dart';
 import 'offline_ownership_service.dart';
+import 'offline_write_barrier.dart';
 
 typedef OutboxDelay = Future<void> Function(Duration duration);
 typedef ProbeBackoff = Duration Function(int attempt);
@@ -158,6 +159,7 @@ final class OutboxExecutor
     this.minimumReplayWindow = const Duration(seconds: 15),
     this.staleSyncingThreshold = const Duration(minutes: 5),
     this.onSuccessPersisted,
+    this.writeBarrier,
   }) : handlers = Map.unmodifiable({
          for (final handler in handlers) handler.kind: handler,
        }),
@@ -181,16 +183,53 @@ final class OutboxExecutor
   final Duration minimumReplayWindow;
   final Duration staleSyncingThreshold;
   final OutboxSuccessObserver? onSuccessPersisted;
+  final OfflineWriteBarrier? writeBarrier;
   bool _isExecuting = false;
   Completer<void>? _activeExecution;
+  String? _activeAccountId;
+  final List<_ExecutorMutationBlock> _mutationBlocks = [];
 
-  @override
   Future<void> waitForQuiescence() {
     return _activeExecution?.future ?? Future<void>.value();
   }
 
   @override
-  Future<OutboxExecutionReport> execute(OutboxReview requestedReview) async {
+  OfflineMutationBlock blockMutations(OfflineMutationScope scope) {
+    final block = _ExecutorMutationBlock(this, scope);
+    _mutationBlocks.add(block);
+    return block;
+  }
+
+  @override
+  Future<OutboxExecutionReport> execute(OutboxReview requestedReview) {
+    if (_mutationBlocks.any(
+      (block) => block.scope.contains(requestedReview.accountId),
+    )) {
+      return Future.value(
+        const OutboxExecutionReport(
+          failure: StateFailure(
+            message: 'Synchronization is blocked by an ownership transition.',
+          ),
+        ),
+      );
+    }
+    final barrier = writeBarrier;
+    if (barrier == null) return _execute(requestedReview);
+    return barrier
+        .protect(
+          accountId: requestedReview.accountId,
+          operation: () => _execute(requestedReview),
+        )
+        .onError<OfflineWriteBlockedException>(
+          (_, _) => const OutboxExecutionReport(
+            failure: StateFailure(
+              message: 'Synchronization is blocked by an ownership transition.',
+            ),
+          ),
+        );
+  }
+
+  Future<OutboxExecutionReport> _execute(OutboxReview requestedReview) async {
     if (_isExecuting) {
       return const OutboxExecutionReport(
         failure: StateFailure(message: 'Synchronization is already running.'),
@@ -213,6 +252,7 @@ final class OutboxExecutor
     if (review.operationIds.isEmpty) return const OutboxExecutionReport();
 
     _isExecuting = true;
+    _activeAccountId = requestedReview.accountId;
     final activeExecution = Completer<void>();
     _activeExecution = activeExecution;
     try {
@@ -570,11 +610,24 @@ final class OutboxExecutor
       );
     } finally {
       _isExecuting = false;
+      _activeAccountId = null;
       if (identical(_activeExecution, activeExecution)) {
         _activeExecution = null;
       }
       activeExecution.complete();
     }
+  }
+
+  Future<void> _waitForScope(OfflineMutationScope scope) {
+    final accountId = _activeAccountId;
+    if (accountId == null || !scope.contains(accountId)) {
+      return Future<void>.value();
+    }
+    return _activeExecution?.future ?? Future<void>.value();
+  }
+
+  void _releaseMutationBlock(_ExecutorMutationBlock block) {
+    _mutationBlocks.remove(block);
   }
 
   Map<String, String> _skipAll(Set<String> operationIds, String reason) =>
@@ -867,6 +920,24 @@ final class OutboxExecutor
       pauseBatch: failure is AuthenticationFailure,
       failure: failure,
     );
+  }
+}
+
+final class _ExecutorMutationBlock implements OfflineMutationBlock {
+  _ExecutorMutationBlock(this.executor, this.scope);
+
+  final OutboxExecutor executor;
+  final OfflineMutationScope scope;
+  bool _released = false;
+
+  @override
+  Future<void> waitForQuiescence() => executor._waitForScope(scope);
+
+  @override
+  void release() {
+    if (_released) return;
+    _released = true;
+    executor._releaseMutationBlock(this);
   }
 }
 

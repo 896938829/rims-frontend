@@ -9,6 +9,7 @@ import 'package:crypto/crypto.dart';
 import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
 import '../../../offline/domain/services/offline_ownership_service.dart';
+import '../../../offline/domain/services/offline_write_barrier.dart';
 import '../../domain/entities/attachment.dart';
 import '../../domain/services/attachment_picker.dart';
 import '../../domain/services/attachment_staging_store.dart';
@@ -49,6 +50,7 @@ final class FileAttachmentStagingStore
     ManifestReadObserver? onManifestRead,
     AttachmentFileStreamReader? openRead,
     ThumbnailBuilder? thumbnailBuilder,
+    OfflineWriteBarrier? writeBarrier,
   }) : this._(
          rootDirectory,
          idFactory,
@@ -59,6 +61,7 @@ final class FileAttachmentStagingStore
          onManifestRead,
          openRead ?? _defaultOpenRead,
          thumbnailBuilder ?? buildBoundedThumbnail,
+         writeBarrier,
        );
 
   FileAttachmentStagingStore._(
@@ -71,6 +74,7 @@ final class FileAttachmentStagingStore
     this._onManifestRead,
     this._openRead,
     this._thumbnailBuilder,
+    this.writeBarrier,
   );
 
   final DirectoryProvider _rootDirectory;
@@ -82,6 +86,7 @@ final class FileAttachmentStagingStore
   final ManifestReadObserver? _onManifestRead;
   final AttachmentFileStreamReader _openRead;
   final ThumbnailBuilder _thumbnailBuilder;
+  final OfflineWriteBarrier? writeBarrier;
 
   @override
   Future<Result<StagedAttachment>> stage({
@@ -744,32 +749,43 @@ final class FileAttachmentStagingStore
     required String userId,
     required Duration maxAge,
     Set<String> protectedRequestIds = const {},
+  }) => _withUserLock(
+    userId,
+    () => _cleanupStale(
+      userId: userId,
+      maxAge: maxAge,
+      protectedRequestIds: protectedRequestIds,
+    ),
+  );
+
+  Future<Result<void>> _cleanupStale({
+    required String userId,
+    required Duration maxAge,
+    required Set<String> protectedRequestIds,
   }) async {
     try {
       final directory = await _userDirectory(userId, create: false);
       if (!await directory.exists()) return const Success(null);
       final cutoff = _clock().toUtc().subtract(maxAge);
-      await _accountOperations.run(directory.absolute.path, () async {
-        if (!await directory.exists()) return;
-        await _completePendingCleanup(directory);
-        final items = await _readManifest(directory);
-        final retained = <StagedAttachment>[];
-        for (final item in items) {
-          if (item.createdAt.isBefore(cutoff) &&
-              !protectedRequestIds.contains(item.pending.requestId)) {
-            await _deleteIfExists(File(item.pending.stagedPath));
-            final thumbnail = item.thumbnailPath;
-            if (thumbnail != null) await _deleteIfExists(File(thumbnail));
-          } else {
-            retained.add(item);
-          }
+      if (!await directory.exists()) return const Success(null);
+      await _completePendingCleanup(directory);
+      final items = await _readManifest(directory);
+      final retained = <StagedAttachment>[];
+      for (final item in items) {
+        if (item.createdAt.isBefore(cutoff) &&
+            !protectedRequestIds.contains(item.pending.requestId)) {
+          await _deleteIfExists(File(item.pending.stagedPath));
+          final thumbnail = item.thumbnailPath;
+          if (thumbnail != null) await _deleteIfExists(File(thumbnail));
+        } else {
+          retained.add(item);
         }
-        await _writeManifest(directory, retained);
-        await _deleteFilesOlderThan(
-          Directory('${directory.path}${Platform.pathSeparator}downloads'),
-          cutoff,
-        );
-      });
+      }
+      await _writeManifest(directory, retained);
+      await _deleteFilesOlderThan(
+        Directory('${directory.path}${Platform.pathSeparator}downloads'),
+        cutoff,
+      );
       return const Success(null);
     } catch (error) {
       return FailureResult(
@@ -867,7 +883,7 @@ final class FileAttachmentStagingStore
         stagedTransfers: staged,
         downloads: downloadCount,
       );
-    });
+    }, privileged: true);
   }
 
   @override
@@ -922,7 +938,7 @@ final class FileAttachmentStagingStore
         '${directory.path}${Platform.pathSeparator}downloads',
       );
       if (await downloads.exists()) await downloads.delete(recursive: true);
-    });
+    }, privileged: true);
   }
 
   @override
@@ -933,7 +949,7 @@ final class FileAttachmentStagingStore
         '${directory.path}${Platform.pathSeparator}downloads',
       );
       if (await downloads.exists()) await downloads.delete(recursive: true);
-    });
+    }, privileged: true);
   }
 
   @override
@@ -958,7 +974,7 @@ final class FileAttachmentStagingStore
           File('${directory.path}${Platform.pathSeparator}$name'),
         );
       }
-    });
+    }, privileged: true);
   }
 
   @override
@@ -1016,10 +1032,18 @@ final class FileAttachmentStagingStore
 
   Future<T> _withUserLock<T>(
     String userId,
-    Future<T> Function() operation,
-  ) async {
-    final directory = await _userDirectory(userId, create: false);
-    return _accountOperations.run(directory.absolute.path, operation);
+    Future<T> Function() operation, {
+    bool privileged = false,
+  }) {
+    Future<T> locked() async {
+      final directory = await _userDirectory(userId, create: false);
+      return _accountOperations.run(directory.absolute.path, operation);
+    }
+
+    final barrier = writeBarrier;
+    return privileged || barrier == null
+        ? Future<T>.sync(locked)
+        : barrier.protect(accountId: userId, operation: locked);
   }
 
   Future<List<StagedAttachment>> _readManifest(Directory directory) async {

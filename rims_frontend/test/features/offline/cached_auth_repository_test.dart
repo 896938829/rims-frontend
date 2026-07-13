@@ -388,6 +388,57 @@ void main() {
     },
   );
 
+  for (final storageFailure in _RevocationStorageFailure.values) {
+    test(
+      'revocation ${storageFailure.name} failure never leaves restore busy or the old token usable',
+      () async {
+        final delegate = _FakeAuthRepository(
+          restoreResult: const Success(_session),
+        );
+        final storage = _FakeSessionStorage(token: 'token');
+        final ownership = _RecordingOwnershipCoordinator();
+        final controller = AuthSessionController();
+        addTearDown(controller.dispose);
+        final repository = _repository(
+          delegate,
+          storage,
+          now: now,
+          ownership: ownership,
+          onSessionRevoked: controller.invalidateRevokedSession,
+        );
+        await repository.restoreSession();
+        await controller.startSession(_session);
+        delegate.restoreResult = const FailureResult(AuthorizationFailure());
+        storage.failNext(storageFailure);
+
+        await controller.refreshSession(repository);
+
+        expect(controller.isRestoring, isFalse);
+        expect(controller.session, isNull);
+        expect(controller.accessToken, isNull);
+        expect(controller.canAuthenticateRequests, isFalse);
+        expect(controller.restoreFailure, isA<Failure>());
+        expect(controller.restoreFailure, isNot(isA<UnknownFailure>()));
+
+        delegate.restoreResult = const Success<AuthSession?>(null);
+        await controller.refreshSession(repository);
+
+        expect(controller.isRestoring, isFalse);
+        expect(controller.restoreFailure, isNull);
+        expect(storage.token, isNull);
+        expect(storage.pendingRevocationAccountId, isNull);
+        expect(
+          ownership.intents
+              .where(
+                (intent) => intent.reason == OfflineOwnershipReason.revocation,
+              )
+              .length,
+          greaterThanOrEqualTo(2),
+        );
+      },
+    );
+  }
+
   test(
     'network restore account switch is cleaned before the new projection is exposed',
     () async {
@@ -622,9 +673,23 @@ final class _FakeSessionStorage
   String? token;
   String? accountId;
   String? pendingRevocationAccountId;
+  _RevocationStorageFailure? _nextFailure;
+
+  void failNext(_RevocationStorageFailure failure) {
+    _nextFailure = failure;
+  }
+
+  void _throwIf(_RevocationStorageFailure failure) {
+    if (_nextFailure != failure) return;
+    _nextFailure = null;
+    throw StateError('${failure.name} failed');
+  }
 
   @override
-  Future<void> clearAccessToken() async => token = null;
+  Future<void> clearAccessToken() async {
+    _throwIf(_RevocationStorageFailure.clearCredential);
+    token = null;
+  }
 
   @override
   Future<String?> readAccessToken() async => token;
@@ -645,6 +710,7 @@ final class _FakeSessionStorage
 
   @override
   Future<void> clearPendingRevocationAccountId() async {
+    _throwIf(_RevocationStorageFailure.clearMarker);
     pendingRevocationAccountId = null;
   }
 
@@ -655,9 +721,12 @@ final class _FakeSessionStorage
 
   @override
   Future<void> savePendingRevocationAccountId(String accountId) async {
+    _throwIf(_RevocationStorageFailure.saveMarker);
     pendingRevocationAccountId = accountId;
   }
 }
+
+enum _RevocationStorageFailure { saveMarker, clearCredential, clearMarker }
 
 final class _FakeAuthRepository implements AuthRepository {
   _FakeAuthRepository({

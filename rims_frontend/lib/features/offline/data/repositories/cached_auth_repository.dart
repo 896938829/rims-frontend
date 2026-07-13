@@ -37,6 +37,8 @@ final class CachedAuthRepository
   final OfflineOwnershipCoordinator? ownershipCoordinator;
   final void Function() onSessionRevoked;
   final DateTime Function() now;
+  String? _volatilePendingRevocationAccountId;
+  bool _revocationInvalidated = false;
 
   @override
   AuthSessionSource? lastRestoreSource;
@@ -49,25 +51,34 @@ final class CachedAuthRepository
 
   @override
   Future<Result<AuthSession?>> restoreSession() async {
+    try {
+      return await _restoreSession();
+    } on Object catch (error) {
+      final failure =
+          _revocationInvalidated || _volatilePendingRevocationAccountId != null
+          ? RevocationCleanupFailure(
+              message: 'Revoked credential cleanup could not be completed.',
+              cause: error,
+            )
+          : LocalStorageFailure(
+              message: 'Unable to restore the local authentication session.',
+              cause: error,
+            );
+      return FailureResult(failure);
+    }
+  }
+
+  Future<Result<AuthSession?>> _restoreSession() async {
     _clearMetadata();
-    final pendingRevocation = await revocationStorage
-        .readPendingRevocationAccountId();
+    final pendingRevocation =
+        await revocationStorage.readPendingRevocationAccountId() ??
+        _volatilePendingRevocationAccountId;
     if (pendingRevocation != null) {
-      onSessionRevoked();
-      await _expireDelegateCredentials();
-      final ownershipFailure = await _applyOwnership(
-        OfflineOwnershipIntent.revocation(accountId: pendingRevocation),
+      final failure = await _completeRevocation(
+        pendingRevocation,
+        persistMarker: false,
       );
-      if (ownershipFailure != null) {
-        return FailureResult(
-          RevocationCleanupFailure(
-            message: ownershipFailure.message,
-            cause: ownershipFailure.cause,
-          ),
-        );
-      }
-      await revocationStorage.clearPendingRevocationAccountId();
-      await accountStorage.clearAuthenticatedAccountId();
+      if (failure != null) return FailureResult(failure);
     }
     final token = (await tokenStorage.readAccessToken())?.trim();
     final accountId = await accountStorage.readAuthenticatedAccountId();
@@ -127,28 +138,23 @@ final class CachedAuthRepository
     if (failure is AuthenticationFailure || failure is AuthorizationFailure) {
       if (accountId != null) {
         if (failure is AuthorizationFailure) {
-          onSessionRevoked();
-          await revocationStorage.savePendingRevocationAccountId(accountId);
-          await _expireDelegateCredentials();
-        }
-        final ownershipFailure = await _applyOwnership(
-          failure is AuthorizationFailure
-              ? OfflineOwnershipIntent.revocation(accountId: accountId)
-              : OfflineOwnershipIntent.tokenExpiry(accountId: accountId),
-        );
-        if (failure is AuthorizationFailure && ownershipFailure == null) {
-          await revocationStorage.clearPendingRevocationAccountId();
-          await accountStorage.clearAuthenticatedAccountId();
-        }
-        if (ownershipFailure != null) {
-          return FailureResult(
-            failure is AuthorizationFailure
-                ? RevocationCleanupFailure(
-                    message: ownershipFailure.message,
-                    cause: ownershipFailure.cause,
-                  )
-                : ownershipFailure,
+          final revocationFailure = await _completeRevocation(
+            accountId,
+            persistMarker: true,
           );
+          if (revocationFailure != null) {
+            return FailureResult(revocationFailure);
+          }
+        } else {
+          final ownershipFailure = await _applyOwnership(
+            OfflineOwnershipIntent.tokenExpiry(accountId: accountId),
+          );
+          if (ownershipFailure != null) {
+            return FailureResult(ownershipFailure);
+          }
+        }
+        if (failure is AuthorizationFailure) {
+          return FailureResult(failure);
         }
       }
       return FailureResult(failure);
@@ -203,6 +209,13 @@ final class CachedAuthRepository
           await delegate.logout();
           return FailureResult(ownershipFailure);
         }
+      }
+      final reauthenticationFailure = await _applyOwnership(
+        OfflineOwnershipIntent.reauthenticated(accountId: accountId),
+      );
+      if (reauthenticationFailure != null) {
+        await delegate.logout();
+        return FailureResult(reauthenticationFailure);
       }
       await _writeSession(data);
     }
@@ -305,12 +318,73 @@ final class CachedAuthRepository
   }
 
   Future<void> _expireDelegateCredentials() async {
-    await tokenStorage.clearAccessToken();
-    if (delegate case final AuthCredentialInvalidator invalidator) {
-      await invalidator.expireCredentials();
-    } else {
-      await delegate.logout();
+    Object? firstError;
+    try {
+      await tokenStorage.clearAccessToken();
+    } on Object catch (error) {
+      firstError = error;
     }
+    try {
+      if (delegate case final AuthCredentialInvalidator invalidator) {
+        await invalidator.expireCredentials();
+      } else {
+        await delegate.logout();
+      }
+    } on Object catch (error) {
+      firstError ??= error;
+    }
+    if (firstError != null) throw firstError;
+  }
+
+  Future<RevocationCleanupFailure?> _completeRevocation(
+    String accountId, {
+    required bool persistMarker,
+  }) async {
+    _volatilePendingRevocationAccountId = accountId;
+    _revocationInvalidated = true;
+    onSessionRevoked();
+    Object? firstError;
+    if (persistMarker) {
+      try {
+        await revocationStorage.savePendingRevocationAccountId(accountId);
+      } on Object catch (error) {
+        firstError = error;
+      }
+    }
+    try {
+      await _expireDelegateCredentials();
+    } on Object catch (error) {
+      firstError ??= error;
+    }
+    final ownershipFailure = await _applyOwnership(
+      OfflineOwnershipIntent.revocation(accountId: accountId),
+    );
+    if (ownershipFailure != null) {
+      firstError ??= ownershipFailure;
+    }
+    if (firstError == null) {
+      try {
+        await revocationStorage.clearPendingRevocationAccountId();
+      } on Object catch (error) {
+        firstError = error;
+      }
+      try {
+        await accountStorage.clearAuthenticatedAccountId();
+      } on Object catch (error) {
+        firstError ??= error;
+      }
+    }
+    if (firstError != null) {
+      return RevocationCleanupFailure(
+        message: firstError is Failure
+            ? firstError.message
+            : 'Revoked credential cleanup could not be completed.',
+        cause: firstError,
+      );
+    }
+    _volatilePendingRevocationAccountId = null;
+    _revocationInvalidated = false;
+    return null;
   }
 
   Future<Failure?> _applyOwnership(OfflineOwnershipIntent intent) async {

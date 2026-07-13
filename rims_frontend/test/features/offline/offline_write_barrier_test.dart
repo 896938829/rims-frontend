@@ -1,0 +1,685 @@
+import 'dart:async';
+import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:drift/native.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:rims_frontend/core/result/result.dart';
+import 'package:rims_frontend/core/storage/app_secure_storage.dart';
+import 'package:rims_frontend/features/attachments/data/services/file_attachment_staging_store.dart';
+import 'package:rims_frontend/features/attachments/domain/entities/attachment.dart';
+import 'package:rims_frontend/features/attachments/domain/services/attachment_picker.dart';
+import 'package:rims_frontend/features/auth/domain/entities/app_user.dart';
+import 'package:rims_frontend/features/auth/domain/entities/auth_session.dart';
+import 'package:rims_frontend/features/auth/domain/entities/warehouse.dart';
+import 'package:rims_frontend/features/auth/domain/repositories/auth_repository.dart';
+import 'package:rims_frontend/features/offline/data/repositories/cached_auth_repository.dart';
+import 'package:rims_frontend/features/offline/data/database/offline_database.dart';
+import 'package:rims_frontend/features/offline/data/repositories/memory_outbox_repository.dart';
+import 'package:rims_frontend/features/offline/data/repositories/memory_offline_store.dart';
+import 'package:rims_frontend/features/offline/domain/entities/cache_snapshot.dart';
+import 'package:rims_frontend/features/offline/domain/entities/document_draft.dart';
+import 'package:rims_frontend/features/offline/domain/entities/outbox_graph.dart';
+import 'package:rims_frontend/features/offline/domain/services/offline_ownership_service.dart';
+import 'package:rims_frontend/features/offline/domain/services/offline_store.dart';
+import 'package:rims_frontend/features/offline/domain/services/outbox_state_machine.dart';
+import 'package:rims_frontend/features/offline/domain/services/offline_write_barrier.dart';
+import 'package:rims_frontend/features/inventory/domain/entities/inventory_item.dart';
+import 'package:rims_frontend/features/scanner/domain/entities/scan_data.dart';
+import 'package:rims_frontend/features/scanner/domain/services/scan_lookup_cache.dart';
+import 'package:rims_frontend/features/scanner/domain/services/scan_session_store.dart';
+
+void main() {
+  test('the outbox wrapper preserves empty graph validation', () async {
+    final repository = WriteBarrierOutboxRepository(
+      delegate: MemoryOutboxRepository(stateMachine: OutboxStateMachine()),
+      barrier: OfflineWriteBarrier(),
+    );
+
+    final result = await repository.enqueueGraph(OutboxGraph(operations: []));
+
+    expect(result, isA<FailureResult<List<dynamic>>>());
+  });
+
+  test(
+    'the account barrier protects both Drift and web-memory offline stores',
+    () async {
+      final drift = OfflineDatabase.forTesting(NativeDatabase.memory());
+      addTearDown(drift.close);
+      for (final rawStore in <OfflineStore>[MemoryOfflineStore(), drift]) {
+        final barrier = OfflineWriteBarrier();
+        final store = WriteBarrierOfflineStore(
+          delegate: rawStore,
+          barrier: barrier,
+        );
+        final block = barrier.blockMutations(
+          const OfflineMutationScope.account('7'),
+        );
+        final now = DateTime.utc(2026, 7, 13);
+        final record = CacheRecord(
+          key: const CacheKey(
+            accountId: '7',
+            namespace: 'inventory',
+            entityKey: 'page',
+          ),
+          payload: const {},
+          schemaVersion: 1,
+          fetchedAt: now,
+          expiresAt: now.add(const Duration(days: 1)),
+        );
+
+        await expectLater(
+          store.writeCache(record),
+          throwsA(isA<OfflineWriteBlockedException>()),
+        );
+        block.release();
+        await store.writeCache(record);
+
+        expect(
+          await rawStore.readCache(record.key, schemaVersion: 1),
+          isNotNull,
+        );
+      }
+    },
+  );
+
+  test(
+    'revocation drains an entered draft and cache write before cleanup and rejects later writes',
+    () async {
+      final barrier = OfflineWriteBarrier();
+      final rawStore = MemoryOfflineStore();
+      final store = WriteBarrierOfflineStore(
+        delegate: rawStore,
+        barrier: barrier,
+      );
+      final keys = MemoryOfflineDatabaseKeyManager();
+      final ownership = _service(
+        store: rawStore,
+        scans: const _NoopScans(),
+        keys: keys,
+        participants: [barrier],
+      );
+      final entered = Completer<void>();
+      final release = Completer<void>();
+      final now = DateTime.utc(2026, 7, 13);
+      final activeWrite = barrier.protect(
+        accountId: '7',
+        operation: () async {
+          entered.complete();
+          await release.future;
+          await store.writeCache(
+            CacheRecord(
+              key: const CacheKey(
+                accountId: '7',
+                namespace: 'inventory',
+                entityKey: 'late-cache',
+              ),
+              payload: const {},
+              schemaVersion: 1,
+              fetchedAt: now,
+              expiresAt: now.add(const Duration(days: 1)),
+            ),
+          );
+          await store.saveDraft(
+            DocumentDraft(
+              id: 'late-draft',
+              accountId: '7',
+              warehouseId: 1,
+              payload: const {},
+              createdAt: now,
+              updatedAt: now,
+            ),
+          );
+        },
+      );
+      await entered.future;
+
+      final revocation = ownership.apply(
+        const OfflineOwnershipIntent.revocation(accountId: '7'),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(keys.generation, 0);
+      await expectLater(
+        store.saveDraft(
+          DocumentDraft(
+            id: 'blocked-draft',
+            accountId: '7',
+            warehouseId: 1,
+            payload: const {},
+            createdAt: now,
+            updatedAt: now,
+          ),
+        ),
+        throwsA(isA<OfflineWriteBlockedException>()),
+      );
+
+      release.complete();
+      await activeWrite;
+      final report = await revocation;
+
+      expect(report.completed, isTrue);
+      expect(keys.generation, 1);
+      expect((await rawStore.inspectAccount('7')).cacheEntries, 0);
+      expect((await rawStore.inspectAccount('7')).drafts, 0);
+    },
+  );
+
+  test(
+    'clear offline work holds one write snapshot through drain recount and confirmation',
+    () async {
+      final barrier = OfflineWriteBarrier();
+      final rawStore = MemoryOfflineStore();
+      final store = WriteBarrierOfflineStore(
+        delegate: rawStore,
+        barrier: barrier,
+      );
+      final ownership = _service(
+        store: rawStore,
+        scans: const _NoopScans(),
+        keys: MemoryOfflineDatabaseKeyManager(),
+        participants: [barrier],
+      );
+      final preview = await ownership.preview(
+        accountId: '7',
+        command: OfflineClearCommand.offlineWork,
+      );
+      final entered = Completer<void>();
+      final release = Completer<void>();
+      final now = DateTime.utc(2026, 7, 13);
+      final autosave = barrier.protect(
+        accountId: '7',
+        operation: () async {
+          entered.complete();
+          await release.future;
+          await store.saveDraft(
+            DocumentDraft(
+              id: 'autosave',
+              accountId: '7',
+              warehouseId: 1,
+              payload: const {},
+              createdAt: now,
+              updatedAt: now,
+            ),
+          );
+        },
+      );
+      await entered.future;
+
+      final clearing = ownership.executeClear(preview);
+      await Future<void>.delayed(Duration.zero);
+      expect((await rawStore.inspectAccount('7')).drafts, 0);
+
+      release.complete();
+      await autosave;
+      final changed = await clearing;
+
+      expect(changed.requiresReconfirmation, isTrue);
+      expect(changed.currentPreview?.counts.drafts, 1);
+      expect((await rawStore.inspectAccount('7')).drafts, 1);
+
+      final cleared = await ownership.executeClear(changed.currentPreview!);
+      expect(cleared.completed, isTrue);
+      expect((await rawStore.inspectAccount('7')).drafts, 0);
+    },
+  );
+
+  test(
+    'clear preview drains entered writes and releases its snapshot barrier afterward',
+    () async {
+      final barrier = OfflineWriteBarrier();
+      final rawStore = MemoryOfflineStore();
+      final store = WriteBarrierOfflineStore(
+        delegate: rawStore,
+        barrier: barrier,
+      );
+      final ownership = _service(
+        store: rawStore,
+        scans: const _NoopScans(),
+        keys: MemoryOfflineDatabaseKeyManager(),
+        participants: [barrier],
+      );
+      final entered = Completer<void>();
+      final release = Completer<void>();
+      final now = DateTime.utc(2026, 7, 13);
+      final activeWrite = barrier.protect(
+        accountId: '7',
+        operation: () async {
+          entered.complete();
+          await release.future;
+          await store.saveDraft(
+            DocumentDraft(
+              id: 'before-preview',
+              accountId: '7',
+              warehouseId: 1,
+              payload: const {},
+              createdAt: now,
+              updatedAt: now,
+            ),
+          );
+        },
+      );
+      await entered.future;
+
+      final pendingPreview = ownership.preview(
+        accountId: '7',
+        command: OfflineClearCommand.offlineWork,
+      );
+      await Future<void>.delayed(Duration.zero);
+      await expectLater(
+        store.saveDraft(
+          DocumentDraft(
+            id: 'blocked-during-preview',
+            accountId: '7',
+            warehouseId: 1,
+            payload: const {},
+            createdAt: now,
+            updatedAt: now,
+          ),
+        ),
+        throwsA(isA<OfflineWriteBlockedException>()),
+      );
+
+      release.complete();
+      await activeWrite;
+      final preview = await pendingPreview;
+      expect(preview.counts.drafts, 1);
+
+      await store.saveDraft(
+        DocumentDraft(
+          id: 'after-preview',
+          accountId: '7',
+          warehouseId: 1,
+          payload: const {},
+          createdAt: now,
+          updatedAt: now,
+        ),
+      );
+      expect((await rawStore.inspectAccount('7')).drafts, 2);
+    },
+  );
+
+  test(
+    'same-account login releases a retained logout barrier before writing its new projection',
+    () async {
+      final barrier = OfflineWriteBarrier();
+      final rawStore = MemoryOfflineStore();
+      final guardedStore = WriteBarrierOfflineStore(
+        delegate: rawStore,
+        barrier: barrier,
+      );
+      final ownership = _service(
+        store: rawStore,
+        scans: const _NoopScans(),
+        keys: MemoryOfflineDatabaseKeyManager(),
+        participants: [barrier],
+      );
+      await ownership.apply(
+        const OfflineOwnershipIntent.logout(accountId: '7'),
+      );
+      final storage = _SessionStorage();
+      final delegate = _LoginAuthRepository();
+      final repository = CachedAuthRepository(
+        delegate: delegate,
+        store: guardedStore,
+        tokenStorage: storage,
+        accountStorage: storage,
+        revocationStorage: storage,
+        onSessionRevoked: () {},
+        ownershipCoordinator: ownership,
+      );
+
+      final result = await repository.login(
+        username: 'alice',
+        password: 'secret',
+      );
+
+      expect(result, isA<Success<AuthSession>>());
+      expect((await rawStore.inspectAccount('7')).cacheEntries, 1);
+      expect(ownership.canAccessOfflineData('7'), isTrue);
+    },
+  );
+
+  test(
+    'blocked scan persistence drains before revocation and cannot recreate a cleared session',
+    () async {
+      final barrier = OfflineWriteBarrier();
+      final storage = _BlockedScanStorage();
+      final sessions = ScanSessionStore(
+        storage: storage,
+        writeBarrier: barrier,
+      );
+      final keys = MemoryOfflineDatabaseKeyManager();
+      final ownership = _service(
+        store: MemoryOfflineStore(),
+        scans: sessions,
+        keys: keys,
+        participants: [barrier],
+      );
+      final firstWrite = sessions.save(
+        userId: '7',
+        warehouseId: 1,
+        session: const ScanSessionSnapshot(mode: ScanMode.batch, lines: []),
+      );
+      await storage.writeStarted.future;
+
+      final revocation = ownership.apply(
+        const OfflineOwnershipIntent.revocation(accountId: '7'),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(keys.generation, 0);
+      expect(storage.deleteCalls, 0);
+      await expectLater(
+        sessions.save(
+          userId: '7',
+          warehouseId: 2,
+          session: const ScanSessionSnapshot(mode: ScanMode.batch, lines: []),
+        ),
+        throwsA(isA<OfflineWriteBlockedException>()),
+      );
+      final lookup = ScanLookupCache(storage: storage, writeBarrier: barrier);
+      await expectLater(
+        lookup.put(
+          userId: '7',
+          warehouseId: 1,
+          barcode: 'SKU-1',
+          item: _inventoryItem,
+        ),
+        throwsA(isA<OfflineWriteBlockedException>()),
+      );
+
+      storage.releaseWrite.complete();
+      await firstWrite;
+      expect(
+        (await storage.keys(prefix: 'rims.scanner.session.v1.')),
+        isNotEmpty,
+      );
+      final report = await revocation;
+
+      expect(report.completed, isTrue);
+      expect(keys.generation, 1);
+      expect((await storage.keys(prefix: 'rims.scanner.session.v1.')), isEmpty);
+    },
+  );
+
+  test(
+    'logout drains staged file persistence before cleanup and rejects a second staging write',
+    () async {
+      final root = await Directory.systemTemp.createTemp('ownership_barrier_');
+      addTearDown(() => root.delete(recursive: true));
+      final source = File('${root.path}${Platform.pathSeparator}source.pdf');
+      await source.writeAsBytes(Uint8List.fromList([1, 2, 3]));
+      final barrier = OfflineWriteBarrier();
+      final copyStarted = Completer<void>();
+      final releaseCopy = Completer<void>();
+      var nextId = 0;
+      final staging = FileAttachmentStagingStore(
+        rootDirectory: () async => root,
+        idFactory: () => 'request-${++nextId}',
+        writeBarrier: barrier,
+        copyFile: (sourcePath, destinationPath) async {
+          if (!copyStarted.isCompleted) copyStarted.complete();
+          await releaseCopy.future;
+          await File(sourcePath).copy(destinationPath);
+        },
+        thumbnailBuilder: (_, _) async => null,
+      );
+      final ownership = OfflineOwnershipService(
+        store: MemoryOfflineStore(),
+        files: staging,
+        scans: const _NoopScans(),
+        reviews: const _NoopReviews(),
+        databaseKeys: MemoryOfflineDatabaseKeyManager(),
+        mutationParticipants: [barrier],
+      );
+      final selection = SelectedAttachmentSource(
+        path: source.path,
+        originalName: 'source.pdf',
+        mimeType: 'application/pdf',
+        fileSize: 3,
+      );
+      final firstStage = staging.stage(
+        userId: '7',
+        binding: AttachmentBinding.documentDraft('draft-1'),
+        selection: selection,
+        existingCount: 0,
+      );
+      await copyStarted.future;
+
+      final logout = ownership.apply(
+        const OfflineOwnershipIntent.logout(accountId: '7'),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      final blockedStage = staging.stage(
+        userId: '7',
+        binding: AttachmentBinding.documentDraft('draft-2'),
+        selection: selection,
+        existingCount: 0,
+      );
+      final blockedDownload = staging.saveDownload(
+        userId: '7',
+        originalName: 'blocked.pdf',
+        bytes: Uint8List.fromList([4, 5, 6]),
+      );
+      final blockedCleanup = staging.cleanupStale(
+        userId: '7',
+        maxAge: Duration.zero,
+      );
+      releaseCopy.complete();
+      await expectLater(
+        blockedStage.timeout(
+          const Duration(seconds: 2),
+          onTimeout: () => throw StateError('blocked stage did not settle'),
+        ),
+        throwsA(isA<OfflineWriteBlockedException>()),
+      );
+      await expectLater(
+        blockedDownload,
+        throwsA(isA<OfflineWriteBlockedException>()),
+      );
+      await expectLater(
+        blockedCleanup,
+        throwsA(isA<OfflineWriteBlockedException>()),
+      );
+      expect(
+        (await firstStage.timeout(
+          const Duration(seconds: 2),
+          onTimeout: () => throw StateError('first stage did not settle'),
+        )).when(success: (_) => true, failure: (_) => false),
+        isTrue,
+      );
+      final report = await logout.timeout(
+        const Duration(seconds: 2),
+        onTimeout: () => throw StateError('logout did not settle'),
+      );
+
+      expect(report.completed, isTrue);
+      expect((await staging.inspectAccount('7')).stagedTransfers, 0);
+    },
+  );
+}
+
+OfflineOwnershipService _service({
+  required OfflineOwnershipStore store,
+  required OfflineOwnedScanStore scans,
+  required OfflineDatabaseKeyManager keys,
+  required List<OfflineMutationParticipant> participants,
+}) {
+  return OfflineOwnershipService(
+    store: store,
+    files: const _NoopFiles(),
+    scans: scans,
+    reviews: const _NoopReviews(),
+    databaseKeys: keys,
+    mutationParticipants: participants,
+  );
+}
+
+final class _BlockedScanStorage implements AsyncScanStorage {
+  final Map<String, String> values = {};
+  final Completer<void> writeStarted = Completer<void>();
+  final Completer<void> releaseWrite = Completer<void>();
+  int deleteCalls = 0;
+
+  @override
+  Future<void> delete(String key) async {
+    deleteCalls += 1;
+    values.remove(key);
+  }
+
+  @override
+  Future<Set<String>> keys({required String prefix}) async =>
+      values.keys.where((key) => key.startsWith(prefix)).toSet();
+
+  @override
+  Future<String?> read(String key) async => values[key];
+
+  @override
+  Future<void> write(String key, String value) async {
+    if (!writeStarted.isCompleted) writeStarted.complete();
+    await releaseWrite.future;
+    values[key] = value;
+  }
+}
+
+final class _NoopFiles implements OfflineOwnedFileStore {
+  const _NoopFiles();
+
+  @override
+  Future<void> clearAccountFiles(
+    String accountId, {
+    required Set<String> retainStagedRequestIds,
+  }) async {}
+
+  @override
+  Future<void> clearAllFiles() async {}
+
+  @override
+  Future<void> clearDownloads(String accountId) async {}
+
+  @override
+  Future<void> clearStagedTransfers(String accountId) async {}
+
+  @override
+  Future<OfflineFileOwnershipSnapshot> inspectAccount(String accountId) async =>
+      const OfflineFileOwnershipSnapshot();
+}
+
+final class _NoopScans implements OfflineOwnedScanStore {
+  const _NoopScans();
+
+  @override
+  Future<void> clearAll() async {}
+
+  @override
+  Future<void> clearForAccount(String accountId) async {}
+
+  @override
+  Future<int> countForAccount(String accountId) async => 0;
+}
+
+final class _NoopReviews implements OfflineReviewInvalidator {
+  const _NoopReviews();
+
+  @override
+  Future<void> invalidate({
+    required String accountId,
+    int? warehouseId,
+  }) async {}
+}
+
+final class _SessionStorage
+    implements
+        TokenStorage,
+        AuthenticatedAccountStorage,
+        PendingRevocationStorage {
+  String? token;
+  String? accountId;
+  String? pendingRevocationAccountId;
+
+  @override
+  Future<void> clearAccessToken() async => token = null;
+
+  @override
+  Future<String?> readAccessToken() async => token;
+
+  @override
+  Future<void> saveAccessToken(String token) async => this.token = token;
+
+  @override
+  Future<void> clearAuthenticatedAccountId() async => accountId = null;
+
+  @override
+  Future<String?> readAuthenticatedAccountId() async => accountId;
+
+  @override
+  Future<void> saveAuthenticatedAccountId(String accountId) async {
+    this.accountId = accountId;
+  }
+
+  @override
+  Future<void> clearPendingRevocationAccountId() async {
+    pendingRevocationAccountId = null;
+  }
+
+  @override
+  Future<String?> readPendingRevocationAccountId() async =>
+      pendingRevocationAccountId;
+
+  @override
+  Future<void> savePendingRevocationAccountId(String accountId) async {
+    pendingRevocationAccountId = accountId;
+  }
+}
+
+final class _LoginAuthRepository implements AuthRepository {
+  @override
+  Future<Result<AuthSession>> login({
+    required String username,
+    required String password,
+  }) async => const Success(_authSession);
+
+  @override
+  Future<void> logout() async {}
+
+  @override
+  Future<Result<AuthSession?>> restoreSession() async =>
+      const Success<AuthSession?>(null);
+
+  @override
+  Future<Result<Warehouse>> switchCurrentWarehouse(Warehouse warehouse) async =>
+      Success(warehouse);
+}
+
+const _authWarehouse = Warehouse(
+  id: 1,
+  code: 'SH',
+  name: 'Shanghai',
+  isDefault: true,
+);
+
+const _authSession = AuthSession(
+  accessToken: 'new-token',
+  user: AppUser(
+    id: 7,
+    username: 'alice',
+    realName: 'Alice',
+    roleCode: 'user',
+    roleName: 'User',
+  ),
+  currentWarehouse: _authWarehouse,
+  warehouses: [_authWarehouse],
+);
+
+const _inventoryItem = InventoryItem(
+  id: 1,
+  productId: 1,
+  productName: 'Product',
+  sku: 'SKU-1',
+  availableQuantity: 1,
+  stockQuantity: 1,
+  statusLabel: 'available',
+  imageUrl: '',
+);

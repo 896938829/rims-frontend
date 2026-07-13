@@ -264,8 +264,36 @@ abstract interface class OfflineDatabaseKeyManager {
   Future<void> rotateAfterRevocation();
 }
 
-abstract interface class OfflineMutationParticipant {
+final class OfflineMutationScope {
+  const OfflineMutationScope.account(String accountId)
+    : accountIds = const {},
+      _accountId = accountId,
+      allAccounts = false;
+
+  const OfflineMutationScope.all()
+    : accountIds = const {},
+      _accountId = null,
+      allAccounts = true;
+
+  final Set<String> accountIds;
+  final String? _accountId;
+  final bool allAccounts;
+
+  Set<String> get resolvedAccountIds =>
+      _accountId == null ? accountIds : {_accountId};
+
+  bool contains(String accountId) =>
+      allAccounts || resolvedAccountIds.contains(accountId);
+}
+
+abstract interface class OfflineMutationBlock {
   Future<void> waitForQuiescence();
+
+  void release();
+}
+
+abstract interface class OfflineMutationParticipant {
+  OfflineMutationBlock blockMutations(OfflineMutationScope scope);
 }
 
 final class MemoryOfflineDatabaseKeyManager
@@ -293,14 +321,16 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
     required this.scans,
     required this.reviews,
     required this.databaseKeys,
-  });
+    Iterable<OfflineMutationParticipant> mutationParticipants = const [],
+  }) : _mutationParticipants = [...mutationParticipants];
 
   final OfflineOwnershipStore store;
   final OfflineOwnedFileStore files;
   final OfflineOwnedScanStore scans;
   final OfflineReviewInvalidator reviews;
   final OfflineDatabaseKeyManager databaseKeys;
-  OfflineMutationParticipant? _mutationParticipant;
+  final List<OfflineMutationParticipant> _mutationParticipants;
+  final Map<String, List<_ParticipantBlock>> _retainedMutationBlocks = {};
 
   final Map<String, Set<OfflineOwnershipReason>> _blockedReasons = {};
   final Set<String> _commandBlockedAccounts = {};
@@ -309,11 +339,12 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
   int _previewSequence = 0;
 
   void attachMutationParticipant(OfflineMutationParticipant participant) {
-    final current = _mutationParticipant;
-    if (current != null && !identical(current, participant)) {
-      throw StateError('An offline mutation participant is already attached.');
+    if (_mutationParticipants.any(
+      (current) => identical(current, participant),
+    )) {
+      return;
     }
-    _mutationParticipant = participant;
+    _mutationParticipants.add(participant);
   }
 
   @override
@@ -326,14 +357,24 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
     required String accountId,
     required OfflineClearCommand command,
   }) {
+    final mutationBlocks = _beginMutationBlocks([
+      OfflineMutationScope.account(accountId),
+    ]);
     return _serialized(() async {
-      final counts = await _inspect(accountId);
-      return OfflineClearPreview(
-        accountId: accountId,
-        command: command,
-        counts: counts,
-        sequence: ++_previewSequence,
-      );
+      try {
+        await Future.wait(
+          mutationBlocks.map((entry) => entry.block.waitForQuiescence()),
+        );
+        final counts = await _inspect(accountId);
+        return OfflineClearPreview(
+          accountId: accountId,
+          command: command,
+          counts: counts,
+          sequence: ++_previewSequence,
+        );
+      } finally {
+        _releaseMutationBlocks(mutationBlocks);
+      }
     });
   }
 
@@ -342,14 +383,18 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
       preview.accountId,
     );
     _commandBlockedAccounts.add(preview.accountId);
+    final mutationBlocks = _beginMutationBlocks([
+      OfflineMutationScope.account(preview.accountId),
+    ]);
     return _serialized(() async {
       final failures = <OfflineOwnershipFailure>[];
-      if (preview.command == OfflineClearCommand.offlineWork) {
-        await _step(
-          OfflineOwnershipStep.mutationQuiescence,
-          'Unable to wait for active synchronization to finish.',
-          () async => _mutationParticipant?.waitForQuiescence(),
-          failures,
+      await _waitForMutationBlocks(mutationBlocks, failures);
+      if (failures.isNotEmpty) {
+        return OfflineOwnershipReport(
+          reason: null,
+          accountId: preview.accountId,
+          executedCounts: const OfflineOwnershipCounts(),
+          failures: failures,
         );
       }
       final executedCounts = await _inspectWithFailure(
@@ -423,6 +468,7 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
         failures: failures,
       );
     }).whenComplete(() {
+      _releaseMutationBlocks(mutationBlocks);
       if (!wasCommandBlocked) {
         _commandBlockedAccounts.remove(preview.accountId);
       }
@@ -432,18 +478,21 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
   @override
   Future<OfflineOwnershipReport> apply(OfflineOwnershipIntent intent) {
     _blockBefore(intent);
-    return _serialized(() => _apply(intent));
+    final mutationBlocks = _beginMutationBlocks(_mutationScopesFor(intent));
+    return _serialized(() async {
+      final report = await _apply(intent, mutationBlocks);
+      _finishMutationBlocks(intent, report, mutationBlocks);
+      return report;
+    });
   }
 
-  Future<OfflineOwnershipReport> _apply(OfflineOwnershipIntent intent) async {
+  Future<OfflineOwnershipReport> _apply(
+    OfflineOwnershipIntent intent,
+    List<_ParticipantBlock> mutationBlocks,
+  ) async {
     final failures = <OfflineOwnershipFailure>[];
     if (intent.reason != OfflineOwnershipReason.reauthenticated) {
-      await _step(
-        OfflineOwnershipStep.mutationQuiescence,
-        'Unable to wait for active synchronization to finish.',
-        () async => _mutationParticipant?.waitForQuiescence(),
-        failures,
-      );
+      await _waitForMutationBlocks(mutationBlocks, failures);
       if (failures.isNotEmpty) {
         return OfflineOwnershipReport(
           reason: intent.reason,
@@ -595,6 +644,120 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
     );
   }
 
+  List<OfflineMutationScope> _mutationScopesFor(OfflineOwnershipIntent intent) {
+    return switch (intent.reason) {
+      OfflineOwnershipReason.reauthenticated => const [],
+      OfflineOwnershipReason.revocation => const [OfflineMutationScope.all()],
+      OfflineOwnershipReason.accountSwitch => [
+        OfflineMutationScope.account(intent.accountId),
+        if (intent.currentAccountId case final current?)
+          OfflineMutationScope.account(current),
+      ],
+      _ => [OfflineMutationScope.account(intent.accountId)],
+    };
+  }
+
+  List<_ParticipantBlock> _beginMutationBlocks(
+    Iterable<OfflineMutationScope> scopes,
+  ) {
+    final blocks = <_ParticipantBlock>[];
+    try {
+      for (final scope in scopes) {
+        for (final participant in _mutationParticipants) {
+          blocks.add(
+            _ParticipantBlock(
+              scope: scope,
+              block: participant.blockMutations(scope),
+            ),
+          );
+        }
+      }
+      return blocks;
+    } on Object {
+      _releaseMutationBlocks(blocks);
+      rethrow;
+    }
+  }
+
+  Future<void> _waitForMutationBlocks(
+    List<_ParticipantBlock> blocks,
+    List<OfflineOwnershipFailure> failures,
+  ) async {
+    await _step(
+      OfflineOwnershipStep.mutationQuiescence,
+      'Unable to wait for active offline writes to finish.',
+      () => Future.wait(blocks.map((entry) => entry.block.waitForQuiescence())),
+      failures,
+    );
+  }
+
+  void _finishMutationBlocks(
+    OfflineOwnershipIntent intent,
+    OfflineOwnershipReport report,
+    List<_ParticipantBlock> blocks,
+  ) {
+    if (intent.reason == OfflineOwnershipReason.reauthenticated) {
+      if (report.completed) _releaseRetainedMutationBlocks(intent.accountId);
+      return;
+    }
+    switch (intent.reason) {
+      case OfflineOwnershipReason.logout ||
+          OfflineOwnershipReason.invalidSessionProjection:
+        _retainMutationBlocks(intent.accountId, blocks);
+      case OfflineOwnershipReason.accountSwitch:
+        _retainMutationBlocks(intent.accountId, blocks);
+      case OfflineOwnershipReason.revocation:
+        final accountBlocks = _beginMutationBlocks([
+          OfflineMutationScope.account(intent.accountId),
+        ]);
+        _retainMutationBlocks(intent.accountId, accountBlocks);
+        _releaseMutationBlocks(accountBlocks);
+      case OfflineOwnershipReason.warehouseSwitch ||
+          OfflineOwnershipReason.permissionRefresh ||
+          OfflineOwnershipReason.tokenExpiry:
+        break;
+      case OfflineOwnershipReason.reauthenticated:
+        break;
+    }
+    _releaseMutationBlocks(blocks);
+  }
+
+  void _retainMutationBlocks(
+    String accountId,
+    List<_ParticipantBlock> candidates,
+  ) {
+    final matching = candidates
+        .where(
+          (entry) =>
+              !entry.scope.allAccounts &&
+              entry.scope.resolvedAccountIds.length == 1 &&
+              entry.scope.contains(accountId),
+        )
+        .toList(growable: false);
+    if (matching.isEmpty) return;
+    if (_retainedMutationBlocks.containsKey(accountId)) return;
+    _retainedMutationBlocks[accountId] = matching;
+    for (final entry in matching) {
+      entry.retained = true;
+    }
+  }
+
+  void _releaseRetainedMutationBlocks(String accountId) {
+    final retained = _retainedMutationBlocks.remove(accountId);
+    if (retained != null) {
+      _releaseMutationBlocks(retained, includeRetained: true);
+    }
+  }
+
+  void _releaseMutationBlocks(
+    Iterable<_ParticipantBlock> blocks, {
+    bool includeRetained = false,
+  }) {
+    for (final entry in blocks) {
+      if (!entry.retained || includeRetained) entry.block.release();
+    }
+  }
+
   void _blockBefore(OfflineOwnershipIntent intent) {
     switch (intent.reason) {
       case OfflineOwnershipReason.logout ||
@@ -740,4 +903,12 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
     });
     return completer.future;
   }
+}
+
+final class _ParticipantBlock {
+  _ParticipantBlock({required this.scope, required this.block});
+
+  final OfflineMutationScope scope;
+  final OfflineMutationBlock block;
+  bool retained = false;
 }

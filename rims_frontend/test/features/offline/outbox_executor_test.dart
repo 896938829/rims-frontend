@@ -15,6 +15,7 @@ import 'package:rims_frontend/features/offline/domain/services/outbox_executor.d
 import 'package:rims_frontend/features/offline/domain/services/outbox_permission_policy.dart';
 import 'package:rims_frontend/features/offline/domain/services/outbox_state_machine.dart';
 import 'package:rims_frontend/features/offline/domain/services/offline_ownership_service.dart';
+import 'package:rims_frontend/features/offline/domain/services/offline_write_barrier.dart';
 
 void main() {
   test(
@@ -526,6 +527,11 @@ void main() {
     () async {
       final events = <String>[];
       final offlineStore = MemoryOfflineStore();
+      final barrier = OfflineWriteBarrier();
+      final protectedRepository = WriteBarrierOutboxRepository(
+        delegate: offlineStore.outboxRepository,
+        barrier: barrier,
+      );
       final ownershipStore = _RecordingOwnershipStore(offlineStore, events);
       final ownership = OfflineOwnershipService(
         store: ownershipStore,
@@ -533,6 +539,7 @@ void main() {
         scans: const _NoopOwnedScans(),
         reviews: const _NoopReviewInvalidator(),
         databaseKeys: MemoryOfflineDatabaseKeyManager(),
+        mutationParticipants: [barrier],
       );
       final blockedHandler = _Handler();
       final handlerGate = Completer<Result<Object?>>();
@@ -548,7 +555,8 @@ void main() {
         allowedKinds: {OutboxOperationKind.documentCreate},
       );
       final gatedExecutor = OutboxExecutor(
-        repository: offlineStore.outboxRepository,
+        repository: protectedRepository,
+        writeBarrier: barrier,
         networkStatusService: network,
         statusDataSource: status,
         handlers: [blockedHandler],
@@ -556,7 +564,7 @@ void main() {
         onSuccessPersisted: (_) async => events.add('terminal.persisted'),
       );
       ownership.attachMutationParticipant(gatedExecutor);
-      await offlineStore.outboxRepository.enqueue(_operation('owned-op'));
+      await protectedRepository.enqueue(_operation('owned-op'));
       const ownedReview = OutboxReview(
         operationIds: {'owned-op'},
         accountId: '7',
@@ -576,6 +584,14 @@ void main() {
       final secondBatch = await gatedExecutor.execute(ownedReview);
       expect(secondBatch.failure, isA<StateFailure>());
       expect(blockedHandler.calls, ['owned-op']);
+      final blockedEnqueue = await protectedRepository.enqueue(
+        _operation('blocked-enqueue'),
+      );
+      expect(blockedEnqueue, isA<FailureResult<OutboxOperation>>());
+      expect(
+        (blockedEnqueue as FailureResult<OutboxOperation>).failure,
+        isA<StateFailure>(),
+      );
 
       handlerGate.complete(const Success(null));
       await foreground;

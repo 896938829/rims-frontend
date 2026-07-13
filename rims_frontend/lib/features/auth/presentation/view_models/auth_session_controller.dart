@@ -87,65 +87,76 @@ final class AuthSessionController extends ChangeNotifier {
     _restoreFailure = null;
     notifyListeners();
 
-    final result = await authRepository.restoreSession();
+    try {
+      final result = await authRepository.restoreSession();
 
-    switch (result) {
-      case Success<AuthSession?>(data: final session):
-        final candidate = _sessionWithActiveWarehouse(
-          restoredSession: session,
-          activeSession: activeSession,
-          preserveActiveWarehouse: preserveActiveSessionOnFailure,
-        );
-        final ownershipReady = await _prepareOwnershipChange(
-          activeSession,
-          candidate,
-        );
-        if (ownershipReady) {
-          _session = candidate;
-          _credentialsInvalidated = candidate == null;
-          _restoreFailure = null;
-          _sessionMessage = null;
-          final AuthSessionRestoreMetadata? metadata =
-              authRepository is AuthSessionRestoreMetadata
-              ? authRepository as AuthSessionRestoreMetadata
-              : null;
-          _sessionSource = session == null
-              ? null
-              : metadata?.lastRestoreSource ?? AuthSessionSource.network;
-          _sessionFetchedAt = session == null
-              ? null
-              : metadata?.lastRestoreFetchedAt;
-          _sessionExpiresAt = session == null
-              ? null
-              : metadata?.lastRestoreExpiresAt;
-        } else {
-          _session = activeSession;
-          _restoreFailure = _ownershipFailure;
-          _sessionMessage = _ownershipFailure?.message;
-        }
-      case FailureResult<AuthSession?>(failure: final failure):
-        if (!preserveActiveSessionOnFailure ||
-            activeSession == null ||
-            failure is AuthenticationFailure ||
-            failure is AuthorizationFailure ||
-            failure is RevocationCleanupFailure) {
-          _session = null;
-        } else {
-          _session = activeSession;
-        }
-        _restoreFailure = failure;
-        _sessionMessage = failure.message;
-        if (failure is AuthenticationFailure ||
-            failure is AuthorizationFailure ||
-            failure is RevocationCleanupFailure) {
-          _credentialsInvalidated = true;
-        }
-        if (_session == null) _clearSourceMetadata();
+      switch (result) {
+        case Success<AuthSession?>(data: final session):
+          final candidate = _sessionWithActiveWarehouse(
+            restoredSession: session,
+            activeSession: activeSession,
+            preserveActiveWarehouse: preserveActiveSessionOnFailure,
+          );
+          final ownershipReady = await _prepareOwnershipChange(
+            activeSession,
+            candidate,
+          );
+          if (ownershipReady) {
+            _session = candidate;
+            _credentialsInvalidated = candidate == null;
+            _restoreFailure = null;
+            _sessionMessage = null;
+            final AuthSessionRestoreMetadata? metadata =
+                authRepository is AuthSessionRestoreMetadata
+                ? authRepository as AuthSessionRestoreMetadata
+                : null;
+            _sessionSource = session == null
+                ? null
+                : metadata?.lastRestoreSource ?? AuthSessionSource.network;
+            _sessionFetchedAt = session == null
+                ? null
+                : metadata?.lastRestoreFetchedAt;
+            _sessionExpiresAt = session == null
+                ? null
+                : metadata?.lastRestoreExpiresAt;
+          } else {
+            _session = activeSession;
+            _restoreFailure = _ownershipFailure;
+            _sessionMessage = _ownershipFailure?.message;
+          }
+        case FailureResult<AuthSession?>(failure: final failure):
+          if (!preserveActiveSessionOnFailure ||
+              activeSession == null ||
+              failure is AuthenticationFailure ||
+              failure is AuthorizationFailure ||
+              failure is RevocationCleanupFailure) {
+            _session = null;
+          } else {
+            _session = activeSession;
+          }
+          _restoreFailure = failure;
+          _sessionMessage = failure.message;
+          if (failure is AuthenticationFailure ||
+              failure is AuthorizationFailure ||
+              failure is RevocationCleanupFailure) {
+            _credentialsInvalidated = true;
+          }
+          if (_session == null) _clearSourceMetadata();
+      }
+    } on Object catch (error) {
+      _session = null;
+      _credentialsInvalidated = true;
+      _restoreFailure = LocalStorageFailure(
+        message: '会话恢复失败，请重试',
+        cause: error,
+      );
+      _sessionMessage = _restoreFailure!.message;
+      _clearSourceMetadata();
+    } finally {
+      _isRestoring = false;
+      _publishOwnershipChanges(activeSession, _session);
+      notifyListeners();
     }
-
-    _isRestoring = false;
-    _publishOwnershipChanges(activeSession, _session);
-    notifyListeners();
   }
 
   Future<bool> startSession(AuthSession session) async {
