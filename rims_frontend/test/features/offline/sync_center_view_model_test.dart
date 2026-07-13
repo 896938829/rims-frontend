@@ -184,6 +184,39 @@ void main() {
   );
 
   test(
+    'changed permission fingerprint can be reviewed again when kind stays allowed',
+    () async {
+      await repository.enqueue(_operation('op', confirmed: false));
+      await viewModel.load();
+      await viewModel.review('op');
+      expect(viewModel.reviewedOperationIds, {'op'});
+
+      context = const OutboxExecutionContext(
+        accountId: '7',
+        warehouseId: 11,
+        permissionStamp: 'role:operator@2',
+        allowedKinds: {OutboxOperationKind.documentCreate},
+      );
+      await viewModel.refreshContext();
+      expect(viewModel.reviewedOperationIds, isEmpty);
+
+      await viewModel.review('op');
+      await viewModel.retryAllReviewed();
+
+      expect(viewModel.reviewedOperationIds, {'op'});
+      expect(executor.reviews.last.permissionStamp, 'role:operator@2');
+      final rebuilt = SyncCenterViewModel(
+        repository: repository,
+        executor: executor,
+        contextReader: () => context,
+      );
+      addTearDown(rebuilt.dispose);
+      await rebuilt.load();
+      expect(rebuilt.reviewedOperationIds, {'op'});
+    },
+  );
+
+  test(
     'retry selected excludes selected operations that are not reviewed',
     () async {
       await repository.enqueue(_operation('a'));

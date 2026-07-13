@@ -5,8 +5,12 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:rims_frontend/core/result/failure.dart';
 import 'package:rims_frontend/core/result/result.dart';
 import 'package:rims_frontend/features/offline/data/database/offline_database.dart';
+import 'package:rims_frontend/features/offline/data/datasources/operation_status_remote_datasource.dart';
 import 'package:rims_frontend/features/offline/data/repositories/drift_outbox_repository.dart';
+import 'package:rims_frontend/features/offline/domain/entities/network_reachability.dart';
 import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.dart';
+import 'package:rims_frontend/features/offline/domain/services/network_status_service.dart';
+import 'package:rims_frontend/features/offline/domain/services/outbox_executor.dart';
 import 'package:rims_frontend/features/offline/domain/services/outbox_state_machine.dart';
 import 'package:sqlite3/sqlite3.dart' as sqlite;
 
@@ -43,7 +47,7 @@ void main() {
         .getSingle();
 
     expect(version.read<int>('user_version'), 5);
-    expect(migratedRows, hasLength(2));
+    expect(migratedRows, hasLength(3));
     expect(
       migratedRows.every(
         (row) => row.read<int>('updated_at') == row.read<int>('created_at'),
@@ -52,6 +56,7 @@ void main() {
     );
     expect(foreignKeys, hasLength(2));
     expect(foreignKeysEnabled.read<int>('foreign_keys'), 1);
+    await _expectLegacySyncingProbeFirst(repository, createdAt);
     expect((await repository.ready('7')).successData, isEmpty);
     final child = (await repository.list(
       '7',
@@ -158,7 +163,8 @@ void main() {
     );
     expect(first, isA<Success<OutboxOperation>>());
     expect(replay, isA<Success<OutboxOperation>>());
-    expect((await repository.list('7')).successData, hasLength(2));
+    await _expectLegacySyncingProbeFirst(repository, createdAt);
+    expect((await repository.list('7')).successData, hasLength(3));
   });
 
   test(
@@ -226,6 +232,7 @@ void main() {
         (changedDependencies as FailureResult<OutboxOperation>).failure,
         isA<ConflictFailure>(),
       );
+      await _expectLegacySyncingProbeFirst(repository, createdAt);
     },
   );
 
@@ -244,12 +251,13 @@ void main() {
     final columns = await database
         .customSelect('PRAGMA table_info(outbox_operations)')
         .get();
-    final rows = await database
+    final legacy = await database
         .customSelect(
           'SELECT confirmed_at, review_stamp, requires_status_probe, '
-          'syncing_started_at FROM outbox_operations',
+          'syncing_started_at FROM outbox_operations '
+          "WHERE operation_id = 'legacy-syncing'",
         )
-        .get();
+        .getSingle();
 
     expect(version.read<int>('user_version'), 5);
     expect(
@@ -260,19 +268,16 @@ void main() {
         'syncing_started_at',
       ]),
     );
-    expect(rows.every((row) => row.read<int?>('confirmed_at') == null), isTrue);
-    expect(
-      rows.every((row) => row.read<String?>('review_stamp') == null),
-      isTrue,
+    expect(legacy.read<int?>('confirmed_at'), isNull);
+    expect(legacy.read<String?>('review_stamp'), isNull);
+    expect(legacy.read<int>('requires_status_probe'), 1);
+    expect(legacy.read<int?>('syncing_started_at'), isNull);
+    final repository = DriftOutboxRepository(
+      database: database,
+      stateMachine: OutboxStateMachine(now: () => createdAt),
+      now: () => createdAt,
     );
-    expect(
-      rows.every((row) => row.read<int>('requires_status_probe') == 0),
-      isTrue,
-    );
-    expect(
-      rows.every((row) => row.read<int?>('syncing_started_at') == null),
-      isTrue,
-    );
+    await _expectLegacySyncingProbeFirst(repository, createdAt);
   });
 }
 
@@ -364,6 +369,13 @@ INSERT INTO outbox_operations (
         timestamp,
       ]);
       insert.execute(['child', 'key-child', 'queued', timestamp, timestamp]);
+      insert.execute([
+        'legacy-syncing',
+        'key-legacy-syncing',
+        'syncing',
+        timestamp,
+        timestamp,
+      ]);
     } finally {
       insert.close();
     }
@@ -439,6 +451,13 @@ INSERT INTO outbox_operations (
   payload, operation_state, created_at, updated_at, confirmed_at, attempt_count
 ) VALUES ('conflict', 'key-conflict', '7', 11, 'document_create', '{}',
   'conflict', $timestamp, NULL, $timestamp, 0)
+''');
+    database.execute('''
+INSERT INTO outbox_operations (
+  operation_id, idempotency_key, account_id, warehouse_id, operation_kind,
+  payload, operation_state, created_at, updated_at, confirmed_at, attempt_count
+) VALUES ('legacy-syncing', 'key-legacy-syncing', '7', 11,
+  'document_create', '{}', 'syncing', $timestamp, NULL, $timestamp, 0)
 ''');
     database.execute('PRAGMA user_version = 2');
   } finally {
@@ -519,4 +538,102 @@ INSERT INTO outbox_resolutions (
   } finally {
     database.close();
   }
+}
+
+Future<void> _expectLegacySyncingProbeFirst(
+  DriftOutboxRepository repository,
+  DateTime now,
+) async {
+  const context = OutboxExecutionContext(
+    accountId: '7',
+    warehouseId: 11,
+    permissionStamp: 'document:create',
+    allowedKinds: {OutboxOperationKind.documentCreate},
+  );
+  final migrated = (await repository.list('7')).successData.singleWhere(
+    (operation) => operation.operationId == 'legacy-syncing',
+  );
+  expect(migrated.state, OutboxState.retryableFailure);
+  expect(migrated.requiresStatusProbe, isTrue);
+  expect(migrated.syncingStartedAt, isNull);
+  expect(migrated.lastFailureCode, 'unknown_result');
+  expect(migrated.nextAttemptAt?.isAfter(now), isFalse);
+  final confirmed = await repository.confirm(
+    accountId: '7',
+    operationId: migrated.operationId,
+    reviewStamp: context.reviewStamp,
+    expectedUpdatedAt: migrated.updatedAt,
+  );
+  expect(confirmed, isA<Success<OutboxOperation>>());
+  final events = <String>[];
+  final executor = OutboxExecutor(
+    repository: repository,
+    networkStatusService: const _OnlineNetwork(),
+    statusDataSource: _AbsentStatus(events),
+    handlers: [_RecordingHandler(events)],
+    contextReader: () => context,
+    now: () => now,
+  );
+
+  final report = await executor.execute(
+    OutboxReview(
+      operationIds: const {'legacy-syncing'},
+      accountId: context.accountId,
+      warehouseId: context.warehouseId,
+      permissionStamp: context.permissionStamp,
+    ),
+  );
+
+  expect(report.succeededOperationIds, ['legacy-syncing']);
+  expect(events, ['status', 'handler']);
+}
+
+final class _AbsentStatus implements OperationStatusRemoteDataSource {
+  const _AbsentStatus(this.events);
+  final List<String> events;
+
+  @override
+  Future<Result<OperationStatus>> loadStatus({
+    required String key,
+    required String scope,
+  }) async {
+    events.add('status');
+    return const FailureResult(NotFoundFailure());
+  }
+}
+
+final class _RecordingHandler implements OutboxOperationHandler {
+  const _RecordingHandler(this.events);
+  final List<String> events;
+
+  @override
+  OutboxOperationKind get kind => OutboxOperationKind.documentCreate;
+
+  @override
+  String get statusScope => 'POST /api/v1/documents';
+
+  @override
+  Future<Result<Object?>> execute(OutboxOperation operation) async {
+    events.add('handler');
+    return const Success(null);
+  }
+}
+
+final class _OnlineNetwork implements NetworkStatusService {
+  const _OnlineNetwork();
+
+  @override
+  Stream<NetworkReachability> get changes => const Stream.empty();
+
+  @override
+  NetworkReachability get current => NetworkReachability.online;
+
+  @override
+  Future<NetworkReachability> verify() async => NetworkReachability.online;
+
+  @override
+  void markOnlineFromRequest() {}
+
+  @override
+  Future<void> dispose() async {}
 }

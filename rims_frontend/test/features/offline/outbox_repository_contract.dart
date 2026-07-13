@@ -72,6 +72,71 @@ void runOutboxRepositoryContract(String name, OutboxHarnessFactory create) {
       );
     });
 
+    test(
+      'current CAS can replace an obsolete permission review stamp',
+      () async {
+        await repository.enqueue(_operation('replace-review', clock.value));
+        final original = (await repository.list('7')).successData.single;
+        await repository.confirm(
+          accountId: '7',
+          operationId: original.operationId,
+          reviewStamp: '7\u000011\u0000permissions-v1',
+          expectedUpdatedAt: original.updatedAt,
+        );
+        final reviewed = (await repository.list('7')).successData.single;
+
+        final replaced = await repository.confirm(
+          accountId: '7',
+          operationId: reviewed.operationId,
+          reviewStamp: '7\u000011\u0000permissions-v2',
+          expectedUpdatedAt: reviewed.updatedAt,
+        );
+
+        expect(replaced, isA<Success<OutboxOperation>>());
+        expect(
+          replaced.successData.reviewStamp,
+          '7\u000011\u0000permissions-v2',
+        );
+        expect(
+          (await repository.ready(
+            '7',
+            reviewStamp: '7\u000011\u0000permissions-v1',
+          )).successData,
+          isEmpty,
+        );
+        expect(
+          (await repository.ready(
+            '7',
+            reviewStamp: '7\u000011\u0000permissions-v2',
+          )).successData,
+          hasLength(1),
+        );
+      },
+    );
+
+    test('concurrent permission review stamps have one CAS winner', () async {
+      await repository.enqueue(_operation('review-race', clock.value));
+      final original = (await repository.list('7')).successData.single;
+
+      final results = await Future.wait([
+        repository.confirm(
+          accountId: '7',
+          operationId: original.operationId,
+          reviewStamp: '7\u000011\u0000permissions-a',
+          expectedUpdatedAt: original.updatedAt,
+        ),
+        repository.confirm(
+          accountId: '7',
+          operationId: original.operationId,
+          reviewStamp: '7\u000011\u0000permissions-b',
+          expectedUpdatedAt: original.updatedAt,
+        ),
+      ]);
+
+      expect(results.whereType<Success<OutboxOperation>>(), hasLength(1));
+      expect(results.whereType<FailureResult<OutboxOperation>>(), hasLength(1));
+    });
+
     test('transactionally recovers stale syncing as unknown result', () async {
       await repository.enqueue(_operation('stale-sync', clock.value));
       await repository.transition(

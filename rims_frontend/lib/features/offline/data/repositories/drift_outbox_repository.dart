@@ -204,7 +204,7 @@ ORDER BY operation.created_at ASC, operation.operation_id ASC
         ConflictFailure(message: 'Offline review context changed.'),
       );
     }
-    final timestamp = now().toUtc();
+    final timestamp = _nextReviewTimestamp(now(), operation.updatedAt);
     try {
       final changed = await database.customUpdate(
         '''
@@ -212,7 +212,6 @@ UPDATE outbox_operations
 SET confirmed_at = ?, review_stamp = ?, updated_at = ?
 WHERE account_id = ? AND operation_id = ? AND operation_state = ?
   AND (? IS NULL OR updated_at = ?)
-  AND (review_stamp IS NULL OR review_stamp = ?)
 ''',
         variables: [
           Variable(timestamp),
@@ -223,7 +222,6 @@ WHERE account_id = ? AND operation_id = ? AND operation_state = ?
           Variable(operation.state.wireValue),
           Variable<DateTime>(expectedUpdatedAt?.toUtc()),
           Variable<DateTime>(expectedUpdatedAt?.toUtc()),
-          Variable<String>(reviewStamp),
         ],
         updates: {database.offlineOutboxOperations},
       );
@@ -1185,6 +1183,12 @@ bool _isStorageException(Exception error) =>
 String _dependencyFingerprint(Set<String> dependencies) {
   final sorted = dependencies.toList()..sort();
   return jsonEncode(sorted);
+}
+
+DateTime _nextReviewTimestamp(DateTime now, DateTime current) {
+  final candidate = now.toUtc();
+  final minimum = current.toUtc().add(const Duration(seconds: 1));
+  return candidate.isAfter(minimum) ? candidate : minimum;
 }
 
 String _serializePayload(Map<String, Object?> payload) {

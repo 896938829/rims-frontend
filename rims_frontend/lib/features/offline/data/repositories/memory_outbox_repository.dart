@@ -97,14 +97,7 @@ final class MemoryOutboxRepository implements OutboxRepository {
         ConflictFailure(message: 'Offline review context changed.'),
       );
     }
-    if (operation.reviewStamp != null &&
-        reviewStamp != null &&
-        operation.reviewStamp != reviewStamp) {
-      return const FailureResult(
-        ConflictFailure(message: 'Offline review context changed.'),
-      );
-    }
-    final confirmedAt = now().toUtc();
+    final confirmedAt = _nextReviewTimestamp(now(), operation.updatedAt);
     final confirmed = operation.copyWith(
       confirmedAt: confirmedAt,
       updatedAt: confirmedAt,
@@ -602,3 +595,9 @@ bool _isTerminal(OutboxState state) => switch (state) {
   OutboxState.syncing ||
   OutboxState.retryableFailure => false,
 };
+
+DateTime _nextReviewTimestamp(DateTime now, DateTime current) {
+  final candidate = now.toUtc();
+  final minimum = current.toUtc().add(const Duration(seconds: 1));
+  return candidate.isAfter(minimum) ? candidate : minimum;
+}

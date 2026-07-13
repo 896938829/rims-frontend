@@ -123,6 +123,16 @@ WHERE replacement_of IS NOT NULL
           offlineOutboxOperations,
           offlineOutboxOperations.syncingStartedAt,
         );
+        await customStatement('''
+UPDATE outbox_operations
+SET operation_state = 'retryable_failure',
+    updated_at = COALESCE(updated_at, created_at),
+    next_attempt_at = COALESCE(updated_at, created_at),
+    last_failure_code = 'unknown_result',
+    requires_status_probe = 1,
+    syncing_started_at = NULL
+WHERE operation_state = 'syncing'
+''');
         await customStatement(
           'UPDATE outbox_operations SET confirmed_at = NULL '
           'WHERE review_stamp IS NULL',
