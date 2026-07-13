@@ -190,6 +190,7 @@ final class _TransferRow extends StatelessWidget {
         item.state == AttachmentTransferState.failed ||
         item.state == AttachmentTransferState.interrupted ||
         item.state == AttachmentTransferState.cancelled;
+    final offlineReview = viewModel.offlineUploadReviewFor(item.requestId);
     return _RowFrame(
       key: Key('attachment-transfer-${item.requestId}'),
       child: Row(
@@ -217,7 +218,19 @@ final class _TransferRow extends StatelessWidget {
               ],
             ),
           ),
-          if (retryable)
+          if (item.state == AttachmentTransferState.queuedForSync)
+            const Padding(
+              padding: EdgeInsets.all(8),
+              child: Icon(Icons.schedule_send_outlined),
+            )
+          else if (offlineReview != null)
+            IconButton(
+              tooltip: '保存到待同步',
+              onPressed: () =>
+                  unawaited(_confirmOfflineUpload(context, offlineReview)),
+              icon: const Icon(Icons.cloud_upload_outlined),
+            )
+          else if (retryable)
             IconButton(
               tooltip: '重试上传',
               onPressed: () => unawaited(viewModel.retry(item.requestId)),
@@ -232,6 +245,34 @@ final class _TransferRow extends StatelessWidget {
         ],
       ),
     );
+  }
+
+  Future<void> _confirmOfflineUpload(
+    BuildContext context,
+    OfflineAttachmentReview review,
+  ) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('保存附件到待同步'),
+        content: Text(
+          '${review.originalName}\n${_formatBytes(review.fileSize)}',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('确认保存'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) {
+      await viewModel.confirmOfflineUpload(item.requestId);
+    }
   }
 }
 

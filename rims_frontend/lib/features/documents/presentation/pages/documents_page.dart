@@ -23,6 +23,7 @@ import '../../domain/repositories/documents_repository.dart';
 import '../../../inventory/domain/entities/inventory_item.dart';
 import '../../../inventory/domain/repositories/inventory_repository.dart';
 import '../../../offline/domain/repositories/document_draft_repository.dart';
+import '../../../offline/domain/repositories/outbox_repository.dart';
 import '../../../offline/presentation/view_models/draft_attachments_view_model.dart';
 import '../../../offline/presentation/widgets/draft_attachment_panel.dart';
 import '../view_models/documents_view_model.dart';
@@ -51,6 +52,7 @@ final class DocumentsPage extends StatefulWidget {
     this.accountId,
     this.observedRoleCode = '',
     this.initialDraftId,
+    this.outboxRepository,
     super.key,
   });
 
@@ -73,6 +75,7 @@ final class DocumentsPage extends StatefulWidget {
   final String? accountId;
   final String observedRoleCode;
   final String? initialDraftId;
+  final OutboxRepository? outboxRepository;
 
   @override
   State<DocumentsPage> createState() => _DocumentsPageState();
@@ -98,6 +101,11 @@ final class _DocumentsPageState extends State<DocumentsPage> {
           draftRepository: widget.draftRepository,
           accountId: widget.accountId,
           observedRoleCode: widget.observedRoleCode,
+          outboxRepository: widget.outboxRepository,
+          submissionStagingStore:
+              widget.attachmentStagingStore is OutboxAttachmentStagingStore
+              ? widget.attachmentStagingStore! as OutboxAttachmentStagingStore
+              : null,
         );
 
     _selectInitialAction();
@@ -616,6 +624,8 @@ final class _DocumentDetailSheetState extends State<_DocumentDetailSheet> {
         shareService: shareService,
         binding: AttachmentBinding.document(widget.document.id),
         userId: userId,
+        warehouseId: viewModel.currentWarehouse?.id,
+        outboxRepository: viewModel.outboxRepository,
       );
     }
   }
@@ -1289,6 +1299,35 @@ final class _DocumentFormState extends State<_DocumentForm> {
     final created = await widget.viewModel.createDocument();
     if (created) {
       widget.eventBus?.publish(const GlobalRefreshRequestedEvent());
+      return;
+    }
+    final review = widget.viewModel.offlineSubmissionReview;
+    if (review == null || !mounted) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('保存到待同步'),
+        content: SingleChildScrollView(
+          child: Text(
+            '${review.warehouseName} · ${review.documentType}\n'
+            '${review.lines.join('\n')}\n\n'
+            '${review.staleAssumptions.join('\n')}',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('确认保存'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) {
+      await widget.viewModel.confirmOfflineSubmission();
     }
   }
 
@@ -1942,6 +1981,33 @@ final class _RecentDocumentCard extends StatelessWidget {
       final succeeded = await run();
       if (succeeded) {
         eventBus?.publish(const GlobalRefreshRequestedEvent());
+        return;
+      }
+      final review = viewModel.offlineSubmissionReview;
+      if (review == null || !context.mounted) return;
+      final queueConfirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: const Text('保存到待同步'),
+          content: Text(
+            '${review.warehouseName} · ${review.documentType}\n'
+            '${review.lines.join('\n')}\n\n'
+            '${review.staleAssumptions.join('\n')}',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('确认保存'),
+            ),
+          ],
+        ),
+      );
+      if (queueConfirmed == true) {
+        await viewModel.confirmOfflineSubmission();
       }
     }
   }

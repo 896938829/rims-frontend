@@ -68,17 +68,17 @@ final class DocumentsRepositoryImpl
   }
 
   @override
-  Future<Result<void>> completeDocument(int id) {
-    return remoteDataSource.completeDocument(id);
+  Future<Result<void>> completeDocument(int id, {String? requestId}) {
+    return remoteDataSource.completeDocument(id, requestId: requestId);
   }
 
   @override
-  Future<Result<void>> confirmDocument(int id) {
-    return remoteDataSource.confirmDocument(id);
+  Future<Result<void>> confirmDocument(int id, {String? requestId}) {
+    return remoteDataSource.confirmDocument(id, requestId: requestId);
   }
 
   @override
-  Future<Result<void>> settleDocument(int id) {
-    return remoteDataSource.settleDocument(id);
+  Future<Result<void>> settleDocument(int id, {String? requestId}) {
+    return remoteDataSource.settleDocument(id, requestId: requestId);
   }
 }

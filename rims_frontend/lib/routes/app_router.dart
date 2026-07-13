@@ -110,6 +110,7 @@ GoRouter createAppRouter({
           sessionController: sessionController,
           scanLookupCache: scanLookupCache,
           documentDraftRepository: documentDraftRepository,
+          outboxRepository: outboxRepository,
           initialDraftId: state.uri.queryParameters['draft'],
         ),
       ),

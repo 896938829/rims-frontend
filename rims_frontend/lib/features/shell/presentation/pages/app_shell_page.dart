@@ -21,6 +21,7 @@ import '../../../home/presentation/view_models/home_view_model.dart';
 import '../../../inventory/domain/repositories/inventory_repository.dart';
 import '../../../inventory/presentation/pages/inventory_page.dart';
 import '../../../offline/domain/repositories/document_draft_repository.dart';
+import '../../../offline/domain/repositories/outbox_repository.dart';
 import '../../../inventory/domain/entities/inventory_item.dart';
 import '../../../profile/presentation/pages/profile_page.dart';
 import '../../../reports/domain/repositories/reports_repository.dart';
@@ -52,6 +53,7 @@ final class AppShellPage extends StatefulWidget {
     this.scanLookupCache,
     this.documentDraftRepository,
     this.initialDraftId,
+    this.outboxRepository,
     super.key,
   });
 
@@ -69,6 +71,7 @@ final class AppShellPage extends StatefulWidget {
   final ScanLookupCache? scanLookupCache;
   final DocumentDraftRepository? documentDraftRepository;
   final String? initialDraftId;
+  final OutboxRepository? outboxRepository;
 
   @override
   State<AppShellPage> createState() => _AppShellPageState();
@@ -170,6 +173,7 @@ final class _AppShellPageState extends State<AppShellPage> {
         accountId: widget.sessionController.currentUser?.id.toString(),
         observedRoleCode: widget.sessionController.currentUser?.roleCode ?? '',
         initialDraftId: widget.initialDraftId,
+        outboxRepository: widget.outboxRepository,
       ),
       AppTab.reports => ReportsPage(
         repository: widget.reportsRepository,

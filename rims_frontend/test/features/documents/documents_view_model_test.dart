@@ -23,6 +23,10 @@ import 'package:rims_frontend/features/offline/domain/entities/document_draft.da
 import 'package:rims_frontend/features/offline/domain/repositories/document_draft_repository.dart';
 import 'package:rims_frontend/features/offline/data/repositories/drift_document_draft_repository.dart';
 import 'package:rims_frontend/features/offline/data/repositories/memory_offline_store.dart';
+import 'package:rims_frontend/features/offline/data/repositories/memory_outbox_repository.dart';
+import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.dart';
+import 'package:rims_frontend/features/offline/domain/repositories/outbox_repository.dart';
+import 'package:rims_frontend/features/offline/domain/services/outbox_state_machine.dart';
 
 void main() {
   test(
@@ -554,6 +558,145 @@ void main() {
       expect(repository.createdRequestIds, hasLength(2));
       expect(repository.createdRequestIds.toSet(), hasLength(1));
       expect(viewModel.draftLines, isNotEmpty);
+    },
+  );
+
+  test(
+    'offline submit waits for explicit reviewed confirmation before enqueue',
+    () async {
+      final repository = _FakeDocumentsRepository(
+        createResult: Future.value(
+          const FailureResult(NetworkFailure(message: '暂时离线')),
+        ),
+      );
+      final outbox = MemoryOutboxRepository(stateMachine: OutboxStateMachine());
+      final staging = _OutboxSubmissionStagingStore();
+      final viewModel = _draftEnabledViewModel(
+        drafts: _FakeDocumentDraftRepository(),
+        documents: repository,
+        outbox: outbox,
+        submissionStagingStore: staging,
+        draftIdFactory: () => 'draft-1',
+      );
+      viewModel.addScannedProduct(_standardItem);
+      viewModel.updateAttachmentStagingIds(const ['attachment-request-1']);
+
+      expect(await viewModel.createDocument(), isFalse);
+      expect((await outbox.list('7')).successData, isEmpty);
+      expect(viewModel.offlineSubmissionReview?.warehouseName, 'Main');
+      expect(viewModel.offlineSubmissionReview?.documentType, '销售出库');
+      expect(viewModel.offlineSubmissionReview?.lineCount, 1);
+      expect(viewModel.offlineSubmissionReview?.staleAssumptions, isNotEmpty);
+
+      expect(await viewModel.confirmOfflineSubmission(), isTrue);
+      final queued = (await outbox.list('7')).successData;
+      expect(queued.map((item) => item.kind), [
+        OutboxOperationKind.documentCreate,
+        OutboxOperationKind.attachmentUpload,
+      ]);
+      expect(queued.first.idempotencyKey, repository.createdRequestIds.single);
+      expect(queued.first.payload.toString(), isNot(contains('token')));
+      expect(queued.first.payload.toString(), isNot(contains('cached')));
+
+      await outbox.confirm(
+        accountId: '7',
+        operationId: queued.first.operationId,
+      );
+      final initiallyReady = (await outbox.ready('7')).successData;
+      expect(initiallyReady.map((item) => item.kind), [
+        OutboxOperationKind.documentCreate,
+      ]);
+      await outbox.transition(
+        accountId: '7',
+        operationId: queued.first.operationId,
+        next: OutboxState.syncing,
+      );
+      await outbox.transition(
+        accountId: '7',
+        operationId: queued.first.operationId,
+        next: OutboxState.succeeded,
+      );
+      await outbox.confirm(
+        accountId: '7',
+        operationId: queued.last.operationId,
+      );
+      expect((await outbox.ready('7')).successData.map((item) => item.kind), [
+        OutboxOperationKind.attachmentUpload,
+      ]);
+    },
+  );
+
+  test(
+    'repeated offline confirmation does not create a second write',
+    () async {
+      final repository = _FakeDocumentsRepository(
+        createResult: Future.value(const FailureResult(NetworkFailure())),
+      );
+      final outbox = MemoryOutboxRepository(stateMachine: OutboxStateMachine());
+      final viewModel = _draftEnabledViewModel(
+        drafts: _FakeDocumentDraftRepository(),
+        documents: repository,
+        outbox: outbox,
+        submissionStagingStore: _OutboxSubmissionStagingStore(),
+        draftIdFactory: () => 'draft-1',
+      );
+      viewModel.addScannedProduct(_standardItem);
+
+      await viewModel.createDocument();
+      expect(await viewModel.confirmOfflineSubmission(), isTrue);
+      expect(await viewModel.confirmOfflineSubmission(), isFalse);
+
+      final queued = (await outbox.list('7')).successData;
+      expect(queued, hasLength(1));
+      expect(
+        queued.single.operationId,
+        'document-create-${queued.single.idempotencyKey}',
+      );
+    },
+  );
+
+  test(
+    'unknown result queues status-first while server validation never queues',
+    () async {
+      final unknownOutbox = MemoryOutboxRepository(
+        stateMachine: OutboxStateMachine(),
+      );
+      final unknown = _draftEnabledViewModel(
+        drafts: _FakeDocumentDraftRepository(),
+        documents: _FakeDocumentsRepository(
+          createResult: Future.value(const FailureResult(UnknownFailure())),
+        ),
+        outbox: unknownOutbox,
+        submissionStagingStore: _OutboxSubmissionStagingStore(),
+        draftIdFactory: () => 'draft-unknown',
+      )..addScannedProduct(_standardItem);
+
+      await unknown.createDocument();
+      expect(await unknown.confirmOfflineSubmission(), isTrue);
+      expect(
+        (await unknownOutbox.list('7')).successData.single.requiresStatusProbe,
+        isTrue,
+      );
+
+      final rejectedOutbox = MemoryOutboxRepository(
+        stateMachine: OutboxStateMachine(),
+      );
+      final rejected = _draftEnabledViewModel(
+        drafts: _FakeDocumentDraftRepository(),
+        documents: _FakeDocumentsRepository(
+          createResult: Future.value(
+            const FailureResult(ValidationFailure(message: 'bad lines')),
+          ),
+        ),
+        outbox: rejectedOutbox,
+        submissionStagingStore: _OutboxSubmissionStagingStore(),
+        draftIdFactory: () => 'draft-rejected',
+      )..addScannedProduct(_standardItem);
+
+      await rejected.createDocument();
+      expect(rejected.offlineSubmissionReview, isNull);
+      expect((await rejectedOutbox.list('7')).successData, isEmpty);
+      expect(rejected.formError, 'bad lines');
     },
   );
 
@@ -1376,6 +1519,33 @@ void main() {
     expect(repository.completedDocumentId, 137);
     expect(viewModel.documentActionError, '库存不足');
   });
+
+  test(
+    'offline lifecycle keeps stable key and waits for queue confirmation',
+    () async {
+      final repository = _FakeDocumentsRepository(
+        completeResult: Future.value(
+          const FailureResult<void>(NetworkFailure()),
+        ),
+      );
+      final outbox = MemoryOutboxRepository(stateMachine: OutboxStateMachine());
+      final viewModel = _draftEnabledViewModel(
+        drafts: _FakeDocumentDraftRepository(),
+        documents: repository,
+        outbox: outbox,
+      );
+
+      expect(await viewModel.completeDocument(_draftSalesDocument), isFalse);
+      expect((await outbox.list('7')).successData, isEmpty);
+      expect(viewModel.offlineSubmissionReview?.documentType, isNotEmpty);
+      expect(await viewModel.confirmOfflineSubmission(), isTrue);
+
+      final queued = (await outbox.list('7')).successData.single;
+      expect(queued.kind, OutboxOperationKind.documentComplete);
+      expect(queued.payload['documentId'], _draftSalesDocument.id);
+      expect(queued.idempotencyKey, repository.completedRequestIds.single);
+    },
+  );
 
   test(
     'operator cannot complete admin-only documents even when visible',
@@ -2498,6 +2668,8 @@ DocumentsViewModel _draftEnabledViewModel({
   required DocumentDraftRepository drafts,
   DocumentsRepository? documents,
   InventoryRepository? inventory,
+  OutboxRepository? outbox,
+  OutboxAttachmentStagingStore? submissionStagingStore,
   String roleCode = 'operator',
   String Function()? draftIdFactory,
 }) => DocumentsViewModel(
@@ -2505,6 +2677,8 @@ DocumentsViewModel _draftEnabledViewModel({
   inventoryRepository: inventory,
   draftRepository: drafts,
   accountId: '7',
+  outboxRepository: outbox,
+  submissionStagingStore: submissionStagingStore,
   observedRoleCode: roleCode,
   currentWarehouse: const Warehouse(
     id: 11,
@@ -2515,6 +2689,50 @@ DocumentsViewModel _draftEnabledViewModel({
   draftIdFactory:
       draftIdFactory ?? () => 'draft-${DateTime.now().microsecondsSinceEpoch}',
 );
+
+final class _OutboxSubmissionStagingStore
+    implements OutboxAttachmentStagingStore {
+  @override
+  Future<Result<StagedAttachment>> loadStaged({
+    required String userId,
+    required String requestId,
+  }) async => Success(
+    StagedAttachment(
+      pending: PendingAttachment(
+        requestId: requestId,
+        binding: AttachmentBinding.documentDraft('draft-1'),
+        stagedPath: 'owned/$requestId.pdf',
+        originalName: 'proof.pdf',
+        mimeType: 'application/pdf',
+        fileSize: 3,
+      ),
+      thumbnailPath: null,
+      createdAt: DateTime.utc(2026, 7, 13),
+      sha256: 'stable-hash',
+    ),
+  );
+
+  @override
+  Future<Result<void>> rebindDocumentDraft({
+    required String userId,
+    required String localAggregateId,
+    required int documentId,
+    required List<String> requestIds,
+  }) async => const Success(null);
+
+  @override
+  Future<Result<void>> removeStagedAttachments({
+    required String userId,
+    required List<String> requestIds,
+  }) async => const Success(null);
+}
+
+extension _SuccessData<T> on Result<T> {
+  T get successData => switch (this) {
+    Success<T>(:final data) => data,
+    FailureResult<T>(:final failure) => throw TestFailure(failure.message),
+  };
+}
 
 Future<void> _waitFor(bool Function() condition) async {
   for (var attempt = 0; attempt < 100; attempt += 1) {
@@ -3058,6 +3276,7 @@ final class _FakeDocumentsRepository
   final Future<Result<List<DocumentRecord>>>? listFuture;
   CreateDocumentRequest? createdRequest;
   final List<String> createdRequestIds = [];
+  final List<String> completedRequestIds = [];
   int createCallCount = 0;
   int completeCallCount = 0;
   int? completedDocumentId;
@@ -3127,20 +3346,21 @@ final class _FakeDocumentsRepository
   }
 
   @override
-  Future<Result<void>> completeDocument(int id) async {
+  Future<Result<void>> completeDocument(int id, {String? requestId}) async {
     completeCallCount += 1;
     completedDocumentId = id;
+    completedRequestIds.add(requestId ?? '');
     return completeResult;
   }
 
   @override
-  Future<Result<void>> confirmDocument(int id) async {
+  Future<Result<void>> confirmDocument(int id, {String? requestId}) async {
     confirmedDocumentId = id;
     return confirmResult;
   }
 
   @override
-  Future<Result<void>> settleDocument(int id) async {
+  Future<Result<void>> settleDocument(int id, {String? requestId}) async {
     settledDocumentId = id;
     return settleResult;
   }
@@ -3204,17 +3424,17 @@ final class _RetryDocumentsRepository implements DocumentsRepository {
   }
 
   @override
-  Future<Result<void>> completeDocument(int id) async {
+  Future<Result<void>> completeDocument(int id, {String? requestId}) async {
     return const Success<void>(null);
   }
 
   @override
-  Future<Result<void>> confirmDocument(int id) async {
+  Future<Result<void>> confirmDocument(int id, {String? requestId}) async {
     return const Success<void>(null);
   }
 
   @override
-  Future<Result<void>> settleDocument(int id) async {
+  Future<Result<void>> settleDocument(int id, {String? requestId}) async {
     return const Success<void>(null);
   }
 }
@@ -3258,15 +3478,15 @@ final class _DelayedCreationRefreshRepository implements DocumentsRepository {
   }) async => Success(_transactionPage([], page: page));
 
   @override
-  Future<Result<void>> completeDocument(int id) async =>
+  Future<Result<void>> completeDocument(int id, {String? requestId}) async =>
       const Success<void>(null);
 
   @override
-  Future<Result<void>> confirmDocument(int id) async =>
+  Future<Result<void>> confirmDocument(int id, {String? requestId}) async =>
       const Success<void>(null);
 
   @override
-  Future<Result<void>> settleDocument(int id) async =>
+  Future<Result<void>> settleDocument(int id, {String? requestId}) async =>
       const Success<void>(null);
 }
 
@@ -3346,15 +3566,15 @@ final class _PagedDocumentsRepository implements DocumentsRepository {
   ) async => const Success(_remoteDocument);
 
   @override
-  Future<Result<void>> completeDocument(int id) async =>
+  Future<Result<void>> completeDocument(int id, {String? requestId}) async =>
       const Success<void>(null);
 
   @override
-  Future<Result<void>> confirmDocument(int id) async =>
+  Future<Result<void>> confirmDocument(int id, {String? requestId}) async =>
       const Success<void>(null);
 
   @override
-  Future<Result<void>> settleDocument(int id) async =>
+  Future<Result<void>> settleDocument(int id, {String? requestId}) async =>
       const Success<void>(null);
 }
 

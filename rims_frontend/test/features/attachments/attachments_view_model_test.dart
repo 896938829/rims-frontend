@@ -11,6 +11,10 @@ import 'package:rims_frontend/features/attachments/domain/repositories/attachmen
 import 'package:rims_frontend/features/attachments/domain/services/attachment_picker.dart';
 import 'package:rims_frontend/features/attachments/domain/services/attachment_staging_store.dart';
 import 'package:rims_frontend/features/attachments/presentation/view_models/attachments_view_model.dart';
+import 'package:rims_frontend/features/offline/data/repositories/memory_outbox_repository.dart';
+import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.dart';
+import 'package:rims_frontend/features/offline/domain/repositories/outbox_repository.dart';
+import 'package:rims_frontend/features/offline/domain/services/outbox_state_machine.dart';
 
 void main() {
   test('load exposes empty, success, and error states', () async {
@@ -66,6 +70,68 @@ void main() {
     viewModel.cancel('stable-request');
     expect(viewModel.queue.single.state, AttachmentTransferState.cancelled);
   });
+
+  test(
+    'offline upload requires confirmation and queues one stable snapshot',
+    () async {
+      final repository = _FakeRepository()
+        ..uploadResult = const FailureResult(NetworkFailure());
+      final outbox = MemoryOutboxRepository(stateMachine: OutboxStateMachine());
+      final viewModel = _viewModel(repository: repository, outbox: outbox);
+
+      await viewModel.pickAndUpload(AttachmentPickSource.file);
+
+      expect((await outbox.list('3')).successData, isEmpty);
+      expect(
+        viewModel.offlineUploadReviewFor('stable-request')?.originalName,
+        'receipt.pdf',
+      );
+      expect(viewModel.offlineUploadReviewFor('stable-request')?.fileSize, 128);
+      expect(await viewModel.confirmOfflineUpload('stable-request'), isTrue);
+      expect(await viewModel.confirmOfflineUpload('stable-request'), isFalse);
+
+      final queued = (await outbox.list('3')).successData;
+      expect(queued, hasLength(1));
+      expect(queued.single.kind, OutboxOperationKind.attachmentUpload);
+      expect(queued.single.idempotencyKey, 'stable-request');
+      expect(queued.single.payload['expectedSha256'], 'stable-hash');
+      expect(queued.single.requiresStatusProbe, isFalse);
+    },
+  );
+
+  test(
+    'unknown upload queues status-first but validation remains immediate',
+    () async {
+      final unknownOutbox = MemoryOutboxRepository(
+        stateMachine: OutboxStateMachine(),
+      );
+      final unknownRepository = _FakeRepository()
+        ..uploadResult = const FailureResult(UnknownFailure());
+      final unknown = _viewModel(
+        repository: unknownRepository,
+        outbox: unknownOutbox,
+      );
+      await unknown.pickAndUpload(AttachmentPickSource.file);
+      expect(await unknown.confirmOfflineUpload('stable-request'), isTrue);
+      expect(
+        (await unknownOutbox.list('3')).successData.single.requiresStatusProbe,
+        isTrue,
+      );
+
+      final rejectedOutbox = MemoryOutboxRepository(
+        stateMachine: OutboxStateMachine(),
+      );
+      final rejectedRepository = _FakeRepository()
+        ..uploadResult = const FailureResult(ValidationFailure());
+      final rejected = _viewModel(
+        repository: rejectedRepository,
+        outbox: rejectedOutbox,
+      );
+      await rejected.pickAndUpload(AttachmentPickSource.file);
+      expect(rejected.offlineUploadReviewFor('stable-request'), isNull);
+      expect((await rejectedOutbox.list('3')).successData, isEmpty);
+    },
+  );
 
   test(
     'recovers interrupted staging and resumes after background cancellation',
@@ -171,6 +237,7 @@ AttachmentsViewModel _viewModel({
   _FakePicker? picker,
   _FakeStaging? staging,
   _FakeShare? share,
+  OutboxRepository? outbox,
 }) => AttachmentsViewModel(
   repository: repository ?? _FakeRepository(),
   picker: picker ?? _FakePicker(),
@@ -178,6 +245,8 @@ AttachmentsViewModel _viewModel({
   shareService: share ?? _FakeShare(),
   binding: AttachmentBinding.document(42),
   userId: '3',
+  warehouseId: 11,
+  outboxRepository: outbox,
 );
 
 Attachment _attachment({int id = 7, int position = 0}) => Attachment(
@@ -205,6 +274,7 @@ StagedAttachment _staged() => StagedAttachment(
   ),
   thumbnailPath: null,
   createdAt: DateTime.utc(2026, 7, 13),
+  sha256: 'stable-hash',
 );
 
 final class _FakeRepository implements AttachmentsRepository {
@@ -298,7 +368,8 @@ final class _FakePicker implements AttachmentPicker {
   List<SelectedAttachmentSource> takeRecovered() => const [];
 }
 
-final class _FakeStaging implements AttachmentStagingStore {
+final class _FakeStaging
+    implements AttachmentStagingStore, OutboxAttachmentStagingStore {
   List<StagedAttachment> recovered = [];
   final List<String> removedRequestIds = [];
 
@@ -331,6 +402,36 @@ final class _FakeStaging implements AttachmentStagingStore {
     required String originalName,
     required Uint8List bytes,
   }) async => const Success('/support/download');
+
+  @override
+  Future<Result<StagedAttachment>> loadStaged({
+    required String userId,
+    required String requestId,
+  }) async => Success(_staged());
+
+  @override
+  Future<Result<void>> rebindDocumentDraft({
+    required String userId,
+    required String localAggregateId,
+    required int documentId,
+    required List<String> requestIds,
+  }) async => const Success(null);
+
+  @override
+  Future<Result<void>> removeStagedAttachments({
+    required String userId,
+    required List<String> requestIds,
+  }) async {
+    removedRequestIds.addAll(requestIds);
+    return const Success(null);
+  }
+}
+
+extension _SuccessData<T> on Result<T> {
+  T get successData => switch (this) {
+    Success<T>(:final data) => data,
+    FailureResult<T>(:final failure) => throw TestFailure(failure.message),
+  };
 }
 
 final class _FakeShare implements AttachmentShareService {

@@ -27,11 +27,11 @@ abstract interface class DocumentsRemoteDataSource {
     CreateDocumentRequest request,
   );
 
-  Future<Result<void>> completeDocument(int id);
+  Future<Result<void>> completeDocument(int id, {String? requestId});
 
-  Future<Result<void>> confirmDocument(int id);
+  Future<Result<void>> confirmDocument(int id, {String? requestId});
 
-  Future<Result<void>> settleDocument(int id);
+  Future<Result<void>> settleDocument(int id, {String? requestId});
 }
 
 final class ApiDocumentsRemoteDataSource implements DocumentsRemoteDataSource {
@@ -120,27 +120,36 @@ final class ApiDocumentsRemoteDataSource implements DocumentsRemoteDataSource {
   }
 
   @override
-  Future<Result<void>> completeDocument(int id) async {
+  Future<Result<void>> completeDocument(int id, {String? requestId}) async {
     final result = await _apiClient.post<dynamic>(
       '${ApiEndpoints.documents}/$id/complete',
+      options: requestId == null
+          ? null
+          : Options(headers: {'Idempotency-Key': requestId}),
     );
 
     return _mapEmptySuccess(result);
   }
 
   @override
-  Future<Result<void>> confirmDocument(int id) async {
+  Future<Result<void>> confirmDocument(int id, {String? requestId}) async {
     final result = await _apiClient.post<dynamic>(
       '${ApiEndpoints.documents}/$id/confirm',
+      options: requestId == null
+          ? null
+          : Options(headers: {'Idempotency-Key': requestId}),
     );
 
     return _mapEmptySuccess(result);
   }
 
   @override
-  Future<Result<void>> settleDocument(int id) async {
+  Future<Result<void>> settleDocument(int id, {String? requestId}) async {
     final result = await _apiClient.post<dynamic>(
       '${ApiEndpoints.documents}/$id/settle',
+      options: requestId == null
+          ? null
+          : Options(headers: {'Idempotency-Key': requestId}),
     );
 
     return _mapEmptySuccess(result);

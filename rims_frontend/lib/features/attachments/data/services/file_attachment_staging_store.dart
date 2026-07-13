@@ -4,6 +4,8 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'dart:ui' as ui;
 
+import 'package:crypto/crypto.dart';
+
 import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
 import '../../domain/entities/attachment.dart';
@@ -26,7 +28,10 @@ typedef ThumbnailBuilder =
     Future<String?> Function(String source, String destination);
 
 final class FileAttachmentStagingStore
-    implements AttachmentStagingStore, DraftAttachmentStagingStore {
+    implements
+        AttachmentStagingStore,
+        DraftAttachmentStagingStore,
+        OutboxAttachmentStagingStore {
   static final _accountOperations = _AsyncKeyedLock();
 
   FileAttachmentStagingStore({
@@ -139,6 +144,7 @@ final class FileAttachmentStagingStore
         ),
         thumbnailPath: createdThumbnail,
         createdAt: _clock().toUtc(),
+        sha256: await _sha256File(File(stagedPath)),
       );
       final current = await _readManifest(userDirectory);
       await _writeManifest(userDirectory, [...current, staged]);
@@ -177,6 +183,169 @@ final class FileAttachmentStagingStore
       return FailureResult(
         LocalStorageFailure(
           message: 'Unable to recover staged attachments.',
+          cause: error,
+        ),
+      );
+    }
+  }
+
+  @override
+  Future<Result<StagedAttachment>> loadStaged({
+    required String userId,
+    required String requestId,
+  }) => _withUserLock(userId, () => _loadStaged(userId, requestId));
+
+  Future<Result<StagedAttachment>> _loadStaged(
+    String userId,
+    String requestId,
+  ) async {
+    if (!RegExp(r'^[A-Za-z0-9_-]+$').hasMatch(requestId)) {
+      return const FailureResult(
+        ValidationFailure(message: 'Invalid staged attachment request ID.'),
+      );
+    }
+    try {
+      final directory = await _userDirectory(userId, create: false);
+      if (!await directory.exists()) {
+        return const FailureResult(
+          ValidationFailure(message: 'Staged attachment is missing.'),
+        );
+      }
+      await _completePendingCleanup(directory);
+      final items = await _readManifest(directory);
+      final matches = items
+          .where((item) => item.pending.requestId == requestId)
+          .toList(growable: false);
+      if (matches.length != 1) {
+        return const FailureResult(
+          ValidationFailure(message: 'Staged attachment is missing.'),
+        );
+      }
+      final item = matches.single;
+      final file = File(item.pending.stagedPath);
+      if (!await file.exists()) {
+        return const FailureResult(
+          ValidationFailure(message: 'Staged attachment is missing.'),
+        );
+      }
+      final actualSize = await file.length();
+      final actualHash = await _sha256File(file);
+      if (actualSize != item.pending.fileSize ||
+          (item.sha256.isNotEmpty && actualHash != item.sha256)) {
+        return const FailureResult(
+          ValidationFailure(message: 'Staged attachment changed after review.'),
+        );
+      }
+      if (item.sha256.isEmpty) {
+        final upgraded = StagedAttachment(
+          pending: item.pending,
+          thumbnailPath: item.thumbnailPath,
+          createdAt: item.createdAt,
+          sha256: actualHash,
+        );
+        await _writeManifest(directory, [
+          for (final candidate in items)
+            if (identical(candidate, item)) upgraded else candidate,
+        ]);
+        return Success(upgraded);
+      }
+      return Success(item);
+    } on Object catch (error) {
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to load staged attachment.',
+          cause: error,
+        ),
+      );
+    }
+  }
+
+  @override
+  Future<Result<void>> rebindDocumentDraft({
+    required String userId,
+    required String localAggregateId,
+    required int documentId,
+    required List<String> requestIds,
+  }) => _withUserLock(
+    userId,
+    () => _rebindDocumentDraft(
+      userId: userId,
+      localAggregateId: localAggregateId,
+      documentId: documentId,
+      requestIds: requestIds,
+    ),
+  );
+
+  Future<Result<void>> _rebindDocumentDraft({
+    required String userId,
+    required String localAggregateId,
+    required int documentId,
+    required List<String> requestIds,
+  }) async {
+    if (localAggregateId.trim().isEmpty ||
+        documentId <= 0 ||
+        requestIds.toSet().length != requestIds.length) {
+      return const FailureResult(
+        ValidationFailure(message: 'Invalid document attachment rebind.'),
+      );
+    }
+    if (requestIds.isEmpty) return const Success(null);
+    try {
+      final directory = await _userDirectory(userId, create: false);
+      if (!await directory.exists()) {
+        return const FailureResult(
+          ValidationFailure(message: 'Staged attachments are missing.'),
+        );
+      }
+      await _completePendingCleanup(directory);
+      final items = await _readManifest(directory);
+      final requested = requestIds.toSet();
+      final selected = items.where(
+        (item) => requested.contains(item.pending.requestId),
+      );
+      if (selected.length != requested.length ||
+          selected.any((item) {
+            final binding = item.pending.binding;
+            final isOwnedDraft =
+                binding.businessType == 'document_draft' &&
+                binding.localDraftId == localAggregateId;
+            final isExactReplay =
+                binding.businessType == 'doc_attachment' &&
+                binding.businessId == documentId &&
+                binding.localDraftId == null;
+            return !isOwnedDraft && !isExactReplay;
+          })) {
+        return const FailureResult(
+          ValidationFailure(
+            message: 'Draft attachment ownership changed before rebind.',
+          ),
+        );
+      }
+      final rebound = items
+          .map(
+            (item) => !requested.contains(item.pending.requestId)
+                ? item
+                : StagedAttachment(
+                    pending: PendingAttachment(
+                      requestId: item.pending.requestId,
+                      binding: AttachmentBinding.document(documentId),
+                      stagedPath: item.pending.stagedPath,
+                      originalName: item.pending.originalName,
+                      mimeType: item.pending.mimeType,
+                      fileSize: item.pending.fileSize,
+                    ),
+                    thumbnailPath: item.thumbnailPath,
+                    createdAt: item.createdAt,
+                    sha256: item.sha256,
+                  ),
+          )
+          .toList(growable: false);
+      await _writeManifest(directory, rebound);
+      return const Success(null);
+    } on Object catch (error) {
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to rebind draft attachments.',
           cause: error,
         ),
       );
@@ -282,6 +451,7 @@ final class FileAttachmentStagingStore
             ),
             thumbnailPath: thumbnailPath,
             createdAt: _clock().toUtc(),
+            sha256: await _sha256File(stagedFile),
           ),
         );
       }
@@ -745,6 +915,7 @@ Map<String, Object?> _stagedToJson(StagedAttachment item) => {
   'fileSize': item.pending.fileSize,
   'thumbnailPath': item.thumbnailPath,
   'createdAt': item.createdAt.toIso8601String(),
+  if (item.sha256.isNotEmpty) 'sha256': item.sha256,
 };
 
 StagedAttachment _stagedFromJson(Object? raw) {
@@ -766,6 +937,12 @@ StagedAttachment _stagedFromJson(Object? raw) {
   if (thumbnail != null && thumbnail is! String) {
     throw const FormatException('Invalid staged attachment thumbnail.');
   }
+  final persistedHash = raw['sha256'];
+  if (persistedHash != null &&
+      (persistedHash is! String ||
+          !RegExp(r'^[a-f0-9]{64}$').hasMatch(persistedHash))) {
+    throw const FormatException('Invalid staged attachment sha256.');
+  }
   return StagedAttachment(
     pending: PendingAttachment(
       requestId: requestId,
@@ -781,7 +958,13 @@ StagedAttachment _stagedFromJson(Object? raw) {
     ),
     thumbnailPath: thumbnail as String?,
     createdAt: createdAt.toUtc(),
+    sha256: persistedHash as String? ?? '',
   );
+}
+
+Future<String> _sha256File(File file) async {
+  final digest = await sha256.bind(file.openRead()).first;
+  return digest.toString();
 }
 
 String _requiredString(Map<String, Object?> json, String key) {

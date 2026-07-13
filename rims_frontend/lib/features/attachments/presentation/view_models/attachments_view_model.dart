@@ -9,6 +9,8 @@ import '../../domain/repositories/attachments_repository.dart';
 import '../../domain/services/attachment_picker.dart';
 import '../../domain/services/attachment_share_service.dart';
 import '../../domain/services/attachment_staging_store.dart';
+import '../../../offline/domain/entities/outbox_operation.dart';
+import '../../../offline/domain/repositories/outbox_repository.dart';
 
 enum AttachmentTransferState {
   staged,
@@ -16,10 +18,23 @@ enum AttachmentTransferState {
   failed,
   interrupted,
   cancelled,
+  queuedForSync,
 }
 
 typedef AttachmentSynchronization =
     Future<Result<void>> Function(Attachment attachment);
+
+final class OfflineAttachmentReview {
+  const OfflineAttachmentReview({
+    required this.originalName,
+    required this.fileSize,
+    required this.bindingType,
+  });
+
+  final String originalName;
+  final int fileSize;
+  final String bindingType;
+}
 
 final class AttachmentQueueItem {
   const AttachmentQueueItem({
@@ -78,6 +93,8 @@ final class AttachmentsViewModel extends ChangeNotifier {
     required this.shareService,
     required this.binding,
     required this.userId,
+    this.warehouseId,
+    this.outboxRepository,
     this.onAttachmentPublished,
     this.beforeAttachmentDelete,
     this.restoreAfterDeleteFailure,
@@ -89,6 +106,8 @@ final class AttachmentsViewModel extends ChangeNotifier {
   final AttachmentShareService shareService;
   final AttachmentBinding binding;
   final String userId;
+  final int? warehouseId;
+  final OutboxRepository? outboxRepository;
   final AttachmentSynchronization? onAttachmentPublished;
   final AttachmentSynchronization? beforeAttachmentDelete;
   final AttachmentSynchronization? restoreAfterDeleteFailure;
@@ -101,6 +120,8 @@ final class AttachmentsViewModel extends ChangeNotifier {
   bool _paused = false;
   bool _disposed = false;
   String? _errorMessage;
+  final Map<String, bool> _offlineUploadUnknown = {};
+  bool _offlineEnqueueInFlight = false;
 
   List<Attachment> get attachments => List.unmodifiable(_attachments);
   List<AttachmentQueueItem> get queue => List.unmodifiable(_queue);
@@ -108,6 +129,80 @@ final class AttachmentsViewModel extends ChangeNotifier {
   bool get isBusy => _isPickingOrTransferring;
   String? get errorMessage => _errorMessage;
   String? downloadedPathFor(int attachmentId) => _downloadedPaths[attachmentId];
+  OfflineAttachmentReview? offlineUploadReviewFor(String requestId) {
+    if (!_offlineUploadUnknown.containsKey(requestId)) return null;
+    final index = _queue.indexWhere((item) => item.requestId == requestId);
+    if (index < 0) return null;
+    final pending = _queue[index].staged.pending;
+    return OfflineAttachmentReview(
+      originalName: pending.originalName,
+      fileSize: pending.fileSize,
+      bindingType: pending.binding.businessType,
+    );
+  }
+
+  Future<bool> confirmOfflineUpload(String requestId) async {
+    if (_offlineEnqueueInFlight ||
+        !_offlineUploadUnknown.containsKey(requestId) ||
+        outboxRepository == null ||
+        warehouseId == null ||
+        stagingStore is! OutboxAttachmentStagingStore) {
+      return false;
+    }
+    final index = _queue.indexWhere((item) => item.requestId == requestId);
+    if (index < 0) return false;
+    _offlineEnqueueInFlight = true;
+    try {
+      final loaded = await (stagingStore as OutboxAttachmentStagingStore)
+          .loadStaged(userId: userId, requestId: requestId);
+      if (loaded case FailureResult<StagedAttachment>(:final failure)) {
+        _errorMessage = failure.message;
+        _notify();
+        return false;
+      }
+      final staged = (loaded as Success<StagedAttachment>).data;
+      if (staged.pending.binding != binding || staged.sha256.isEmpty) {
+        _errorMessage = '附件暂存归属或内容快照已变化，请重新复核';
+        _notify();
+        return false;
+      }
+      final operation = OutboxOperation(
+        operationId: 'attachment-upload-$requestId',
+        idempotencyKey: requestId,
+        accountId: userId,
+        warehouseId: warehouseId!,
+        kind: OutboxOperationKind.attachmentUpload,
+        payload: {
+          'version': 1,
+          'requestId': requestId,
+          'expectedSize': staged.pending.fileSize,
+          'expectedSha256': staged.sha256,
+        },
+        state: OutboxState.queued,
+        createdAt: DateTime.now().toUtc(),
+        requiresStatusProbe: _offlineUploadUnknown[requestId]!,
+      );
+      final result = await outboxRepository!.enqueue(operation);
+      if (result case FailureResult<OutboxOperation>(:final failure)) {
+        _errorMessage = failure.message;
+        _notify();
+        return false;
+      }
+      final current = _queue.indexWhere((item) => item.requestId == requestId);
+      if (current >= 0) {
+        _queue[current] = _queue[current].copyWith(
+          state: AttachmentTransferState.queuedForSync,
+          clearFailure: true,
+        );
+      }
+      _offlineUploadUnknown.remove(requestId);
+      _errorMessage = '附件已保存到待同步';
+      _notify();
+      return true;
+    } finally {
+      _offlineEnqueueInFlight = false;
+    }
+  }
 
   Future<void> load() async {
     _isLoading = true;
@@ -466,6 +561,7 @@ final class AttachmentsViewModel extends ChangeNotifier {
     item = _queue[index];
     await result.when(
       success: (attachment) async {
+        _offlineUploadUnknown.remove(requestId);
         final synchronize = onAttachmentPublished;
         if (synchronize != null) {
           final synchronized = await synchronize(attachment);
@@ -498,6 +594,14 @@ final class AttachmentsViewModel extends ChangeNotifier {
             ? AttachmentTransferState.interrupted
             : AttachmentTransferState.failed;
         _queue[index] = item.copyWith(state: state, failure: failure);
+        if ((failure is NetworkFailure || failure is UnknownFailure) &&
+            outboxRepository != null &&
+            warehouseId != null &&
+            stagingStore is OutboxAttachmentStagingStore) {
+          _offlineUploadUnknown[requestId] = failure is UnknownFailure;
+        } else {
+          _offlineUploadUnknown.remove(requestId);
+        }
         _errorMessage = failure.message;
       },
     );

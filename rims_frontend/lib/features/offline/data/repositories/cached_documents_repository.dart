@@ -75,22 +75,22 @@ final class CachedDocumentsRepository
   }
 
   @override
-  Future<Result<void>> completeDocument(int id) async {
-    final result = await delegate.completeDocument(id);
+  Future<Result<void>> completeDocument(int id, {String? requestId}) async {
+    final result = await delegate.completeDocument(id, requestId: requestId);
     await _invalidateOnSuccess(result);
     return result;
   }
 
   @override
-  Future<Result<void>> confirmDocument(int id) async {
-    final result = await delegate.confirmDocument(id);
+  Future<Result<void>> confirmDocument(int id, {String? requestId}) async {
+    final result = await delegate.confirmDocument(id, requestId: requestId);
     await _invalidateOnSuccess(result);
     return result;
   }
 
   @override
-  Future<Result<void>> settleDocument(int id) async {
-    final result = await delegate.settleDocument(id);
+  Future<Result<void>> settleDocument(int id, {String? requestId}) async {
+    final result = await delegate.settleDocument(id, requestId: requestId);
     await _invalidateOnSuccess(result);
     return result;
   }

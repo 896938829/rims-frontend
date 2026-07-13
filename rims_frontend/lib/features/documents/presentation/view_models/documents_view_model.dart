@@ -7,13 +7,16 @@ import '../../../../core/result/result.dart';
 import '../../../../core/result/failure.dart';
 import '../../../../core/resources/app_icons.dart';
 import '../../../auth/domain/entities/warehouse.dart';
+import '../../../attachments/domain/services/attachment_staging_store.dart';
 import '../../domain/entities/document_data.dart';
 import '../../domain/repositories/documents_repository.dart';
 import '../../../inventory/domain/entities/inventory_item.dart';
 import '../../../inventory/domain/entities/non_standard_inventory_item.dart';
 import '../../../inventory/domain/repositories/inventory_repository.dart';
 import '../../../offline/domain/entities/document_draft.dart';
+import '../../../offline/domain/entities/outbox_operation.dart';
 import '../../../offline/domain/repositories/document_draft_repository.dart';
+import '../../../offline/domain/repositories/outbox_repository.dart';
 
 final class DocumentAction {
   const DocumentAction({
@@ -27,6 +30,63 @@ final class DocumentAction {
   final String iconPath;
 }
 
+final class _PendingOfflineSubmission {
+  const _PendingOfflineSubmission({
+    required this.request,
+    required this.accountId,
+    required this.warehouseId,
+    required this.localAggregateId,
+    required this.attachmentRequestIds,
+    required this.requiresStatusProbe,
+    required this.review,
+  });
+
+  final CreateDocumentRequest request;
+  final String accountId;
+  final int warehouseId;
+  final String localAggregateId;
+  final List<String> attachmentRequestIds;
+  final bool requiresStatusProbe;
+  final OfflineSubmissionReview review;
+}
+
+final class _PendingLifecycleSubmission {
+  const _PendingLifecycleSubmission({
+    required this.kind,
+    required this.requestId,
+    required this.documentId,
+    required this.accountId,
+    required this.warehouseId,
+    required this.requiresStatusProbe,
+    required this.review,
+  });
+
+  final OutboxOperationKind kind;
+  final String requestId;
+  final int documentId;
+  final String accountId;
+  final int warehouseId;
+  final bool requiresStatusProbe;
+  final OfflineSubmissionReview review;
+}
+
+final class OfflineSubmissionReview {
+  OfflineSubmissionReview({
+    required this.warehouseName,
+    required this.documentType,
+    required this.lineCount,
+    required List<String> lines,
+    required List<String> staleAssumptions,
+  }) : lines = List.unmodifiable(lines),
+       staleAssumptions = List.unmodifiable(staleAssumptions);
+
+  final String warehouseName;
+  final String documentType;
+  final int lineCount;
+  final List<String> lines;
+  final List<String> staleAssumptions;
+}
+
 final class DocumentsViewModel extends ChangeNotifier {
   DocumentsViewModel({
     this.repository,
@@ -35,6 +95,8 @@ final class DocumentsViewModel extends ChangeNotifier {
     this.warehouses = const [],
     this.canManageAdminDocumentActions = true,
     this.draftRepository,
+    this.outboxRepository,
+    this.submissionStagingStore,
     this.accountId,
     this.observedRoleCode = '',
     String Function()? draftIdFactory,
@@ -65,6 +127,8 @@ final class DocumentsViewModel extends ChangeNotifier {
   final List<Warehouse> warehouses;
   final bool canManageAdminDocumentActions;
   final DocumentDraftRepository? draftRepository;
+  final OutboxRepository? outboxRepository;
+  final OutboxAttachmentStagingStore? submissionStagingStore;
   final String? accountId;
   final String observedRoleCode;
   final String Function() draftIdFactory;
@@ -136,6 +200,10 @@ final class DocumentsViewModel extends ChangeNotifier {
   int? _nonStandardSourceId;
   bool _requiresDraftReview = false;
   String? _draftObservedRoleCode;
+  _PendingOfflineSubmission? _pendingOfflineSubmission;
+  _PendingLifecycleSubmission? _pendingLifecycleSubmission;
+  bool _offlineEnqueueInFlight = false;
+  final Map<String, String> _lifecycleRequestIds = {};
 
   @override
   void dispose() {
@@ -151,6 +219,8 @@ final class DocumentsViewModel extends ChangeNotifier {
       )
       .toList(growable: false);
   List<String> get flowSteps => const ['创建', '确认', '提交', '完成'];
+  OfflineSubmissionReview? get offlineSubmissionReview =>
+      _pendingOfflineSubmission?.review ?? _pendingLifecycleSubmission?.review;
   List<DocumentRecord> get recentDocuments =>
       List<DocumentRecord>.unmodifiable(_recentDocuments);
   List<DocumentRecord> get visibleDocuments {
@@ -1318,58 +1388,79 @@ final class DocumentsViewModel extends ChangeNotifier {
     await _drainDraftSavesForSubmit();
     if (_isDisposed) return false;
 
-    final result = await repository.createDocument(
-      CreateDocumentRequest(
-        docType: _selectedAction.docType,
-        typeLabel: _selectedAction.label,
-        requestId: _draftRequestId ??= const Uuid().v4(),
-        lines: submissionLines,
-        toWarehouseId: isTransferAction ? targetWarehouse?.id : null,
-        refDocId: isReturnAction ? returnSourceDocument?.id : null,
-        remark: _remark,
-      ),
+    final submittedDraftId = _activeDraftId ?? ensureDraftId();
+    final submittedAccountId = accountId;
+    final request = CreateDocumentRequest(
+      docType: _selectedAction.docType,
+      typeLabel: _selectedAction.label,
+      requestId: _draftRequestId ??= const Uuid().v4(),
+      lines: List.unmodifiable(submissionLines),
+      toWarehouseId: isTransferAction ? targetWarehouse?.id : null,
+      refDocId: isReturnAction ? returnSourceDocument?.id : null,
+      remark: _remark,
     );
+    final result = await repository.createDocument(request);
     if (_isDisposed) return false;
 
     var created = false;
-    final submittedDraftId = _activeDraftId;
-    final submittedAccountId = accountId;
-    result.when(
-      success: (document) {
-        _recentDocuments = [
-          _withSubmittedLineSummary(
-            document: document,
-            line: submissionLines.first,
+    if (result case Success<DocumentRecord>(:final data)) {
+      final document = data;
+      _recentDocuments = [
+        _withSubmittedLineSummary(
+          document: document,
+          line: submissionLines.first,
+        ),
+        ..._recentDocuments,
+      ];
+      _selectedProduct = null;
+      _productQuery = '';
+      _productCandidates = const [];
+      _selectedNonStandardInventory = null;
+      _nonStandardSourceId = null;
+      _selectedTargetWarehouse = null;
+      _selectedReturnSourceDocument = null;
+      _draftLines = const [];
+      _draftRequestId = null;
+      _quantityText = '';
+      _remark = '';
+      _attachmentStagingIds = const [];
+      _requiresDraftReview = false;
+      _draftObservedRoleCode = null;
+      _formError = null;
+      created = true;
+      notifyListeners();
+    } else if (result case FailureResult<DocumentRecord>(:final failure)) {
+      if (_canOfferOfflineQueue(failure) &&
+          submittedAccountId != null &&
+          currentWarehouse != null &&
+          outboxRepository != null &&
+          submissionStagingStore != null) {
+        _pendingLifecycleSubmission = null;
+        _pendingOfflineSubmission = _PendingOfflineSubmission(
+          request: request,
+          accountId: submittedAccountId,
+          warehouseId: currentWarehouse!.id,
+          localAggregateId: submittedDraftId,
+          attachmentRequestIds: List.unmodifiable(_attachmentStagingIds),
+          requiresStatusProbe: failure is UnknownFailure,
+          review: OfflineSubmissionReview(
+            warehouseName: currentWarehouse!.name,
+            documentType: request.typeLabel,
+            lineCount: request.effectiveLines.length,
+            lines: request.effectiveLines
+                .map((line) => '${line.productName} × ${line.quantity}')
+                .toList(growable: false),
+            staleAssumptions: const ['库存、原单状态和权限将在同步前重新校验', '附件内容必须与当前暂存快照一致'],
           ),
-          ..._recentDocuments,
-        ];
-        _selectedProduct = null;
-        _productQuery = '';
-        _productCandidates = const [];
-        _selectedNonStandardInventory = null;
-        _nonStandardSourceId = null;
-        _selectedTargetWarehouse = null;
-        _selectedReturnSourceDocument = null;
-        _draftLines = const [];
-        _draftRequestId = null;
-        _quantityText = '';
-        _remark = '';
-        _attachmentStagingIds = const [];
-        _requiresDraftReview = false;
-        _draftObservedRoleCode = null;
-        _formError = null;
-        created = true;
-        notifyListeners();
-      },
-      failure: (failure) {
+        );
+        _formError = '网络结果不确定，确认后可保存到待同步';
+      } else {
+        _pendingOfflineSubmission = null;
         _formError = failure.message;
-      },
-    );
+      }
+    }
 
-    if (created &&
-        submittedDraftId != null &&
-        submittedAccountId != null &&
-        draftRepository != null) {
+    if (created && submittedAccountId != null && draftRepository != null) {
       try {
         await draftRepository!.delete(
           accountId: submittedAccountId,
@@ -1395,6 +1486,177 @@ final class DocumentsViewModel extends ChangeNotifier {
     notifyListeners();
     return created;
   }
+
+  Future<bool> confirmOfflineSubmission() async {
+    if (_offlineEnqueueInFlight) return false;
+    final create = _pendingOfflineSubmission;
+    final lifecycle = _pendingLifecycleSubmission;
+    final outbox = outboxRepository;
+    if (outbox == null || (create == null && lifecycle == null)) return false;
+
+    _offlineEnqueueInFlight = true;
+    _formError = null;
+    _documentActionError = null;
+    notifyListeners();
+    try {
+      if (create != null) return await _enqueueCreateSubmission(create, outbox);
+      return await _enqueueLifecycleSubmission(lifecycle!, outbox);
+    } finally {
+      _offlineEnqueueInFlight = false;
+      notifyListeners();
+    }
+  }
+
+  Future<bool> _enqueueCreateSubmission(
+    _PendingOfflineSubmission pending,
+    OutboxRepository outbox,
+  ) async {
+    final staging = submissionStagingStore!;
+    final staged = <StagedAttachment>[];
+    for (final requestId in pending.attachmentRequestIds) {
+      final result = await staging.loadStaged(
+        userId: pending.accountId,
+        requestId: requestId,
+      );
+      if (result case FailureResult<StagedAttachment>(:final failure)) {
+        _formError = failure.message;
+        return false;
+      }
+      final attachment = (result as Success<StagedAttachment>).data;
+      if (attachment.pending.binding.businessType != 'document_draft' ||
+          attachment.pending.binding.localDraftId != pending.localAggregateId ||
+          attachment.sha256.isEmpty) {
+        _formError = '附件暂存归属或内容快照已变化，请重新复核';
+        return false;
+      }
+      staged.add(attachment);
+    }
+
+    final createdAt = now().toUtc();
+    final createOperationId = 'document-create-${pending.request.requestId}';
+    final cleanup = {
+      'draftId': pending.localAggregateId,
+      'attachmentRequestIds': List<Object?>.from(pending.attachmentRequestIds),
+    };
+    final createOperation = OutboxOperation(
+      operationId: createOperationId,
+      idempotencyKey: pending.request.requestId,
+      accountId: pending.accountId,
+      warehouseId: pending.warehouseId,
+      kind: OutboxOperationKind.documentCreate,
+      payload: {
+        'version': 1,
+        'localAggregateId': pending.localAggregateId,
+        'attachmentRequestIds': List<Object?>.from(
+          pending.attachmentRequestIds,
+        ),
+        'request': _outboxDocumentRequest(pending.request),
+        if (staged.isEmpty) 'cleanup': cleanup,
+      },
+      state: OutboxState.queued,
+      createdAt: createdAt,
+      requiresStatusProbe: pending.requiresStatusProbe,
+    );
+    final createResult = await outbox.enqueue(createOperation);
+    if (createResult case FailureResult<OutboxOperation>(:final failure)) {
+      _formError = failure.message;
+      return false;
+    }
+
+    var dependencyId = createOperationId;
+    for (var index = 0; index < staged.length; index += 1) {
+      final attachment = staged[index];
+      final terminal = index == staged.length - 1;
+      final operation = OutboxOperation(
+        operationId: 'attachment-upload-${attachment.pending.requestId}',
+        idempotencyKey: attachment.pending.requestId,
+        accountId: pending.accountId,
+        warehouseId: pending.warehouseId,
+        kind: OutboxOperationKind.attachmentUpload,
+        payload: {
+          'version': 1,
+          'requestId': attachment.pending.requestId,
+          'expectedSize': attachment.pending.fileSize,
+          'expectedSha256': attachment.sha256,
+          'localAggregateId': pending.localAggregateId,
+          if (terminal) 'cleanup': cleanup,
+        },
+        state: OutboxState.queued,
+        createdAt: createdAt.add(Duration(microseconds: index + 1)),
+        requiresStatusProbe: pending.requiresStatusProbe,
+      );
+      final result = await outbox.enqueue(
+        operation,
+        dependencies: {dependencyId},
+      );
+      if (result case FailureResult<OutboxOperation>(:final failure)) {
+        await outbox.cancel(
+          accountId: pending.accountId,
+          operationId: createOperationId,
+        );
+        _formError = failure.message;
+        return false;
+      }
+      dependencyId = operation.operationId;
+    }
+
+    _pendingOfflineSubmission = null;
+    _formError = '已保存到待同步，请前往同步中心复核';
+    return true;
+  }
+
+  Future<bool> _enqueueLifecycleSubmission(
+    _PendingLifecycleSubmission pending,
+    OutboxRepository outbox,
+  ) async {
+    final operation = OutboxOperation(
+      operationId: '${pending.kind.wireValue}-${pending.requestId}',
+      idempotencyKey: pending.requestId,
+      accountId: pending.accountId,
+      warehouseId: pending.warehouseId,
+      kind: pending.kind,
+      payload: {'version': 1, 'documentId': pending.documentId},
+      state: OutboxState.queued,
+      createdAt: now().toUtc(),
+      requiresStatusProbe: pending.requiresStatusProbe,
+    );
+    final result = await outbox.enqueue(operation);
+    if (result case FailureResult<OutboxOperation>(:final failure)) {
+      _documentActionError = failure.message;
+      return false;
+    }
+    _pendingLifecycleSubmission = null;
+    _documentActionError = '已保存到待同步，请前往同步中心复核';
+    return true;
+  }
+
+  Map<String, Object?> _outboxDocumentRequest(
+    CreateDocumentRequest request,
+  ) => {
+    'docType': request.docType,
+    'typeLabel': request.typeLabel,
+    'requestId': request.requestId,
+    'lines': request.effectiveLines
+        .map(
+          (line) => <String, Object?>{
+            'productId': line.productId,
+            'productName': line.productName,
+            'quantity': line.quantity,
+            if (line.actualQuantity != null)
+              'actualQuantity': line.actualQuantity,
+            if (line.nonStandardInventoryId != null)
+              'nonStandardInventoryId': line.nonStandardInventoryId,
+            if (line.retailPrice != null) 'retailPrice': line.retailPrice,
+          },
+        )
+        .toList(growable: false),
+    if (request.toWarehouseId != null) 'toWarehouseId': request.toWarehouseId,
+    if (request.refDocId != null) 'refDocId': request.refDocId,
+    'remark': request.remark,
+  };
+
+  bool _canOfferOfflineQueue(Failure failure) =>
+      failure is NetworkFailure || failure is UnknownFailure;
 
   Future<NonStandardInventoryItem?> _revalidateNonStandardSource() async {
     final sourceId = _nonStandardSourceId;
@@ -1477,8 +1739,10 @@ final class DocumentsViewModel extends ChangeNotifier {
 
     return _runLifecycleAction(
       document: document,
+      kind: OutboxOperationKind.documentComplete,
       invalidServiceMessage: '单据服务未配置',
-      run: (repository) => repository.completeDocument(document.id),
+      run: (repository, requestId) =>
+          repository.completeDocument(document.id, requestId: requestId),
     );
   }
 
@@ -1491,8 +1755,10 @@ final class DocumentsViewModel extends ChangeNotifier {
 
     return _runLifecycleAction(
       document: document,
+      kind: OutboxOperationKind.stocktakeConfirm,
       invalidServiceMessage: '单据服务未配置',
-      run: (repository) => repository.confirmDocument(document.id),
+      run: (repository, requestId) =>
+          repository.confirmDocument(document.id, requestId: requestId),
     );
   }
 
@@ -1505,15 +1771,22 @@ final class DocumentsViewModel extends ChangeNotifier {
 
     return _runLifecycleAction(
       document: document,
+      kind: OutboxOperationKind.stocktakeSettle,
       invalidServiceMessage: '单据服务未配置',
-      run: (repository) => repository.settleDocument(document.id),
+      run: (repository, requestId) =>
+          repository.settleDocument(document.id, requestId: requestId),
     );
   }
 
   Future<bool> _runLifecycleAction({
     required DocumentRecord document,
+    required OutboxOperationKind kind,
     required String invalidServiceMessage,
-    required Future<Result<void>> Function(DocumentsRepository repository) run,
+    required Future<Result<void>> Function(
+      DocumentsRepository repository,
+      String requestId,
+    )
+    run,
   }) async {
     if (_completingDocumentIds.contains(document.id)) {
       return false;
@@ -1530,17 +1803,49 @@ final class DocumentsViewModel extends ChangeNotifier {
     _documentActionError = null;
     notifyListeners();
 
-    final result = await run(repository);
+    final requestKey = '${kind.wireValue}:${document.id}';
+    final requestId = _lifecycleRequestIds.putIfAbsent(
+      requestKey,
+      const Uuid().v4,
+    );
+    final result = await run(repository, requestId);
     if (_isDisposed) return false;
     var completed = false;
     await result.when(
       success: (_) async {
         completed = true;
+        _lifecycleRequestIds.remove(requestKey);
         _documentActionError = null;
         await load();
       },
       failure: (failure) async {
-        _documentActionError = failure.message;
+        final currentAccountId = accountId;
+        final warehouse = currentWarehouse;
+        if (_canOfferOfflineQueue(failure) &&
+            currentAccountId != null &&
+            warehouse != null &&
+            outboxRepository != null) {
+          _pendingOfflineSubmission = null;
+          _pendingLifecycleSubmission = _PendingLifecycleSubmission(
+            kind: kind,
+            requestId: requestId,
+            documentId: document.id,
+            accountId: currentAccountId,
+            warehouseId: warehouse.id,
+            requiresStatusProbe: failure is UnknownFailure,
+            review: OfflineSubmissionReview(
+              warehouseName: warehouse.name,
+              documentType: document.title,
+              lineCount: 0,
+              lines: [document.number],
+              staleAssumptions: const ['单据状态、库存和权限将在同步前重新校验'],
+            ),
+          );
+          _documentActionError = '网络结果不确定，确认后可保存到待同步';
+        } else {
+          _pendingLifecycleSubmission = null;
+          _documentActionError = failure.message;
+        }
       },
     );
     if (_isDisposed) return false;

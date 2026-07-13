@@ -9,11 +9,13 @@ final class StagedAttachment {
     required this.pending,
     required this.thumbnailPath,
     required this.createdAt,
+    this.sha256 = '',
   });
 
   final PendingAttachment pending;
   final String? thumbnailPath;
   final DateTime createdAt;
+  final String sha256;
 }
 
 abstract interface class AttachmentStagingStore {
@@ -40,6 +42,25 @@ abstract interface class DraftAttachmentStagingStore {
     required String userId,
     required String sourceDraftId,
     required String targetDraftId,
+    required List<String> requestIds,
+  });
+
+  Future<Result<void>> removeStagedAttachments({
+    required String userId,
+    required List<String> requestIds,
+  });
+}
+
+abstract interface class OutboxAttachmentStagingStore {
+  Future<Result<StagedAttachment>> loadStaged({
+    required String userId,
+    required String requestId,
+  });
+
+  Future<Result<void>> rebindDocumentDraft({
+    required String userId,
+    required String localAggregateId,
+    required int documentId,
     required List<String> requestIds,
   });
 

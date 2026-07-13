@@ -362,11 +362,15 @@ void main() {
         ApiClient(dio: dio, enableLogging: false),
       );
 
-      final result = await dataSource.completeDocument(7);
+      final result = await dataSource.completeDocument(
+        7,
+        requestId: 'complete-request-1',
+      );
 
       expect(result.isSuccess, isTrue);
       expect(adapter.lastPath, '/documents/7/complete');
       expect(adapter.lastData, isNull);
+      expect(adapter.lastIdempotencyKey, 'complete-request-1');
     },
   );
 
@@ -377,11 +381,15 @@ void main() {
       ApiClient(dio: dio, enableLogging: false),
     );
 
-    final result = await dataSource.confirmDocument(7);
+    final result = await dataSource.confirmDocument(
+      7,
+      requestId: 'confirm-request-1',
+    );
 
     expect(result.isSuccess, isTrue);
     expect(adapter.lastPath, '/documents/7/confirm');
     expect(adapter.lastData, isNull);
+    expect(adapter.lastIdempotencyKey, 'confirm-request-1');
   });
 
   test('settleDocument posts stocktake settle endpoint', () async {
@@ -391,11 +399,15 @@ void main() {
       ApiClient(dio: dio, enableLogging: false),
     );
 
-    final result = await dataSource.settleDocument(7);
+    final result = await dataSource.settleDocument(
+      7,
+      requestId: 'settle-request-1',
+    );
 
     expect(result.isSuccess, isTrue);
     expect(adapter.lastPath, '/documents/7/settle');
     expect(adapter.lastData, isNull);
+    expect(adapter.lastIdempotencyKey, 'settle-request-1');
   });
 
   test('listTransactions loads inventory transaction endpoint', () async {

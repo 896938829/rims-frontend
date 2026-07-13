@@ -166,9 +166,12 @@ final class _FakeDocumentsRepository
     CreateDocumentRequest request,
   ) => throw UnimplementedError();
   @override
-  Future<Result<void>> completeDocument(int id) => throw UnimplementedError();
+  Future<Result<void>> completeDocument(int id, {String? requestId}) =>
+      throw UnimplementedError();
   @override
-  Future<Result<void>> confirmDocument(int id) => throw UnimplementedError();
+  Future<Result<void>> confirmDocument(int id, {String? requestId}) =>
+      throw UnimplementedError();
   @override
-  Future<Result<void>> settleDocument(int id) => throw UnimplementedError();
+  Future<Result<void>> settleDocument(int id, {String? requestId}) =>
+      throw UnimplementedError();
 }

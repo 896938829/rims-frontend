@@ -1013,17 +1013,17 @@ final class _FakeDocumentsRepository implements DocumentsRepository {
   }
 
   @override
-  Future<Result<void>> completeDocument(int id) async {
+  Future<Result<void>> completeDocument(int id, {String? requestId}) async {
     return const Success<void>(null);
   }
 
   @override
-  Future<Result<void>> confirmDocument(int id) async {
+  Future<Result<void>> confirmDocument(int id, {String? requestId}) async {
     return const Success<void>(null);
   }
 
   @override
-  Future<Result<void>> settleDocument(int id) async {
+  Future<Result<void>> settleDocument(int id, {String? requestId}) async {
     return const Success<void>(null);
   }
 }

@@ -34,11 +34,11 @@ abstract interface class DocumentsRepository {
 
   Future<Result<DocumentRecord>> createDocument(CreateDocumentRequest request);
 
-  Future<Result<void>> completeDocument(int id);
+  Future<Result<void>> completeDocument(int id, {String? requestId});
 
-  Future<Result<void>> confirmDocument(int id);
+  Future<Result<void>> confirmDocument(int id, {String? requestId});
 
-  Future<Result<void>> settleDocument(int id);
+  Future<Result<void>> settleDocument(int id, {String? requestId});
 }
 
 abstract interface class DocumentDetailsRepository {

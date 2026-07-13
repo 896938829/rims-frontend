@@ -159,9 +159,12 @@ final class _PageRepository implements DocumentsRepository {
     CreateDocumentRequest request,
   ) async => const Success(_document);
   @override
-  Future<Result<void>> completeDocument(int id) async => const Success(null);
+  Future<Result<void>> completeDocument(int id, {String? requestId}) async =>
+      const Success(null);
   @override
-  Future<Result<void>> confirmDocument(int id) async => const Success(null);
+  Future<Result<void>> confirmDocument(int id, {String? requestId}) async =>
+      const Success(null);
   @override
-  Future<Result<void>> settleDocument(int id) async => const Success(null);
+  Future<Result<void>> settleDocument(int id, {String? requestId}) async =>
+      const Success(null);
 }

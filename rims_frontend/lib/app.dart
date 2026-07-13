@@ -39,6 +39,8 @@ import 'features/offline/data/datasources/operation_status_remote_datasource.dar
 import 'features/offline/data/repositories/drift_outbox_repository.dart';
 import 'features/offline/data/repositories/memory_outbox_repository.dart';
 import 'features/offline/data/services/connectivity_network_status_service.dart';
+import 'features/offline/data/services/attachment_outbox_handler.dart';
+import 'features/offline/data/services/document_outbox_handler.dart';
 import 'features/offline/data/repositories/cached_auth_repository.dart';
 import 'features/offline/data/repositories/cached_inventory_repository.dart';
 import 'features/offline/data/repositories/cached_documents_repository.dart';
@@ -46,6 +48,7 @@ import 'features/offline/data/repositories/cached_reports_repository.dart';
 import 'features/offline/data/repositories/drift_document_draft_repository.dart';
 import 'features/offline/domain/repositories/document_draft_repository.dart';
 import 'features/offline/domain/repositories/outbox_repository.dart';
+import 'features/offline/domain/entities/outbox_operation.dart';
 import 'features/offline/domain/services/network_status_service.dart';
 import 'features/offline/domain/services/outbox_executor.dart';
 import 'features/offline/domain/services/outbox_permission_policy.dart';
@@ -144,8 +147,11 @@ final class _MainAppState extends State<MainApp> {
         }
       },
     );
+    final attachmentsRemoteDataSource = ApiAttachmentsRemoteDataSource(
+      _apiClient,
+    );
     _attachmentsRepository = AttachmentsRepositoryImpl(
-      remoteDataSource: ApiAttachmentsRemoteDataSource(_apiClient),
+      remoteDataSource: attachmentsRemoteDataSource,
       apiBaseUri: Uri.parse(ApiEndpoints.baseUrl),
       saveDownload: (attachment, bytes) async {
         final userId = _sessionController.currentUser?.id.toString();
@@ -173,8 +179,9 @@ final class _MainAppState extends State<MainApp> {
       tokenStorage: _secureStorage,
       accountStorage: _secureStorage,
     );
+    final documentsRemoteDataSource = ApiDocumentsRemoteDataSource(_apiClient);
     final documentsRepository = DocumentsRepositoryImpl(
-      remoteDataSource: ApiDocumentsRemoteDataSource(_apiClient),
+      remoteDataSource: documentsRemoteDataSource,
     );
     _documentsRepository = CachedDocumentsRepository(
       delegate: documentsRepository,
@@ -207,11 +214,33 @@ final class _MainAppState extends State<MainApp> {
     );
     _outboxRepository = outboxRepositoryForOfflineStore(widget.offlineStore);
     _operationStatusDataSource = ApiOperationStatusRemoteDataSource(_apiClient);
+    final handlers = <OutboxOperationKind, OutboxOperationHandler>{
+      OutboxOperationKind.attachmentUpload: AttachmentOutboxHandler(
+        remoteDataSource: attachmentsRemoteDataSource,
+        stagingStore: _attachmentStagingStore,
+        draftRepository: _documentDraftRepository,
+        eventBus: _eventBus,
+      ),
+      for (final kind in const [
+        OutboxOperationKind.documentCreate,
+        OutboxOperationKind.documentComplete,
+        OutboxOperationKind.stocktakeConfirm,
+        OutboxOperationKind.stocktakeSettle,
+      ])
+        kind: DocumentOutboxHandler(
+          kind: kind,
+          remoteDataSource: documentsRemoteDataSource,
+          stagingStore: _attachmentStagingStore,
+          draftRepository: _documentDraftRepository,
+          eventBus: _eventBus,
+        ),
+      for (final handler in widget.outboxHandlers) handler.kind: handler,
+    };
     _outboxExecutor = OutboxExecutor(
       repository: _outboxRepository,
       networkStatusService: _networkStatusService,
       statusDataSource: _operationStatusDataSource,
-      handlers: widget.outboxHandlers,
+      handlers: handlers.values,
       contextReader: _outboxExecutionContext,
     );
     _adminRepository = AdminRepositoryImpl(

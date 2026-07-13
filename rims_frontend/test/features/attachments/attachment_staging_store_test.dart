@@ -8,6 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:rims_frontend/features/attachments/data/services/file_attachment_staging_store.dart';
 import 'package:rims_frontend/features/attachments/domain/entities/attachment.dart';
 import 'package:rims_frontend/features/attachments/domain/services/attachment_picker.dart';
+import 'package:rims_frontend/core/result/failure.dart';
 
 void main() {
   late Directory root;
@@ -110,6 +111,97 @@ void main() {
       );
     },
   );
+
+  test(
+    'outbox load survives reconstruction and rebinds only to server id',
+    () async {
+      await store().stage(
+        userId: '42',
+        binding: AttachmentBinding.documentDraft('stable-draft-id'),
+        selection: selection(),
+        existingCount: 0,
+      );
+
+      final rebuilt = store();
+      final before = await rebuilt.loadStaged(
+        userId: '42',
+        requestId: 'request-1',
+      );
+      before.when(
+        success: (item) {
+          expect(item.sha256, hasLength(64));
+          expect(item.pending.binding.localDraftId, 'stable-draft-id');
+        },
+        failure: (failure) => fail(failure.message),
+      );
+
+      final rebound = await rebuilt.rebindDocumentDraft(
+        userId: '42',
+        localAggregateId: 'stable-draft-id',
+        documentId: 91,
+        requestIds: const ['request-1'],
+      );
+      rebound.when(
+        success: (_) {},
+        failure: (failure) => fail(failure.message),
+      );
+      final replayedRebind = await store().rebindDocumentDraft(
+        userId: '42',
+        localAggregateId: 'stable-draft-id',
+        documentId: 91,
+        requestIds: const ['request-1'],
+      );
+      replayedRebind.when(
+        success: (_) {},
+        failure: (failure) => fail(failure.message),
+      );
+      final after = await store().loadStaged(
+        userId: '42',
+        requestId: 'request-1',
+      );
+      after.when(
+        success: (item) {
+          expect(item.pending.binding, AttachmentBinding.document(91));
+          expect(item.pending.binding.localDraftId, isNull);
+        },
+        failure: (failure) => fail(failure.message),
+      );
+    },
+  );
+
+  test('outbox load rejects missing and changed staged files', () async {
+    final staged = await store().stage(
+      userId: '42',
+      binding: AttachmentBinding.document(91),
+      selection: selection(),
+      existingCount: 0,
+    );
+    late final String path;
+    staged.when(
+      success: (item) => path = item.pending.stagedPath,
+      failure: (failure) => fail(failure.message),
+    );
+
+    await File(path).writeAsBytes([4, 3, 2, 1], flush: true);
+    final changed = await store().loadStaged(
+      userId: '42',
+      requestId: 'request-1',
+    );
+    changed.when(
+      success: (_) => fail('changed file must not load'),
+      failure: (failure) => expect(failure, isA<ValidationFailure>()),
+    );
+
+    await File(path).delete();
+    final missing = await store().loadStaged(
+      userId: '42',
+      requestId: 'request-1',
+    );
+    missing.when(
+      success: (_) => fail('missing file must not load'),
+      failure: (failure) => expect(failure, isA<ValidationFailure>()),
+    );
+  });
 
   test('manifest paths outside the user roots are quarantined', () async {
     final externalFile = File(
