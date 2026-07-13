@@ -269,7 +269,28 @@ final class AuthSessionController extends ChangeNotifier {
       }
       if (transaction
           case final OwnershipPreparedAuthSessionTransaction owned) {
-        final finalized = owned.finalizeReauthentication();
+        final Result<void> finalized;
+        try {
+          finalized = await owned.finalizeReauthentication();
+        } on Object catch (error) {
+          if (!_isCurrent(epoch)) {
+            await _abortTransaction(transaction, reportFailure: false);
+            return false;
+          }
+          return _failSessionTransaction(
+            epoch: epoch,
+            previous: previous,
+            transaction: transaction,
+            failure: LocalStorageFailure(
+              message: 'ownership finalize failed',
+              cause: error,
+            ),
+          );
+        }
+        if (!_isCurrent(epoch)) {
+          await _abortTransaction(transaction, reportFailure: false);
+          return false;
+        }
         if (finalized case FailureResult<void>(failure: final failure)) {
           return _failSessionTransaction(
             epoch: epoch,

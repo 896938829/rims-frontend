@@ -420,15 +420,149 @@ void main() {
     final abandoned = await ownership.prepareReauthentication(accountId: '7');
     expect(abandoned.report.completed, isTrue);
     expect(ownership.canAccessOfflineData('7'), isFalse);
-    abandoned.rollback();
+    expect(abandoned.rollback(), const Success<void>(null));
     expect(ownership.canSync('7'), isFalse);
 
     final accepted = await ownership.prepareReauthentication(accountId: '7');
     expect(ownership.canAccessOfflineData('7'), isFalse);
-    expect(accepted.finalize().completed, isTrue);
+    final finalized = await accepted.finalize();
+    expect(finalized, isA<Success<OfflineOwnershipReport>>());
     expect(ownership.canAccessOfflineData('7'), isTrue);
     expect(ownership.canSync('7'), isTrue);
   });
+
+  test(
+    'empty reauthentication lease cannot bypass a later global block',
+    () async {
+      final barrier = OfflineWriteBarrier();
+      final rawStore = MemoryOfflineStore();
+      final guardedStore = WriteBarrierOfflineStore(
+        delegate: rawStore,
+        barrier: barrier,
+      );
+      final ownership = _service(
+        store: rawStore,
+        scans: const _NoopScans(),
+        keys: MemoryOfflineDatabaseKeyManager(),
+        participants: [barrier],
+      );
+      final lease = await ownership.prepareReauthentication(accountId: '7');
+      final record = _ownedCacheRecord('7', 'empty-lease');
+      final global = barrier.blockMutations(const OfflineMutationScope.all());
+
+      await expectLater(
+        lease.runScopedWrite(() => guardedStore.writeCache(record)),
+        throwsA(isA<OfflineWriteBlockedException>()),
+      );
+      global.release();
+      await lease.runScopedWrite(() => guardedStore.writeCache(record));
+
+      expect(await rawStore.readCache(record.key, schemaVersion: 1), isNotNull);
+    },
+  );
+
+  test(
+    'lease permits only captured blocks and rejects a later global block',
+    () async {
+      final barrier = OfflineWriteBarrier();
+      final rawStore = MemoryOfflineStore();
+      final guardedStore = WriteBarrierOfflineStore(
+        delegate: rawStore,
+        barrier: barrier,
+      );
+      final ownership = _service(
+        store: rawStore,
+        scans: const _NoopScans(),
+        keys: MemoryOfflineDatabaseKeyManager(),
+        participants: [barrier],
+      );
+      await ownership.apply(
+        const OfflineOwnershipIntent.tokenExpiry(accountId: '7'),
+      );
+      final lease = await ownership.prepareReauthentication(accountId: '7');
+      final first = _ownedCacheRecord('7', 'captured');
+      await lease.runScopedWrite(() => guardedStore.writeCache(first));
+
+      final global = barrier.blockMutations(const OfflineMutationScope.all());
+      final second = _ownedCacheRecord('7', 'new-global');
+      await expectLater(
+        lease.runScopedWrite(() => guardedStore.writeCache(second)),
+        throwsA(isA<OfflineWriteBlockedException>()),
+      );
+      global.release();
+      await lease.runScopedWrite(() => guardedStore.writeCache(second));
+
+      expect(await rawStore.readCache(second.key, schemaVersion: 1), isNotNull);
+    },
+  );
+
+  test('scoped lease is not blocked by an unrelated account', () async {
+    final barrier = OfflineWriteBarrier();
+    final rawStore = MemoryOfflineStore();
+    final guardedStore = WriteBarrierOfflineStore(
+      delegate: rawStore,
+      barrier: barrier,
+    );
+    final ownership = _service(
+      store: rawStore,
+      scans: const _NoopScans(),
+      keys: MemoryOfflineDatabaseKeyManager(),
+      participants: [barrier],
+    );
+    final lease = await ownership.prepareReauthentication(accountId: '7');
+    final unrelated = barrier.blockMutations(
+      const OfflineMutationScope.account('8'),
+    );
+    final record = _ownedCacheRecord('7', 'unrelated');
+
+    await lease.runScopedWrite(() => guardedStore.writeCache(record));
+    unrelated.release();
+
+    expect(await rawStore.readCache(record.key, schemaVersion: 1), isNotNull);
+  });
+
+  test(
+    'finalize release failure retains a fallback guard until retry succeeds',
+    () async {
+      final barrier = OfflineWriteBarrier();
+      final throwing = _ThrowingMutationParticipant();
+      final ownership = _service(
+        store: MemoryOfflineStore(),
+        scans: const _NoopScans(),
+        keys: MemoryOfflineDatabaseKeyManager(),
+        participants: [barrier, throwing],
+      );
+      await ownership.apply(
+        const OfflineOwnershipIntent.tokenExpiry(accountId: '7'),
+      );
+      final failedLease = await ownership.prepareReauthentication(
+        accountId: '7',
+      );
+      throwing.throwOnReleaseCall = 1;
+
+      final failed = await failedLease.finalize();
+
+      expect(failed, isA<FailureResult<OfflineOwnershipReport>>());
+      expect(ownership.canAccessOfflineData('7'), isFalse);
+      expect(ownership.canSync('7'), isFalse);
+      await expectLater(
+        barrier.protect(accountId: '7', operation: () async {}),
+        throwsA(isA<OfflineWriteBlockedException>()),
+      );
+
+      throwing.throwOnReleaseCall = null;
+      final retryLease = await ownership.prepareReauthentication(
+        accountId: '7',
+      );
+      expect(
+        await retryLease.finalize(),
+        isA<Success<OfflineOwnershipReport>>(),
+      );
+      expect(ownership.canAccessOfflineData('7'), isTrue);
+      expect(ownership.canSync('7'), isTrue);
+      expect(throwing.activeBlocks, 0);
+    },
+  );
 
   test(
     'pending reauthentication lease does not release after a simulated crash',
@@ -1339,7 +1473,15 @@ void main() {
         password: 'secret',
       );
 
-      expect(successfulLogin, isA<Success<AuthSession>>());
+      expect(
+        successfulLogin,
+        isA<Success<AuthSession>>(),
+        reason: switch (successfulLogin) {
+          FailureResult<AuthSession>(failure: final failure) =>
+            '${failure.message}: ${failure.cause}',
+          _ => null,
+        },
+      );
       expect(restartedDelegate.loginCalls, 1);
       expect(storage.token, 'new-token');
       expect(storage.pendingRevocationAccountId, isNull);
@@ -1765,7 +1907,9 @@ final class _ThrowingMutationParticipant implements OfflineMutationParticipant {
   bool throwOnAcquire;
   bool throwOnWait;
   int? throwOnAcquireCall;
+  int? throwOnReleaseCall;
   int acquireCalls = 0;
+  int releaseCalls = 0;
   int activeBlocks = 0;
 
   @override
@@ -1786,8 +1930,15 @@ final class _ThrowingMutationBlock implements OfflineMutationBlock {
   bool released = false;
 
   @override
+  final Object blockId = Object();
+
+  @override
   void release() {
     if (released) return;
+    participant.releaseCalls += 1;
+    if (participant.releaseCalls == participant.throwOnReleaseCall) {
+      throw StateError('block release failed');
+    }
     released = true;
     participant.activeBlocks -= 1;
   }
@@ -1798,6 +1949,21 @@ final class _ThrowingMutationBlock implements OfflineMutationBlock {
       throw StateError('quiescence failed');
     }
   }
+}
+
+CacheRecord _ownedCacheRecord(String accountId, String entityKey) {
+  final now = DateTime.utc(2026, 7, 14);
+  return CacheRecord(
+    key: CacheKey(
+      accountId: accountId,
+      namespace: 'auth.session',
+      entityKey: entityKey,
+    ),
+    payload: const {'value': 'owned'},
+    schemaVersion: 1,
+    fetchedAt: now,
+    expiresAt: now.add(const Duration(days: 1)),
+  );
 }
 
 final class _NoopFiles implements OfflineOwnedFileStore {

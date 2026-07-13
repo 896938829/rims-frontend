@@ -197,6 +197,35 @@ void main() {
       });
     }
 
+    for (final asynchronous in [false, true]) {
+      test(
+        'ownership finalize ${asynchronous ? 'async' : 'sync'} throw is contained and abort stays typed',
+        () async {
+          final transaction = _ThrowingOwnershipPreparedTransaction(
+            asynchronous: asynchronous,
+          );
+          final controller = AuthSessionController();
+          addTearDown(controller.dispose);
+          final epoch = controller.beginAuthenticationAttempt();
+
+          expect(
+            await controller.startSession(
+              transaction.session,
+              expectedEpoch: epoch,
+              transaction: transaction,
+            ),
+            isFalse,
+          );
+
+          expect(transaction.commitCalls, 1);
+          expect(transaction.abortCalls, 1);
+          expect(controller.session, isNull);
+          expect(controller.canAuthenticateRequests, isFalse);
+          expect(controller.ownershipFailure, isA<LocalStorageFailure>());
+        },
+      );
+    }
+
     for (final invalidation in ['revoked', 'expired']) {
       test(
         'stale commit failure cannot overwrite $invalidation state',
@@ -772,6 +801,40 @@ final class _FakeAuthSessionTransaction implements AuthSessionTransaction {
   Future<Result<void>> abort() async {
     abortCalls += 1;
     return const Success(null);
+  }
+}
+
+final class _ThrowingOwnershipPreparedTransaction
+    implements AuthSessionTransaction, OwnershipPreparedAuthSessionTransaction {
+  _ThrowingOwnershipPreparedTransaction({required this.asynchronous});
+
+  final bool asynchronous;
+  int commitCalls = 0;
+  int abortCalls = 0;
+
+  @override
+  bool get hasPreparedReauthentication => true;
+
+  @override
+  AuthSession get session => _session;
+
+  @override
+  Future<Result<void>> commit() async {
+    commitCalls += 1;
+    return const Success(null);
+  }
+
+  @override
+  Future<Result<void>> finalizeReauthentication() {
+    if (!asynchronous) throw StateError('sync finalize failed');
+    return Future<Result<void>>.error(StateError('async finalize failed'));
+  }
+
+  @override
+  Future<Result<void>> abort() {
+    abortCalls += 1;
+    if (!asynchronous) throw StateError('sync abort failed');
+    return Future<Result<void>>.error(StateError('async abort failed'));
   }
 }
 

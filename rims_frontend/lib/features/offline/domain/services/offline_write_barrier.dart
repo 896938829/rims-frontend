@@ -21,11 +21,13 @@ final class OfflineWriteBlockedException implements Exception {
       'Offline writes are blocked for: ${accountIds.join(', ')}';
 }
 
-final class OfflineWriteBarrier implements OfflineMutationParticipant {
-  final Map<String, int> _accountBlocks = {};
-  int _globalBlocks = 0;
+final class OfflineWriteBarrier
+    implements OfflineScopedMutationPermitParticipant {
+  final Map<String, Set<Object>> _accountBlocks = {};
+  final Set<Object> _globalBlocks = {};
   final Map<String, int> _activeByAccount = {};
   int _activeGlobal = 0;
+  int _nextBlockId = 0;
   Completer<void> _stateChanged = Completer<void>();
 
   Future<T> protect<T>({
@@ -45,13 +47,14 @@ final class OfflineWriteBarrier implements OfflineMutationParticipant {
     if (normalized.isEmpty) {
       return Future<T>.error(ArgumentError.value(accountIds, 'accountIds'));
     }
+    final blockingIds = _blockingIdsForAccounts(normalized);
     final inherited = Zone.current[this];
-    final hasPermit = inherited is _WritePermit && inherited.covers(normalized);
-    if (!hasPermit &&
-        (_globalBlocks > 0 ||
-            normalized.any(
-              (accountId) => (_accountBlocks[accountId] ?? 0) > 0,
-            ))) {
+    final permit = inherited is _WritePermit ? inherited : null;
+    final hasPermit =
+        permit != null &&
+        permit.covers(normalized) &&
+        (permit.enteredMutation || permit.blockIds.containsAll(blockingIds));
+    if (blockingIds.isNotEmpty && !hasPermit) {
       return Future<T>.error(OfflineWriteBlockedException(normalized));
     }
     for (final accountId in normalized) {
@@ -62,12 +65,18 @@ final class OfflineWriteBarrier implements OfflineMutationParticipant {
       );
     }
     _signalStateChange();
-    final future = hasPermit
-        ? Future<T>.sync(operation)
-        : runZoned(
-            () => Future<T>.sync(operation),
-            zoneValues: {this: _WritePermit(normalized, global: false)},
+    final effectivePermit = hasPermit
+        ? permit
+        : _WritePermit(
+            accountIds: normalized,
+            global: false,
+            blockIds: blockingIds,
+            enteredMutation: true,
           );
+    final future = runZoned(
+      () => Future<T>.sync(operation),
+      zoneValues: {this: effectivePermit},
+    );
     return future.whenComplete(() {
       for (final accountId in normalized) {
         final remaining = (_activeByAccount[accountId] ?? 1) - 1;
@@ -82,21 +91,32 @@ final class OfflineWriteBarrier implements OfflineMutationParticipant {
   }
 
   Future<T> protectAll<T>(Future<T> Function() operation) {
+    final blockingIds = _allBlockingIds();
     final inherited = Zone.current[this];
-    final hasPermit = inherited is _WritePermit && inherited.global;
-    if (!hasPermit && (_globalBlocks > 0 || _accountBlocks.isNotEmpty)) {
+    final permit = inherited is _WritePermit ? inherited : null;
+    final hasPermit =
+        permit != null &&
+        permit.global &&
+        (permit.enteredMutation || permit.blockIds.containsAll(blockingIds));
+    if (blockingIds.isNotEmpty && !hasPermit) {
       return Future<T>.error(
         OfflineWriteBlockedException(_accountBlocks.keys.toSet()),
       );
     }
     _activeGlobal += 1;
     _signalStateChange();
-    final future = hasPermit
-        ? Future<T>.sync(operation)
-        : runZoned(
-            () => Future<T>.sync(operation),
-            zoneValues: {this: const _WritePermit({}, global: true)},
+    final effectivePermit = hasPermit
+        ? permit
+        : _WritePermit(
+            accountIds: const {},
+            global: true,
+            blockIds: blockingIds,
+            enteredMutation: true,
           );
+    final future = runZoned(
+      () => Future<T>.sync(operation),
+      zoneValues: {this: effectivePermit},
+    );
     return future.whenComplete(() {
       _activeGlobal -= 1;
       _signalStateChange();
@@ -105,20 +125,46 @@ final class OfflineWriteBarrier implements OfflineMutationParticipant {
 
   @override
   OfflineMutationBlock blockMutations(OfflineMutationScope scope) {
+    final blockId = ++_nextBlockId;
     if (scope.allAccounts) {
-      _globalBlocks += 1;
+      _globalBlocks.add(blockId);
     } else {
       for (final accountId in scope.resolvedAccountIds) {
-        _accountBlocks.update(
-          accountId,
-          (value) => value + 1,
-          ifAbsent: () => 1,
-        );
+        _accountBlocks.putIfAbsent(accountId, () => {}).add(blockId);
       }
     }
     _signalStateChange();
-    return _OfflineWriteBarrierBlock(this, scope);
+    return _OfflineWriteBarrierBlock(this, scope, blockId);
   }
+
+  @override
+  Future<T> runWithMutationPermit<T>({
+    required OfflineMutationScope scope,
+    required Set<Object> blockIds,
+    required Future<T> Function() operation,
+  }) {
+    if (blockIds.isEmpty) return Future<T>.sync(operation);
+    final permit = _WritePermit(
+      accountIds: scope.resolvedAccountIds,
+      global: scope.allAccounts,
+      blockIds: Set<Object>.unmodifiable(blockIds),
+      enteredMutation: false,
+    );
+    return runZoned(
+      () => Future<T>.sync(operation),
+      zoneValues: {this: permit},
+    );
+  }
+
+  Set<Object> _blockingIdsForAccounts(Set<String> accountIds) => {
+    ..._globalBlocks,
+    for (final accountId in accountIds) ...?_accountBlocks[accountId],
+  };
+
+  Set<Object> _allBlockingIds() => {
+    ..._globalBlocks,
+    for (final blocks in _accountBlocks.values) ...blocks,
+  };
 
   Future<void> _waitForQuiescence(OfflineMutationScope scope) async {
     while (_hasActive(scope)) {
@@ -136,17 +182,14 @@ final class OfflineWriteBarrier implements OfflineMutationParticipant {
     );
   }
 
-  void _release(OfflineMutationScope scope) {
+  void _release(OfflineMutationScope scope, Object blockId) {
     if (scope.allAccounts) {
-      _globalBlocks -= 1;
+      _globalBlocks.remove(blockId);
     } else {
       for (final accountId in scope.resolvedAccountIds) {
-        final remaining = (_accountBlocks[accountId] ?? 1) - 1;
-        if (remaining == 0) {
-          _accountBlocks.remove(accountId);
-        } else {
-          _accountBlocks[accountId] = remaining;
-        }
+        final blocks = _accountBlocks[accountId];
+        blocks?.remove(blockId);
+        if (blocks?.isEmpty ?? false) _accountBlocks.remove(accountId);
       }
     }
     _signalStateChange();
@@ -160,20 +203,29 @@ final class OfflineWriteBarrier implements OfflineMutationParticipant {
 }
 
 final class _WritePermit {
-  const _WritePermit(this.accountIds, {required this.global});
+  const _WritePermit({
+    required this.accountIds,
+    required this.global,
+    required this.blockIds,
+    required this.enteredMutation,
+  });
 
   final Set<String> accountIds;
   final bool global;
+  final Set<Object> blockIds;
+  final bool enteredMutation;
 
   bool covers(Set<String> requested) =>
       global || requested.every(accountIds.contains);
 }
 
 final class _OfflineWriteBarrierBlock implements OfflineMutationBlock {
-  _OfflineWriteBarrierBlock(this._barrier, this._scope);
+  _OfflineWriteBarrierBlock(this._barrier, this._scope, this.blockId);
 
   final OfflineWriteBarrier _barrier;
   final OfflineMutationScope _scope;
+  @override
+  final Object blockId;
   bool _released = false;
 
   @override
@@ -183,7 +235,7 @@ final class _OfflineWriteBarrierBlock implements OfflineMutationBlock {
   void release() {
     if (_released) return;
     _released = true;
-    _barrier._release(_scope);
+    _barrier._release(_scope, blockId);
   }
 }
 

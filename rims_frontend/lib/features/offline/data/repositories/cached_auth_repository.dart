@@ -248,10 +248,20 @@ final class CachedAuthRepository
     required String username,
     required String password,
   }) async {
+    final configuredCoordinator = ownershipCoordinator;
     final operationEpoch = authEpochReader?.call();
     final pendingFailure = await _retryPendingRevocation();
     if (pendingFailure != null) return FailureResult(pendingFailure);
     await _clearAbandonedPendingToken();
+    if (configuredCoordinator != null &&
+        configuredCoordinator is! OfflineReauthenticationCoordinator) {
+      return const FailureResult(
+        LocalStorageFailure(
+          message:
+              'Offline ownership coordinator does not support provisional reauthentication.',
+        ),
+      );
+    }
     final Result<AuthSessionTransaction> prepared;
     if (delegate case final TransactionalAuthRepository transactional) {
       prepared = await transactional.prepareLogin(
@@ -294,52 +304,51 @@ final class CachedAuthRepository
         }
       }
       OfflineReauthenticationLease? reauthenticationLease;
-      final coordinator = ownershipCoordinator;
+      final coordinator = configuredCoordinator;
       if (coordinator case final OfflineReauthenticationCoordinator preparer) {
         reauthenticationLease = await preparer.prepareReauthentication(
           accountId: accountId,
         );
         if (!reauthenticationLease.report.completed) {
-          reauthenticationLease.rollback();
+          _safeRollbackLease(reauthenticationLease);
           await upstream.abort();
           return FailureResult(
             _ownershipFailureFrom(reauthenticationLease.report),
           );
         }
-      } else {
-        final reauthenticationFailure = await _applyOwnership(
-          OfflineOwnershipIntent.reauthenticated(accountId: accountId),
-        );
-        if (reauthenticationFailure != null) {
-          await upstream.abort();
-          return FailureResult(reauthenticationFailure);
-        }
       }
       if (!_isCurrentEpoch(operationEpoch)) {
-        reauthenticationLease?.rollback();
+        _safeRollbackLease(reauthenticationLease);
         await upstream.abort();
         return _staleSessionFailure();
       }
       final projectionId = authTransactionOwnerFactory();
       try {
-        await _writeSession(
+        Future<CacheRecord> writeProjection() => _writeSession(
           data,
           expectedEpoch: operationEpoch,
           projectionId: projectionId,
-          privilegedOwnershipWrite: reauthenticationLease != null,
         );
+        if (reauthenticationLease == null) {
+          await writeProjection();
+        } else {
+          await reauthenticationLease.runScopedWrite(writeProjection);
+        }
       } on _StaleAuthOperation {
-        reauthenticationLease?.rollback();
+        _safeRollbackLease(reauthenticationLease);
         await upstream.abort();
         return _staleSessionFailure();
       } on Object {
-        reauthenticationLease?.rollback();
         await upstream.abort();
-        await _rollbackFailedSessionProjection(
-          accountId,
-          projectionId,
-          propagateFailure: true,
+        await _runWithLease(
+          reauthenticationLease,
+          () => _rollbackFailedSessionProjection(
+            accountId,
+            projectionId,
+            propagateFailure: true,
+          ),
         );
+        _safeRollbackLease(reauthenticationLease);
         rethrow;
       }
       return Success(
@@ -367,7 +376,18 @@ final class CachedAuthRepository
       return FailureResult(failure);
     }
     if (transaction case final OwnershipPreparedAuthSessionTransaction owned) {
-      final finalized = owned.finalizeReauthentication();
+      final Result<void> finalized;
+      try {
+        finalized = await owned.finalizeReauthentication();
+      } on Object catch (error) {
+        await transaction.abort();
+        return FailureResult(
+          LocalStorageFailure(
+            message: 'Unable to finalize authentication ownership.',
+            cause: error,
+          ),
+        );
+      }
       if (finalized case FailureResult<void>(failure: final failure)) {
         await transaction.abort();
         return FailureResult(failure);
@@ -465,7 +485,6 @@ final class CachedAuthRepository
     AuthSession session, {
     int? expectedEpoch,
     String? projectionId,
-    bool privilegedOwnershipWrite = false,
   }) async {
     if (!_isCurrentEpoch(expectedEpoch)) throw const _StaleAuthOperation();
     final fetchedAt = now().toUtc();
@@ -482,12 +501,8 @@ final class CachedAuthRepository
       fetchedAt: fetchedAt,
       expiresAt: CachePolicy.references.expiresAt(fetchedAt),
     );
-    final projectionStore =
-        privilegedOwnershipWrite && store is WriteBarrierOfflineStore
-        ? (store as WriteBarrierOfflineStore).delegate
-        : store;
-    await projectionStore.writeCache(record);
-    await projectionStore.enforceCacheLimit(
+    await store.writeCache(record);
+    await store.enforceCacheLimit(
       accountId: accountId,
       warehouseId: null,
       namespace: _namespace,
@@ -534,11 +549,7 @@ final class CachedAuthRepository
       if (projectionId == null) {
         await _deleteSessionProjection(accountId);
       } else {
-        final projectionStore = store is WriteBarrierOfflineStore
-            ? (store as WriteBarrierOfflineStore).delegate
-            : store;
-        if (projectionStore
-            case final ConditionalCacheRecordStorage conditional) {
+        if (store case final ConditionalCacheRecordStorage conditional) {
           await conditional.deleteCacheRecordIfPayloadMatches(
             key: _cacheKey(accountId),
             schemaVersion: CachePolicy.references.schemaVersion,
@@ -627,6 +638,9 @@ final class CachedAuthRepository
     }
     try {
       await _deleteSessionProjection(accountId);
+    } on OfflineWriteBlockedException {
+      // A same-process revocation retry can inherit the fail-closed barrier
+      // established only after this projection was already quarantined.
     } on Object catch (error) {
       firstError ??= error;
     }
@@ -742,6 +756,27 @@ final class CachedAuthRepository
     );
   }
 
+  Result<void> _safeRollbackLease(OfflineReauthenticationLease? lease) {
+    if (lease == null) return const Success(null);
+    try {
+      return lease.rollback();
+    } on Object catch (error) {
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to roll back reauthentication ownership.',
+          cause: error,
+        ),
+      );
+    }
+  }
+
+  Future<T> _runWithLease<T>(
+    OfflineReauthenticationLease? lease,
+    Future<T> Function() operation,
+  ) => lease == null
+      ? Future<T>.sync(operation)
+      : lease.runScopedWrite(operation);
+
   Future<Failure?> _preparePermissionRefresh(AuthSession session) async {
     final accountId = session.user.id.toString();
     final record = await store.readCache(
@@ -780,10 +815,7 @@ final class CachedAuthRepository
       expected == null || authEpochReader?.call() == expected;
 
   Future<void> _deleteSessionProjection(String accountId) {
-    final projectionStore = store is WriteBarrierOfflineStore
-        ? (store as WriteBarrierOfflineStore).delegate
-        : store;
-    return projectionStore.deleteCacheNamespace(
+    return store.deleteCacheNamespace(
       accountId: accountId,
       namespace: _namespace,
     );
@@ -820,17 +852,24 @@ final class _CachedAuthSessionTransaction
   bool get hasPreparedReauthentication => reauthenticationLease != null;
 
   @override
-  Result<void> finalizeReauthentication() {
+  Future<Result<void>> finalizeReauthentication() async {
     final lease = reauthenticationLease;
     if (lease == null) return const Success(null);
-    final report = lease.finalize();
-    if (report.completed) return const Success(null);
-    return FailureResult(
-      LocalStorageFailure(
-        message: report.failures.map((failure) => failure.message).join(' '),
-        cause: report,
-      ),
-    );
+    try {
+      final finalized = await lease.finalize();
+      return switch (finalized) {
+        Success<OfflineOwnershipReport>() => const Success(null),
+        FailureResult<OfflineOwnershipReport>(failure: final failure) =>
+          FailureResult(failure),
+      };
+    } on Object catch (error) {
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to finalize reauthentication ownership.',
+          cause: error,
+        ),
+      );
+    }
   }
 
   @override
@@ -847,23 +886,36 @@ final class _CachedAuthSessionTransaction
       );
     }
     if (result is Success<void>) return result;
-    reauthenticationLease?.rollback();
+    Failure? projectionFailure;
     try {
-      await rollbackProjection();
-      return result;
+      await _runProjectionRollback();
     } on Object catch (error) {
-      return FailureResult(
-        LocalStorageFailure(
-          message: 'Unable to roll back the failed authentication session.',
-          cause: error,
-        ),
+      projectionFailure = LocalStorageFailure(
+        message: 'Unable to roll back the failed authentication session.',
+        cause: error,
       );
     }
+    final leaseFailure = _rollbackLease();
+    if (projectionFailure == null && leaseFailure == null) return result;
+    final originalFailure = switch (result) {
+      FailureResult<void>(failure: final failure) => failure,
+      _ => null,
+    };
+    return FailureResult(
+      LocalStorageFailure(
+        message: [
+          if (originalFailure != null) originalFailure.message,
+          if (projectionFailure != null) projectionFailure.message,
+          if (leaseFailure != null) leaseFailure.message,
+        ].join(' '),
+        cause: [originalFailure, projectionFailure, leaseFailure],
+      ),
+    );
   }
 
   @override
   Future<Result<void>> abort() async {
-    reauthenticationLease?.rollback();
+    final failures = <Failure>[];
     Result<void> upstreamResult;
     try {
       upstreamResult = await upstream.abort();
@@ -875,17 +927,51 @@ final class _CachedAuthSessionTransaction
         ),
       );
     }
+    if (upstreamResult case FailureResult<void>(failure: final failure)) {
+      failures.add(failure);
+    }
     try {
-      await rollbackProjection();
-      return upstreamResult;
+      await _runProjectionRollback();
     } on Object catch (error) {
-      return FailureResult(
+      failures.add(
         LocalStorageFailure(
           message: 'Unable to roll back the local session projection.',
           cause: error,
         ),
       );
     }
+    final leaseFailure = _rollbackLease();
+    if (leaseFailure != null) failures.add(leaseFailure);
+    if (failures.isEmpty) return const Success(null);
+    return FailureResult(
+      LocalStorageFailure(
+        message: failures.map((failure) => failure.message).join(' '),
+        cause: failures,
+      ),
+    );
+  }
+
+  Failure? _rollbackLease() {
+    final lease = reauthenticationLease;
+    if (lease == null) return null;
+    try {
+      return switch (lease.rollback()) {
+        Success<void>() => null,
+        FailureResult<void>(failure: final failure) => failure,
+      };
+    } on Object catch (error) {
+      return LocalStorageFailure(
+        message: 'Unable to roll back reauthentication ownership.',
+        cause: error,
+      );
+    }
+  }
+
+  Future<void> _runProjectionRollback() {
+    final lease = reauthenticationLease;
+    return lease == null
+        ? rollbackProjection()
+        : lease.runScopedWrite(rollbackProjection);
   }
 }
 

@@ -27,7 +27,7 @@ abstract interface class AuthSessionTransaction {
 abstract interface class OwnershipPreparedAuthSessionTransaction {
   bool get hasPreparedReauthentication;
 
-  Result<void> finalizeReauthentication();
+  Future<Result<void>> finalizeReauthentication();
 }
 
 abstract interface class TransactionalAuthRepository {

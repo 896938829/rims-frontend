@@ -759,13 +759,13 @@ final class _BlockingMutationParticipant implements OfflineMutationParticipant {
 }
 
 final class _BlockingMutationBlock implements OfflineMutationBlock {
-  const _BlockingMutationBlock({
-    required this.started,
-    required this.releaseGate,
-  });
+  _BlockingMutationBlock({required this.started, required this.releaseGate});
 
   final Completer<void> started;
   final Completer<void> releaseGate;
+
+  @override
+  final Object blockId = Object();
 
   @override
   void release() {}

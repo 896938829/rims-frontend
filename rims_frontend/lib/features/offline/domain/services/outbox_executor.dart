@@ -931,6 +931,9 @@ final class _ExecutorMutationBlock implements OfflineMutationBlock {
   bool _released = false;
 
   @override
+  final Object blockId = Object();
+
+  @override
   Future<void> waitForQuiescence() => executor._waitForScope(scope);
 
   @override

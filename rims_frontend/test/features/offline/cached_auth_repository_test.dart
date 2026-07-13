@@ -997,6 +997,104 @@ void main() {
     },
   );
 
+  test(
+    'transactional login fails closed when ownership lacks provisional capability',
+    () async {
+      final storage = _FakeSessionStorage();
+      final delegate = _ConcurrentLoginAuthRepository(storage);
+      final repository = CachedAuthRepository(
+        delegate: delegate,
+        store: MemoryOfflineStore(),
+        tokenStorage: storage,
+        accountStorage: storage,
+        revocationStorage: storage,
+        ownershipCoordinator: _ApplyOnlyOwnershipCoordinator(),
+        onSessionRevoked: () {},
+      );
+
+      final result = await repository.prepareLogin(
+        username: 'bob',
+        password: 'secret',
+      );
+
+      expect(result, isA<FailureResult<AuthSessionTransaction>>());
+      expect(
+        (result as FailureResult<AuthSessionTransaction>).failure,
+        isA<LocalStorageFailure>(),
+      );
+      expect(delegate.prepareCalls, 0);
+      expect(await storage.readAccessToken(), isNull);
+    },
+  );
+
+  test(
+    'finalize release failure aborts committed credential and projection',
+    () async {
+      final barrier = OfflineWriteBarrier();
+      final throwing = _ReleaseThrowingParticipant();
+      final rawStore = MemoryOfflineStore();
+      final ownership = OfflineOwnershipService(
+        store: rawStore,
+        files: const _NoopOwnedFiles(),
+        scans: const _NoopOwnedScans(),
+        reviews: const _NoopReviewInvalidator(),
+        databaseKeys: MemoryOfflineDatabaseKeyManager(),
+        mutationParticipants: [barrier, throwing],
+      );
+      await ownership.apply(
+        const OfflineOwnershipIntent.tokenExpiry(accountId: '8'),
+      );
+      final storage = _FakeSessionStorage();
+      final repository = CachedAuthRepository(
+        delegate: _ConcurrentLoginAuthRepository(storage),
+        store: WriteBarrierOfflineStore(delegate: rawStore, barrier: barrier),
+        tokenStorage: storage,
+        accountStorage: storage,
+        revocationStorage: storage,
+        ownershipCoordinator: ownership,
+        authTransactionOwnerFactory: () => 'projection-release-failure',
+        onSessionRevoked: () {},
+      );
+      final controller = AuthSessionController(ownershipCoordinator: ownership);
+      addTearDown(controller.dispose);
+      final epoch = controller.beginAuthenticationAttempt();
+      final prepared = await repository.prepareLogin(
+        username: 'bob',
+        password: 'secret',
+      );
+      final transaction = (prepared as Success<AuthSessionTransaction>).data;
+      throwing.throwOnRelease = true;
+
+      expect(
+        await controller.startSession(
+          transaction.session,
+          expectedEpoch: epoch,
+          transaction: transaction,
+        ),
+        isFalse,
+      );
+
+      expect(storage.committedOwnerIds, isNotEmpty);
+      expect(await storage.readAccessToken(), isNull);
+      expect(storage.accountId, isNull);
+      expect((await rawStore.inspectAccount('8')).cacheEntries, 0);
+      expect(controller.session, isNull);
+      expect(controller.ownershipFailure, isA<LocalStorageFailure>());
+      expect(ownership.canAccessOfflineData('8'), isFalse);
+      expect(ownership.canSync('8'), isFalse);
+      final restarted = CachedAuthRepository(
+        delegate: _ConcurrentLoginAuthRepository(storage),
+        store: rawStore,
+        tokenStorage: storage,
+        accountStorage: storage,
+        revocationStorage: storage,
+        onSessionRevoked: () {},
+      );
+      expect(await restarted.restoreSession(), isA<Success<AuthSession?>>());
+      expect(_sessionFrom(await restarted.restoreSession()), isNull);
+    },
+  );
+
   test('aborted cached login keeps the reauthentication block', () async {
     final barrier = OfflineWriteBarrier();
     final rawStore = MemoryOfflineStore();
@@ -1611,7 +1709,7 @@ CachedAuthRepository _repository(
 }
 
 final class _RecordingOwnershipCoordinator
-    implements OfflineOwnershipCoordinator {
+    implements OfflineOwnershipCoordinator, OfflineReauthenticationCoordinator {
   final List<OfflineOwnershipIntent> intents = [];
   Completer<void>? blocker;
   bool failNext = false;
@@ -1646,10 +1744,38 @@ final class _RecordingOwnershipCoordinator
 
   @override
   bool canSync(String accountId) => true;
+
+  @override
+  Future<OfflineReauthenticationLease> prepareReauthentication({
+    required String accountId,
+  }) async {
+    final report = await apply(
+      OfflineOwnershipIntent.reauthenticated(accountId: accountId),
+    );
+    return _RecordingReauthenticationLease(report);
+  }
+}
+
+final class _ApplyOnlyOwnershipCoordinator
+    implements OfflineOwnershipCoordinator {
+  @override
+  Future<OfflineOwnershipReport> apply(OfflineOwnershipIntent intent) async =>
+      OfflineOwnershipReport(
+        reason: intent.reason,
+        accountId: intent.accountId,
+        executedCounts: const OfflineOwnershipCounts(),
+        failures: const [],
+      );
+
+  @override
+  bool canAccessOfflineData(String accountId) => true;
+
+  @override
+  bool canSync(String accountId) => true;
 }
 
 final class _AccountFailingOwnershipCoordinator
-    implements OfflineOwnershipCoordinator {
+    implements OfflineOwnershipCoordinator, OfflineReauthenticationCoordinator {
   _AccountFailingOwnershipCoordinator(this.failRevocationsFor);
 
   final Set<String> failRevocationsFor;
@@ -1679,6 +1805,33 @@ final class _AccountFailingOwnershipCoordinator
 
   @override
   bool canSync(String accountId) => true;
+
+  @override
+  Future<OfflineReauthenticationLease> prepareReauthentication({
+    required String accountId,
+  }) async {
+    final report = await apply(
+      OfflineOwnershipIntent.reauthenticated(accountId: accountId),
+    );
+    return _RecordingReauthenticationLease(report);
+  }
+}
+
+final class _RecordingReauthenticationLease
+    implements OfflineReauthenticationLease {
+  const _RecordingReauthenticationLease(this.report);
+
+  @override
+  final OfflineOwnershipReport report;
+
+  @override
+  Future<Result<OfflineOwnershipReport>> finalize() async => Success(report);
+
+  @override
+  Result<void> rollback() => const Success(null);
+
+  @override
+  Future<T> runScopedWrite<T>(Future<T> Function() operation) => operation();
 }
 
 AuthSession? _sessionFrom(Result<AuthSession?> result) {
@@ -2079,6 +2232,7 @@ final class _ConcurrentLoginAuthRepository
   final Completer<void> aliceStarted = Completer<void>();
   final Completer<void> releaseAlice = Completer<void>();
   bool bobFails = false;
+  int prepareCalls = 0;
   int _ownerSequence = 0;
 
   @override
@@ -2106,6 +2260,7 @@ final class _ConcurrentLoginAuthRepository
     required String username,
     required String password,
   }) async {
+    prepareCalls += 1;
     _ownerSequence += 1;
     final ownerId = _ownerSequence == 1 ? 'owner-a' : 'owner-b';
     final attemptVersion = await storage.beginAccessTokenAttempt(ownerId);
@@ -2146,6 +2301,38 @@ final class _ConcurrentLoginAuthRepository
   @override
   Future<Result<Warehouse>> switchCurrentWarehouse(Warehouse warehouse) async =>
       Success(warehouse);
+}
+
+final class _ReleaseThrowingParticipant implements OfflineMutationParticipant {
+  bool throwOnRelease = false;
+  int activeBlocks = 0;
+
+  @override
+  OfflineMutationBlock blockMutations(OfflineMutationScope scope) {
+    activeBlocks += 1;
+    return _ReleaseThrowingBlock(this);
+  }
+}
+
+final class _ReleaseThrowingBlock implements OfflineMutationBlock {
+  _ReleaseThrowingBlock(this.participant);
+
+  final _ReleaseThrowingParticipant participant;
+  bool released = false;
+
+  @override
+  final Object blockId = Object();
+
+  @override
+  void release() {
+    if (released) return;
+    if (participant.throwOnRelease) throw StateError('release failed');
+    released = true;
+    participant.activeBlocks -= 1;
+  }
+
+  @override
+  Future<void> waitForQuiescence() async {}
 }
 
 final class _FakeStoredSessionTransaction implements AuthSessionTransaction {

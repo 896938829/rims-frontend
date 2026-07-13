@@ -1,5 +1,8 @@
 import 'dart:async';
 
+import '../../../../core/result/failure.dart';
+import '../../../../core/result/result.dart';
+
 enum OfflineOwnershipReason {
   logout,
   accountSwitch,
@@ -305,6 +308,8 @@ final class OfflineMutationScope {
 }
 
 abstract interface class OfflineMutationBlock {
+  Object get blockId;
+
   Future<void> waitForQuiescence();
 
   void release();
@@ -312,6 +317,15 @@ abstract interface class OfflineMutationBlock {
 
 abstract interface class OfflineMutationParticipant {
   OfflineMutationBlock blockMutations(OfflineMutationScope scope);
+}
+
+abstract interface class OfflineScopedMutationPermitParticipant
+    implements OfflineMutationParticipant {
+  Future<T> runWithMutationPermit<T>({
+    required OfflineMutationScope scope,
+    required Set<Object> blockIds,
+    required Future<T> Function() operation,
+  });
 }
 
 final class MemoryOfflineDatabaseKeyManager
@@ -335,9 +349,11 @@ abstract interface class OfflineOwnershipCoordinator {
 abstract interface class OfflineReauthenticationLease {
   OfflineOwnershipReport get report;
 
-  OfflineOwnershipReport finalize();
+  Future<Result<OfflineOwnershipReport>> finalize();
 
-  void rollback();
+  Result<void> rollback();
+
+  Future<T> runScopedWrite<T>(Future<T> Function() operation);
 }
 
 abstract interface class OfflineReauthenticationCoordinator {
@@ -373,6 +389,8 @@ final class OfflineOwnershipService
   final Map<String, Map<_OwnershipBlockKey, int>>
   _successfulAttemptGenerations = {};
   final Map<String, List<_ParticipantBlock>> _retainedCommandBlocks = {};
+  final Map<String, List<_ParticipantBlock>> _reauthenticationFallbackBlocks =
+      {};
   Future<void> _tail = Future<void>.value();
   int _previewSequence = 0;
   int _attemptGeneration = 0;
@@ -633,6 +651,7 @@ final class OfflineOwnershipService
       accountId: accountId,
       report: report,
       generations: captured,
+      permitBlocks: _permitBlocksFor(accountId, captured),
     );
   });
 
@@ -818,6 +837,7 @@ final class OfflineOwnershipService
           blocks.add(
             _ParticipantBlock(
               scope: scope,
+              participant: participant,
               block: participant.blockMutations(scope),
             ),
           );
@@ -1137,16 +1157,18 @@ final class OfflineOwnershipService
     if (latest?.isEmpty ?? false) _latestAttemptGenerations.remove(accountId);
   }
 
-  OfflineOwnershipReport _finalizeReauthentication(
+  Future<Result<OfflineOwnershipReport>> _finalizeReauthentication(
     _OfflineReauthenticationLease lease,
-  ) {
-    if (!lease.report.completed) return lease.report;
+  ) => _serialized(() async {
+    if (!lease.report.completed) {
+      return FailureResult(_failureFromReport(lease.report));
+    }
     for (final entry in lease.generations) {
       if (_latestAttemptGenerations[lease.accountId]?[entry.key] !=
               entry.generation ||
           _successfulAttemptGenerations[lease.accountId]?[entry.key] !=
               entry.generation) {
-        return OfflineOwnershipReport(
+        final report = OfflineOwnershipReport(
           reason: OfflineOwnershipReason.reauthenticated,
           accountId: lease.accountId,
           executedCounts: lease.report.executedCounts,
@@ -1157,11 +1179,80 @@ final class OfflineOwnershipService
             ),
           ],
         );
+        return FailureResult(_failureFromReport(report));
       }
     }
+
+    late final List<_ParticipantBlock> guard;
+    try {
+      guard = _beginMutationBlocks([
+        OfflineMutationScope.account(lease.accountId),
+      ]);
+    } on Object catch (error) {
+      final report = _reauthenticationFailureReport(
+        lease,
+        'Unable to acquire the reauthentication fallback guard.',
+        error,
+      );
+      return FailureResult(_failureFromReport(report));
+    }
+    for (final entry in guard) {
+      entry.retained = true;
+    }
+    final previousFallback =
+        _reauthenticationFallbackBlocks[lease.accountId] ?? const [];
+    _reauthenticationFallbackBlocks[lease.accountId] = [
+      ...previousFallback,
+      ...guard,
+    ];
+    lease._replacePermitBlocks(
+      _permitBlocksFor(lease.accountId, lease.generations),
+    );
+    final waitFailures = <OfflineOwnershipFailure>[];
+    await _waitForMutationBlocks(guard, waitFailures);
+    if (waitFailures.isNotEmpty) {
+      final report = OfflineOwnershipReport(
+        reason: OfflineOwnershipReason.reauthenticated,
+        accountId: lease.accountId,
+        executedCounts: lease.report.executedCounts,
+        failures: waitFailures,
+      );
+      return FailureResult(_failureFromReport(report));
+    }
+
+    try {
+      for (final entry in lease.generations) {
+        final retained =
+            _retainedMutationBlocks[lease.accountId]?[entry.key]?[entry
+                .generation];
+        if (retained != null) {
+          _releaseMutationBlocks(retained, includeRetained: true);
+        }
+      }
+      _releaseMutationBlocks(previousFallback, includeRetained: true);
+      final orderedGuard = [...guard]
+        ..sort((left, right) {
+          final leftPermit =
+              left.participant is OfflineScopedMutationPermitParticipant;
+          final rightPermit =
+              right.participant is OfflineScopedMutationPermitParticipant;
+          if (leftPermit == rightPermit) return 0;
+          return leftPermit ? 1 : -1;
+        });
+      _releaseMutationBlocks(orderedGuard, includeRetained: true);
+    } on Object catch (error) {
+      final report = _reauthenticationFailureReport(
+        lease,
+        'Unable to release reauthentication ownership guards.',
+        error,
+      );
+      return FailureResult(_failureFromReport(report));
+    }
+
+    _reauthenticationFallbackBlocks.remove(lease.accountId);
     for (final entry in lease.generations) {
       _unblockGeneration(lease.accountId, entry.key, entry.generation);
-      _releaseRetainedMutationBlocks(
+      _removeRetainedMutationBlocks(
         lease.accountId,
         entry.key,
         entry.generation,
@@ -1175,8 +1266,86 @@ final class OfflineOwnershipService
         _successfulAttemptGenerations.remove(lease.accountId);
       }
     }
-    return lease.report;
+    return Success(lease.report);
+  });
+
+  Map<OfflineScopedMutationPermitParticipant, Set<Object>> _permitBlocksFor(
+    String accountId,
+    List<_ReauthenticationGeneration> generations,
+  ) {
+    final permits = <OfflineScopedMutationPermitParticipant, Set<Object>>{};
+    void collect(Iterable<_ParticipantBlock> blocks) {
+      for (final entry in blocks) {
+        final participant = entry.participant;
+        if (participant is OfflineScopedMutationPermitParticipant) {
+          permits.putIfAbsent(participant, () => {}).add(entry.block.blockId);
+        }
+      }
+    }
+
+    for (final entry in generations) {
+      collect(
+        _retainedMutationBlocks[accountId]?[entry.key]?[entry.generation] ??
+            const [],
+      );
+    }
+    collect(_reauthenticationFallbackBlocks[accountId] ?? const []);
+    return {
+      for (final entry in permits.entries)
+        entry.key: Set<Object>.unmodifiable(entry.value),
+    };
   }
+
+  Future<T> _runScopedWrite<T>(
+    _OfflineReauthenticationLease lease,
+    Future<T> Function() operation,
+  ) {
+    Future<T> Function() scoped = operation;
+    for (final entry in lease.permitBlocks.entries) {
+      final inner = scoped;
+      scoped = () => entry.key.runWithMutationPermit(
+        scope: OfflineMutationScope.account(lease.accountId),
+        blockIds: entry.value,
+        operation: inner,
+      );
+    }
+    return scoped();
+  }
+
+  void _removeRetainedMutationBlocks(
+    String accountId,
+    _OwnershipBlockKey key,
+    int generation,
+  ) {
+    final byReason = _retainedMutationBlocks[accountId];
+    final byGeneration = byReason?[key];
+    byGeneration?.remove(generation);
+    if (byGeneration?.isEmpty ?? false) byReason?.remove(key);
+    if (byReason?.isEmpty ?? false) _retainedMutationBlocks.remove(accountId);
+  }
+
+  OfflineOwnershipReport _reauthenticationFailureReport(
+    _OfflineReauthenticationLease lease,
+    String message,
+    Object error,
+  ) => OfflineOwnershipReport(
+    reason: OfflineOwnershipReason.reauthenticated,
+    accountId: lease.accountId,
+    executedCounts: lease.report.executedCounts,
+    failures: [
+      OfflineOwnershipFailure(
+        step: OfflineOwnershipStep.mutationQuiescence,
+        message: message,
+        cause: error,
+      ),
+    ],
+  );
+
+  LocalStorageFailure _failureFromReport(OfflineOwnershipReport report) =>
+      LocalStorageFailure(
+        message: report.failures.map((failure) => failure.message).join(' '),
+        cause: report,
+      );
 
   Future<void> _clearAccount(
     String accountId, {
@@ -1333,9 +1502,14 @@ final class OfflineOwnershipService
 }
 
 final class _ParticipantBlock {
-  _ParticipantBlock({required this.scope, required this.block});
+  _ParticipantBlock({
+    required this.scope,
+    required this.participant,
+    required this.block,
+  });
 
   final OfflineMutationScope scope;
+  final OfflineMutationParticipant participant;
   final OfflineMutationBlock block;
   bool retained = false;
 }
@@ -1385,6 +1559,7 @@ final class _OfflineReauthenticationLease
     required this.accountId,
     required this.report,
     required this.generations,
+    required this.permitBlocks,
   });
 
   final OfflineOwnershipService service;
@@ -1392,13 +1567,22 @@ final class _OfflineReauthenticationLease
   @override
   final OfflineOwnershipReport report;
   final List<_ReauthenticationGeneration> generations;
+  Map<OfflineScopedMutationPermitParticipant, Set<Object>> permitBlocks;
   _ReauthenticationLeaseState _state = _ReauthenticationLeaseState.pending;
 
+  void _replacePermitBlocks(
+    Map<OfflineScopedMutationPermitParticipant, Set<Object>> value,
+  ) {
+    permitBlocks = value;
+  }
+
   @override
-  OfflineOwnershipReport finalize() {
-    if (_state == _ReauthenticationLeaseState.finalized) return report;
+  Future<Result<OfflineOwnershipReport>> finalize() async {
+    if (_state == _ReauthenticationLeaseState.finalized) {
+      return Success(report);
+    }
     if (_state == _ReauthenticationLeaseState.rolledBack) {
-      return OfflineOwnershipReport(
+      final failed = OfflineOwnershipReport(
         reason: OfflineOwnershipReason.reauthenticated,
         accountId: accountId,
         executedCounts: report.executedCounts,
@@ -1409,19 +1593,49 @@ final class _OfflineReauthenticationLease
           ),
         ],
       );
+      return FailureResult(service._failureFromReport(failed));
     }
-    final finalized = service._finalizeReauthentication(this);
-    if (finalized.completed) {
-      _state = _ReauthenticationLeaseState.finalized;
+    try {
+      final finalized = await service._finalizeReauthentication(this);
+      if (finalized is Success<OfflineOwnershipReport>) {
+        _state = _ReauthenticationLeaseState.finalized;
+      }
+      return finalized;
+    } on Object catch (error) {
+      final failed = service._reauthenticationFailureReport(
+        this,
+        'Unable to finalize reauthentication ownership.',
+        error,
+      );
+      return FailureResult(service._failureFromReport(failed));
     }
-    return finalized;
   }
 
   @override
-  void rollback() {
-    if (_state == _ReauthenticationLeaseState.pending) {
-      _state = _ReauthenticationLeaseState.rolledBack;
+  Result<void> rollback() {
+    try {
+      if (_state == _ReauthenticationLeaseState.pending) {
+        _state = _ReauthenticationLeaseState.rolledBack;
+      }
+      return const Success(null);
+    } on Object catch (error) {
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to roll back reauthentication ownership.',
+          cause: error,
+        ),
+      );
     }
+  }
+
+  @override
+  Future<T> runScopedWrite<T>(Future<T> Function() operation) {
+    if (_state != _ReauthenticationLeaseState.pending || !report.completed) {
+      return Future<T>.error(
+        StateError('Reauthentication ownership lease is not active.'),
+      );
+    }
+    return service._runScopedWrite(this, operation);
   }
 }
 
