@@ -8,6 +8,7 @@ param(
   [string]$BackendDir = $env:RIMS_BACKEND_DIR,
   [string]$BackendWorkspaceRoot = $env:RIMS_BACKEND_WORKSPACE_ROOT,
   [int]$BackendPort = 8080,
+  [int]$FaultProxyPort = 0,
   [string]$ReportPath,
   [string]$ArtifactRoot,
   [switch]$TestMode,
@@ -16,7 +17,8 @@ param(
   [string]$TestEmulatorOwnership = 'pre-existing',
   [switch]$TestPreExistingRuntime,
   [string]$CleanupRecordPath,
-  [ValidateSet('baseline', 'field-operations')]
+  [string]$M11CommandRecordPath,
+  [ValidateSet('baseline', 'field-operations', 'offline-sync')]
   [string]$Phase = 'baseline'
 )
 
@@ -72,16 +74,35 @@ if ($TestMode -and $FailStep -notin @(
 if ($KeepRunning) {
   throw 'Android smoke does not support -KeepRunning because its host bridge must remain exactly owned.'
 }
+if ($FaultProxyPort -eq 0) { $FaultProxyPort = $BackendPort + 1 }
+if ($FaultProxyPort -eq $BackendPort -or
+    $FaultProxyPort -lt 1 -or
+    $FaultProxyPort -gt 65535) {
+  throw 'FaultProxyPort must be a valid port distinct from BackendPort.'
+}
 
-$apiBaseUrl = "http://10.0.2.2:$BackendPort/api/v1"
-$integrationTestPath = if ($Phase -eq 'field-operations') {
-  'integration_test/m10_field_operations_test.dart'
-} else { 'integration_test/app_e2e_test.dart' }
+$effectiveApiPort = if ($Phase -eq 'offline-sync') {
+  $FaultProxyPort
+} else { $BackendPort }
+$apiBaseUrl = "http://10.0.2.2:$effectiveApiPort/api/v1"
+$integrationTestPath = switch ($Phase) {
+  'field-operations' { 'integration_test/m10_field_operations_test.dart' }
+  'offline-sync' { 'integration_test/m11_offline_sync_test.dart' }
+  default { 'integration_test/app_e2e_test.dart' }
+}
 $fieldDefines = if ($Phase -eq 'field-operations') {
   @(
     '--dart-define=RIMS_E2E_FIELD_OPERATIONS=true',
     '--dart-define=RIMS_E2E_BARCODE=M10-ACTIVE-001',
     '--dart-define=RIMS_E2E_PICKED_FILE=provider-file'
+  )
+} else { @() }
+$offlineDefines = if ($Phase -eq 'offline-sync') {
+  @(
+    '--dart-define=RIMS_E2E_M11=true',
+    "--dart-define=RIMS_E2E_M11_FAULT_CONTROL_URL=http://10.0.2.2:$FaultProxyPort/__rims_m11",
+    '--dart-define=RIMS_E2E_FIELD_OPERATIONS=true',
+    '--dart-define=RIMS_E2E_PICKED_FILE=m11-offline-attachment'
   )
 } else { @() }
 $failureArtifactNames = @(
@@ -92,6 +113,9 @@ $failureArtifactNames = @(
 )
 if ($Phase -eq 'field-operations') {
   $failureArtifactNames += 'upload-provider-log'
+}
+if ($Phase -eq 'offline-sync') {
+  $failureArtifactNames += @('fault-proxy-log', 'offline-database-evidence')
 }
 $plan = [pscustomobject][ordered]@{
   schemaVersion = 1
@@ -110,7 +134,7 @@ $plan = [pscustomobject][ordered]@{
     $integrationTestPath,
     '-d', '<resolved-serial>',
     "--dart-define=API_BASE_URL=$apiBaseUrl"
-  ) + $fieldDefines
+  ) + $fieldDefines + $offlineDefines
   deviceActions = if ($Phase -eq 'field-operations') {
     @(
       'camera-deny',
@@ -120,13 +144,38 @@ $plan = [pscustomobject][ordered]@{
       'network-disable-enable',
       'provider-cleanup'
     )
+  } elseif ($Phase -eq 'offline-sync') {
+    @(
+      'airplane-enable-restore',
+      'latency-enable-restore',
+      'packet-loss-enable-restore',
+      'api-unreachable-enable-restore',
+      'wifi-disable-enable',
+      'process-recreation',
+      'stale-session',
+      'stale-permission',
+      'duplicate-delivery',
+      'server-conflict',
+      'database-corruption-quarantine'
+    )
   } else { @() }
   readinessChecks = @('windows-healthz', 'emulator-healthz')
   failureArtifacts = $failureArtifactNames
+  faultProxy = if ($Phase -eq 'offline-sync') {
+    [pscustomobject][ordered]@{
+      listenPort = $FaultProxyPort
+      upstreamPort = $BackendPort
+      ownership = 'start-and-stop-exact-owned-process'
+      controlPath = '/__rims_m11'
+    }
+  } else { $null }
   cleanup = [pscustomobject][ordered]@{
     preExistingDevice = 'preserve'
     controllerStartedDevice = 'stop-only-on-pid-and-start-time-match'
     hostBridge = 'stop-only-on-pid-and-start-time-match'
+    adbNetworkState = if ($Phase -eq 'offline-sync') {
+      'restore-in-finally'
+    } else { 'not-applicable' }
   }
 }
 
@@ -203,6 +252,9 @@ $fieldPermissionHelper = $null
 $fieldPermissionHelperPath = Join-Path $ArtifactRoot 'grant-camera-after-launch.ps1'
 $flutterOutputPath = Join-Path $ArtifactRoot 'flutter-output.log'
 $uploadProviderLogPath = Join-Path $ArtifactRoot 'upload-provider.log'
+$faultProxyLogPath = Join-Path $ArtifactRoot 'fault-proxy.log'
+$databaseEvidencePath = Join-Path $ArtifactRoot 'offline-database-evidence.log'
+$faultProxyHelperPath = Join-Path $ArtifactRoot 'm11-fault-proxy.ps1'
 $failureArtifacts = [pscustomobject][ordered]@{
   deviceScreenshot = $null
   filteredLogcat = $null
@@ -215,6 +267,10 @@ if ($Phase -eq 'field-operations') {
     -Name uploadProviderLog `
     -Value $uploadProviderLogPath
 }
+if ($Phase -eq 'offline-sync') {
+  $failureArtifacts | Add-Member -MemberType NoteProperty -Name faultProxyLog -Value $faultProxyLogPath
+  $failureArtifacts | Add-Member -MemberType NoteProperty -Name databaseEvidence -Value $databaseEvidencePath
+}
 $baselineRestore = [pscustomobject][ordered]@{
   attempted = $false
   ok = $false
@@ -226,6 +282,21 @@ $hostBridgeCleanup = [pscustomobject][ordered]@{
   error = ''
 }
 $artifactCollection = [pscustomobject][ordered]@{
+  attempted = $false
+  ok = $true
+  error = ''
+}
+$faultProxyProcess = $null
+$faultProxyIdentity = $null
+$m11Commands = [Collections.Generic.List[string]]::new()
+$initialAirplaneMode = $null
+$initialWifiEnabled = $null
+$adbStateRestore = [pscustomobject][ordered]@{
+  attempted = $false
+  ok = $true
+  error = ''
+}
+$faultProxyCleanup = [pscustomobject][ordered]@{
   attempted = $false
   ok = $true
   error = ''
@@ -334,6 +405,439 @@ function Invoke-Adb {
     -TimeoutSeconds $TimeoutSeconds
 }
 
+function Add-M11Command {
+  param([string]$Name)
+  if ($Phase -eq 'offline-sync') { [void]$script:m11Commands.Add($Name) }
+}
+
+function Get-M11AdbText {
+  param([string[]]$Arguments)
+  $result = Invoke-Adb -Arguments (@('-s', $androidSerial) + $Arguments)
+  if ($result.ExitCode -ne 0) {
+    throw "ADB state command failed: $($Arguments -join ' ') $($result.StandardError)"
+  }
+  return ([string]$result.StandardOutput).Trim()
+}
+
+function Start-M11FaultProxy {
+  if ($Phase -ne 'offline-sync') { return }
+  Add-M11Command 'snapshot-airplane-mode'
+  Add-M11Command 'snapshot-wifi'
+  if ($TestMode) {
+    $script:initialAirplaneMode = '0'
+    $script:initialWifiEnabled = $true
+    $script:faultProxyIdentity = [pscustomobject][ordered]@{
+      owned = $true
+      windowsPid = 4343
+      windowsProcessStartTimeUtc = '2026-07-14T00:00:00Z'
+      listenAddress = '127.0.0.1'
+      listenPort = $FaultProxyPort
+      upstreamPort = $BackendPort
+      controlPath = '/__rims_m11'
+    }
+    Add-M11Command "start-owned-fault-proxy:$FaultProxyPort"
+    return
+  }
+  $script:initialAirplaneMode = Get-M11AdbText @(
+    'shell', 'settings', 'get', 'global', 'airplane_mode_on'
+  )
+  $wifiStatus = Get-M11AdbText @('shell', 'cmd', 'wifi', 'status')
+  $script:initialWifiEnabled = $wifiStatus -match '(?i)enabled'
+  $adb = Resolve-RimsAndroidTool `
+    -CommandName 'adb.exe' `
+    -SdkRelativePath 'platform-tools\adb.exe'
+  $source = @'
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+
+public static class RimsM11FaultProxy {
+  static readonly object Gate = new object();
+  static string mode = "normal";
+  static int delayMs = 0;
+  static string adb;
+  static string serial;
+  static string logPath;
+  static int upstreamPort;
+  static int networkGeneration = 0;
+  static int activeNetworkActions = 0;
+
+  public static void Run(int listenPort, int backendPort, string adbPath,
+      string deviceSerial, string outputPath) {
+    upstreamPort = backendPort;
+    adb = adbPath;
+    serial = deviceSerial;
+    logPath = outputPath;
+    Log("proxy-start listen=" + listenPort + " upstream=" + backendPort);
+    var listener = new TcpListener(IPAddress.Loopback, listenPort);
+    listener.Start();
+    while (true) {
+      var client = listener.AcceptTcpClient();
+      Task.Run(() => Handle(client));
+    }
+  }
+
+  static void Handle(TcpClient client) {
+    using (client) {
+      try {
+        var request = ReadRequest(client.GetStream());
+        if (request == null) return;
+        var header = Encoding.ASCII.GetString(request, 0,
+          FindHeaderEnd(request) + 4);
+        var firstLine = header.Split(new[] { "\r\n" },
+          StringSplitOptions.None)[0];
+        var parts = firstLine.Split(' ');
+        var path = parts.Length > 1 ? parts[1] : "/";
+        if (path.StartsWith("/__rims_m11", StringComparison.Ordinal)) {
+          HandleControl(client.GetStream(), path);
+          return;
+        }
+        string active;
+        int activeDelay;
+        lock (Gate) {
+          active = mode;
+          activeDelay = delayMs;
+          if (active.EndsWith("-next", StringComparison.Ordinal)) mode = "normal";
+        }
+        if (activeDelay > 0) Thread.Sleep(activeDelay);
+        Log("request mode=" + active + " path=" + path);
+        if (active == "packet-loss-next") return;
+        if (active == "unreachable") {
+          WriteJson(client.GetStream(), 503, "Service Unavailable",
+            "{\"ok\":false,\"fault\":\"unreachable\"}");
+          return;
+        }
+        if (active == "stale-session-next") {
+          WriteJson(client.GetStream(), 401, "Unauthorized",
+            "{\"code\":\"AUTHENTICATION_REQUIRED\",\"message\":\"Injected stale session\"}");
+          return;
+        }
+        if (active == "stale-permission-next") {
+          WriteJson(client.GetStream(), 403, "Forbidden",
+            "{\"code\":\"PERMISSION_DENIED\",\"message\":\"Injected stale permission\"}");
+          return;
+        }
+        if (active == "server-conflict-next") {
+          WriteJson(client.GetStream(), 409, "Conflict",
+            "{\"code\":\"CONFLICT\",\"message\":\"Injected server conflict\"}");
+          return;
+        }
+        if (active == "unknown-response-next") {
+          Forward(request, null);
+          return;
+        }
+        Forward(request, client.GetStream());
+        if (active == "duplicate-delivery-next") Forward(request, null);
+      } catch (Exception error) {
+        Log("proxy-error " + error.GetType().Name + " " + error.Message);
+      }
+    }
+  }
+
+  static void HandleControl(NetworkStream stream, string path) {
+    var action = Query(path, "action") ?? "status";
+    Log("control action=" + action);
+    var waitForNetworkActions = false;
+    lock (Gate) {
+      switch (action) {
+        case "reset":
+          mode = "normal";
+          delayMs = 0;
+          networkGeneration++;
+          waitForNetworkActions = true;
+          break;
+        case "latency": delayMs = ParseInt(Query(path, "delayMs"), 750); break;
+        case "latency-off": delayMs = 0; break;
+        case "packet-loss": mode = "packet-loss-next"; break;
+        case "unreachable": mode = "unreachable"; break;
+        case "unreachable-off": mode = "normal"; break;
+        case "stale-session": mode = "stale-session-next"; break;
+        case "stale-permission": mode = "stale-permission-next"; break;
+        case "unknown-response": mode = "unknown-response-next"; break;
+        case "duplicate-delivery": mode = "duplicate-delivery-next"; break;
+        case "server-conflict": mode = "server-conflict-next"; break;
+      }
+    }
+    if (waitForNetworkActions) WaitForNetworkActions();
+    if (action == "airplane-mode") {
+      ScheduleNetworkAction(
+        "shell cmd connectivity airplane-mode enable",
+        "shell cmd connectivity airplane-mode disable",
+        ParseInt(Query(path, "restoreMs"), 3000));
+    } else if (action == "wifi-switch") {
+      ScheduleNetworkAction(
+        "shell svc wifi disable",
+        "shell svc wifi enable",
+        ParseInt(Query(path, "restoreMs"), 1500));
+    }
+    string current;
+    int currentDelay;
+    lock (Gate) { current = mode; currentDelay = delayMs; }
+    WriteJson(stream, 200, "OK", "{\"ok\":true,\"mode\":\"" +
+      current + "\",\"delayMs\":" + currentDelay + "}");
+  }
+
+  static void Forward(byte[] request, NetworkStream destination) {
+    using (var upstream = ConnectUpstream()) {
+      var stream = upstream.GetStream();
+      var normalized = ForceConnectionClose(request);
+      stream.Write(normalized, 0, normalized.Length);
+      var buffer = new byte[32768];
+      int read;
+      while ((read = stream.Read(buffer, 0, buffer.Length)) > 0) {
+        if (destination != null) destination.Write(buffer, 0, read);
+      }
+    }
+  }
+
+  static TcpClient ConnectUpstream() {
+    try {
+      var ipv4 = new TcpClient(AddressFamily.InterNetwork);
+      ipv4.Connect(IPAddress.Loopback, upstreamPort);
+      return ipv4;
+    } catch {
+      var ipv6 = new TcpClient(AddressFamily.InterNetworkV6);
+      ipv6.Connect(IPAddress.IPv6Loopback, upstreamPort);
+      return ipv6;
+    }
+  }
+
+  static byte[] ReadRequest(NetworkStream stream) {
+    var data = new List<byte>();
+    var one = new byte[1];
+    while (FindHeaderEnd(data.ToArray()) < 0) {
+      if (stream.Read(one, 0, 1) == 0) return null;
+      data.Add(one[0]);
+      if (data.Count > 1024 * 1024) throw new InvalidDataException("header too large");
+    }
+    var bytes = data.ToArray();
+    var headerEnd = FindHeaderEnd(bytes);
+    var header = Encoding.ASCII.GetString(bytes, 0, headerEnd + 4);
+    var contentLength = 0;
+    foreach (var line in header.Split(new[] { "\r\n" }, StringSplitOptions.None)) {
+      if (line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase))
+        int.TryParse(line.Substring(line.IndexOf(':') + 1).Trim(), out contentLength);
+    }
+    while (data.Count < headerEnd + 4 + contentLength) {
+      var buffer = new byte[Math.Min(32768, headerEnd + 4 + contentLength - data.Count)];
+      var read = stream.Read(buffer, 0, buffer.Length);
+      if (read == 0) break;
+      for (var i = 0; i < read; i++) data.Add(buffer[i]);
+    }
+    return data.ToArray();
+  }
+
+  static int FindHeaderEnd(byte[] data) {
+    for (var i = 0; i + 3 < data.Length; i++)
+      if (data[i] == 13 && data[i + 1] == 10 && data[i + 2] == 13 && data[i + 3] == 10) return i;
+    return -1;
+  }
+
+  static byte[] ForceConnectionClose(byte[] request) {
+    var end = FindHeaderEnd(request);
+    var header = Encoding.ASCII.GetString(request, 0, end);
+    var lines = new List<string>();
+    foreach (var line in header.Split(new[] { "\r\n" }, StringSplitOptions.None))
+      if (!line.StartsWith("Connection:", StringComparison.OrdinalIgnoreCase)) lines.Add(line);
+    lines.Add("Connection: close");
+    var replaced = Encoding.ASCII.GetBytes(string.Join("\r\n", lines) + "\r\n\r\n");
+    var result = new byte[replaced.Length + request.Length - end - 4];
+    Buffer.BlockCopy(replaced, 0, result, 0, replaced.Length);
+    Buffer.BlockCopy(request, end + 4, result, replaced.Length, request.Length - end - 4);
+    return result;
+  }
+
+  static void WriteJson(NetworkStream stream, int status, string label, string json) {
+    var body = Encoding.UTF8.GetBytes(json);
+    var header = Encoding.ASCII.GetBytes("HTTP/1.1 " + status + " " + label +
+      "\r\nContent-Type: application/json\r\nContent-Length: " + body.Length +
+      "\r\nConnection: close\r\n\r\n");
+    stream.Write(header, 0, header.Length);
+    stream.Write(body, 0, body.Length);
+  }
+
+  static string Query(string path, string name) {
+    var index = path.IndexOf('?');
+    if (index < 0) return null;
+    foreach (var pair in path.Substring(index + 1).Split('&')) {
+      var bits = pair.Split(new[] { '=' }, 2);
+      if (Uri.UnescapeDataString(bits[0]) == name)
+        return bits.Length > 1 ? Uri.UnescapeDataString(bits[1]) : "";
+    }
+    return null;
+  }
+
+  static int ParseInt(string value, int fallback) {
+    int parsed;
+    return int.TryParse(value, out parsed) ? parsed : fallback;
+  }
+
+  static void ScheduleNetworkAction(
+      string faultArguments, string restoreArguments, int restoreMs) {
+    int generation;
+    lock (Gate) {
+      generation = ++networkGeneration;
+      activeNetworkActions++;
+    }
+    Task.Run(async () => {
+      try {
+        if (!await DelayWhileCurrent(generation, 150)) return;
+        RunAdb(faultArguments);
+        if (!await DelayWhileCurrent(generation, restoreMs)) return;
+        RunAdb(restoreArguments);
+      } finally {
+        lock (Gate) activeNetworkActions--;
+      }
+    });
+  }
+
+  static async Task<bool> DelayWhileCurrent(int generation, int milliseconds) {
+    var remaining = Math.Max(0, milliseconds);
+    while (remaining > 0) {
+      var delay = Math.Min(25, remaining);
+      await Task.Delay(delay);
+      remaining -= delay;
+      lock (Gate) if (generation != networkGeneration) return false;
+    }
+    lock (Gate) return generation == networkGeneration;
+  }
+
+  static void WaitForNetworkActions() {
+    var deadline = DateTime.UtcNow.AddSeconds(10);
+    while (DateTime.UtcNow < deadline) {
+      lock (Gate) if (activeNetworkActions == 0) return;
+      Thread.Sleep(25);
+    }
+    throw new TimeoutException("network fault action did not stop after reset");
+  }
+
+  static void RunAdb(string arguments) {
+    try {
+      var info = new ProcessStartInfo(adb, "-s \"" + serial + "\" " + arguments) {
+        UseShellExecute = false, CreateNoWindow = true,
+        RedirectStandardOutput = true, RedirectStandardError = true
+      };
+      using (var process = Process.Start(info)) {
+        if (!process.WaitForExit(30000)) {
+          process.Kill();
+          process.WaitForExit();
+          throw new TimeoutException("adb network command timed out");
+        }
+        Log("adb exit=" + process.ExitCode + " args=" + arguments);
+      }
+    } catch (Exception error) { Log("adb-error " + error.Message); }
+  }
+
+  static void Log(string line) {
+    lock (Gate) File.AppendAllText(logPath,
+      DateTimeOffset.UtcNow.ToString("o") + " " + line + Environment.NewLine);
+  }
+}
+'@
+  $helper = @"
+param([int]`$ListenPort, [int]`$BackendPort, [string]`$Adb, [string]`$Serial, [string]`$LogPath)
+`$ErrorActionPreference = 'Stop'
+Add-Type -TypeDefinition @'
+$source
+'@
+[RimsM11FaultProxy]::Run(`$ListenPort, `$BackendPort, `$Adb, `$Serial, `$LogPath)
+"@
+  New-Item -ItemType Directory -Force -Path $ArtifactRoot | Out-Null
+  Set-Content -LiteralPath $faultProxyHelperPath -Value $helper -Encoding UTF8
+  $helperArguments = @(
+    '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $faultProxyHelperPath,
+    '-ListenPort', "$FaultProxyPort", '-BackendPort', "$BackendPort",
+    '-Adb', $adb, '-Serial', $androidSerial, '-LogPath', $faultProxyLogPath
+  ) | ForEach-Object { ConvertTo-RimsWindowsCommandLineArgument -Value "$_" }
+  $script:faultProxyProcess = Start-Process `
+    -FilePath (Join-Path $PSHOME 'powershell.exe') `
+    -ArgumentList ($helperArguments -join ' ') `
+    -WindowStyle Hidden `
+    -PassThru
+  $script:faultProxyIdentity = [pscustomobject][ordered]@{
+    owned = $true
+    windowsPid = $script:faultProxyProcess.Id
+    windowsProcessStartTimeUtc = $script:faultProxyProcess.StartTime.ToUniversalTime().ToString('o')
+    listenAddress = '127.0.0.1'
+    listenPort = $FaultProxyPort
+    upstreamPort = $BackendPort
+    controlPath = '/__rims_m11'
+  }
+  Add-M11Command "start-owned-fault-proxy:$FaultProxyPort"
+  $deadline = [DateTime]::UtcNow.AddSeconds(20)
+  do {
+    if ($script:faultProxyProcess.HasExited) {
+      throw 'M11 fault proxy exited before becoming ready.'
+    }
+    try {
+      $status = Invoke-RestMethod `
+        -Uri "http://127.0.0.1:$FaultProxyPort/__rims_m11?action=status" `
+        -TimeoutSec 2
+      if ($status.ok -eq $true) { return }
+    } catch { }
+    Start-Sleep -Milliseconds 200
+  } while ([DateTime]::UtcNow -lt $deadline)
+  throw 'M11 fault proxy did not become ready.'
+}
+
+function Restore-M11FaultHarness {
+  if ($Phase -ne 'offline-sync') { return }
+  $script:adbStateRestore.attempted = $true
+  $restoreErrors = [Collections.Generic.List[string]]::new()
+  Add-M11Command 'reset-fault-proxy'
+  Add-M11Command 'restore-airplane-mode'
+  Add-M11Command 'restore-wifi'
+  Add-M11Command 'stop-owned-fault-proxy'
+  if (-not $TestMode -and $null -ne $faultProxyIdentity) {
+    try {
+      [void](Invoke-RestMethod `
+          -Uri "http://127.0.0.1:$FaultProxyPort/__rims_m11?action=reset" `
+          -TimeoutSec 12)
+    } catch { [void]$restoreErrors.Add("proxy reset: $($_.Exception.Message)") }
+    try {
+      $airplaneAction = if ($initialAirplaneMode -eq '1') { 'enable' } else { 'disable' }
+      [void](Get-M11AdbText @('shell', 'cmd', 'connectivity', 'airplane-mode', $airplaneAction))
+    } catch { [void]$restoreErrors.Add("airplane mode: $($_.Exception.Message)") }
+    try {
+      $wifiAction = if ($initialWifiEnabled) { 'enable' } else { 'disable' }
+      [void](Get-M11AdbText @('shell', 'svc', 'wifi', $wifiAction))
+    } catch { [void]$restoreErrors.Add("wifi: $($_.Exception.Message)") }
+  }
+  $script:faultProxyCleanup.attempted = $true
+  if (-not $TestMode -and $null -ne $faultProxyProcess) {
+    try {
+      $process = Get-Process -Id $faultProxyIdentity.windowsPid -ErrorAction SilentlyContinue
+      if ($null -ne $process) {
+        $actualStart = $process.StartTime.ToUniversalTime().ToString('o')
+        if ($actualStart -ne $faultProxyIdentity.windowsProcessStartTimeUtc) {
+          throw 'M11 fault proxy PID was reused; cleanup refused.'
+        }
+        if (-not $process.HasExited) {
+          $process.Kill()
+          if (-not $process.WaitForExit(5000)) { throw 'M11 fault proxy did not stop.' }
+        }
+      }
+    } catch { [void]$restoreErrors.Add("proxy stop: $($_.Exception.Message)") }
+    $faultProxyProcess.Dispose()
+    $script:faultProxyProcess = $null
+  }
+  Remove-Item -LiteralPath $faultProxyHelperPath -Force -ErrorAction SilentlyContinue
+  $script:adbStateRestore.ok = $restoreErrors.Count -eq 0
+  $script:adbStateRestore.error = $restoreErrors -join '; '
+  $script:faultProxyCleanup.ok = $restoreErrors.Count -eq 0
+  $script:faultProxyCleanup.error = $restoreErrors -join '; '
+  if ($restoreErrors.Count -gt 0 -and $script:firstExitCode -eq 0) {
+    $script:firstExitCode = 1
+    $script:failedStep = 'baseline-restore'
+  }
+}
+
 function Invoke-AndroidFlutterTest {
   $flutter = Resolve-RimsCommandPath -Name 'flutter'
   if ([string]::IsNullOrWhiteSpace($flutter)) {
@@ -343,7 +847,7 @@ function Invoke-AndroidFlutterTest {
     'test', '--no-pub', $integrationTestPath,
     '-d', $androidSerial,
     "--dart-define=API_BASE_URL=$apiBaseUrl"
-  ) + $fieldDefines
+  ) + $fieldDefines + $offlineDefines
   $flutterCommand = (@($flutter) + $flutterArguments | ForEach-Object {
       ConvertTo-RimsWindowsCommandLineArgument -Value "$_"
     }) -join ' '
@@ -523,6 +1027,10 @@ function Collect-AndroidFailureArtifacts {
         -Value 'test upload provider' `
         -Encoding UTF8
     }
+    if ($Phase -eq 'offline-sync') {
+      Set-Content -LiteralPath $faultProxyLogPath -Value 'test fault proxy' -Encoding UTF8
+      Set-Content -LiteralPath $databaseEvidencePath -Value 'test database evidence' -Encoding UTF8
+    }
   } else {
     if (-not [string]::IsNullOrWhiteSpace($androidSerial)) {
       $remoteScreenshot = '/sdcard/rims-android-smoke-failure.png'
@@ -577,6 +1085,18 @@ function Collect-AndroidFailureArtifacts {
         'provider=compile-time deterministic selection',
         'cleanup=owned by integration process and baseline restore'
       ) | Add-Content -LiteralPath $uploadProviderLogPath -Encoding UTF8
+    }
+    if ($Phase -eq 'offline-sync') {
+      if (-not (Test-Path -LiteralPath $faultProxyLogPath -PathType Leaf)) {
+        Set-Content `
+          -LiteralPath $faultProxyLogPath `
+          -Value 'Fault proxy did not start before failure.' `
+          -Encoding UTF8
+      }
+      Set-Content `
+        -LiteralPath $databaseEvidencePath `
+        -Value 'Database evidence is emitted by the M11 integration result.' `
+        -Encoding UTF8
     }
   }
   if (-not (Test-Path -LiteralPath $screenshot -PathType Leaf)) {
@@ -730,6 +1250,18 @@ function Invoke-AndroidArtifactCollection {
 
 function Restore-AndroidBaseline {
   $script:baselineRestore.attempted = $true
+  try {
+    Restore-M11FaultHarness
+  } catch {
+    $script:adbStateRestore.ok = $false
+    $script:adbStateRestore.error = $_.Exception.Message
+    $script:faultProxyCleanup.ok = $false
+    $script:faultProxyCleanup.error = $_.Exception.Message
+    if ($script:firstExitCode -eq 0) {
+      $script:firstExitCode = 1
+      $script:failedStep = 'baseline-restore'
+    }
+  }
   if ($TestMode) {
     $action = if ($TestPreExistingRuntime) {
       'preserve-runtime'
@@ -810,6 +1342,7 @@ function Write-AndroidReport {
     finishedAt = [DateTimeOffset]::Now.ToString('o')
     frontendCommit = $frontendCommit
     backendCommit = $backendCommit
+    runtimeOwnedByRun = [bool]$script:runtimeOwnedByRun
     androidDevice = $AndroidDevice
     androidSerial = $script:androidSerial
     apiBaseUrl = $apiBaseUrl
@@ -818,6 +1351,9 @@ function Write-AndroidReport {
     e2e = $script:e2eData
     hostBridge = $script:hostBridgeIdentity
     hostBridgeCleanup = $hostBridgeCleanup
+    faultProxy = $script:faultProxyIdentity
+    faultProxyCleanup = $faultProxyCleanup
+    adbStateRestore = $adbStateRestore
     baselineRestore = $baselineRestore
     artifactCollection = $artifactCollection
     failureArtifacts = $failureArtifacts
@@ -873,6 +1409,11 @@ try {
           '2026-07-12T00:00:00Z'
         } else { $null }
       }
+    }
+    if ($TestMode -and
+        $name -eq 'android-integration-test' -and
+        $Phase -eq 'offline-sync') {
+      Start-M11FaultProxy
     }
     $action = switch ($name) {
       'doctor-android' {
@@ -935,6 +1476,7 @@ try {
       'emulator-healthz' { { Test-EmulatorHealthz } }
       'android-integration-test' {
         {
+          Start-M11FaultProxy
           New-Item -ItemType Directory -Force -Path $ArtifactRoot | Out-Null
           [void](Invoke-Adb -Arguments @('-s', $androidSerial, 'logcat', '-c'))
           Invoke-FieldOperationsDeviceSetup
@@ -991,6 +1533,16 @@ try {
   if ($firstExitCode -ne 0 -and -not $artifactCollection.attempted) {
     Invoke-AndroidArtifactCollection
   }
+}
+
+if (-not [string]::IsNullOrWhiteSpace($M11CommandRecordPath)) {
+  $m11RecordDirectory = Split-Path -Parent $M11CommandRecordPath
+  if (-not [string]::IsNullOrWhiteSpace($m11RecordDirectory)) {
+    New-Item -ItemType Directory -Force -Path $m11RecordDirectory | Out-Null
+  }
+  @($m11Commands) | ConvertTo-Json | Set-Content `
+    -LiteralPath $M11CommandRecordPath `
+    -Encoding UTF8
 }
 
 $reportTemporary = "$ReportPath.tmp-$PID"

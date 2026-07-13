@@ -19,13 +19,14 @@ $localText = Get-Content -LiteralPath $localScript -Raw
 $webWrapperText = Get-Content `
   -LiteralPath (Join-Path $scriptDir 'rims_web_e2e.ps1') `
   -Raw
+$androidWrapperText = Get-Content -LiteralPath $wrapper -Raw
 if (-not $localText.Contains("'rims_android_smoke.ps1'")) {
   throw 'rims_local smoke does not delegate to the Android wrapper.'
 }
 if (-not $localText.Contains("@('-AndroidDevice', `$AndroidDevice)")) {
   throw 'rims_local smoke does not pass the explicit Android AVD.'
 }
-foreach ($text in @($webWrapperText, (Get-Content -LiteralPath $wrapper -Raw))) {
+foreach ($text in @($webWrapperText, $androidWrapperText)) {
   if (-not $text.Contains("'acceptance-smoke.lock'")) {
     throw 'Web and Android smoke must share the acceptance runtime lock.'
   }
@@ -139,6 +140,55 @@ Assert-Equal `
   -Actual (@($fieldPlan.failureArtifacts) -join '|') `
   -Expected 'device-screenshot|filtered-logcat|backend-log-tails|flutter-output|upload-provider-log' `
   -Message 'M10 upload failure evidence.'
+
+$offlinePlan = (& $wrapper `
+    -ListPlan `
+    -Phase 'offline-sync' `
+    -AndroidDevice 'Medium_Phone_API_36.1' `
+    -BackendPort 18080 `
+    -FaultProxyPort 18081 `
+    -Output Json) -join "`n" | ConvertFrom-Json
+Assert-Equal `
+  -Actual $offlinePlan.phase `
+  -Expected 'offline-sync' `
+  -Message 'M11 Android phase.'
+Assert-Equal `
+  -Actual $offlinePlan.apiBaseUrl `
+  -Expected 'http://10.0.2.2:18081/api/v1' `
+  -Message 'M11 fault-proxy API URL.'
+if (@($offlinePlan.command | Where-Object {
+      $_ -eq 'integration_test/m11_offline_sync_test.dart'
+    }).Count -ne 1) {
+  throw 'M11 Android command omitted the offline-sync integration test.'
+}
+foreach ($cancellationContract in @(
+    'networkGeneration',
+    'WaitForNetworkActions'
+  )) {
+  if (-not $androidWrapperText.Contains($cancellationContract)) {
+    throw "M11 fault proxy omitted cancellation contract '$cancellationContract'."
+  }
+}
+foreach ($define in @(
+    '--dart-define=RIMS_E2E_M11=true',
+    '--dart-define=RIMS_E2E_M11_FAULT_CONTROL_URL=http://10.0.2.2:18081/__rims_m11'
+  )) {
+  if (@($offlinePlan.command | Where-Object { $_ -eq $define }).Count -ne 1) {
+    throw "M11 Android command omitted '$define'."
+  }
+}
+Assert-Equal `
+  -Actual (@($offlinePlan.deviceActions) -join '|') `
+  -Expected 'airplane-enable-restore|latency-enable-restore|packet-loss-enable-restore|api-unreachable-enable-restore|wifi-disable-enable|process-recreation|stale-session|stale-permission|duplicate-delivery|server-conflict|database-corruption-quarantine' `
+  -Message 'M11 device/fault action contract.'
+Assert-Equal `
+  -Actual $offlinePlan.faultProxy.ownership `
+  -Expected 'start-and-stop-exact-owned-process' `
+  -Message 'M11 proxy ownership.'
+Assert-Equal `
+  -Actual $offlinePlan.cleanup.adbNetworkState `
+  -Expected 'restore-in-finally' `
+  -Message 'M11 ADB restoration.'
 $fieldTestText = Get-Content `
   -LiteralPath (Join-Path $scriptDir '..\rims_frontend\integration_test\m10_field_operations_test.dart') `
   -Raw
@@ -318,6 +368,56 @@ try {
       -Expected $expectedCleanup `
       -Message "Cleanup action for $ownership emulator."
   }
+
+  $offlineReportPath = Join-Path $tempRoot 'offline-failure-report.json'
+  $offlineRecordPath = Join-Path $tempRoot 'offline-command-record.json'
+  & $wrapper `
+    -AndroidDevice 'Medium_Phone_API_36.1' `
+    -BackendPort 18080 `
+    -FaultProxyPort 18081 `
+    -Phase 'offline-sync' `
+    -TestMode `
+    -FailStep 'android-integration-test' `
+    -ReportPath $offlineReportPath `
+    -ArtifactRoot (Join-Path $tempRoot 'offline-artifacts') `
+    -M11CommandRecordPath $offlineRecordPath
+  if ($LASTEXITCODE -ne 23) {
+    throw "Injected M11 Android failure exited '$LASTEXITCODE' instead of 23."
+  }
+  $offlineReport = Get-Content -LiteralPath $offlineReportPath -Raw | ConvertFrom-Json
+  $offlineCommands = Get-Content -LiteralPath $offlineRecordPath -Raw | ConvertFrom-Json
+  Assert-Equal `
+    -Actual (@($offlineCommands) -join '|') `
+    -Expected 'snapshot-airplane-mode|snapshot-wifi|start-owned-fault-proxy:18081|reset-fault-proxy|restore-airplane-mode|restore-wifi|stop-owned-fault-proxy' `
+    -Message 'M11 fault proxy and ADB restoration order.'
+  Assert-Equal `
+    -Actual $offlineReport.failedStep `
+    -Expected 'android-integration-test' `
+    -Message 'M11 first failure.'
+  Assert-Equal `
+    -Actual $offlineReport.faultProxy.owned `
+    -Expected $true `
+    -Message 'M11 fault proxy ownership.'
+  Assert-Equal `
+    -Actual $offlineReport.faultProxy.windowsPid `
+    -Expected 4343 `
+    -Message 'M11 fault proxy PID evidence.'
+  Assert-Equal `
+    -Actual $offlineReport.adbStateRestore.attempted `
+    -Expected $true `
+    -Message 'M11 ADB state restoration attempt.'
+  Assert-Equal `
+    -Actual $offlineReport.adbStateRestore.ok `
+    -Expected $true `
+    -Message 'M11 ADB state restoration result.'
+  Assert-Equal `
+    -Actual $offlineReport.faultProxyCleanup.attempted `
+    -Expected $true `
+    -Message 'M11 proxy cleanup attempt.'
+  Assert-Equal `
+    -Actual $offlineReport.faultProxyCleanup.ok `
+    -Expected $true `
+    -Message 'M11 proxy cleanup result.'
 } finally {
   Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 }

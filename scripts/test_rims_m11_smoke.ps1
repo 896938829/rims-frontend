@@ -1,0 +1,409 @@
+$ErrorActionPreference = 'Stop'
+Set-StrictMode -Version Latest
+
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$wrapper = Join-Path $scriptDir 'rims_m11_smoke.ps1'
+
+function Assert-Equal {
+  param($Actual, $Expected, [string]$Message)
+  if ($Actual -ne $Expected) {
+    throw "$Message Expected '$Expected', got '$Actual'."
+  }
+}
+
+function Assert-True {
+  param([bool]$Condition, [string]$Message)
+  if (-not $Condition) { throw $Message }
+}
+
+function Invoke-ExpectFailure {
+  param(
+    [string[]]$Arguments,
+    [int]$ExpectedExitCode,
+    [string]$Message
+  )
+  $previousPreference = $ErrorActionPreference
+  $ErrorActionPreference = 'Continue'
+  try {
+    $output = @(& powershell.exe @Arguments 2>&1)
+    $exitCode = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $previousPreference
+  }
+  if ($exitCode -ne $ExpectedExitCode) {
+    throw "$Message Expected exit '$ExpectedExitCode', got '$exitCode': $($output -join ' ')"
+  }
+  return $output
+}
+
+if (-not (Test-Path -LiteralPath $wrapper -PathType Leaf)) {
+  throw "Missing M11 smoke wrapper: $wrapper"
+}
+$wrapperText = Get-Content -LiteralPath $wrapper -Raw
+foreach ($childCleanupGate in @(
+    'childReport.baselineRestore.ok',
+    'childReport.adbStateRestore.ok',
+    'childReport.faultProxyCleanup.ok'
+  )) {
+  Assert-True `
+    -Condition ($wrapperText.Contains($childCleanupGate)) `
+    -Message "M11 wrapper omitted child cleanup gate '$childCleanupGate'."
+}
+$integrationTestPath = Join-Path `
+  $scriptDir `
+  '..\rims_frontend\integration_test\m11_offline_sync_test.dart'
+$integrationTestText = Get-Content -LiteralPath $integrationTestPath -Raw
+foreach ($faultAction in @(
+    'airplane-mode', 'latency', 'packet-loss', 'unreachable', 'wifi-switch',
+    'unknown-response', 'duplicate-delivery', 'server-conflict',
+    'stale-session', 'stale-permission'
+  )) {
+  Assert-True `
+    -Condition ($integrationTestText.Contains("_fault('$faultAction'")) `
+    -Message "M11 Android journey omitted fault action '$faultAction'."
+}
+$configText = Get-Content `
+  -LiteralPath (Join-Path $scriptDir '..\rims_frontend\integration_test\support\rims_e2e_config.dart') `
+  -Raw
+Assert-True `
+  -Condition ($configText.Contains("bool.fromEnvironment('RIMS_E2E_M11')")) `
+  -Message 'M11 fault hooks must default to disabled without an explicit define.'
+
+$plan = (& $wrapper `
+    -ListPlan `
+    -AndroidDevice 'Medium_Phone_API_36.1' `
+    -BackendPort 18080 `
+    -FaultProxyPort 18081 `
+    -Output Json) -join "`n" | ConvertFrom-Json
+
+Assert-Equal -Actual $plan.target -Expected 'android-m11' -Message 'Target.'
+Assert-Equal -Actual $plan.phase -Expected 'offline-sync' -Message 'Phase.'
+Assert-Equal -Actual $plan.androidDevice -Expected 'Medium_Phone_API_36.1' -Message 'AVD.'
+Assert-Equal -Actual $plan.backendPort -Expected 18080 -Message 'Backend port.'
+Assert-Equal -Actual $plan.faultProxyPort -Expected 18081 -Message 'Fault proxy port.'
+Assert-Equal `
+  -Actual (@($plan.scenarios) -join '|') `
+  -Expected 'airplane-mode|latency|packet-loss|unreachable-api|wifi-switch|process-recreation|stale-session|stale-permission|duplicate-delivery|server-conflict|database-corruption' `
+  -Message 'Fault scenario order.'
+Assert-Equal `
+  -Actual $plan.deterministicInjection.productionDefault `
+  -Expected 'disabled' `
+  -Message 'Production fault boundary.'
+Assert-Equal `
+  -Actual $plan.deterministicInjection.enableDefine `
+  -Expected 'RIMS_E2E_M11=true' `
+  -Message 'M11 enable define.'
+Assert-Equal `
+  -Actual $plan.deterministicInjection.controlDefine `
+  -Expected 'RIMS_E2E_M11_FAULT_CONTROL_URL' `
+  -Message 'Fault control define.'
+Assert-Equal `
+  -Actual $plan.deterministicInjection.networkOwnership `
+  -Expected 'owned-host-fault-proxy-restored-in-finally' `
+  -Message 'Network ownership.'
+Assert-True `
+  -Condition ([bool]$plan.lifecycle.startsFromStoppedState) `
+  -Message 'M11 must self-start from stopped state.'
+Assert-Equal `
+  -Actual $plan.lifecycle.backend `
+  -Expected 'start-if-stopped-stop-only-if-owned' `
+  -Message 'Backend lifecycle.'
+Assert-Equal `
+  -Actual $plan.lifecycle.emulator `
+  -Expected 'reuse-explicit-avd-or-start-and-stop-exact-owned-process' `
+  -Message 'AVD lifecycle.'
+Assert-Equal `
+  -Actual $plan.lifecycle.driver `
+  -Expected 'owned-flutter-test-process' `
+  -Message 'Driver lifecycle.'
+Assert-Equal `
+  -Actual (@($plan.thresholds.PSObject.Properties.Name) -join '|') `
+  -Expected 'cachedFirstContentMs|draftSaveMs|draftRecoveryMs|outboxEnqueueMs|confirmedSyncMs|databaseBytes|maxDuplicateDocuments|maxDuplicateInventoryTransactions' `
+  -Message 'Threshold schema.'
+Assert-Equal -Actual $plan.thresholds.cachedFirstContentMs -Expected 500 -Message 'Cache threshold.'
+Assert-Equal -Actual $plan.thresholds.draftSaveMs -Expected 250 -Message 'Draft threshold.'
+Assert-Equal -Actual $plan.thresholds.draftRecoveryMs -Expected 1000 -Message 'Recovery threshold.'
+Assert-Equal -Actual $plan.thresholds.outboxEnqueueMs -Expected 250 -Message 'Enqueue threshold.'
+Assert-Equal -Actual $plan.thresholds.confirmedSyncMs -Expected 10000 -Message 'Sync threshold.'
+Assert-Equal -Actual $plan.thresholds.databaseBytes -Expected 26214400 -Message 'Database threshold.'
+
+$tempRoot = Join-Path `
+  ([IO.Path]::GetTempPath()) `
+  ('rims-m11-smoke-test-' + [guid]::NewGuid().ToString('N'))
+$resolvedTempRoot = [IO.Path]::GetFullPath($tempRoot)
+New-Item -ItemType Directory -Path $resolvedTempRoot | Out-Null
+try {
+  $fixturePath = Join-Path $resolvedTempRoot 'valid-fixture.json'
+  $fixture = [ordered]@{
+    cacheReadLatencyMs = 120
+    draftSaveLatencyMs = 80
+    processRecoveryLatencyMs = 400
+    outboxEnqueueLatencyMs = 90
+    syncTotalMs = 2400
+    intentionalFaultDelayMs = 750
+    operationIds = @('op-upload', 'op-create', 'op-complete')
+    idempotencyKeyHashes = @(
+      ('a' * 64),
+      ('b' * 64),
+      ('c' * 64)
+    )
+    stockBefore = 100
+    stockAfter = 98
+    serverDocumentCount = 1
+    duplicateDocumentCount = 0
+    duplicateInventoryTransactionCount = 0
+    attachmentHash = ('d' * 64)
+    attachmentCount = 1
+    databaseBytes = 1048576
+    cleanup = [ordered]@{
+      accountCacheCleared = $true
+      outboxCleared = $true
+      stagingCleared = $true
+      baselineRestored = $true
+    }
+    journey = [ordered]@{
+      onlineSeeded = $true
+      cachedInventoryRead = $true
+      cachedReportRead = $true
+      cachedDetailRead = $true
+      draftRecovered = $true
+      explicitSyncConfirmed = $true
+      unknownResponseProbed = $true
+      idempotentReplaySingleEffect = $true
+      attachmentDependencyCompleted = $true
+      staleSessionBlocked = $true
+      stalePermissionBlocked = $true
+      conflictVisible = $true
+      conflictResolved = $true
+      logoutCleanupCompleted = $true
+      databaseCorruptionQuarantined = $true
+    }
+  }
+  $fixture | ConvertTo-Json -Depth 8 | Set-Content `
+    -LiteralPath $fixturePath `
+    -Encoding UTF8
+
+  $reportPath = Join-Path $resolvedTempRoot 'success-report.json'
+  $recordPath = Join-Path $resolvedTempRoot 'success-commands.json'
+  & $wrapper `
+    -AndroidDevice 'Medium_Phone_API_36.1' `
+    -BackendPort 18080 `
+    -FaultProxyPort 18081 `
+    -BackendDir 'E:\fixture\backend' `
+    -TestMode `
+    -FixturePath $fixturePath `
+    -ReportPath $reportPath `
+    -ArtifactRoot (Join-Path $resolvedTempRoot 'success-artifacts') `
+    -CommandRecordPath $recordPath
+  if ($LASTEXITCODE -ne 0) {
+    throw "Valid stopped-state M11 self-test failed with '$LASTEXITCODE'."
+  }
+  $report = Get-Content -LiteralPath $reportPath -Raw | ConvertFrom-Json
+  $commands = Get-Content -LiteralPath $recordPath -Raw | ConvertFrom-Json
+  Assert-Equal `
+    -Actual (@($commands) -join '|') `
+    -Expected 'inspect-runtime|select-port:18081|select-avd:Medium_Phone_API_36.1|start-backend:18080|start-avd:Medium_Phone_API_36.1|start-fault-proxy:18081|exercise:airplane-mode|exercise:latency|exercise:packet-loss|exercise:unreachable-api|exercise:wifi-switch|exercise:process-recreation|exercise:stale-session|exercise:stale-permission|exercise:duplicate-delivery|exercise:server-conflict|exercise:database-corruption|run-android-offline-sync|restore-fault-proxy|restore-airplane-mode|restore-wifi|stop-owned-driver|stop-owned-fault-proxy|stop-owned-avd|stop-owned-backend|validate-evidence|write-report' `
+    -Message 'Stopped-state command order.'
+  Assert-Equal `
+    -Actual (@($report.steps.name) -join '|') `
+    -Expected 'airplane-mode|latency|packet-loss|unreachable-api|wifi-switch|process-recreation|stale-session|stale-permission|duplicate-delivery|server-conflict|database-corruption|android-offline-sync' `
+    -Message 'Fake fault executor step order.'
+  Assert-Equal -Actual $report.ok -Expected $true -Message 'Success report flag.'
+  Assert-Equal -Actual $report.ownership.backendOwned -Expected $true -Message 'Backend ownership.'
+  Assert-Equal -Actual $report.ownership.emulatorOwned -Expected $true -Message 'Emulator ownership.'
+  Assert-Equal -Actual $report.ownership.faultProxyOwned -Expected $true -Message 'Proxy ownership.'
+  Assert-Equal -Actual $report.cleanup.networkRestored -Expected $true -Message 'Network cleanup.'
+  Assert-Equal -Actual $report.cleanup.ownedProcessesStopped -Expected $true -Message 'Owned process cleanup.'
+  Assert-True -Condition ($report.evidence.cacheReadLatencyMs -is [ValueType]) -Message 'Cache metric must be numeric.'
+  Assert-True -Condition ($report.evidence.cleanup.accountCacheCleared -is [bool]) -Message 'Cleanup evidence must be Boolean.'
+  Assert-True -Condition ($report.frontendCommit -match '^[0-9a-f]{40}$') -Message 'Frontend commit missing.'
+  Assert-True -Condition ($report.backendCommit -match '^[0-9a-f]{40}$') -Message 'Backend commit missing.'
+
+  $preExistingReportPath = Join-Path $resolvedTempRoot 'pre-existing-report.json'
+  $preExistingRecordPath = Join-Path $resolvedTempRoot 'pre-existing-commands.json'
+  & $wrapper `
+    -AndroidDevice 'Medium_Phone_API_36.1' `
+    -TestMode `
+    -TestPreExistingRuntime `
+    -TestPreExistingEmulator `
+    -FixturePath $fixturePath `
+    -ReportPath $preExistingReportPath `
+    -ArtifactRoot (Join-Path $resolvedTempRoot 'pre-existing-artifacts') `
+    -CommandRecordPath $preExistingRecordPath
+  if ($LASTEXITCODE -ne 0) { throw 'Pre-existing runtime fixture failed.' }
+  $preExisting = Get-Content -LiteralPath $preExistingReportPath -Raw | ConvertFrom-Json
+  $preExistingCommands = Get-Content -LiteralPath $preExistingRecordPath -Raw | ConvertFrom-Json
+  Assert-Equal -Actual $preExisting.ownership.backendOwned -Expected $false -Message 'Existing backend ownership.'
+  Assert-Equal -Actual $preExisting.ownership.emulatorOwned -Expected $false -Message 'Existing AVD ownership.'
+  Assert-True `
+    -Condition (-not (@($preExistingCommands) -contains 'stop-owned-backend')) `
+    -Message 'Pre-existing backend must be preserved.'
+  Assert-True `
+    -Condition (-not (@($preExistingCommands) -contains 'stop-owned-avd')) `
+    -Message 'Pre-existing AVD must be preserved.'
+
+  $failureReportPath = Join-Path $resolvedTempRoot 'first-failure-report.json'
+  $failureRecordPath = Join-Path $resolvedTempRoot 'first-failure-commands.json'
+  Invoke-ExpectFailure `
+    -ExpectedExitCode 23 `
+    -Message 'Injected packet-loss failure.' `
+    -Arguments @(
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $wrapper,
+      '-AndroidDevice', 'Medium_Phone_API_36.1',
+      '-TestMode', '-FixturePath', $fixturePath,
+      '-FailStep', 'packet-loss',
+      '-TestCleanupFailStep', 'restore-fault-proxy',
+      '-ReportPath', $failureReportPath,
+      '-ArtifactRoot', (Join-Path $resolvedTempRoot 'failure-artifacts'),
+      '-CommandRecordPath', $failureRecordPath
+    ) | Out-Null
+  $failure = Get-Content -LiteralPath $failureReportPath -Raw | ConvertFrom-Json
+  $failureCommands = Get-Content -LiteralPath $failureRecordPath -Raw | ConvertFrom-Json
+  Assert-Equal -Actual $failure.failedStep -Expected 'packet-loss' -Message 'First failure preservation.'
+  Assert-Equal -Actual $failure.exitCode -Expected 23 -Message 'First exit preservation.'
+  Assert-Equal -Actual $failure.cleanup.attempted -Expected $true -Message 'Cleanup attempted.'
+  Assert-Equal -Actual $failure.cleanup.ok -Expected $false -Message 'Injected cleanup failure visible.'
+  foreach ($cleanupCommand in @(
+      'restore-fault-proxy',
+      'restore-airplane-mode',
+      'restore-wifi',
+      'stop-owned-driver',
+      'stop-owned-fault-proxy',
+      'stop-owned-avd',
+      'stop-owned-backend'
+    )) {
+    Assert-True `
+      -Condition (@($failureCommands) -contains $cleanupCommand) `
+      -Message "Cleanup omitted '$cleanupCommand'."
+  }
+
+  $cleanupOnlyReportPath = Join-Path $resolvedTempRoot 'cleanup-only-report.json'
+  Invoke-ExpectFailure `
+    -ExpectedExitCode 2 `
+    -Message 'Cleanup-only failure.' `
+    -Arguments @(
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $wrapper,
+      '-AndroidDevice', 'Medium_Phone_API_36.1',
+      '-TestMode', '-FixturePath', $fixturePath,
+      '-TestCleanupFailStep', 'restore-wifi',
+      '-ReportPath', $cleanupOnlyReportPath,
+      '-ArtifactRoot', (Join-Path $resolvedTempRoot 'cleanup-only-artifacts')
+    ) | Out-Null
+  $cleanupOnly = Get-Content -LiteralPath $cleanupOnlyReportPath -Raw | ConvertFrom-Json
+  Assert-Equal `
+    -Actual $cleanupOnly.failedStep `
+    -Expected 'cleanup' `
+    -Message 'Cleanup-only failed step.'
+  Assert-Equal `
+    -Actual $cleanupOnly.cleanup.ok `
+    -Expected $false `
+    -Message 'Cleanup-only result.'
+
+  $gateCases = @(
+    @{ Name = 'cache'; Property = 'cacheReadLatencyMs'; Value = 501 },
+    @{ Name = 'draft'; Property = 'draftSaveLatencyMs'; Value = 251 },
+    @{ Name = 'recovery'; Property = 'processRecoveryLatencyMs'; Value = 1001 },
+    @{ Name = 'enqueue'; Property = 'outboxEnqueueLatencyMs'; Value = 251 },
+    @{ Name = 'sync'; Property = 'syncTotalMs'; Value = 10001 },
+    @{ Name = 'database'; Property = 'databaseBytes'; Value = 26214401 },
+    @{ Name = 'documents'; Property = 'duplicateDocumentCount'; Value = 1 },
+    @{ Name = 'transactions'; Property = 'duplicateInventoryTransactionCount'; Value = 1 }
+  )
+  foreach ($case in $gateCases) {
+    $invalid = $fixture | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+    $invalid.($case.Property) = $case.Value
+    $invalidPath = Join-Path $resolvedTempRoot "invalid-$($case.Name).json"
+    $invalid | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $invalidPath -Encoding UTF8
+    Invoke-ExpectFailure `
+      -ExpectedExitCode 2 `
+      -Message "Threshold gate '$($case.Name)'." `
+      -Arguments @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $wrapper,
+        '-AndroidDevice', 'Medium_Phone_API_36.1', '-TestMode',
+        '-FixturePath', $invalidPath,
+        '-ReportPath', (Join-Path $resolvedTempRoot "invalid-$($case.Name)-report.json"),
+        '-ArtifactRoot', (Join-Path $resolvedTempRoot "invalid-$($case.Name)-artifacts")
+      ) | Out-Null
+  }
+
+  $wrongTypes = $fixture | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+  $wrongTypes.cacheReadLatencyMs = '120'
+  $wrongTypes.cleanup.accountCacheCleared = 'true'
+  $wrongTypesPath = Join-Path $resolvedTempRoot 'wrong-types.json'
+  $wrongTypes | ConvertTo-Json -Depth 8 | Set-Content `
+    -LiteralPath $wrongTypesPath `
+    -Encoding UTF8
+  Invoke-ExpectFailure `
+    -ExpectedExitCode 2 `
+    -Message 'Strict evidence types.' `
+    -Arguments @(
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $wrapper,
+      '-AndroidDevice', 'Medium_Phone_API_36.1', '-TestMode',
+      '-FixturePath', $wrongTypesPath,
+      '-ReportPath', (Join-Path $resolvedTempRoot 'wrong-types-report.json'),
+      '-ArtifactRoot', (Join-Path $resolvedTempRoot 'wrong-types-artifacts')
+    ) | Out-Null
+
+  $missing = $fixture | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+  $missing.PSObject.Properties.Remove('attachmentHash')
+  $missingPath = Join-Path $resolvedTempRoot 'missing-evidence.json'
+  $missing | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $missingPath -Encoding UTF8
+  Invoke-ExpectFailure `
+    -ExpectedExitCode 2 `
+    -Message 'Missing evidence gate.' `
+    -Arguments @(
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $wrapper,
+      '-AndroidDevice', 'Medium_Phone_API_36.1', '-TestMode',
+      '-FixturePath', $missingPath,
+      '-ReportPath', (Join-Path $resolvedTempRoot 'missing-report.json'),
+      '-ArtifactRoot', (Join-Path $resolvedTempRoot 'missing-artifacts')
+    ) | Out-Null
+
+  $missingCorruption = $fixture | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+  $missingCorruption.journey.PSObject.Properties.Remove(
+    'databaseCorruptionQuarantined'
+  )
+  $missingCorruptionPath = Join-Path $resolvedTempRoot 'missing-corruption.json'
+  $missingCorruption | ConvertTo-Json -Depth 8 | Set-Content `
+    -LiteralPath $missingCorruptionPath `
+    -Encoding UTF8
+  Invoke-ExpectFailure `
+    -ExpectedExitCode 2 `
+    -Message 'Missing corruption evidence gate.' `
+    -Arguments @(
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $wrapper,
+      '-AndroidDevice', 'Medium_Phone_API_36.1', '-TestMode',
+      '-FixturePath', $missingCorruptionPath,
+      '-ReportPath', (Join-Path $resolvedTempRoot 'missing-corruption-report.json'),
+      '-ArtifactRoot', (Join-Path $resolvedTempRoot 'missing-corruption-artifacts')
+    ) | Out-Null
+
+  $secret = $fixture | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+  $secret | Add-Member -NotePropertyName rawIdempotencyKey -NotePropertyValue 'RIMS-RAW-SECRET-KEY'
+  $secretPath = Join-Path $resolvedTempRoot 'secret-evidence.json'
+  $secret | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $secretPath -Encoding UTF8
+  $secretOutput = Invoke-ExpectFailure `
+    -ExpectedExitCode 2 `
+    -Message 'Secret redaction gate.' `
+    -Arguments @(
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $wrapper,
+      '-AndroidDevice', 'Medium_Phone_API_36.1', '-TestMode',
+      '-FixturePath', $secretPath,
+      '-ReportPath', (Join-Path $resolvedTempRoot 'secret-report.json'),
+      '-ArtifactRoot', (Join-Path $resolvedTempRoot 'secret-artifacts')
+    )
+  Assert-True `
+    -Condition (($secretOutput -join ' ') -notmatch 'RIMS-RAW-SECRET-KEY') `
+    -Message 'Raw idempotency key leaked to wrapper output.'
+} finally {
+  $candidate = [IO.Path]::GetFullPath($resolvedTempRoot)
+  $tempBase = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
+  if ($candidate.StartsWith($tempBase, [StringComparison]::OrdinalIgnoreCase) -and
+      $candidate -ne $tempBase) {
+    Remove-Item -LiteralPath $candidate -Recurse -Force -ErrorAction SilentlyContinue
+  } else {
+    throw "Refusing to clean unowned self-test path: $candidate"
+  }
+}
+
+Write-Host 'M11 smoke wrapper self-test passed.'
