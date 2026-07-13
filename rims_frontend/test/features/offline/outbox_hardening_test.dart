@@ -364,11 +364,10 @@ void main() {
         now: () => now,
       );
       await deniedVm.load();
-      expect(deniedVm.permissionBlockedOperationIds, {
+      expect(deniedVm.permissionBlockedOperationIds, {'upload', 'complete'});
+      expect(deniedVm.completed.map((operation) => operation.operationId), [
         'create',
-        'upload',
-        'complete',
-      });
+      ]);
       deniedVm.dispose();
 
       now = initial.add(const Duration(minutes: 6));

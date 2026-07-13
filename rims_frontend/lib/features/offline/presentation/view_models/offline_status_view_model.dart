@@ -123,9 +123,8 @@ final class OfflineStatusViewModel extends ChangeNotifier {
             data
                 .map((operation) => operation.operationId)
                 .where(
-                  visible
-                      .map((operation) => operation.operationId)
-                      .toSet()
+                  _statusClassifier
+                      .permissionRelevantOperationIds(operations: visible)
                       .contains,
                 )
                 .toSet(),

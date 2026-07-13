@@ -34,10 +34,21 @@ final class OutboxStatusClassifier {
     required OutboxExecutionContext context,
   }) {
     return operations
-        .where((operation) => !context.allowedKinds.contains(operation.kind))
+        .where(
+          (operation) =>
+              _requiresCurrentPermission(operation) &&
+              !context.allowedKinds.contains(operation.kind),
+        )
         .map((operation) => operation.operationId)
         .toSet();
   }
+
+  Set<String> permissionRelevantOperationIds({
+    required Iterable<OutboxOperation> operations,
+  }) => operations
+      .where(_requiresCurrentPermission)
+      .map((operation) => operation.operationId)
+      .toSet();
 
   OutboxStatusBuckets classify({
     required Iterable<OutboxOperation> operations,
@@ -59,7 +70,10 @@ final class OutboxStatusClassifier {
       attention: visible
           .where(
             (operation) =>
-                permissionBlockedOperationIds.contains(operation.operationId) ||
+                (_requiresCurrentPermission(operation) &&
+                    permissionBlockedOperationIds.contains(
+                      operation.operationId,
+                    )) ||
                 operation.state == OutboxState.conflict ||
                 operation.state == OutboxState.permanentFailure,
           )
@@ -67,13 +81,21 @@ final class OutboxStatusClassifier {
       completed: visible
           .where(
             (operation) =>
-                !permissionBlockedOperationIds.contains(
-                  operation.operationId,
-                ) &&
-                (operation.state == OutboxState.succeeded ||
-                    operation.state == OutboxState.cancelled),
+                operation.state == OutboxState.succeeded ||
+                operation.state == OutboxState.cancelled,
           )
           .toList(growable: false),
     );
   }
+
+  bool _requiresCurrentPermission(OutboxOperation operation) =>
+      switch (operation.state) {
+        OutboxState.queued ||
+        OutboxState.syncing ||
+        OutboxState.retryableFailure ||
+        OutboxState.conflict => true,
+        OutboxState.succeeded ||
+        OutboxState.permanentFailure ||
+        OutboxState.cancelled => false,
+      };
 }

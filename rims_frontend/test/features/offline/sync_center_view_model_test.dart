@@ -74,6 +74,120 @@ void main() {
   });
 
   test(
+    'permission downgrade leaves succeeded and cancelled graph completed without graph read',
+    () async {
+      await repository.enqueueGraph(
+        OutboxGraph(
+          operations: [
+            _operation('terminal-parent'),
+            _operation(
+              'terminal-child',
+              kind: OutboxOperationKind.documentComplete,
+            ),
+          ],
+          dependencies: const {
+            'terminal-child': {'terminal-parent'},
+          },
+        ),
+      );
+      await transition('terminal-parent', OutboxState.syncing);
+      await transition('terminal-parent', OutboxState.succeeded);
+      await transition('terminal-child', OutboxState.cancelled);
+      final counting = _DeferredRepository(repository);
+      final scopedViewModel = SyncCenterViewModel(
+        repository: counting,
+        executor: executor,
+        contextReader: () => const OutboxExecutionContext(
+          accountId: '7',
+          warehouseId: 11,
+          permissionStamp: 'permission-none',
+          allowedKinds: {},
+        ),
+      );
+      addTearDown(scopedViewModel.dispose);
+
+      await scopedViewModel.load();
+
+      expect(counting.connectedComponentCalls, 0);
+      expect(scopedViewModel.permissionBlockedOperationIds, isEmpty);
+      expect(scopedViewModel.attention, isEmpty);
+      expect(
+        scopedViewModel.completed.map((operation) => operation.operationId),
+        containsAll({'terminal-parent', 'terminal-child'}),
+      );
+    },
+  );
+
+  test(
+    'denied active child propagates once without contaminating succeeded parent',
+    () async {
+      await repository.enqueueGraph(
+        OutboxGraph(
+          operations: [
+            _operation('succeeded-parent'),
+            _operation(
+              'denied-child',
+              kind: OutboxOperationKind.documentComplete,
+            ),
+            _operation('active-descendant'),
+          ],
+          dependencies: const {
+            'denied-child': {'succeeded-parent'},
+            'active-descendant': {'denied-child'},
+          },
+        ),
+      );
+      await transition('succeeded-parent', OutboxState.syncing);
+      await transition('succeeded-parent', OutboxState.succeeded);
+      final counting = _DeferredRepository(repository);
+      final scopedViewModel = SyncCenterViewModel(
+        repository: counting,
+        executor: executor,
+        contextReader: () => const OutboxExecutionContext(
+          accountId: '7',
+          warehouseId: 11,
+          permissionStamp: 'complete-denied',
+          allowedKinds: {OutboxOperationKind.documentCreate},
+        ),
+      );
+      addTearDown(scopedViewModel.dispose);
+
+      await scopedViewModel.load();
+
+      expect(counting.connectedComponentCalls, 1);
+      expect(counting.connectedComponentRequests.single, {'denied-child'});
+      expect(scopedViewModel.permissionBlockedOperationIds, {
+        'denied-child',
+        'active-descendant',
+      });
+      expect(
+        scopedViewModel.attention.map((operation) => operation.operationId),
+        containsAll({'denied-child', 'active-descendant'}),
+      );
+      expect(
+        scopedViewModel.completed.map((operation) => operation.operationId),
+        ['succeeded-parent'],
+      );
+    },
+  );
+
+  test('allowed active operations skip connected component reads', () async {
+    await repository.enqueue(_operation('allowed-active'));
+    final counting = _DeferredRepository(repository);
+    final scopedViewModel = SyncCenterViewModel(
+      repository: counting,
+      executor: executor,
+      contextReader: () => context,
+    );
+    addTearDown(scopedViewModel.dispose);
+
+    await scopedViewModel.load();
+
+    expect(counting.connectedComponentCalls, 0);
+    expect(scopedViewModel.waiting, hasLength(1));
+  });
+
+  test(
     'review is explicit and retry all executes only reviewed operations',
     () async {
       await repository.enqueue(_operation('reviewed'));
@@ -668,6 +782,8 @@ final class _DeferredRepository implements OutboxRepository {
   final Queue<Completer<Result<List<OutboxOperation>>>> listResults = Queue();
   Completer<Result<OutboxOperation>>? confirmResult;
   Completer<Result<OutboxOperation>>? cancelResult;
+  int connectedComponentCalls = 0;
+  final List<Set<String>> connectedComponentRequests = [];
 
   @override
   Future<Result<List<OutboxOperation>>> enqueueGraph(OutboxGraph graph) =>
@@ -730,10 +846,14 @@ final class _DeferredRepository implements OutboxRepository {
   Future<Result<List<OutboxOperation>>> loadConnectedComponent({
     required String accountId,
     required Set<String> operationIds,
-  }) => delegate.loadConnectedComponent(
-    accountId: accountId,
-    operationIds: operationIds,
-  );
+  }) {
+    connectedComponentCalls += 1;
+    connectedComponentRequests.add(Set.unmodifiable(operationIds));
+    return delegate.loadConnectedComponent(
+      accountId: accountId,
+      operationIds: operationIds,
+    );
+  }
 
   @override
   Future<Result<OutboxOperation>> confirm({

@@ -115,57 +115,66 @@ final class SyncCenterViewModel extends ChangeNotifier {
         operations: _operations,
         context: context,
       );
-      final component = await repository.loadConnectedComponent(
-        accountId: context.accountId,
-        operationIds: deniedIds,
-      );
-      if (!_acceptResult(generation, context)) return;
-      if (component case FailureResult<List<OutboxOperation>>(:final failure)) {
-        _loadFailure = failure;
+      if (deniedIds.isEmpty) {
+        _permissionBlockedOperationIds.clear();
+        _loadFailure = null;
       } else {
-        final blockedComponent =
-            (component as Success<List<OutboxOperation>>).data;
-        final visibleIds = _operations
-            .map((operation) => operation.operationId)
-            .toSet();
-        _permissionBlockedOperationIds
-          ..clear()
-          ..addAll(
-            blockedComponent
-                .map((operation) => operation.operationId)
-                .where(visibleIds.contains),
-          );
-        if (blockedComponent.any(
-          (operation) =>
-              _isNonTerminal(operation) &&
-              (operation.confirmedAt != null || operation.reviewStamp != null),
+        final component = await repository.loadConnectedComponent(
+          accountId: context.accountId,
+          operationIds: deniedIds,
+        );
+        if (!_acceptResult(generation, context)) return;
+        _permissionBlockedOperationIds.clear();
+        if (component case FailureResult<List<OutboxOperation>>(
+          :final failure,
         )) {
-          final invalidated = await repository.invalidateReviewGraph(
-            accountId: context.accountId,
-            expectedUpdatedAtByOperation: {
-              for (final operation in blockedComponent)
-                operation.operationId: operation.updatedAt,
-            },
+          _loadFailure = failure;
+        } else {
+          final permissionRelevantIds = _statusClassifier
+              .permissionRelevantOperationIds(operations: _operations);
+          final blockedComponent = (component as Success<List<OutboxOperation>>)
+              .data
+              .where(
+                (operation) =>
+                    permissionRelevantIds.contains(operation.operationId),
+              )
+              .toList(growable: false);
+          _permissionBlockedOperationIds.addAll(
+            blockedComponent.map((operation) => operation.operationId),
           );
-          if (!_acceptResult(generation, context)) return;
-          if (invalidated case FailureResult<List<OutboxOperation>>(
-            :final failure,
+          if (blockedComponent.any(
+            (operation) =>
+                _isNonTerminal(operation) &&
+                (operation.confirmedAt != null ||
+                    operation.reviewStamp != null),
           )) {
-            _loadFailure = failure;
+            final invalidated = await repository.invalidateReviewGraph(
+              accountId: context.accountId,
+              expectedUpdatedAtByOperation: {
+                for (final operation in blockedComponent)
+                  operation.operationId: operation.updatedAt,
+              },
+            );
+            if (!_acceptResult(generation, context)) return;
+            if (invalidated case FailureResult<List<OutboxOperation>>(
+              :final failure,
+            )) {
+              _loadFailure = failure;
+            } else {
+              final invalidatedById = {
+                for (final operation
+                    in (invalidated as Success<List<OutboxOperation>>).data)
+                  operation.operationId: operation,
+              };
+              _operations = [
+                for (final operation in _operations)
+                  invalidatedById[operation.operationId] ?? operation,
+              ];
+              _loadFailure = null;
+            }
           } else {
-            final invalidatedById = {
-              for (final operation
-                  in (invalidated as Success<List<OutboxOperation>>).data)
-                operation.operationId: operation,
-            };
-            _operations = [
-              for (final operation in _operations)
-                invalidatedById[operation.operationId] ?? operation,
-            ];
             _loadFailure = null;
           }
-        } else {
-          _loadFailure = null;
         }
       }
     }
