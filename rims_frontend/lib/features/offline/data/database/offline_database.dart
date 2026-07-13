@@ -54,6 +54,10 @@ final class OfflineDatabase extends _$OfflineDatabase implements OfflineStore {
           offlineOutboxOperations,
           offlineOutboxOperations.updatedAt,
         );
+        await customStatement(
+          'UPDATE outbox_operations '
+          'SET updated_at = created_at WHERE updated_at IS NULL',
+        );
       }
     },
     beforeOpen: (details) async {

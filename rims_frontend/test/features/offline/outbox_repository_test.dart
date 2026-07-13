@@ -1,3 +1,4 @@
+import 'package:drift/drift.dart';
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rims_frontend/core/result/failure.dart';
@@ -268,59 +269,198 @@ void main() {
     },
   );
 
+  test('500 expired terminal graph nodes can be pruned then enqueue', () async {
+    final old = now.subtract(const Duration(days: 31));
+    clock = old;
+    String? parent;
+    for (var index = 0; index < 500; index += 1) {
+      final id = 'history-$index';
+      await repository.enqueue(
+        _operation(id, createdAt: old, updatedAt: old),
+        dependencies: parent == null ? const {} : {parent},
+      );
+      await _succeed(repository, id);
+      parent = id;
+    }
+    clock = now;
+
+    final pruned = await repository.prune(accountId: '7');
+    final enqueued = await repository.enqueue(_operation('new-active'));
+
+    expect(pruned, isA<Success<int>>());
+    expect((pruned as Success<int>).data, 500);
+    expect(enqueued, isA<Success<OutboxOperation>>());
+  });
+
   test(
-    'pruning uses terminal retention and preserves dependency audit and account isolation',
+    'mixed terminal and active dependency component is retained whole',
     () async {
       final old = now.subtract(const Duration(days: 31));
       clock = old;
+      await repository.enqueue(_operation('old-parent', createdAt: old));
+      await _succeed(repository, 'old-parent');
       await repository.enqueue(
-        _operation('standalone', createdAt: old, updatedAt: old),
-      );
-      await repository.transition(
-        accountId: '7',
-        operationId: 'standalone',
-        next: OutboxState.syncing,
-      );
-      await repository.transition(
-        accountId: '7',
-        operationId: 'standalone',
-        next: OutboxState.succeeded,
-      );
-      await repository.enqueue(
-        _operation('parent', createdAt: old, updatedAt: old),
-      );
-      await repository.enqueue(
-        _operation('child', createdAt: old, updatedAt: old),
-        dependencies: const {'parent'},
-      );
-      await repository.enqueue(
-        _operation('other', accountId: '8', createdAt: old, updatedAt: old),
-      );
-      await repository.transition(
-        accountId: '8',
-        operationId: 'other',
-        next: OutboxState.syncing,
-      );
-      await repository.transition(
-        accountId: '8',
-        operationId: 'other',
-        next: OutboxState.succeeded,
+        _operation('active-child', createdAt: old),
+        dependencies: const {'old-parent'},
       );
       clock = now;
 
       final result = await repository.prune(accountId: '7');
 
-      expect(result, isA<Success<int>>());
-      expect((result as Success<int>).data, 1);
-      expect(
-        (await repository.list(
-          '7',
-        )).getOrThrow().map((item) => item.operationId),
-        containsAll(['parent', 'child']),
+      expect((result as Success<int>).data, 0);
+      expect((await repository.list('7')).getOrThrow(), hasLength(2));
+    },
+  );
+
+  test(
+    'terminal component with one unexpired node is retained whole',
+    () async {
+      final old = now.subtract(const Duration(days: 31));
+      clock = old;
+      await repository.enqueue(_operation('old-parent', createdAt: old));
+      await _succeed(repository, 'old-parent');
+      await repository.enqueue(
+        _operation('recent-child', createdAt: old),
+        dependencies: const {'old-parent'},
       );
+      clock = now.subtract(const Duration(days: 1));
+      await _succeed(repository, 'recent-child');
+      clock = now;
+
+      final result = await repository.prune(accountId: '7');
+
+      expect((result as Success<int>).data, 0);
+      expect((await repository.list('7')).getOrThrow(), hasLength(2));
+    },
+  );
+
+  test(
+    'pruning one account leaves an independently expired account intact',
+    () async {
+      final old = now.subtract(const Duration(days: 31));
+      clock = old;
+      await repository.enqueue(_operation('account-7', createdAt: old));
+      await _succeed(repository, 'account-7');
+      await repository.enqueue(
+        _operation('account-8', accountId: '8', createdAt: old),
+      );
+      await _succeed(repository, 'account-8', accountId: '8');
+      clock = now;
+
+      final result = await repository.prune(accountId: '7');
+
+      expect((result as Success<int>).data, 1);
+      expect((await repository.list('7')).getOrThrow(), isEmpty);
       expect((await repository.list('8')).getOrThrow(), hasLength(1));
     },
   );
+
+  test('expired terminal chain is pruned with all dependency edges', () async {
+    final old = now.subtract(const Duration(days: 31));
+    clock = old;
+    for (final (id, parents) in [
+      ('chain-a', const <String>{}),
+      ('chain-b', const {'chain-a'}),
+      ('chain-c', const {'chain-b'}),
+    ]) {
+      await repository.enqueue(
+        _operation(id, createdAt: old),
+        dependencies: parents,
+      );
+      await _succeed(repository, id);
+    }
+    clock = now;
+
+    final result = await repository.prune(accountId: '7');
+
+    expect((result as Success<int>).data, 3);
+    expect(await _dependencyCount(database), 0);
+  });
+
+  test('expired terminal fork is pruned as one component', () async {
+    final old = now.subtract(const Duration(days: 31));
+    clock = old;
+    for (final (id, parents) in [
+      ('fork-root', const <String>{}),
+      ('fork-left', const {'fork-root'}),
+      ('fork-right', const {'fork-root'}),
+      ('fork-leaf', const {'fork-left', 'fork-right'}),
+    ]) {
+      await repository.enqueue(
+        _operation(id, createdAt: old),
+        dependencies: parents,
+      );
+      await _succeed(repository, id);
+    }
+    clock = now;
+
+    final result = await repository.prune(accountId: '7');
+
+    expect((result as Success<int>).data, 4);
+    expect(await _dependencyCount(database), 0);
+  });
+
+  test('executor failure maps every key API to LocalStorageFailure', () async {
+    await database.close();
+    final failingDatabase = OfflineDatabase.forTesting(
+      LazyDatabase(() async => throw StateError('executor unavailable')),
+    );
+    final failingRepository = DriftOutboxRepository(
+      database: failingDatabase,
+      stateMachine: OutboxStateMachine(now: () => now),
+      now: () => now,
+    );
+
+    _expectLocalStorageFailure(
+      await failingRepository.enqueue(_operation('failed-enqueue')),
+    );
+    _expectLocalStorageFailure(await failingRepository.list('7'));
+    _expectLocalStorageFailure(await failingRepository.ready('7'));
+    _expectLocalStorageFailure(
+      await failingRepository.transition(
+        accountId: '7',
+        operationId: 'failed-transition',
+        next: OutboxState.syncing,
+      ),
+    );
+    _expectLocalStorageFailure(
+      await failingRepository.cancel(
+        accountId: '7',
+        operationId: 'failed-cancel',
+      ),
+    );
+    _expectLocalStorageFailure(await failingRepository.prune(accountId: '7'));
+  });
+}
+
+void _expectLocalStorageFailure<T>(Result<T> result) {
+  expect(result, isA<FailureResult<T>>());
+  final failure = (result as FailureResult<T>).failure;
+  expect(failure, isA<LocalStorageFailure>());
+}
+
+Future<void> _succeed(
+  OutboxRepository repository,
+  String operationId, {
+  String accountId = '7',
+}) async {
+  await repository.transition(
+    accountId: accountId,
+    operationId: operationId,
+    next: OutboxState.syncing,
+  );
+  await repository.transition(
+    accountId: accountId,
+    operationId: operationId,
+    next: OutboxState.succeeded,
+  );
+}
+
+Future<int> _dependencyCount(OfflineDatabase database) async {
+  final row = await database
+      .customSelect('SELECT COUNT(*) AS count FROM outbox_dependencies')
+      .getSingle();
+  return row.read<int>('count');
 }
 
 extension<T> on Result<T> {

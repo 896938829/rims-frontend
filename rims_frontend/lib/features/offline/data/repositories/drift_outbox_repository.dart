@@ -260,34 +260,69 @@ ORDER BY operation.created_at ASC, operation.operation_id ASC
   Future<Result<int>> prune({required String accountId}) async {
     try {
       final currentTime = now().toUtc();
-      final succeededBefore = currentTime.subtract(succeededRetention);
-      final failedBefore = currentTime.subtract(failedRetention);
-      final deleted = await database.customUpdate(
-        '''
-DELETE FROM outbox_operations
-WHERE account_id = ?
-  AND NOT EXISTS (
-    SELECT 1 FROM outbox_dependencies AS edge
-    WHERE edge.operation_id = outbox_operations.operation_id
-       OR edge.dependency_id = outbox_operations.operation_id
-  )
-  AND (
-    (operation_state = ? AND COALESCE(updated_at, created_at) < ?)
-    OR
-    (operation_state IN (?, ?, ?) AND COALESCE(updated_at, created_at) < ?)
-  )
-''',
-        variables: [
-          Variable(accountId),
-          Variable(OutboxState.succeeded.wireValue),
-          Variable(succeededBefore),
-          Variable(OutboxState.cancelled.wireValue),
-          Variable(OutboxState.permanentFailure.wireValue),
-          Variable(OutboxState.conflict.wireValue),
-          Variable(failedBefore),
-        ],
-        updates: {database.offlineOutboxOperations},
-      );
+      final deleted = await database.transaction(() async {
+        final operations = await (database.select(
+          database.offlineOutboxOperations,
+        )..where((row) => row.accountId.equals(accountId))).get();
+        if (operations.isEmpty) return 0;
+
+        final operationIds = operations
+            .map((operation) => operation.operationId)
+            .toSet();
+        final edges =
+            await (database.select(database.offlineOutboxDependencies)..where(
+                  (edge) =>
+                      edge.operationId.isIn(operationIds) &
+                      edge.dependencyId.isIn(operationIds),
+                ))
+                .get();
+        final adjacency = {
+          for (final operationId in operationIds) operationId: <String>{},
+        };
+        for (final edge in edges) {
+          adjacency[edge.operationId]!.add(edge.dependencyId);
+          adjacency[edge.dependencyId]!.add(edge.operationId);
+        }
+
+        final byId = {
+          for (final operation in operations) operation.operationId: operation,
+        };
+        final expiredIds = <String>{};
+        final visited = <String>{};
+        for (final operationId in operationIds) {
+          if (!visited.add(operationId)) continue;
+          final component = <String>{operationId};
+          final pending = <String>[operationId];
+          while (pending.isNotEmpty) {
+            final current = pending.removeLast();
+            for (final neighbor in adjacency[current]!) {
+              if (visited.add(neighbor)) {
+                component.add(neighbor);
+                pending.add(neighbor);
+              }
+            }
+          }
+          if (component.every(
+            (id) => _isExpiredTerminal(byId[id]!, currentTime),
+          )) {
+            expiredIds.addAll(component);
+          }
+        }
+
+        if (expiredIds.isEmpty) return 0;
+        await (database.delete(database.offlineOutboxDependencies)..where(
+              (edge) =>
+                  edge.operationId.isIn(expiredIds) |
+                  edge.dependencyId.isIn(expiredIds),
+            ))
+            .go();
+        return (database.delete(database.offlineOutboxOperations)..where(
+              (operation) =>
+                  operation.accountId.equals(accountId) &
+                  operation.operationId.isIn(expiredIds),
+            ))
+            .go();
+      });
       return Success(deleted);
     } on Object catch (error) {
       return FailureResult(
@@ -305,7 +340,12 @@ WHERE account_id = ?
         await (database.selectOnly(database.offlineOutboxOperations)
               ..addColumns([count])
               ..where(
-                database.offlineOutboxOperations.accountId.equals(accountId),
+                database.offlineOutboxOperations.accountId.equals(accountId) &
+                    database.offlineOutboxOperations.operationState.isIn([
+                      OutboxState.queued.wireValue,
+                      OutboxState.syncing.wireValue,
+                      OutboxState.retryableFailure.wireValue,
+                    ]),
               ))
             .getSingle();
     if ((row.read(count) ?? 0) >= maxOperationsPerAccount) {
@@ -429,6 +469,29 @@ WHERE account_id = ?
       state == OutboxState.conflict ||
       state == OutboxState.permanentFailure ||
       state == OutboxState.cancelled;
+
+  bool _isExpiredTerminal(
+    OfflineOutboxOperation operation,
+    DateTime currentTime,
+  ) {
+    final state = OutboxState.values.singleWhere(
+      (candidate) => candidate.wireValue == operation.operationState,
+    );
+    final transitionedAt = operation.updatedAt ?? operation.createdAt;
+    return switch (state) {
+      OutboxState.succeeded => transitionedAt.isBefore(
+        currentTime.subtract(succeededRetention),
+      ),
+      OutboxState.conflict ||
+      OutboxState.permanentFailure ||
+      OutboxState.cancelled => transitionedAt.isBefore(
+        currentTime.subtract(failedRetention),
+      ),
+      OutboxState.queued ||
+      OutboxState.syncing ||
+      OutboxState.retryableFailure => false,
+    };
+  }
 
   OutboxOperation _toDomainOperation(OfflineOutboxOperation row) {
     return OutboxOperation(
