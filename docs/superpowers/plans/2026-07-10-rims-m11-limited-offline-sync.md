@@ -589,22 +589,22 @@ feat: add confirmed foreground synchronization
 - Test: `rims_frontend/test/features/offline/attachment_outbox_handler_test.dart`
 - Modify: `rims_frontend/test/features/documents/documents_view_model_test.dart`
 
-- [ ] **Step 1: Write failing tests for offline submit confirmation, stable request key, staged attachment dependency, create-before-complete ordering, unknown result, replay, server validation, and success cleanup.**
+- [x] **Step 1: Write failing tests for offline submit confirmation, stable request key, staged attachment dependency, create-before-complete ordering, unknown result, replay, server validation, and success cleanup.**
 
-- [ ] **Step 2: Queue immutable request DTO snapshots.**
+- [x] **Step 2: Queue immutable request DTO snapshots.**
 
 Document operations retain the existing request ID as idempotency key. Never
 serialize token or cached stock into the operation. Lifecycle operations refer
 to the authoritative document ID produced by their dependency.
 
-- [ ] **Step 3: Bind draft attachments to a local aggregate ID and rebind only after authoritative document creation succeeds.**
+- [x] **Step 3: Bind draft attachments to a local aggregate ID and rebind only after authoritative document creation succeeds.**
 
-- [ ] **Step 4: Keep online fast path unchanged when the request succeeds.**
+- [x] **Step 4: Keep online fast path unchanged when the request succeeds.**
 
 Only network/timeout/unknown outcomes offer queueing. Validation, permission,
 conflict, and insufficient-stock errors remain immediate and are not queued.
 
-- [ ] **Step 5: Run tests and commit.**
+- [x] **Step 5: Run tests and commit.**
 
 ```text
 feat: queue reviewed document operations

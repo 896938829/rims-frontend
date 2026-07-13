@@ -215,6 +215,20 @@ counts, encrypted storage ownership, cleanup, and baseline restore are read.
 | Review gate | independent specification and code-quality reviews APPROVED after all permission, lifecycle, lease, migration, and concurrency findings were fixed |
 | GREEN | backend `go test ./...` and race probes PASS; frontend strict analyze PASS, offline suite PASS (272 tests), full suite PASS (849 tests); diff checks PASS |
 
+## Task 13 Queued Document And Attachment Evidence
+
+| Probe | Observed result |
+| --- | --- |
+| RED | immutable document graphs, typed dependency outputs, lifecycle status recovery, durable attachment ownership, and coordinated cleanup were absent or failed controlled unknown-response and restart cases |
+| Snapshot | document, lifecycle, reference, and attachment operations persist recursively immutable versioned DTO snapshots without tokens or cached stock authority |
+| Graph | transactional create, serial attachment, complete/confirm/settle graphs enforce account, warehouse, permission, document-type, status, and dependency-output boundaries |
+| Idempotency | unknown lifecycle outcomes probe status first; 404 accepts only the authoritative pre-state, while completed plus a valid replay lease supplies runtime-only proof for the unique post-state and same-key replay |
+| Attachments | verified bounded staging snapshots transfer durable ownership to the outbox; restart recovery blocks direct retry and cleanup runs only after a scope-matched succeeded transition |
+| Cleanup | draft and staging cleanup intents persist with the operation, protect active evidence from pruning, and are consumed idempotently after authoritative success |
+| Fast path | successful online document and attachment requests retain the existing immediate path; validation, permission, conflict, and insufficient-stock failures remain visible and are not queued |
+| Review | independent specification and code-quality reviews APPROVED after all P0/P1/P2 findings covering lifecycle provenance, dependency parsing, staging TOCTOU, replay evidence, and restart ownership were fixed |
+| GREEN | strict analyze PASS; full Flutter suite PASS (973 tests); diff check PASS |
+
 ## Final Android State Evidence
 
 | Evidence | Observed result |
