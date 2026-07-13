@@ -1258,15 +1258,6 @@ LIMIT 1
                       edge.dependencyId.isIn(operationIds),
                 ))
                 .get();
-        final byId = {
-          for (final operation in operations) operation.operationId: operation,
-        };
-        final children = {
-          for (final operationId in operationIds) operationId: <String>{},
-        };
-        for (final edge in edges) {
-          children[edge.dependencyId]!.add(edge.operationId);
-        }
         final cleanupOperationIds =
             await (database.selectOnly(database.offlineOutboxCleanupIntents)
                   ..addColumns([
@@ -1289,14 +1280,27 @@ LIMIT 1
           if (!_isExpiredTerminal(operation, currentTime)) continue;
           expiredCandidates.add(operation.operationId);
         }
-        final expiredIds = expiredCandidates.where((operationId) {
-          return !_hasRecoverableDescendantOutside(
-            operationId,
-            children,
-            byId,
-            expiredCandidates,
-          );
-        }).toSet();
+        final recoverableOperationIds = operations
+            .where(
+              (operation) =>
+                  !expiredCandidates.contains(operation.operationId) &&
+                  (operation.operationState == OutboxState.queued.wireValue ||
+                      operation.operationState ==
+                          OutboxState.syncing.wireValue ||
+                      operation.operationState ==
+                          OutboxState.retryableFailure.wireValue ||
+                      operation.operationState ==
+                          OutboxState.conflict.wireValue),
+            )
+            .map((operation) => operation.operationId)
+            .toSet();
+        final protectedDirectDependencies = edges
+            .where((edge) => recoverableOperationIds.contains(edge.operationId))
+            .map((edge) => edge.dependencyId)
+            .toSet();
+        final expiredIds = expiredCandidates
+            .difference(protectedDirectDependencies)
+            .toSet();
 
         final resolutions = await (database.select(
           database.offlineOutboxResolutions,
@@ -1669,31 +1673,6 @@ WHERE account_id = ?
       OutboxState.syncing ||
       OutboxState.retryableFailure => false,
     };
-  }
-
-  bool _hasRecoverableDescendantOutside(
-    String operationId,
-    Map<String, Set<String>> children,
-    Map<String, OfflineOutboxOperation> operations,
-    Set<String> expiredCandidates,
-  ) {
-    final pending = <String>[...children[operationId] ?? const <String>{}];
-    final visited = <String>{};
-    while (pending.isNotEmpty) {
-      final childId = pending.removeLast();
-      if (!visited.add(childId)) continue;
-      final child = operations[childId];
-      if (child != null &&
-          !expiredCandidates.contains(childId) &&
-          (child.operationState == OutboxState.queued.wireValue ||
-              child.operationState == OutboxState.syncing.wireValue ||
-              child.operationState == OutboxState.retryableFailure.wireValue ||
-              child.operationState == OutboxState.conflict.wireValue)) {
-        return true;
-      }
-      pending.addAll(children[childId] ?? const <String>{});
-    }
-    return false;
   }
 
   OutboxOperation _toDomainOperation(OfflineOutboxOperation row) {

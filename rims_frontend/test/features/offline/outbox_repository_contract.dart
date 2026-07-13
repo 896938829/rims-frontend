@@ -856,10 +856,13 @@ void runOutboxRepositoryContract(String name, OutboxHarnessFactory create) {
             operationId: id,
             next: OutboxState.syncing,
           );
-          await repository.transition(
+          await repository.completeSuccess(
             accountId: '7',
             operationId: id,
-            next: OutboxState.succeeded,
+            output: OutboxOperationOutput(
+              version: 1,
+              data: {'attachmentId': index + 1, 'documentId': 91},
+            ),
           );
           parent = id;
         }
@@ -869,11 +872,27 @@ void runOutboxRepositoryContract(String name, OutboxHarnessFactory create) {
         );
         clock.value = initialTime;
 
-        expect((await repository.prune(accountId: '7')).successData, 0);
-        expect((await repository.list('7')).successData, hasLength(41));
+        expect((await repository.prune(accountId: '7')).successData, 39);
+        final remaining = (await repository.list('7')).successData;
+        expect(remaining, hasLength(2));
+        expect(
+          remaining.map((operation) => operation.operationId),
+          containsAll(['chain-39', 'chain-active']),
+        );
+        expect(
+          remaining.map((operation) => operation.operationId),
+          isNot(contains('chain-38')),
+        );
         expect(
           (await repository.ready('7')).successData.single.operationId,
           'chain-active',
+        );
+        expect(
+          (await repository.loadDependencyOutputs(
+            accountId: '7',
+            operationId: 'chain-active',
+          )).successData['chain-39']?.data,
+          {'attachmentId': 40, 'documentId': 91},
         );
       },
     );
@@ -906,8 +925,14 @@ void runOutboxRepositoryContract(String name, OutboxHarnessFactory create) {
         );
         clock.value = initialTime;
 
-        expect((await repository.prune(accountId: '7')).successData, 0);
-        expect((await repository.list('7')).successData, hasLength(4));
+        expect((await repository.prune(accountId: '7')).successData, 1);
+        expect((await repository.list('7')).successData, hasLength(3));
+        expect(
+          (await repository.list(
+            '7',
+          )).successData.map((operation) => operation.operationId),
+          isNot(contains('fork-root')),
+        );
         expect(
           (await repository.ready('7')).successData.single.operationId,
           'fork-active',

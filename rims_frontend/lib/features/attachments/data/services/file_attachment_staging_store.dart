@@ -24,6 +24,8 @@ typedef FileCopier = Future<void> Function(String source, String destination);
 typedef FileDeleter = Future<void> Function(File file);
 typedef ManifestCommitter = Future<void> Function(File temporary, File target);
 typedef ManifestReadObserver = Future<void> Function(File manifest);
+typedef AttachmentFileStreamReader =
+    Stream<List<int>> Function(File file, int start, int end);
 typedef ThumbnailBuilder =
     Future<String?> Function(String source, String destination);
 
@@ -43,6 +45,7 @@ final class FileAttachmentStagingStore
     FileDeleter? deleteFile,
     ManifestCommitter? commitManifest,
     ManifestReadObserver? onManifestRead,
+    AttachmentFileStreamReader? openRead,
     ThumbnailBuilder? thumbnailBuilder,
   }) : this._(
          rootDirectory,
@@ -52,6 +55,7 @@ final class FileAttachmentStagingStore
          deleteFile ?? _deleteIfExists,
          commitManifest ?? _defaultCommitManifest,
          onManifestRead,
+         openRead ?? _defaultOpenRead,
          thumbnailBuilder ?? buildBoundedThumbnail,
        );
 
@@ -63,6 +67,7 @@ final class FileAttachmentStagingStore
     this._deleteFile,
     this._commitManifest,
     this._onManifestRead,
+    this._openRead,
     this._thumbnailBuilder,
   );
 
@@ -73,6 +78,7 @@ final class FileAttachmentStagingStore
   final FileDeleter _deleteFile;
   final ManifestCommitter _commitManifest;
   final ManifestReadObserver? _onManifestRead;
+  final AttachmentFileStreamReader _openRead;
   final ThumbnailBuilder _thumbnailBuilder;
 
   @override
@@ -291,6 +297,7 @@ final class FileAttachmentStagingStore
   }) async {
     if (!RegExp(r'^[A-Za-z0-9_-]+$').hasMatch(requestId) ||
         expectedSize < 0 ||
+        expectedSize > _maximumFileSize ||
         !RegExp(r'^[a-f0-9]{64}$').hasMatch(expectedSha256) ||
         (localAggregateId == null && documentId != null) ||
         (localAggregateId != null &&
@@ -326,14 +333,22 @@ final class FileAttachmentStagingStore
         );
       }
       final file = File(canonicalPath);
-      if (!await file.exists()) {
-        return const FailureResult(
-          ValidationFailure(message: 'Staged attachment is missing.'),
-        );
-      }
-      late final Uint8List bytes;
+      late final FileStat stat;
+      late final _BoundedAttachmentRead read;
       try {
-        bytes = await file.readAsBytes();
+        stat = await file.stat();
+        if (stat.type != FileSystemEntityType.file ||
+            stat.size < 0 ||
+            stat.size > _maximumFileSize ||
+            stat.size != expectedSize ||
+            stat.size != item.pending.fileSize) {
+          return const FailureResult(
+            ValidationFailure(
+              message: 'Staged attachment changed after review.',
+            ),
+          );
+        }
+        read = await _readBoundedAttachment(file, expectedSize);
       } on FileSystemException catch (error) {
         return FailureResult(
           ValidationFailure(
@@ -342,10 +357,9 @@ final class FileAttachmentStagingStore
           ),
         );
       }
-      final actualHash = sha256.convert(bytes).toString();
-      if (bytes.length != expectedSize ||
-          bytes.length != item.pending.fileSize ||
-          actualHash != expectedSha256 ||
+      if (read.overflow ||
+          read.bytes.length != expectedSize ||
+          read.sha256 != expectedSha256 ||
           item.sha256 != expectedSha256) {
         return const FailureResult(
           ValidationFailure(message: 'Staged attachment changed after review.'),
@@ -394,7 +408,9 @@ final class FileAttachmentStagingStore
             if (identical(candidate, item)) rebound else candidate,
         ]);
       }
-      return Success(AttachmentUploadSnapshot(pending: pending, bytes: bytes));
+      return Success(
+        AttachmentUploadSnapshot(pending: pending, bytes: read.bytes),
+      );
     } on Object catch (error) {
       return FailureResult(
         LocalStorageFailure(
@@ -403,6 +419,45 @@ final class FileAttachmentStagingStore
         ),
       );
     }
+  }
+
+  Future<_BoundedAttachmentRead> _readBoundedAttachment(
+    File file,
+    int expectedSize,
+  ) async {
+    final readLimit = expectedSize + 1;
+    final bytes = BytesBuilder(copy: false);
+    final digestCapture = _DigestCapture();
+    final hashSink = sha256.startChunkedConversion(digestCapture);
+    var observed = 0;
+    var stored = 0;
+    try {
+      await for (final chunk in _openRead(file, 0, readLimit)) {
+        if (observed >= readLimit) break;
+        final observedInChunk = chunk.length <= readLimit - observed
+            ? chunk.length
+            : readLimit - observed;
+        final dataInChunk = observedInChunk <= expectedSize - stored
+            ? observedInChunk
+            : expectedSize - stored;
+        if (dataInChunk > 0) {
+          final accepted = dataInChunk == chunk.length
+              ? chunk
+              : chunk.sublist(0, dataInChunk);
+          bytes.add(accepted);
+          hashSink.add(accepted);
+          stored += dataInChunk;
+        }
+        observed += observedInChunk;
+      }
+    } finally {
+      hashSink.close();
+    }
+    return _BoundedAttachmentRead(
+      bytes: bytes.takeBytes(),
+      sha256: digestCapture.digest.toString(),
+      overflow: observed > expectedSize,
+    );
   }
 
   @override
@@ -1183,6 +1238,9 @@ Future<void> _defaultCopy(String source, String destination) async {
   await File(source).copy(destination);
 }
 
+Stream<List<int>> _defaultOpenRead(File file, int start, int end) =>
+    file.openRead(start, end);
+
 Future<void> _defaultCommitManifest(File temporary, File target) async {
   await temporary.rename(target.path);
 }
@@ -1236,6 +1294,28 @@ final class _AsyncKeyedLock {
       if (identical(_tails[key], tail)) _tails.remove(key);
     }
   }
+}
+
+final class _BoundedAttachmentRead {
+  const _BoundedAttachmentRead({
+    required this.bytes,
+    required this.sha256,
+    required this.overflow,
+  });
+
+  final Uint8List bytes;
+  final String sha256;
+  final bool overflow;
+}
+
+final class _DigestCapture implements Sink<Digest> {
+  late Digest digest;
+
+  @override
+  void add(Digest data) => digest = data;
+
+  @override
+  void close() {}
 }
 
 Future<String?> buildBoundedThumbnail(String source, String destination) async {

@@ -58,7 +58,10 @@ final class AttachmentOutboxHandler implements OutboxOperationHandler {
       try {
         dependencyDocumentId = requireAuthoritativeDocumentId(
           dependencyOutputs,
-          allowedShapes: const {OutboxDependencyOutputShape.document},
+          allowedShapes: const {
+            OutboxDependencyOutputShape.document,
+            OutboxDependencyOutputShape.attachment,
+          },
         );
       } on FormatException catch (error) {
         return FailureResult(

@@ -20,7 +20,7 @@ final class StagedAttachment {
 
 final class AttachmentUploadSnapshot {
   AttachmentUploadSnapshot({required this.pending, required List<int> bytes})
-    : bytes = List<int>.unmodifiable(List<int>.of(bytes));
+    : bytes = List<int>.unmodifiable(bytes);
 
   final PendingAttachment pending;
   final List<int> bytes;

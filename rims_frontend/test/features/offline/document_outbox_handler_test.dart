@@ -190,7 +190,7 @@ void main() {
       final success = (result as Success<OutboxHandlerSuccess>).data;
       expect(success.output.data, {
         'documentId': 91,
-        'lifecycle': 'document_complete',
+        'operationKind': 'document_complete',
       });
       expect(success.cleanup?.draftId, 'draft-1');
       expect(success.cleanup?.attachmentRequestIds, ['attachment-request-1']);
@@ -260,7 +260,7 @@ void main() {
         {
           'parent': OutboxOperationOutput(
             version: 1,
-            data: {'documentId': 91, 'lifecycle': 'unknown'},
+            data: {'documentId': 91, 'operationKind': 'unknown'},
           ),
         },
         {'parent-a': valid, 'parent-b': valid},
@@ -274,6 +274,133 @@ void main() {
         expect(result.failureOrNull, isA<ValidationFailure>());
       }
       expect(dataSource.events, isEmpty);
+    },
+  );
+
+  test(
+    'complete and stocktake confirm accept only document or attachment output',
+    () async {
+      for (final kind in [
+        OutboxOperationKind.documentComplete,
+        OutboxOperationKind.stocktakeConfirm,
+      ]) {
+        final handler = DocumentOutboxHandler(
+          kind: kind,
+          remoteDataSource: dataSource,
+          stagingStore: stagingStore,
+          draftRepository: draftRepository,
+          eventBus: eventBus,
+        );
+        for (final valid in [
+          OutboxOperationOutput(version: 1, data: {'documentId': 91}),
+          OutboxOperationOutput(
+            version: 1,
+            data: {'attachmentId': 17, 'documentId': 91},
+          ),
+        ]) {
+          final result = await handler.execute(
+            _operation(
+              kind: kind,
+              operationId: '${kind.wireValue}-request',
+              idempotencyKey: '${kind.wireValue}.request',
+              payload: const {'version': 1},
+            ),
+            dependencyOutputs: {'parent': valid},
+          );
+          expect(result, isA<Success<OutboxHandlerSuccess>>());
+        }
+
+        final callsBeforeInvalid = dataSource.events.length;
+        for (final invalid in [
+          OutboxOperationOutput(
+            version: 1,
+            data: {'documentId': 91, 'operationKind': 'stocktake_confirm'},
+          ),
+          OutboxOperationOutput(
+            version: 1,
+            data: {'documentId': 91, 'operationKind': 'stocktake_settle'},
+          ),
+        ]) {
+          final result = await handler.execute(
+            _operation(
+              kind: kind,
+              operationId: '${kind.wireValue}-invalid',
+              idempotencyKey: '${kind.wireValue}.invalid',
+              payload: const {'version': 1},
+            ),
+            dependencyOutputs: {'parent': invalid},
+          );
+          expect(result.failureOrNull, isA<ValidationFailure>());
+        }
+        expect(dataSource.events, hasLength(callsBeforeInvalid));
+      }
+    },
+  );
+
+  test(
+    'stocktake settle accepts only exact stocktake confirm lifecycle output',
+    () async {
+      final handler = DocumentOutboxHandler(
+        kind: OutboxOperationKind.stocktakeSettle,
+        remoteDataSource: dataSource,
+        stagingStore: stagingStore,
+        draftRepository: draftRepository,
+        eventBus: eventBus,
+      );
+      final operation = _operation(
+        kind: OutboxOperationKind.stocktakeSettle,
+        operationId: 'settle-document-request-1',
+        idempotencyKey: 'document-request-1.stocktake_settle',
+        payload: const {'version': 1},
+      );
+
+      final valid = await handler.execute(
+        operation,
+        dependencyOutputs: {
+          'confirm': OutboxOperationOutput(
+            version: 1,
+            data: {'documentId': 91, 'operationKind': 'stocktake_confirm'},
+          ),
+        },
+      );
+      expect(valid, isA<Success<OutboxHandlerSuccess>>());
+      expect((valid as Success<OutboxHandlerSuccess>).data.output.data, {
+        'documentId': 91,
+        'operationKind': 'stocktake_settle',
+      });
+
+      final callsBeforeInvalid = dataSource.events.length;
+      final invalid = <OutboxOperationOutput>[
+        OutboxOperationOutput(version: 1, data: {'documentId': 91}),
+        OutboxOperationOutput(
+          version: 1,
+          data: {'attachmentId': 17, 'documentId': 91},
+        ),
+        OutboxOperationOutput(
+          version: 1,
+          data: {'documentId': 91, 'operationKind': 'document_complete'},
+        ),
+        OutboxOperationOutput(
+          version: 1,
+          data: {'documentId': 91, 'operationKind': 'stocktake_settle'},
+        ),
+        OutboxOperationOutput(
+          version: 1,
+          data: {
+            'documentId': 91,
+            'operationKind': 'stocktake_confirm',
+            'extra': true,
+          },
+        ),
+      ];
+      for (final output in invalid) {
+        final result = await handler.execute(
+          operation,
+          dependencyOutputs: {'parent': output},
+        );
+        expect(result.failureOrNull, isA<ValidationFailure>());
+      }
+      expect(dataSource.events, hasLength(callsBeforeInvalid));
     },
   );
 }

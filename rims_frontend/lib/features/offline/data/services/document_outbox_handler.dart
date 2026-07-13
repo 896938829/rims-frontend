@@ -125,11 +125,16 @@ final class DocumentOutboxHandler implements OutboxOperationHandler {
     final payload = _DocumentLifecyclePayload.fromJson(operation.payload);
     final documentId = requireAuthoritativeDocumentId(
       dependencyOutputs,
-      allowedShapes: const {
-        OutboxDependencyOutputShape.document,
-        OutboxDependencyOutputShape.attachment,
-        OutboxDependencyOutputShape.lifecycle,
-      },
+      allowedShapes: kind == OutboxOperationKind.stocktakeSettle
+          ? const {OutboxDependencyOutputShape.lifecycle}
+          : const {
+              OutboxDependencyOutputShape.document,
+              OutboxDependencyOutputShape.attachment,
+            },
+      requiredLifecycleOperationKind:
+          kind == OutboxOperationKind.stocktakeSettle
+          ? OutboxOperationKind.stocktakeConfirm.wireValue
+          : null,
     );
     final Result<void> result = switch (kind) {
       OutboxOperationKind.documentComplete =>
@@ -156,7 +161,7 @@ final class DocumentOutboxHandler implements OutboxOperationHandler {
       OutboxHandlerSuccess(
         output: OutboxOperationOutput(
           version: 1,
-          data: {'documentId': documentId, 'lifecycle': kind.wireValue},
+          data: {'documentId': documentId, 'operationKind': kind.wireValue},
         ),
         cleanup: payload.cleanup?.toRequest(),
       ),

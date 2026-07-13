@@ -30,6 +30,7 @@ void main() {
     FileDeleter? deleteFile,
     ManifestCommitter? commitManifest,
     ManifestReadObserver? onManifestRead,
+    AttachmentFileStreamReader? openRead,
     DateTime? now,
     String Function()? idFactory,
   }) {
@@ -41,6 +42,7 @@ void main() {
       deleteFile: deleteFile,
       commitManifest: commitManifest,
       onManifestRead: onManifestRead,
+      openRead: openRead,
       thumbnailBuilder: (sourcePath, destinationPath) async {
         await File(destinationPath).writeAsBytes([9, 8, 7]);
         return destinationPath;
@@ -238,6 +240,81 @@ void main() {
       );
     },
   );
+
+  test(
+    'oversized replacement is rejected from stat without opening a byte stream',
+    () async {
+      var readerCalls = 0;
+      final boundedStore = store(
+        openRead: (file, start, end) {
+          readerCalls += 1;
+          return file.openRead(start, end);
+        },
+      );
+      final staged = (await boundedStore.stage(
+        userId: '42',
+        binding: AttachmentBinding.documentDraft('draft-1'),
+        selection: selection(),
+        existingCount: 0,
+      )).successData;
+      final replacement = await File(
+        staged.pending.stagedPath,
+      ).open(mode: FileMode.write);
+      await replacement.truncate(10 * 1024 * 1024 + 1);
+      await replacement.close();
+
+      final result = await boundedStore.prepareUploadSnapshot(
+        userId: '42',
+        requestId: staged.pending.requestId,
+        expectedSize: staged.pending.fileSize,
+        expectedSha256: staged.sha256,
+        localAggregateId: 'draft-1',
+        documentId: 91,
+      );
+
+      expect(result.failureOrNull, isA<ValidationFailure>());
+      expect(readerCalls, 0);
+      expect(
+        (await store().recoverForUser('42')).successData.single.pending.binding,
+        AttachmentBinding.documentDraft('draft-1'),
+      );
+    },
+  );
+
+  test('snapshot stream is bounded to expected size plus one byte', () async {
+    int? requestedStart;
+    int? requestedEnd;
+    final boundedStore = store(
+      openRead: (_, start, end) {
+        requestedStart = start;
+        requestedEnd = end;
+        return Stream<List<int>>.value(const [1, 2, 3, 4, 5, 6, 7]);
+      },
+    );
+    final staged = (await boundedStore.stage(
+      userId: '42',
+      binding: AttachmentBinding.documentDraft('draft-1'),
+      selection: selection(),
+      existingCount: 0,
+    )).successData;
+
+    final result = await boundedStore.prepareUploadSnapshot(
+      userId: '42',
+      requestId: staged.pending.requestId,
+      expectedSize: staged.pending.fileSize,
+      expectedSha256: staged.sha256,
+      localAggregateId: 'draft-1',
+      documentId: 91,
+    );
+
+    expect(result.failureOrNull, isA<ValidationFailure>());
+    expect(requestedStart, 0);
+    expect(requestedEnd, staged.pending.fileSize + 1);
+    expect(
+      (await store().recoverForUser('42')).successData.single.pending.binding,
+      AttachmentBinding.documentDraft('draft-1'),
+    );
+  });
 
   test(
     'missing snapshot file is validation and leaves draft binding unchanged',

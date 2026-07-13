@@ -675,30 +675,25 @@ final class MemoryOutboxRepository implements OutboxRepository {
       for (final operation in _operations.values)
         if (operation.accountId == accountId) operation.operationId: operation,
     };
-    final children = {
-      for (final operationId in accountOperations.keys) operationId: <String>{},
-    };
-    for (final entry in _dependencies.entries) {
-      if (!accountOperations.containsKey(entry.key)) continue;
-      for (final dependency in entry.value) {
-        if (accountOperations.containsKey(dependency)) {
-          children[dependency]!.add(entry.key);
-        }
-      }
-    }
     final expiredCandidates = <String>{};
     for (final operation in accountOperations.values) {
       if (_cleanupIntents.containsKey(operation.operationId)) continue;
       if (!_isExpiredTerminal(operation, currentTime)) continue;
       expiredCandidates.add(operation.operationId);
     }
-    final expiredIds = expiredCandidates.where((operationId) {
-      return !_hasRecoverableDescendantOutside(
-        operationId,
-        children,
-        expiredCandidates,
+    final protectedDirectDependencies = <String>{};
+    for (final operation in accountOperations.values) {
+      if (expiredCandidates.contains(operation.operationId) ||
+          !_isRecoverable(operation.state)) {
+        continue;
+      }
+      protectedDirectDependencies.addAll(
+        _dependencies[operation.operationId] ?? const <String>{},
       );
-    }).toSet();
+    }
+    final expiredIds = expiredCandidates
+        .difference(protectedDirectDependencies)
+        .toSet();
     final removableResolutionOriginalIds = <String>{};
     for (final entry in _replacementByOriginal.entries) {
       final originalExpired = expiredIds.contains(entry.key);
@@ -871,27 +866,6 @@ final class MemoryOutboxRepository implements OutboxRepository {
         );
       }
     }
-  }
-
-  bool _hasRecoverableDescendantOutside(
-    String operationId,
-    Map<String, Set<String>> children,
-    Set<String> expiredCandidates,
-  ) {
-    final pending = <String>[...children[operationId] ?? const <String>{}];
-    final visited = <String>{};
-    while (pending.isNotEmpty) {
-      final childId = pending.removeLast();
-      if (!visited.add(childId)) continue;
-      final child = _operations[childId];
-      if (child != null &&
-          !expiredCandidates.contains(childId) &&
-          _isRecoverable(child.state)) {
-        return true;
-      }
-      pending.addAll(children[childId] ?? const <String>{});
-    }
-    return false;
   }
 
   Result<OutboxOperation> _replayOrConflict(
