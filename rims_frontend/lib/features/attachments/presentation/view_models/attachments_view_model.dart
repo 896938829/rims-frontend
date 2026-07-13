@@ -10,7 +10,9 @@ import '../../domain/services/attachment_picker.dart';
 import '../../domain/services/attachment_share_service.dart';
 import '../../domain/services/attachment_staging_store.dart';
 import '../../../offline/domain/entities/outbox_operation.dart';
+import '../../../offline/domain/entities/outbox_graph.dart';
 import '../../../offline/domain/repositories/outbox_repository.dart';
+import '../../../offline/domain/services/outbox_executor.dart';
 
 enum AttachmentTransferState {
   staged,
@@ -96,6 +98,8 @@ final class AttachmentsViewModel extends ChangeNotifier {
     this.warehouseId,
     this.outboxRepository,
     this.allowedOutboxKindsReader,
+    this.outboxContextReader,
+    this.outboxContextGenerationReader,
     this.onAttachmentPublished,
     this.beforeAttachmentDelete,
     this.restoreAfterDeleteFailure,
@@ -110,6 +114,8 @@ final class AttachmentsViewModel extends ChangeNotifier {
   final int? warehouseId;
   final OutboxRepository? outboxRepository;
   final Set<OutboxOperationKind> Function()? allowedOutboxKindsReader;
+  final OutboxExecutionContext? Function()? outboxContextReader;
+  final int Function()? outboxContextGenerationReader;
   final AttachmentSynchronization? onAttachmentPublished;
   final AttachmentSynchronization? beforeAttachmentDelete;
   final AttachmentSynchronization? restoreAfterDeleteFailure;
@@ -157,6 +163,12 @@ final class AttachmentsViewModel extends ChangeNotifier {
       _denyOfflineUpload(requestId);
       return false;
     }
+    final contextAtStart = outboxContextReader?.call();
+    final generationAtStart = outboxContextGenerationReader?.call();
+    if (!_matchesOfflineScope(contextAtStart)) {
+      _failOfflineUpload(const StateFailure(message: '账号或仓库上下文已变化，附件未加入待同步'));
+      return false;
+    }
     final index = _queue.indexWhere((item) => item.requestId == requestId);
     if (index < 0) return false;
     _offlineEnqueueInFlight = true;
@@ -172,6 +184,20 @@ final class AttachmentsViewModel extends ChangeNotifier {
       if (staged.pending.binding != binding || staged.sha256.isEmpty) {
         _errorMessage = '附件暂存归属或内容快照已变化，请重新复核';
         _notify();
+        return false;
+      }
+      final currentContext = outboxContextReader?.call();
+      final currentGeneration = outboxContextGenerationReader?.call();
+      if (!_isOutboxKindAllowed(OutboxOperationKind.attachmentUpload)) {
+        _denyOfflineUpload(requestId);
+        return false;
+      }
+      if (!_matchesOfflineScope(currentContext) ||
+          generationAtStart != currentGeneration ||
+          contextAtStart?.reviewStamp != currentContext?.reviewStamp) {
+        _failOfflineUpload(
+          const StateFailure(message: '账号、仓库或权限上下文已变化，附件未加入待同步'),
+        );
         return false;
       }
       final operation = OutboxOperation(
@@ -190,8 +216,10 @@ final class AttachmentsViewModel extends ChangeNotifier {
         createdAt: DateTime.now().toUtc(),
         requiresStatusProbe: _offlineUploadUnknown[requestId]!,
       );
-      final result = await outboxRepository!.enqueue(operation);
-      if (result case FailureResult<OutboxOperation>(:final failure)) {
+      final result = await outboxRepository!.enqueueGraph(
+        OutboxGraph(operations: [operation]),
+      );
+      if (result case FailureResult<List<OutboxOperation>>(:final failure)) {
         _errorMessage = failure.message;
         _notify();
         return false;
@@ -629,11 +657,20 @@ final class AttachmentsViewModel extends ChangeNotifier {
   }
 
   bool _isOutboxKindAllowed(OutboxOperationKind kind) =>
-      allowedOutboxKindsReader?.call().contains(kind) ?? true;
+      outboxContextReader?.call()?.allowedKinds.contains(kind) ??
+      allowedOutboxKindsReader?.call().contains(kind) ??
+      true;
+
+  bool _matchesOfflineScope(OutboxExecutionContext? context) =>
+      context == null ||
+      (context.accountId == userId && context.warehouseId == warehouseId);
 
   void _denyOfflineUpload(String requestId, {bool notify = true}) {
     const failure = AuthorizationFailure(message: '当前账号没有附件待同步权限，未保存任何操作');
-    _offlineUploadUnknown.remove(requestId);
+    _failOfflineUpload(failure, notify: notify);
+  }
+
+  void _failOfflineUpload(Failure failure, {bool notify = true}) {
     _offlineUploadFailure = failure;
     _errorMessage = failure.message;
     if (notify) _notify();

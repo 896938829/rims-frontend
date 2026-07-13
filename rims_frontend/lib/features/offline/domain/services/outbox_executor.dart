@@ -165,6 +165,45 @@ final class OutboxExecutor implements OutboxExecutorPort {
         warehouseId: review.warehouseId,
         permissionStamp: review.permissionStamp,
       );
+      final graphScopeFailure = _validateGraphScope(review, component);
+      if (graphScopeFailure != null) {
+        return OutboxExecutionReport(
+          paused: true,
+          reviewInvalidated: true,
+          skippedOperationReasons: _skipAll(
+            review.operationIds,
+            'review_invalidated',
+          ),
+          failure: graphScopeFailure,
+        );
+      }
+      final recovery = await repository.recoverStaleSyncing(
+        accountId: review.accountId,
+        staleBefore: now().toUtc().subtract(staleSyncingThreshold),
+        operationIds: review.operationIds,
+      );
+      if (recovery case FailureResult<int>(:final failure)) {
+        return OutboxExecutionReport(failure: failure);
+      }
+      final reloadedResult = await repository.loadConnectedComponent(
+        accountId: review.accountId,
+        operationIds: review.operationIds,
+      );
+      if (reloadedResult case FailureResult<List<OutboxOperation>>(
+        :final failure,
+      )) {
+        return OutboxExecutionReport(failure: failure);
+      }
+      final reloaded = (reloadedResult as Success<List<OutboxOperation>>).data;
+      review = OutboxReview(
+        operationIds: Set.unmodifiable({
+          ...review.operationIds,
+          ...reloaded.map((operation) => operation.operationId),
+        }),
+        accountId: review.accountId,
+        warehouseId: review.warehouseId,
+        permissionStamp: review.permissionStamp,
+      );
       final persistedReviewFailure = await _validatePersistedReview(
         review,
         const {},
@@ -179,14 +218,6 @@ final class OutboxExecutor implements OutboxExecutorPort {
           ),
           failure: persistedReviewFailure,
         );
-      }
-      final recovery = await repository.recoverStaleSyncing(
-        accountId: review.accountId,
-        staleBefore: now().toUtc().subtract(staleSyncingThreshold),
-        operationIds: review.operationIds,
-      );
-      if (recovery case FailureResult<int>(:final failure)) {
-        return OutboxExecutionReport(failure: failure);
       }
       final succeeded = <String>[];
       final processed = <String>{};
@@ -413,6 +444,17 @@ final class OutboxExecutor implements OutboxExecutorPort {
       return const AuthorizationFailure(
         message: 'The current session cannot synchronize this operation.',
       );
+    }
+    return null;
+  }
+
+  Failure? _validateGraphScope(
+    OutboxReview review,
+    Iterable<OutboxOperation> operations,
+  ) {
+    for (final operation in operations) {
+      final failure = _validateOperation(review, operation);
+      if (failure != null) return failure;
     }
     return null;
   }

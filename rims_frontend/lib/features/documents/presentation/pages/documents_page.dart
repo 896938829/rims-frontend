@@ -25,6 +25,7 @@ import '../../../inventory/domain/repositories/inventory_repository.dart';
 import '../../../offline/domain/repositories/document_draft_repository.dart';
 import '../../../offline/domain/repositories/outbox_repository.dart';
 import '../../../offline/domain/entities/outbox_operation.dart';
+import '../../../offline/domain/services/outbox_executor.dart';
 import '../../../offline/presentation/view_models/draft_attachments_view_model.dart';
 import '../../../offline/presentation/widgets/draft_attachment_panel.dart';
 import '../view_models/documents_view_model.dart';
@@ -55,6 +56,8 @@ final class DocumentsPage extends StatefulWidget {
     this.initialDraftId,
     this.outboxRepository,
     this.allowedOutboxKinds = const {...OutboxOperationKind.values},
+    this.outboxContextReader,
+    this.outboxContextGenerationReader,
     super.key,
   });
 
@@ -79,6 +82,8 @@ final class DocumentsPage extends StatefulWidget {
   final String? initialDraftId;
   final OutboxRepository? outboxRepository;
   final Set<OutboxOperationKind> allowedOutboxKinds;
+  final OutboxExecutionContext? Function()? outboxContextReader;
+  final int Function()? outboxContextGenerationReader;
 
   @override
   State<DocumentsPage> createState() => _DocumentsPageState();
@@ -228,6 +233,9 @@ final class _DocumentsPageState extends State<DocumentsPage> {
               attachmentStagingStore: widget.attachmentStagingStore,
               attachmentShareService: widget.attachmentShareService,
               attachmentUserId: widget.attachmentUserId,
+              outboxContextReader: widget.outboxContextReader,
+              outboxContextGenerationReader:
+                  widget.outboxContextGenerationReader,
             );
           },
         );
@@ -578,6 +586,8 @@ final class _DocumentDetailSheet extends StatefulWidget {
     this.attachmentStagingStore,
     this.attachmentShareService,
     this.attachmentUserId,
+    this.outboxContextReader,
+    this.outboxContextGenerationReader,
   });
 
   final DocumentRecord document;
@@ -589,6 +599,8 @@ final class _DocumentDetailSheet extends StatefulWidget {
   final AttachmentStagingStore? attachmentStagingStore;
   final AttachmentShareService? attachmentShareService;
   final String? attachmentUserId;
+  final OutboxExecutionContext? Function()? outboxContextReader;
+  final int Function()? outboxContextGenerationReader;
 
   @override
   State<_DocumentDetailSheet> createState() => _DocumentDetailSheetState();
@@ -632,6 +644,8 @@ final class _DocumentDetailSheetState extends State<_DocumentDetailSheet> {
         warehouseId: viewModel.currentWarehouse?.id,
         outboxRepository: viewModel.outboxRepository,
         allowedOutboxKindsReader: () => viewModel.allowedOutboxKinds,
+        outboxContextReader: widget.outboxContextReader,
+        outboxContextGenerationReader: widget.outboxContextGenerationReader,
       );
     }
   }

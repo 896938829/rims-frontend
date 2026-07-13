@@ -14,6 +14,7 @@ import 'package:rims_frontend/features/attachments/presentation/view_models/atta
 import 'package:rims_frontend/features/offline/data/repositories/memory_outbox_repository.dart';
 import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.dart';
 import 'package:rims_frontend/features/offline/domain/repositories/outbox_repository.dart';
+import 'package:rims_frontend/features/offline/domain/services/outbox_executor.dart';
 import 'package:rims_frontend/features/offline/domain/services/outbox_state_machine.dart';
 
 void main() {
@@ -140,6 +141,93 @@ void main() {
     expect(viewModel.offlineUploadFailure, isA<AuthorizationFailure>());
     expect((await outbox.list('3')).successData, isEmpty);
   });
+
+  test(
+    'permission revoked while staged snapshot loads prevents graph enqueue',
+    () async {
+      var generation = 1;
+      var context = const OutboxExecutionContext(
+        accountId: '3',
+        warehouseId: 11,
+        permissionStamp: 'files@1',
+        allowedKinds: {OutboxOperationKind.attachmentUpload},
+      );
+      final repository = _FakeRepository()
+        ..uploadResult = const FailureResult(NetworkFailure());
+      final staging = _FakeStaging()
+        ..loadStagedCompleter = Completer<Result<StagedAttachment>>();
+      final outbox = MemoryOutboxRepository(stateMachine: OutboxStateMachine());
+      final viewModel = _viewModel(
+        repository: repository,
+        staging: staging,
+        outbox: outbox,
+        outboxContextReader: () => context,
+        outboxContextGenerationReader: () => generation,
+      );
+
+      await viewModel.pickAndUpload(AttachmentPickSource.file);
+      final confirming = viewModel.confirmOfflineUpload('stable-request');
+      await staging.loadStagedStarted.future;
+      generation += 1;
+      context = const OutboxExecutionContext(
+        accountId: '3',
+        warehouseId: 11,
+        permissionStamp: 'files@2',
+        allowedKinds: {OutboxOperationKind.documentCreate},
+      );
+      staging.loadStagedCompleter!.complete(Success(_staged()));
+
+      expect(await confirming, isFalse);
+      expect(viewModel.offlineUploadFailure, isA<AuthorizationFailure>());
+      expect((await outbox.list('3')).successData, isEmpty);
+      expect(staging.removedRequestIds, isEmpty);
+      expect(viewModel.offlineUploadReviewFor('stable-request'), isNotNull);
+    },
+  );
+
+  test(
+    'account or warehouse context change while hash loads keeps staged evidence',
+    () async {
+      var generation = 7;
+      var context = const OutboxExecutionContext(
+        accountId: '3',
+        warehouseId: 11,
+        permissionStamp: 'files@1',
+        allowedKinds: {OutboxOperationKind.attachmentUpload},
+      );
+      final repository = _FakeRepository()
+        ..uploadResult = const FailureResult(NetworkFailure());
+      final staging = _FakeStaging()
+        ..loadStagedCompleter = Completer<Result<StagedAttachment>>();
+      final outbox = MemoryOutboxRepository(stateMachine: OutboxStateMachine());
+      final viewModel = _viewModel(
+        repository: repository,
+        staging: staging,
+        outbox: outbox,
+        outboxContextReader: () => context,
+        outboxContextGenerationReader: () => generation,
+      );
+
+      await viewModel.pickAndUpload(AttachmentPickSource.file);
+      final confirming = viewModel.confirmOfflineUpload('stable-request');
+      await staging.loadStagedStarted.future;
+      generation += 1;
+      context = const OutboxExecutionContext(
+        accountId: '4',
+        warehouseId: 12,
+        permissionStamp: 'files@2',
+        allowedKinds: {OutboxOperationKind.attachmentUpload},
+      );
+      staging.loadStagedCompleter!.complete(Success(_staged()));
+
+      expect(await confirming, isFalse);
+      expect(viewModel.offlineUploadFailure, isA<StateFailure>());
+      expect((await outbox.list('3')).successData, isEmpty);
+      expect((await outbox.list('4')).successData, isEmpty);
+      expect(staging.removedRequestIds, isEmpty);
+      expect(viewModel.offlineUploadReviewFor('stable-request'), isNotNull);
+    },
+  );
 
   test(
     'unknown upload queues status-first but validation remains immediate',
@@ -281,6 +369,8 @@ AttachmentsViewModel _viewModel({
   _FakeShare? share,
   OutboxRepository? outbox,
   Set<OutboxOperationKind> Function()? allowedOutboxKindsReader,
+  OutboxExecutionContext? Function()? outboxContextReader,
+  int Function()? outboxContextGenerationReader,
 }) => AttachmentsViewModel(
   repository: repository ?? _FakeRepository(),
   picker: picker ?? _FakePicker(),
@@ -291,6 +381,8 @@ AttachmentsViewModel _viewModel({
   warehouseId: 11,
   outboxRepository: outbox,
   allowedOutboxKindsReader: allowedOutboxKindsReader,
+  outboxContextReader: outboxContextReader,
+  outboxContextGenerationReader: outboxContextGenerationReader,
 );
 
 Attachment _attachment({int id = 7, int position = 0}) => Attachment(
@@ -416,6 +508,8 @@ final class _FakeStaging
     implements AttachmentStagingStore, OutboxAttachmentStagingStore {
   List<StagedAttachment> recovered = [];
   final List<String> removedRequestIds = [];
+  Completer<Result<StagedAttachment>>? loadStagedCompleter;
+  final Completer<void> loadStagedStarted = Completer<void>();
 
   @override
   Future<Result<StagedAttachment>> stage({
@@ -454,7 +548,10 @@ final class _FakeStaging
   Future<Result<StagedAttachment>> loadStaged({
     required String userId,
     required String requestId,
-  }) async => Success(_staged());
+  }) async {
+    if (!loadStagedStarted.isCompleted) loadStagedStarted.complete();
+    return loadStagedCompleter?.future ?? Success(_staged());
+  }
 
   @override
   Future<Result<void>> rebindDocumentDraft({

@@ -21,6 +21,7 @@ final class AuthSessionController extends ChangeNotifier {
   AuthSessionSource? _sessionSource;
   DateTime? _sessionFetchedAt;
   DateTime? _sessionExpiresAt;
+  int _contextGeneration = 0;
 
   AuthSession? get session => _session;
   AppUser? get currentUser => _session?.user;
@@ -36,6 +37,7 @@ final class AuthSessionController extends ChangeNotifier {
   AuthSessionSource? get sessionSource => _sessionSource;
   DateTime? get sessionFetchedAt => _sessionFetchedAt;
   DateTime? get sessionExpiresAt => _sessionExpiresAt;
+  int get contextGeneration => _contextGeneration;
 
   Future<void> restoreSession(AuthRepository authRepository) async {
     await _restoreSession(
@@ -204,6 +206,9 @@ final class AuthSessionController extends ChangeNotifier {
   }
 
   void _publishOwnershipChanges(AuthSession? previous, AuthSession? current) {
+    if (_contextFingerprint(previous) != _contextFingerprint(current)) {
+      _contextGeneration += 1;
+    }
     final previousAccountId = previous?.user.id.toString();
     final currentAccountId = current?.user.id.toString();
     if (previousAccountId != currentAccountId) {
@@ -225,6 +230,13 @@ final class AuthSessionController extends ChangeNotifier {
         ),
       );
     }
+  }
+
+  String? _contextFingerprint(AuthSession? session) {
+    if (session == null) return null;
+    final permissions = session.user.permissionCodes.toList()..sort();
+    return '${session.user.id}:${session.currentWarehouse?.id}:'
+        '${session.user.roleCode}:${permissions.join(',')}';
   }
 
   AuthSession? _sessionWithActiveWarehouse({

@@ -248,6 +248,36 @@ void main() {
         expect(sessionController.switchWarehouseFailure?.message, '无权访问该仓库');
       },
     );
+
+    test(
+      'session context generation changes only after ownership changes',
+      () async {
+        final sessionController = AuthSessionController();
+        expect(sessionController.contextGeneration, 0);
+
+        sessionController.startSession(_multiWarehouseSession);
+        expect(sessionController.contextGeneration, 1);
+
+        await sessionController.switchWarehouse(
+          authRepository: _FakeAuthRepository(
+            switchWarehouseResult: const Success<Warehouse>(_warehouse),
+          ),
+          warehouse: _warehouse,
+        );
+        expect(sessionController.contextGeneration, 1);
+
+        await sessionController.switchWarehouse(
+          authRepository: _FakeAuthRepository(
+            switchWarehouseResult: const Success<Warehouse>(_beijingWarehouse),
+          ),
+          warehouse: _beijingWarehouse,
+        );
+        expect(sessionController.contextGeneration, 2);
+
+        sessionController.logout();
+        expect(sessionController.contextGeneration, 3);
+      },
+    );
   });
 }
 

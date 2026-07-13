@@ -208,6 +208,228 @@ void main() {
     expect(report.succeededOperationIds, ['recovered']);
   });
 
+  test(
+    'executor recovers stale syncing before persisted review validation',
+    () async {
+      await repository.enqueue(operation('invalidated-stale'));
+      await repository.transition(
+        accountId: '7',
+        operationId: 'invalidated-stale',
+        next: OutboxState.syncing,
+      );
+      now = initial.add(const Duration(minutes: 6));
+      final status = _Status(const FailureResult(NotFoundFailure()));
+      final handler = _Handler();
+      final executor = OutboxExecutor(
+        repository: repository,
+        networkStatusService: _Online(),
+        statusDataSource: status,
+        handlers: [handler],
+        contextReader: () => context,
+        now: () => now,
+      );
+
+      final report = await executor.execute(
+        OutboxReview(
+          operationIds: const {'invalidated-stale'},
+          accountId: '7',
+          warehouseId: 11,
+          permissionStamp: context.permissionStamp,
+        ),
+      );
+
+      final stored = (await repository.list('7')).successData.single;
+      expect(report.failure, isA<AuthorizationFailure>());
+      expect(stored.state, OutboxState.retryableFailure);
+      expect(stored.requiresStatusProbe, isTrue);
+      expect(status.calls, 0);
+      expect(handler.calls, 0);
+    },
+  );
+
+  test(
+    'non-stale syncing graph stays processing and cannot be reviewed',
+    () async {
+      await repository.enqueueGraph(
+        OutboxGraph(
+          operations: [
+            operation('upload', kind: OutboxOperationKind.attachmentUpload),
+            operation('complete', kind: OutboxOperationKind.documentComplete),
+          ],
+          dependencies: const {
+            'complete': {'upload'},
+          },
+        ),
+      );
+      for (final item in (await repository.list('7')).successData) {
+        await repository.confirm(
+          accountId: '7',
+          operationId: item.operationId,
+          reviewStamp: 'old-review',
+          expectedUpdatedAt: item.updatedAt,
+        );
+      }
+      await repository.transition(
+        accountId: '7',
+        operationId: 'upload',
+        next: OutboxState.syncing,
+      );
+      const graphContext = OutboxExecutionContext(
+        accountId: '7',
+        warehouseId: 11,
+        permissionStamp: 'files-and-complete',
+        allowedKinds: {
+          OutboxOperationKind.attachmentUpload,
+          OutboxOperationKind.documentComplete,
+        },
+      );
+      final vm = SyncCenterViewModel(
+        repository: repository,
+        executor: _Executor(),
+        contextReader: () => graphContext,
+        now: () => now,
+      );
+      addTearDown(vm.dispose);
+      await vm.load();
+
+      expect(await vm.review('upload'), isFalse);
+      expect(vm.commandFailure, isA<StateFailure>());
+      final stored = (await repository.list('7')).successData;
+      expect(
+        stored.singleWhere((item) => item.operationId == 'upload').state,
+        OutboxState.syncing,
+      );
+      expect(
+        stored
+            .singleWhere((item) => item.operationId == 'complete')
+            .reviewStamp,
+        'old-review',
+      );
+    },
+  );
+
+  test(
+    'rebuilt permission-blocked graph recovers then probes before remaining work',
+    () async {
+      await repository.enqueueGraph(
+        OutboxGraph(
+          operations: [
+            operation('create'),
+            operation('upload', kind: OutboxOperationKind.attachmentUpload),
+            operation('complete', kind: OutboxOperationKind.documentComplete),
+          ],
+          dependencies: const {
+            'upload': {'create'},
+            'complete': {'upload'},
+          },
+        ),
+      );
+      for (final item in (await repository.list('7')).successData) {
+        await repository.confirm(
+          accountId: '7',
+          operationId: item.operationId,
+          reviewStamp: '7\u000011\u0000all@1',
+          expectedUpdatedAt: item.updatedAt,
+        );
+      }
+      await repository.transition(
+        accountId: '7',
+        operationId: 'create',
+        next: OutboxState.syncing,
+      );
+      await repository.completeSuccess(
+        accountId: '7',
+        operationId: 'create',
+        output: OutboxOperationOutput(version: 1, data: {'documentId': 91}),
+      );
+      await repository.transition(
+        accountId: '7',
+        operationId: 'upload',
+        next: OutboxState.syncing,
+      );
+
+      var graphContext = const OutboxExecutionContext(
+        accountId: '7',
+        warehouseId: 11,
+        permissionStamp: 'denied@2',
+        allowedKinds: {
+          OutboxOperationKind.documentCreate,
+          OutboxOperationKind.attachmentUpload,
+        },
+      );
+      final deniedVm = SyncCenterViewModel(
+        repository: repository,
+        executor: _Executor(),
+        contextReader: () => graphContext,
+        now: () => now,
+      );
+      await deniedVm.load();
+      expect(deniedVm.permissionBlockedOperationIds, {
+        'create',
+        'upload',
+        'complete',
+      });
+      deniedVm.dispose();
+
+      now = initial.add(const Duration(minutes: 6));
+      graphContext = const OutboxExecutionContext(
+        accountId: '7',
+        warehouseId: 11,
+        permissionStamp: 'all@3',
+        allowedKinds: {
+          OutboxOperationKind.documentCreate,
+          OutboxOperationKind.attachmentUpload,
+          OutboxOperationKind.documentComplete,
+        },
+      );
+      final events = <String>[];
+      final status = _Status(
+        const FailureResult(NotFoundFailure()),
+        onCall: () => events.add('status:upload'),
+      );
+      final createHandler = _Handler(events: events);
+      final uploadHandler = _Handler(
+        kind: OutboxOperationKind.attachmentUpload,
+        events: events,
+      );
+      final completeHandler = _Handler(
+        kind: OutboxOperationKind.documentComplete,
+        events: events,
+      );
+      final executor = OutboxExecutor(
+        repository: repository,
+        networkStatusService: _Online(),
+        statusDataSource: status,
+        handlers: [createHandler, uploadHandler, completeHandler],
+        contextReader: () => graphContext,
+        now: () => now,
+      );
+      final rebuilt = SyncCenterViewModel(
+        repository: repository,
+        executor: executor,
+        contextReader: () => graphContext,
+        now: () => now,
+      );
+      addTearDown(rebuilt.dispose);
+      await rebuilt.load();
+
+      expect(await rebuilt.review('upload'), isTrue);
+      expect(rebuilt.reviewedOperationIds, {'upload', 'complete'});
+      await rebuilt.retryAllReviewed();
+
+      expect(events, ['status:upload', 'handler:upload', 'handler:complete']);
+      expect(createHandler.calls, 0);
+      expect(uploadHandler.calls, 1);
+      expect(completeHandler.calls, 1);
+      expect(status.calls, 1);
+      final stored = (await repository.list('7')).successData;
+      expect(
+        stored.map((item) => item.state),
+        everyElement(OutboxState.succeeded),
+      );
+    },
+  );
+
   test('stale recovery cannot mutate an unreviewed other warehouse', () async {
     await repository.enqueue(operation('visible'));
     await repository.enqueue(operation('other-warehouse', warehouseId: 12));
@@ -364,8 +586,9 @@ final class _Online implements NetworkStatusService {
 }
 
 final class _Status implements OperationStatusRemoteDataSource {
-  _Status(this.result);
+  _Status(this.result, {this.onCall});
   final Result<OperationStatus> result;
+  final void Function()? onCall;
   int calls = 0;
 
   @override
@@ -374,14 +597,18 @@ final class _Status implements OperationStatusRemoteDataSource {
     required String scope,
   }) async {
     calls += 1;
+    onCall?.call();
     return result;
   }
 }
 
 final class _Handler implements OutboxOperationHandler {
+  _Handler({this.kind = OutboxOperationKind.documentCreate, this.events});
+
   int calls = 0;
   @override
-  OutboxOperationKind get kind => OutboxOperationKind.documentCreate;
+  final OutboxOperationKind kind;
+  final List<String>? events;
   @override
   String get statusScope => 'documents';
   @override
@@ -390,6 +617,7 @@ final class _Handler implements OutboxOperationHandler {
     Map<String, OutboxOperationOutput> dependencyOutputs = const {},
   }) async {
     calls += 1;
+    events?.add('handler:${operation.operationId}');
     return Success(
       OutboxHandlerSuccess(output: OutboxOperationOutput(version: 1, data: {})),
     );

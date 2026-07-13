@@ -24,6 +24,7 @@ import '../../../offline/domain/repositories/document_draft_repository.dart';
 import '../../../offline/domain/repositories/outbox_repository.dart';
 import '../../../offline/domain/entities/outbox_operation.dart';
 import '../../../offline/domain/services/outbox_permission_policy.dart';
+import '../../../offline/domain/services/outbox_executor.dart';
 import '../../../inventory/domain/entities/inventory_item.dart';
 import '../../../profile/presentation/pages/profile_page.dart';
 import '../../../reports/domain/repositories/reports_repository.dart';
@@ -179,6 +180,9 @@ final class _AppShellPageState extends State<AppShellPage> {
         initialDraftId: widget.initialDraftId,
         outboxRepository: widget.outboxRepository,
         allowedOutboxKinds: _allowedOutboxKinds,
+        outboxContextReader: () => _outboxExecutionContext,
+        outboxContextGenerationReader: () =>
+            widget.sessionController.contextGeneration,
       ),
       AppTab.reports => ReportsPage(
         repository: widget.reportsRepository,
@@ -211,12 +215,17 @@ final class _AppShellPageState extends State<AppShellPage> {
   }
 
   Set<OutboxOperationKind> get _allowedOutboxKinds {
+    return _outboxExecutionContext?.allowedKinds ?? const {};
+  }
+
+  OutboxExecutionContext? get _outboxExecutionContext {
     final user = widget.sessionController.currentUser;
     final warehouse = widget.sessionController.currentWarehouse;
-    if (user == null || warehouse == null) return const {};
-    return _outboxPermissionPolicy
-        .contextFor(user: user, warehouseId: warehouse.id)
-        .allowedKinds;
+    if (user == null || warehouse == null) return null;
+    return _outboxPermissionPolicy.contextFor(
+      user: user,
+      warehouseId: warehouse.id,
+    );
   }
 
   Future<InventoryItem?> _openInventoryScanner(BuildContext context) async {

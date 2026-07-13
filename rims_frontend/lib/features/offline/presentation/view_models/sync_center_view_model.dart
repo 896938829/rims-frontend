@@ -25,11 +25,15 @@ final class SyncCenterViewModel extends ChangeNotifier {
     required this.repository,
     required this.executor,
     required this.contextReader,
-  });
+    DateTime Function()? now,
+    this.staleSyncingThreshold = const Duration(minutes: 5),
+  }) : now = now ?? DateTime.now;
 
   final OutboxRepository repository;
   final OutboxExecutorPort executor;
   final OutboxExecutionContext? Function() contextReader;
+  final DateTime Function() now;
+  final Duration staleSyncingThreshold;
   final Set<String> _reviewedOperationIds = {};
   final Set<String> _selectedOperationIds = {};
   final Set<String> _permissionBlockedOperationIds = {};
@@ -228,13 +232,47 @@ final class SyncCenterViewModel extends ChangeNotifier {
         _commandFailure = failure;
         return false;
       }
-      final component = (componentResult as Success<List<OutboxOperation>>).data
+      var component = (componentResult as Success<List<OutboxOperation>>).data
           .where((item) => item.warehouseId == context.warehouseId)
           .toList(growable: false);
       if (component.any((item) => !context.allowedKinds.contains(item.kind))) {
         _commandFailure = const AuthorizationFailure(
           message: '完整依赖图包含当前无权执行的操作，请恢复权限后重新复核',
         );
+        return false;
+      }
+      final recovered = await repository.recoverStaleSyncing(
+        accountId: context.accountId,
+        staleBefore: now().toUtc().subtract(staleSyncingThreshold),
+        operationIds: component.map((item) => item.operationId).toSet(),
+      );
+      if (!_acceptResult(snapshot.generation, context)) return false;
+      if (recovered case FailureResult<int>(:final failure)) {
+        _commandFailure = failure;
+        return false;
+      }
+      final reloadedResult = await repository.loadConnectedComponent(
+        accountId: context.accountId,
+        operationIds: {operationId},
+      );
+      if (!_acceptResult(snapshot.generation, context)) return false;
+      if (reloadedResult case FailureResult<List<OutboxOperation>>(
+        :final failure,
+      )) {
+        _commandFailure = failure;
+        return false;
+      }
+      component = (reloadedResult as Success<List<OutboxOperation>>).data
+          .where((item) => item.warehouseId == context.warehouseId)
+          .toList(growable: false);
+      if (component.any((item) => !context.allowedKinds.contains(item.kind))) {
+        _commandFailure = const AuthorizationFailure(
+          message: '完整依赖图包含当前无权执行的操作，请恢复权限后重新复核',
+        );
+        return false;
+      }
+      if (component.any((item) => item.state == OutboxState.syncing)) {
+        _commandFailure = const StateFailure(message: '同步正在处理中，请稍后刷新后再复核');
         return false;
       }
       final confirmedById = <String, OutboxOperation>{};
