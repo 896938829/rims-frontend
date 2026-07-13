@@ -38,6 +38,7 @@ final class DocumentDraft {
 
   DocumentDraft copyWith({
     Map<String, Object?>? payload,
+    List<String>? attachmentStagingIds,
     DateTime? updatedAt,
     int? schemaVersion,
     int? version,
@@ -49,7 +50,7 @@ final class DocumentDraft {
       docType: docType,
       observedRoleCode: observedRoleCode,
       payload: payload ?? this.payload,
-      attachmentStagingIds: attachmentStagingIds,
+      attachmentStagingIds: attachmentStagingIds ?? this.attachmentStagingIds,
       schemaVersion: schemaVersion ?? this.schemaVersion,
       createdAt: createdAt,
       updatedAt: updatedAt ?? this.updatedAt,

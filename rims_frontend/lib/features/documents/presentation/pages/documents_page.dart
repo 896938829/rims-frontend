@@ -1266,6 +1266,8 @@ final class _DocumentFormState extends State<_DocumentForm> {
       userId: userId,
       draftIdProvider: widget.viewModel.ensureDraftId,
       onChanged: widget.viewModel.updateAttachmentStagingIds,
+      draftRepository: widget.viewModel.draftRepository,
+      draftAccountId: widget.viewModel.accountId,
       onChangedForDraft: widget.viewModel.reconcileAttachmentStagingIds,
       onBusyChanged: widget.viewModel.setAttachmentMutationInProgress,
       canMutate: () => !widget.viewModel.isSubmitting,

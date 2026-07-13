@@ -6,7 +6,14 @@ import 'package:rims_frontend/core/result/result.dart';
 import 'package:rims_frontend/features/attachments/domain/entities/attachment.dart';
 import 'package:rims_frontend/features/attachments/domain/services/attachment_picker.dart';
 import 'package:rims_frontend/features/attachments/domain/services/attachment_staging_store.dart';
+import 'package:rims_frontend/features/auth/domain/entities/warehouse.dart';
+import 'package:rims_frontend/features/documents/presentation/view_models/documents_view_model.dart';
+import 'package:rims_frontend/features/offline/data/repositories/drift_document_draft_repository.dart';
+import 'package:rims_frontend/features/offline/data/repositories/memory_offline_store.dart';
+import 'package:rims_frontend/features/offline/domain/entities/document_draft.dart';
+import 'package:rims_frontend/features/offline/domain/repositories/document_draft_repository.dart';
 import 'package:rims_frontend/features/offline/presentation/view_models/draft_attachments_view_model.dart';
+import 'package:rims_frontend/features/offline/presentation/view_models/drafts_view_model.dart';
 
 void main() {
   test(
@@ -254,6 +261,96 @@ void main() {
       expect(scopedChanges.single.$2, isEmpty);
     },
   );
+
+  test(
+    'disposed pending remove persists A through conflict and leaves B copyable',
+    () async {
+      final store = MemoryOfflineStore();
+      final initialRepository = DriftDocumentDraftRepository(
+        store: store,
+        now: () => DateTime.utc(2026, 7, 13, 10),
+      );
+      await initialRepository.save(
+        _documentDraft(
+          id: 'draft-a',
+          attachmentIds: const ['remove-a'],
+          remark: 'original',
+        ),
+        expectedVersion: 0,
+      );
+      await initialRepository.save(
+        _documentDraft(
+          id: 'draft-b',
+          attachmentIds: const ['keep-b'],
+          remark: 'untouched',
+        ),
+        expectedVersion: 0,
+      );
+      final repository = _ConflictOnceDraftRepository(initialRepository);
+      final removed = Completer<Result<void>>();
+      final staging = _DraftStaging(removeResult: removed.future)
+        ..recovered = [_staged('remove-a', 'draft-a')];
+      final attachments = DraftAttachmentsViewModel(
+        picker: _DraftPicker(),
+        stagingStore: staging,
+        userId: 'account-7',
+        draftIdProvider: () => 'draft-a',
+        onChanged: (_) {},
+        draftRepository: repository,
+        draftAccountId: 'account-7',
+      );
+      await attachments.recover(['remove-a']);
+
+      final remove = attachments.remove('remove-a');
+      await staging.removeStarted.future;
+      attachments.dispose();
+      removed.complete(const Success(null));
+      await remove;
+
+      final rebuiltRepository = DriftDocumentDraftRepository(
+        store: store,
+        now: () => DateTime.utc(2026, 7, 13, 11),
+      );
+      final documents = DocumentsViewModel(
+        draftRepository: rebuiltRepository,
+        accountId: 'account-7',
+        currentWarehouse: const Warehouse(
+          id: 1,
+          code: 'WH-1',
+          name: 'Warehouse 1',
+          isDefault: true,
+        ),
+      );
+
+      expect(await documents.openDraft('draft-a'), isTrue);
+      expect(documents.attachmentStagingIds, isEmpty);
+      final persistedA = await rebuiltRepository.load(
+        accountId: 'account-7',
+        draftId: 'draft-a',
+      );
+      expect(persistedA?.payload['remark'], 'concurrent update');
+
+      expect(await documents.openDraft('draft-b'), isTrue);
+      expect(documents.attachmentStagingIds, ['keep-b']);
+      final persistedB = await rebuiltRepository.load(
+        accountId: 'account-7',
+        draftId: 'draft-b',
+      );
+      expect(persistedB?.payload['remark'], 'untouched');
+      expect(persistedB?.version, 1);
+
+      final drafts = DraftsViewModel(
+        repository: rebuiltRepository,
+        accountId: 'account-7',
+        roleCode: 'operator',
+        warehouseId: 1,
+        draftIdFactory: () => 'draft-a-copy',
+      );
+      final copy = await drafts.duplicate('draft-a');
+      expect(copy, isNotNull);
+      expect(copy?.attachmentStagingIds, isEmpty);
+    },
+  );
 }
 
 const _selection = SelectedAttachmentSource(
@@ -274,6 +371,28 @@ StagedAttachment _staged(String requestId, String draftId) => StagedAttachment(
   ),
   thumbnailPath: null,
   createdAt: DateTime.utc(2026, 7, 13),
+);
+
+DocumentDraft _documentDraft({
+  required String id,
+  required List<String> attachmentIds,
+  required String remark,
+}) => DocumentDraft(
+  id: id,
+  accountId: 'account-7',
+  warehouseId: 1,
+  docType: 2,
+  observedRoleCode: 'operator',
+  payload: {
+    'remark': remark,
+    'lines': const [
+      {'product_id': 10, 'product_name': 'Item', 'quantity': 1},
+    ],
+  },
+  attachmentStagingIds: attachmentIds,
+  createdAt: DateTime.utc(2026, 7, 13, 9),
+  updatedAt: DateTime.utc(2026, 7, 13, 9),
+  version: 0,
 );
 
 final class _DraftPicker implements AttachmentPicker {
@@ -361,4 +480,49 @@ final class _DraftStaging implements AttachmentStagingStore {
     required String originalName,
     required Uint8List bytes,
   }) async => const Success('/download');
+}
+
+final class _ConflictOnceDraftRepository implements DocumentDraftRepository {
+  _ConflictOnceDraftRepository(this.delegate);
+
+  final DocumentDraftRepository delegate;
+  bool _hasInjectedConflict = false;
+
+  @override
+  Future<Result<DocumentDraft>> save(
+    DocumentDraft draft, {
+    required int expectedVersion,
+  }) async {
+    if (!_hasInjectedConflict && draft.id == 'draft-a') {
+      _hasInjectedConflict = true;
+      final current = await delegate.load(
+        accountId: draft.accountId,
+        draftId: draft.id,
+      );
+      final payload = Map<String, Object?>.from(current!.payload)
+        ..['remark'] = 'concurrent update';
+      await delegate.save(
+        current.copyWith(payload: payload),
+        expectedVersion: current.version,
+      );
+    }
+    return delegate.save(draft, expectedVersion: expectedVersion);
+  }
+
+  @override
+  Future<DocumentDraft?> load({
+    required String accountId,
+    required String draftId,
+  }) => delegate.load(accountId: accountId, draftId: draftId);
+
+  @override
+  Future<List<DocumentDraft>> list(String accountId) =>
+      delegate.list(accountId);
+
+  @override
+  Future<void> delete({required String accountId, required String draftId}) =>
+      delegate.delete(accountId: accountId, draftId: draftId);
+
+  @override
+  Future<void> prune() => delegate.prune();
 }

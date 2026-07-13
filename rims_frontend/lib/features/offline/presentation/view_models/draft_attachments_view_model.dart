@@ -1,9 +1,11 @@
 import 'package:flutter/foundation.dart';
 
 import '../../../../core/result/result.dart';
+import '../../../../core/result/failure.dart';
 import '../../../attachments/domain/entities/attachment.dart';
 import '../../../attachments/domain/services/attachment_picker.dart';
 import '../../../attachments/domain/services/attachment_staging_store.dart';
+import '../../domain/repositories/document_draft_repository.dart';
 
 final class DraftAttachmentsViewModel extends ChangeNotifier {
   DraftAttachmentsViewModel({
@@ -12,6 +14,8 @@ final class DraftAttachmentsViewModel extends ChangeNotifier {
     required this.userId,
     required this.draftIdProvider,
     required this.onChanged,
+    this.draftRepository,
+    this.draftAccountId,
     this.onChangedForDraft,
     this.onBusyChanged,
     bool Function()? canMutate,
@@ -24,6 +28,8 @@ final class DraftAttachmentsViewModel extends ChangeNotifier {
   final String userId;
   final String Function() draftIdProvider;
   final ValueChanged<List<String>> onChanged;
+  final DocumentDraftRepository? draftRepository;
+  final String? draftAccountId;
   final void Function(String draftId, List<String> requestIds)?
   onChangedForDraft;
   final ValueChanged<bool>? onBusyChanged;
@@ -119,6 +125,7 @@ final class DraftAttachmentsViewModel extends ChangeNotifier {
     if (_isBusy || !isMutationAllowed) return;
     final generation = ++_generation;
     final draftId = draftIdProvider();
+    final accountId = draftAccountId;
     final mutationEpoch = mutationEpochProvider();
     final requestIdsBefore = _staged
         .map((item) => item.pending.requestId)
@@ -137,6 +144,11 @@ final class DraftAttachmentsViewModel extends ChangeNotifier {
               generation == _generation &&
               draftIdProvider() == draftId;
           if (!isCurrentDraft) {
+            await _persistRemovedAttachment(
+              accountId: accountId,
+              draftId: draftId,
+              requestId: requestId,
+            );
             onChangedForDraft?.call(draftId, reconciledIds);
             return;
           }
@@ -177,6 +189,53 @@ final class DraftAttachmentsViewModel extends ChangeNotifier {
     _isBusy = value;
     onBusyChanged?.call(value);
     _notify();
+  }
+
+  Future<Result<void>> _persistRemovedAttachment({
+    required String? accountId,
+    required String draftId,
+    required String requestId,
+  }) async {
+    final repository = draftRepository;
+    if (repository == null || accountId == null) {
+      return const Success(null);
+    }
+    for (var attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        final draft = await repository.load(
+          accountId: accountId,
+          draftId: draftId,
+        );
+        if (draft == null || !draft.attachmentStagingIds.contains(requestId)) {
+          return const Success(null);
+        }
+        final result = await repository.save(
+          draft.copyWith(
+            attachmentStagingIds: draft.attachmentStagingIds
+                .where((id) => id != requestId)
+                .toList(growable: false),
+          ),
+          expectedVersion: draft.version,
+        );
+        switch (result) {
+          case Success():
+            return const Success(null);
+          case FailureResult(:final failure):
+            if (failure is ConflictFailure && attempt < 2) continue;
+            return FailureResult(failure);
+        }
+      } on Object catch (error) {
+        return FailureResult(
+          LocalStorageFailure(
+            message: 'Unable to reconcile document draft attachments.',
+            cause: error,
+          ),
+        );
+      }
+    }
+    return const FailureResult(
+      ConflictFailure(message: 'Document draft attachment conflict.'),
+    );
   }
 
   void _notify() {
