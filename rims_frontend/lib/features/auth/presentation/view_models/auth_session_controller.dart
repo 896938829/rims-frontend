@@ -237,17 +237,6 @@ final class AuthSessionController extends ChangeNotifier {
   }) async {
     final previous = _session;
     final accountId = previous?.user.id.toString();
-    final report = accountId == null
-        ? null
-        : await _runOwnership(
-            OfflineOwnershipIntent.tokenExpiry(accountId: accountId),
-          );
-    final repository = authRepository;
-    if (repository is AuthCredentialInvalidator) {
-      await (repository as AuthCredentialInvalidator).expireCredentials();
-    } else {
-      await repository?.logout();
-    }
     _session = null;
     _credentialsInvalidated = true;
     _restoreFailure = null;
@@ -256,7 +245,32 @@ final class AuthSessionController extends ChangeNotifier {
     _clearSourceMetadata();
     _publishOwnershipChanges(previous, _session);
     notifyListeners();
-    return report;
+
+    OfflineOwnershipReport? report;
+    try {
+      if (accountId != null) {
+        report = await _runOwnership(
+          OfflineOwnershipIntent.tokenExpiry(accountId: accountId),
+        );
+      }
+      final repository = authRepository;
+      try {
+        if (repository case final AuthCredentialInvalidator invalidator) {
+          await invalidator.expireCredentials();
+        } else {
+          await repository?.logout();
+        }
+      } on Object catch (error) {
+        _restoreFailure = LocalStorageFailure(
+          message: '登录凭据清理失败，请重试',
+          cause: error,
+        );
+        _sessionMessage = '$message；${_restoreFailure!.message}';
+      }
+      return report;
+    } finally {
+      notifyListeners();
+    }
   }
 
   Future<OfflineOwnershipReport?> logout({

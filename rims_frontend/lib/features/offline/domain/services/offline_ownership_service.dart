@@ -697,7 +697,13 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
     List<_ParticipantBlock> blocks,
   ) {
     if (intent.reason == OfflineOwnershipReason.reauthenticated) {
-      if (report.completed) _releaseRetainedMutationBlocks(intent.accountId);
+      if (report.completed &&
+          !(_blockedReasons[intent.accountId]?.contains(
+                OfflineOwnershipReason.revocation,
+              ) ??
+              false)) {
+        _releaseRetainedMutationBlocks(intent.accountId);
+      }
       return;
     }
     switch (intent.reason) {
@@ -762,8 +768,10 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
     switch (intent.reason) {
       case OfflineOwnershipReason.logout ||
           OfflineOwnershipReason.tokenExpiry ||
-          OfflineOwnershipReason.revocation ||
           OfflineOwnershipReason.invalidSessionProjection:
+        _block(intent.accountId, intent.reason);
+      case OfflineOwnershipReason.revocation:
+        _successfulRevocations.remove(intent.accountId);
         _block(intent.accountId, intent.reason);
       case OfflineOwnershipReason.accountSwitch:
         _block(intent.accountId, intent.reason);

@@ -70,16 +70,8 @@ final class CachedAuthRepository
 
   Future<Result<AuthSession?>> _restoreSession() async {
     _clearMetadata();
-    final pendingRevocation =
-        await revocationStorage.readPendingRevocationAccountId() ??
-        _volatilePendingRevocationAccountId;
-    if (pendingRevocation != null) {
-      final failure = await _completeRevocation(
-        pendingRevocation,
-        persistMarker: false,
-      );
-      if (failure != null) return FailureResult(failure);
-    }
+    final pendingFailure = await _retryPendingRevocation();
+    if (pendingFailure != null) return FailureResult(pendingFailure);
     final token = (await tokenStorage.readAccessToken())?.trim();
     final accountId = await accountStorage.readAuthenticatedAccountId();
     if (token == null || token.isEmpty) {
@@ -193,6 +185,8 @@ final class CachedAuthRepository
     required String username,
     required String password,
   }) async {
+    final pendingFailure = await _retryPendingRevocation();
+    if (pendingFailure != null) return FailureResult(pendingFailure);
     final result = await delegate.login(username: username, password: password);
     if (result case Success<AuthSession>(:final data)) {
       final previousAccountId = await accountStorage
@@ -364,14 +358,16 @@ final class CachedAuthRepository
     }
     if (firstError == null) {
       try {
-        await revocationStorage.clearPendingRevocationAccountId();
+        await accountStorage.clearAuthenticatedAccountId();
       } on Object catch (error) {
         firstError = error;
       }
-      try {
-        await accountStorage.clearAuthenticatedAccountId();
-      } on Object catch (error) {
-        firstError ??= error;
+      if (firstError == null) {
+        try {
+          await revocationStorage.clearPendingRevocationAccountId();
+        } on Object catch (error) {
+          firstError = error;
+        }
       }
     }
     if (firstError != null) {
@@ -385,6 +381,22 @@ final class CachedAuthRepository
     _volatilePendingRevocationAccountId = null;
     _revocationInvalidated = false;
     return null;
+  }
+
+  Future<RevocationCleanupFailure?> _retryPendingRevocation() async {
+    String? pendingRevocation;
+    try {
+      pendingRevocation =
+          await revocationStorage.readPendingRevocationAccountId() ??
+          _volatilePendingRevocationAccountId;
+    } on Object catch (error) {
+      return RevocationCleanupFailure(
+        message: 'Pending credential revocation could not be verified.',
+        cause: error,
+      );
+    }
+    if (pendingRevocation == null) return null;
+    return _completeRevocation(pendingRevocation, persistMarker: false);
   }
 
   Future<Failure?> _applyOwnership(OfflineOwnershipIntent intent) async {

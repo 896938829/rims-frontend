@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:rims_frontend/core/result/failure.dart';
 import 'package:rims_frontend/core/result/result.dart';
 import 'package:rims_frontend/core/storage/app_secure_storage.dart';
 import 'package:rims_frontend/features/attachments/data/services/file_attachment_staging_store.dart';
@@ -341,6 +342,215 @@ void main() {
   );
 
   test(
+    'failed revocation retry cannot release a retained barrier through reauthentication',
+    () async {
+      final barrier = OfflineWriteBarrier();
+      final rawStore = MemoryOfflineStore();
+      final store = WriteBarrierOfflineStore(
+        delegate: rawStore,
+        barrier: barrier,
+      );
+      final files = _FailingOwnedFiles();
+      final ownership = OfflineOwnershipService(
+        store: rawStore,
+        files: files,
+        scans: const _NoopScans(),
+        reviews: const _NoopReviews(),
+        databaseKeys: MemoryOfflineDatabaseKeyManager(),
+        mutationParticipants: [barrier],
+      );
+      final now = DateTime.utc(2026, 7, 13);
+      final draft = DocumentDraft(
+        id: 'after-revocation',
+        accountId: '7',
+        warehouseId: 1,
+        payload: const {},
+        createdAt: now,
+        updatedAt: now,
+      );
+      expect(
+        (await ownership.apply(
+          const OfflineOwnershipIntent.revocation(accountId: '7'),
+        )).completed,
+        isTrue,
+      );
+      files.failNextClearAll = true;
+      expect(
+        (await ownership.apply(
+          const OfflineOwnershipIntent.revocation(accountId: '7'),
+        )).completed,
+        isFalse,
+      );
+
+      await ownership.apply(
+        const OfflineOwnershipIntent.reauthenticated(accountId: '7'),
+      );
+
+      await expectLater(
+        store.saveDraft(draft),
+        throwsA(isA<OfflineWriteBlockedException>()),
+      );
+
+      expect(
+        (await ownership.apply(
+          const OfflineOwnershipIntent.revocation(accountId: '7'),
+        )).completed,
+        isTrue,
+      );
+      await ownership.apply(
+        const OfflineOwnershipIntent.reauthenticated(accountId: '7'),
+      );
+      await store.saveDraft(draft);
+      expect((await rawStore.inspectAccount('7')).drafts, 1);
+    },
+  );
+
+  test(
+    'volatile pending revocation is retried before same-account login can expose a token',
+    () async {
+      final barrier = OfflineWriteBarrier();
+      final rawStore = MemoryOfflineStore();
+      final store = WriteBarrierOfflineStore(
+        delegate: rawStore,
+        barrier: barrier,
+      );
+      final files = _FailingOwnedFiles();
+      final keys = MemoryOfflineDatabaseKeyManager();
+      final ownership = OfflineOwnershipService(
+        store: rawStore,
+        files: files,
+        scans: const _NoopScans(),
+        reviews: const _NoopReviews(),
+        databaseKeys: keys,
+        mutationParticipants: [barrier],
+      );
+      final storage = _SessionStorage()
+        ..token = 'revoked-token'
+        ..accountId = '7'
+        ..failNextPendingMarkerWrite = true;
+      final delegate = _PendingAuthRepository(storage);
+      final repository = CachedAuthRepository(
+        delegate: delegate,
+        store: store,
+        tokenStorage: storage,
+        accountStorage: storage,
+        revocationStorage: storage,
+        onSessionRevoked: () {},
+        ownershipCoordinator: ownership,
+      );
+
+      final revoked = await repository.restoreSession();
+
+      expect(revoked, isA<FailureResult<AuthSession?>>());
+      expect(storage.pendingRevocationAccountId, isNull);
+      expect(storage.token, isNull);
+      expect(keys.generation, 1);
+      files.failNextClearAll = true;
+
+      final failedLogin = await repository.login(
+        username: 'alice',
+        password: 'secret',
+      );
+
+      expect(failedLogin, isA<FailureResult<AuthSession>>());
+      expect(delegate.loginCalls, 0);
+      expect(storage.token, isNull);
+      await expectLater(
+        store.saveDraft(
+          DocumentDraft(
+            id: 'blocked',
+            accountId: '7',
+            warehouseId: 1,
+            payload: const {},
+            createdAt: DateTime.utc(2026, 7, 13),
+            updatedAt: DateTime.utc(2026, 7, 13),
+          ),
+        ),
+        throwsA(isA<OfflineWriteBlockedException>()),
+      );
+
+      final successfulLogin = await repository.login(
+        username: 'alice',
+        password: 'secret',
+      );
+
+      expect(successfulLogin, isA<Success<AuthSession>>());
+      expect(delegate.loginCalls, 1);
+      expect(storage.token, 'new-token');
+      expect(storage.pendingRevocationAccountId, isNull);
+      expect(keys.generation, 2);
+      expect(ownership.canAccessOfflineData('7'), isTrue);
+    },
+  );
+
+  test(
+    'durable pending revocation is drained before login after repository restart',
+    () async {
+      final barrier = OfflineWriteBarrier();
+      final rawStore = MemoryOfflineStore();
+      final store = WriteBarrierOfflineStore(
+        delegate: rawStore,
+        barrier: barrier,
+      );
+      final files = _BlockingOwnedFiles();
+      final keys = MemoryOfflineDatabaseKeyManager();
+      final ownership = OfflineOwnershipService(
+        store: rawStore,
+        files: files,
+        scans: const _NoopScans(),
+        reviews: const _NoopReviews(),
+        databaseKeys: keys,
+        mutationParticipants: [barrier],
+      );
+      final storage = _SessionStorage()
+        ..token = 'revoked-token'
+        ..accountId = '7'
+        ..pendingRevocationAccountId = '7';
+      final delegate = _PendingAuthRepository(storage);
+      final repository = CachedAuthRepository(
+        delegate: delegate,
+        store: store,
+        tokenStorage: storage,
+        accountStorage: storage,
+        revocationStorage: storage,
+        onSessionRevoked: () {},
+        ownershipCoordinator: ownership,
+      );
+
+      final login = repository.login(username: 'alice', password: 'secret');
+      for (var index = 0; index < 5; index += 1) {
+        await Future<void>.delayed(Duration.zero);
+      }
+
+      expect(files.clearStarted.isCompleted, isTrue);
+      expect(delegate.loginCalls, 0);
+      expect(storage.token, isNull);
+      expect(keys.generation, 0);
+      await expectLater(
+        store.saveDraft(
+          DocumentDraft(
+            id: 'blocked-during-restart',
+            accountId: '7',
+            warehouseId: 1,
+            payload: const {},
+            createdAt: DateTime.utc(2026, 7, 13),
+            updatedAt: DateTime.utc(2026, 7, 13),
+          ),
+        ),
+        throwsA(isA<OfflineWriteBlockedException>()),
+      );
+
+      files.releaseClear.complete();
+      expect(await login, isA<Success<AuthSession>>());
+      expect(delegate.loginCalls, 1);
+      expect(storage.token, 'new-token');
+      expect(storage.pendingRevocationAccountId, isNull);
+      expect(keys.generation, 1);
+      expect(ownership.canAccessOfflineData('7'), isTrue);
+    },
+  );
+
+  test(
     'blocked scan persistence drains before revocation and cannot recreate a cleared session',
     () async {
       final barrier = OfflineWriteBarrier();
@@ -567,6 +777,60 @@ final class _NoopFiles implements OfflineOwnedFileStore {
       const OfflineFileOwnershipSnapshot();
 }
 
+final class _FailingOwnedFiles implements OfflineOwnedFileStore {
+  bool failNextClearAll = false;
+
+  @override
+  Future<void> clearAccountFiles(
+    String accountId, {
+    required Set<String> retainStagedRequestIds,
+  }) async {}
+
+  @override
+  Future<void> clearAllFiles() async {
+    if (!failNextClearAll) return;
+    failNextClearAll = false;
+    throw StateError('file cleanup failed');
+  }
+
+  @override
+  Future<void> clearDownloads(String accountId) async {}
+
+  @override
+  Future<void> clearStagedTransfers(String accountId) async {}
+
+  @override
+  Future<OfflineFileOwnershipSnapshot> inspectAccount(String accountId) async =>
+      const OfflineFileOwnershipSnapshot();
+}
+
+final class _BlockingOwnedFiles implements OfflineOwnedFileStore {
+  final Completer<void> clearStarted = Completer<void>();
+  final Completer<void> releaseClear = Completer<void>();
+
+  @override
+  Future<void> clearAccountFiles(
+    String accountId, {
+    required Set<String> retainStagedRequestIds,
+  }) async {}
+
+  @override
+  Future<void> clearAllFiles() async {
+    clearStarted.complete();
+    await releaseClear.future;
+  }
+
+  @override
+  Future<void> clearDownloads(String accountId) async {}
+
+  @override
+  Future<void> clearStagedTransfers(String accountId) async {}
+
+  @override
+  Future<OfflineFileOwnershipSnapshot> inspectAccount(String accountId) async =>
+      const OfflineFileOwnershipSnapshot();
+}
+
 final class _NoopScans implements OfflineOwnedScanStore {
   const _NoopScans();
 
@@ -598,6 +862,7 @@ final class _SessionStorage
   String? token;
   String? accountId;
   String? pendingRevocationAccountId;
+  bool failNextPendingMarkerWrite = false;
 
   @override
   Future<void> clearAccessToken() async => token = null;
@@ -630,8 +895,40 @@ final class _SessionStorage
 
   @override
   Future<void> savePendingRevocationAccountId(String accountId) async {
+    if (failNextPendingMarkerWrite) {
+      failNextPendingMarkerWrite = false;
+      throw StateError('pending marker write failed');
+    }
     pendingRevocationAccountId = accountId;
   }
+}
+
+final class _PendingAuthRepository implements AuthRepository {
+  _PendingAuthRepository(this.storage);
+
+  final _SessionStorage storage;
+  int loginCalls = 0;
+
+  @override
+  Future<Result<AuthSession>> login({
+    required String username,
+    required String password,
+  }) async {
+    loginCalls += 1;
+    await storage.saveAccessToken('new-token');
+    return const Success(_authSession);
+  }
+
+  @override
+  Future<void> logout() => storage.clearAccessToken();
+
+  @override
+  Future<Result<AuthSession?>> restoreSession() async =>
+      const FailureResult(AuthorizationFailure(statusCode: 403));
+
+  @override
+  Future<Result<Warehouse>> switchCurrentWarehouse(Warehouse warehouse) async =>
+      Success(warehouse);
 }
 
 final class _LoginAuthRepository implements AuthRepository {

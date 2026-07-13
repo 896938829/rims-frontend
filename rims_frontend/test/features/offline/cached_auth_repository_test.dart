@@ -6,6 +6,9 @@ import 'package:rims_frontend/core/events/app_event_bus.dart';
 import 'package:rims_frontend/core/result/failure.dart';
 import 'package:rims_frontend/core/result/result.dart';
 import 'package:rims_frontend/core/storage/app_secure_storage.dart';
+import 'package:rims_frontend/features/auth/data/datasources/auth_remote_datasource.dart';
+import 'package:rims_frontend/features/auth/data/models/auth_models.dart';
+import 'package:rims_frontend/features/auth/data/repositories/auth_repository_impl.dart';
 import 'package:rims_frontend/features/auth/domain/entities/app_user.dart';
 import 'package:rims_frontend/features/auth/domain/entities/auth_session.dart';
 import 'package:rims_frontend/features/auth/domain/entities/warehouse.dart';
@@ -19,6 +22,72 @@ import 'package:rims_frontend/features/offline/domain/services/offline_ownership
 
 void main() {
   final now = DateTime.utc(2026, 7, 13, 12);
+
+  test(
+    'real 403 remains revocation when secure token clearing fails',
+    () async {
+      final storage = _FakeSessionStorage(token: 'revoked-token');
+      final remote = _MutableAuthRemoteDataSource(
+        currentUserResult: const Success(
+          AppUserModel(
+            id: 7,
+            username: 'alice',
+            realName: 'Alice',
+            roleCode: 'user',
+            roleName: '普通用户',
+          ),
+        ),
+        warehousesResult: const Success([
+          WarehouseModel(id: 11, code: 'SH', name: '上海仓', isDefault: true),
+        ]),
+      );
+      final keys = MemoryOfflineDatabaseKeyManager();
+      final ownership = OfflineOwnershipService(
+        store: MemoryOfflineStore(),
+        files: const _NoopOwnedFiles(),
+        scans: const _NoopOwnedScans(),
+        reviews: const _NoopReviewInvalidator(),
+        databaseKeys: keys,
+      );
+      final controller = AuthSessionController(ownershipCoordinator: ownership);
+      addTearDown(controller.dispose);
+      final delegate = AuthRepositoryImpl(
+        remoteDataSource: remote,
+        secureStorage: storage,
+      );
+      final repository = CachedAuthRepository(
+        delegate: delegate,
+        store: MemoryOfflineStore(),
+        tokenStorage: storage,
+        accountStorage: storage,
+        revocationStorage: storage,
+        ownershipCoordinator: ownership,
+        onSessionRevoked: controller.invalidateRevokedSession,
+        now: () => now,
+      );
+      await controller.restoreSession(repository);
+      expect(controller.session?.user.id, 7);
+      remote.currentUserResult = const FailureResult(
+        AuthorizationFailure(statusCode: 403),
+      );
+      storage.failNext(_RevocationStorageFailure.clearCredential);
+
+      await controller.refreshSession(repository);
+
+      expect(controller.session, isNull);
+      expect(controller.canAuthenticateRequests, isFalse);
+      expect(controller.restoreFailure, isA<RevocationCleanupFailure>());
+      expect(storage.pendingRevocationAccountId, '7');
+      expect(keys.generation, 1);
+      expect(ownership.canSync('7'), isFalse);
+
+      await controller.refreshSession(repository);
+
+      expect(controller.restoreFailure, isNull);
+      expect(storage.pendingRevocationAccountId, isNull);
+      expect(keys.generation, 2);
+    },
+  );
 
   test('authenticated network restore seeds cache with age metadata', () async {
     final delegate = _FakeAuthRepository(
@@ -327,6 +396,26 @@ void main() {
   );
 
   test(
+    'revocation keeps the durable marker until account metadata is cleared',
+    () async {
+      final delegate = _FakeAuthRepository(
+        restoreResult: const Success(_session),
+      );
+      final storage = _FakeSessionStorage(token: 'token');
+      final repository = _repository(delegate, storage, now: now);
+      await repository.restoreSession();
+      delegate.restoreResult = const FailureResult(AuthorizationFailure());
+      storage.failNext(_RevocationStorageFailure.clearAccount);
+
+      final result = await repository.restoreSession();
+
+      expect(result, isA<FailureResult<AuthSession?>>());
+      expect(storage.accountId, '7');
+      expect(storage.pendingRevocationAccountId, '7');
+    },
+  );
+
+  test(
     '403 refresh invalidates request credentials before failed cleanup and retries without the revoked token',
     () async {
       final delegate = _FakeAuthRepository(
@@ -556,6 +645,39 @@ void main() {
   );
 
   test(
+    'token expiry invalidates memory before credential cleanup and contains storage errors',
+    () async {
+      final ownership = _RecordingOwnershipCoordinator();
+      final repository = _ThrowingCredentialRepository();
+      final controller = AuthSessionController(ownershipCoordinator: ownership);
+      addTearDown(controller.dispose);
+      await controller.startSession(_session);
+
+      final expiry = controller.expireSession(authRepository: repository);
+
+      expect(controller.session, isNull);
+      expect(controller.accessToken, isNull);
+      expect(controller.canAuthenticateRequests, isFalse);
+      expect(controller.isOwnershipTransitioning, isTrue);
+      await expiry;
+      expect(controller.isOwnershipTransitioning, isFalse);
+      expect(controller.restoreFailure, isA<LocalStorageFailure>());
+
+      repository.failExpiry = false;
+      final login = await repository.login(
+        username: 'alice',
+        password: 'secret',
+      );
+      expect(login, isA<Success<AuthSession>>());
+      expect(
+        await controller.startSession((login as Success<AuthSession>).data),
+        isTrue,
+      );
+      expect(controller.canAuthenticateRequests, isTrue);
+    },
+  );
+
+  test(
     'controller distinguishes logout retention, token expiry, warehouse, and permission reasons',
     () async {
       final ownership = _RecordingOwnershipCoordinator();
@@ -698,7 +820,10 @@ final class _FakeSessionStorage
   Future<void> saveAccessToken(String token) async => this.token = token;
 
   @override
-  Future<void> clearAuthenticatedAccountId() async => accountId = null;
+  Future<void> clearAuthenticatedAccountId() async {
+    _throwIf(_RevocationStorageFailure.clearAccount);
+    accountId = null;
+  }
 
   @override
   Future<String?> readAuthenticatedAccountId() async => accountId;
@@ -726,7 +851,86 @@ final class _FakeSessionStorage
   }
 }
 
-enum _RevocationStorageFailure { saveMarker, clearCredential, clearMarker }
+enum _RevocationStorageFailure {
+  saveMarker,
+  clearCredential,
+  clearAccount,
+  clearMarker,
+}
+
+final class _MutableAuthRemoteDataSource implements AuthRemoteDataSource {
+  _MutableAuthRemoteDataSource({
+    required this.currentUserResult,
+    required this.warehousesResult,
+  });
+
+  Result<AppUserModel> currentUserResult;
+  Result<List<WarehouseModel>> warehousesResult;
+
+  @override
+  Future<Result<AppUserModel>> loadCurrentUser() async => currentUserResult;
+
+  @override
+  Future<Result<List<WarehouseModel>>> loadWarehouses() async =>
+      warehousesResult;
+
+  @override
+  Future<Result<LoginResponseModel>> login({
+    required String username,
+    required String password,
+  }) async => const FailureResult(UnknownFailure());
+
+  @override
+  Future<Result<WarehouseModel?>> switchCurrentWarehouse(
+    int warehouseId,
+  ) async => const FailureResult(UnknownFailure());
+}
+
+final class _NoopOwnedFiles implements OfflineOwnedFileStore {
+  const _NoopOwnedFiles();
+
+  @override
+  Future<void> clearAccountFiles(
+    String accountId, {
+    required Set<String> retainStagedRequestIds,
+  }) async {}
+
+  @override
+  Future<void> clearAllFiles() async {}
+
+  @override
+  Future<void> clearDownloads(String accountId) async {}
+
+  @override
+  Future<void> clearStagedTransfers(String accountId) async {}
+
+  @override
+  Future<OfflineFileOwnershipSnapshot> inspectAccount(String accountId) async =>
+      const OfflineFileOwnershipSnapshot();
+}
+
+final class _NoopOwnedScans implements OfflineOwnedScanStore {
+  const _NoopOwnedScans();
+
+  @override
+  Future<void> clearAll() async {}
+
+  @override
+  Future<void> clearForAccount(String accountId) async {}
+
+  @override
+  Future<int> countForAccount(String accountId) async => 0;
+}
+
+final class _NoopReviewInvalidator implements OfflineReviewInvalidator {
+  const _NoopReviewInvalidator();
+
+  @override
+  Future<void> invalidate({
+    required String accountId,
+    int? warehouseId,
+  }) async {}
+}
 
 final class _FakeAuthRepository implements AuthRepository {
   _FakeAuthRepository({
@@ -762,6 +966,33 @@ final class _FakeAuthRepository implements AuthRepository {
   Future<void> logout() async {
     logoutCalls += 1;
   }
+}
+
+final class _ThrowingCredentialRepository
+    implements AuthRepository, AuthCredentialInvalidator {
+  bool failExpiry = true;
+
+  @override
+  Future<void> expireCredentials() async {
+    if (failExpiry) throw StateError('secure token clear failed');
+  }
+
+  @override
+  Future<Result<AuthSession>> login({
+    required String username,
+    required String password,
+  }) async => const Success(_session);
+
+  @override
+  Future<void> logout() async {}
+
+  @override
+  Future<Result<AuthSession?>> restoreSession() async =>
+      const Success<AuthSession?>(null);
+
+  @override
+  Future<Result<Warehouse>> switchCurrentWarehouse(Warehouse warehouse) async =>
+      Success(warehouse);
 }
 
 const _warehouse11 = Warehouse(
