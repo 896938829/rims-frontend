@@ -43,7 +43,23 @@ final class OfflineDatabase extends _$OfflineDatabase implements OfflineStore {
        );
 
   @override
-  int get schemaVersion => 1;
+  int get schemaVersion => 2;
+
+  @override
+  MigrationStrategy get migration => MigrationStrategy(
+    onCreate: (migrator) => migrator.createAll(),
+    onUpgrade: (migrator, from, to) async {
+      if (from < 2) {
+        await migrator.addColumn(
+          offlineOutboxOperations,
+          offlineOutboxOperations.updatedAt,
+        );
+      }
+    },
+    beforeOpen: (details) async {
+      await customStatement('PRAGMA foreign_keys = ON');
+    },
+  );
 
   @override
   Future<void> writeCache(CacheRecord record) async {
@@ -296,6 +312,7 @@ final class OfflineDatabase extends _$OfflineDatabase implements OfflineStore {
           payload: CacheRecordModel.canonicalJson(operation.payload),
           operationState: operation.state.wireValue,
           createdAt: operation.createdAt.toUtc(),
+          updatedAt: Value(operation.updatedAt.toUtc()),
           confirmedAt: Value(operation.confirmedAt?.toUtc()),
           nextAttemptAt: Value(operation.nextAttemptAt?.toUtc()),
           attemptCount: Value(operation.attemptCount),
@@ -371,6 +388,7 @@ final class OfflineDatabase extends _$OfflineDatabase implements OfflineStore {
     )..where((operation) => operation.operationId.equals(operationId))).write(
       OfflineOutboxOperationsCompanion(
         operationState: Value(next.wireValue),
+        updatedAt: Value(DateTime.now().toUtc()),
         lastFailureCode: Value(failure?.runtimeType.toString()),
       ),
     );
@@ -426,6 +444,7 @@ final class OfflineDatabase extends _$OfflineDatabase implements OfflineStore {
         (state) => state.wireValue == row.operationState,
       ),
       createdAt: row.createdAt,
+      updatedAt: row.updatedAt ?? row.createdAt,
       confirmedAt: row.confirmedAt,
       nextAttemptAt: row.nextAttemptAt,
       attemptCount: row.attemptCount,

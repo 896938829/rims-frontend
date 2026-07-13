@@ -186,6 +186,7 @@ final class MemoryOfflineStore implements OfflineStore {
       payload: current.payload,
       state: next,
       createdAt: current.createdAt,
+      updatedAt: DateTime.now().toUtc(),
       confirmedAt: current.confirmedAt,
       nextAttemptAt: current.nextAttemptAt,
       attemptCount: current.attemptCount,

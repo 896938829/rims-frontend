@@ -1157,6 +1157,17 @@ class $OfflineOutboxOperationsTable extends OfflineOutboxOperations
     type: DriftSqlType.dateTime,
     requiredDuringInsert: true,
   );
+  static const VerificationMeta _updatedAtMeta = const VerificationMeta(
+    'updatedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> updatedAt = GeneratedColumn<DateTime>(
+    'updated_at',
+    aliasedName,
+    true,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: false,
+  );
   static const VerificationMeta _confirmedAtMeta = const VerificationMeta(
     'confirmedAt',
   );
@@ -1213,6 +1224,7 @@ class $OfflineOutboxOperationsTable extends OfflineOutboxOperations
     payload,
     operationState,
     createdAt,
+    updatedAt,
     confirmedAt,
     nextAttemptAt,
     attemptCount,
@@ -1309,6 +1321,12 @@ class $OfflineOutboxOperationsTable extends OfflineOutboxOperations
     } else if (isInserting) {
       context.missing(_createdAtMeta);
     }
+    if (data.containsKey('updated_at')) {
+      context.handle(
+        _updatedAtMeta,
+        updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta),
+      );
+    }
     if (data.containsKey('confirmed_at')) {
       context.handle(
         _confirmedAtMeta,
@@ -1390,6 +1408,10 @@ class $OfflineOutboxOperationsTable extends OfflineOutboxOperations
         DriftSqlType.dateTime,
         data['${effectivePrefix}created_at'],
       )!,
+      updatedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}updated_at'],
+      ),
       confirmedAt: attachedDatabase.typeMapping.read(
         DriftSqlType.dateTime,
         data['${effectivePrefix}confirmed_at'],
@@ -1425,6 +1447,7 @@ class OfflineOutboxOperation extends DataClass
   final String payload;
   final String operationState;
   final DateTime createdAt;
+  final DateTime? updatedAt;
   final DateTime? confirmedAt;
   final DateTime? nextAttemptAt;
   final int attemptCount;
@@ -1438,6 +1461,7 @@ class OfflineOutboxOperation extends DataClass
     required this.payload,
     required this.operationState,
     required this.createdAt,
+    this.updatedAt,
     this.confirmedAt,
     this.nextAttemptAt,
     required this.attemptCount,
@@ -1454,6 +1478,9 @@ class OfflineOutboxOperation extends DataClass
     map['payload'] = Variable<String>(payload);
     map['operation_state'] = Variable<String>(operationState);
     map['created_at'] = Variable<DateTime>(createdAt);
+    if (!nullToAbsent || updatedAt != null) {
+      map['updated_at'] = Variable<DateTime>(updatedAt);
+    }
     if (!nullToAbsent || confirmedAt != null) {
       map['confirmed_at'] = Variable<DateTime>(confirmedAt);
     }
@@ -1477,6 +1504,9 @@ class OfflineOutboxOperation extends DataClass
       payload: Value(payload),
       operationState: Value(operationState),
       createdAt: Value(createdAt),
+      updatedAt: updatedAt == null && nullToAbsent
+          ? const Value.absent()
+          : Value(updatedAt),
       confirmedAt: confirmedAt == null && nullToAbsent
           ? const Value.absent()
           : Value(confirmedAt),
@@ -1504,6 +1534,7 @@ class OfflineOutboxOperation extends DataClass
       payload: serializer.fromJson<String>(json['payload']),
       operationState: serializer.fromJson<String>(json['operationState']),
       createdAt: serializer.fromJson<DateTime>(json['createdAt']),
+      updatedAt: serializer.fromJson<DateTime?>(json['updatedAt']),
       confirmedAt: serializer.fromJson<DateTime?>(json['confirmedAt']),
       nextAttemptAt: serializer.fromJson<DateTime?>(json['nextAttemptAt']),
       attemptCount: serializer.fromJson<int>(json['attemptCount']),
@@ -1522,6 +1553,7 @@ class OfflineOutboxOperation extends DataClass
       'payload': serializer.toJson<String>(payload),
       'operationState': serializer.toJson<String>(operationState),
       'createdAt': serializer.toJson<DateTime>(createdAt),
+      'updatedAt': serializer.toJson<DateTime?>(updatedAt),
       'confirmedAt': serializer.toJson<DateTime?>(confirmedAt),
       'nextAttemptAt': serializer.toJson<DateTime?>(nextAttemptAt),
       'attemptCount': serializer.toJson<int>(attemptCount),
@@ -1538,6 +1570,7 @@ class OfflineOutboxOperation extends DataClass
     String? payload,
     String? operationState,
     DateTime? createdAt,
+    Value<DateTime?> updatedAt = const Value.absent(),
     Value<DateTime?> confirmedAt = const Value.absent(),
     Value<DateTime?> nextAttemptAt = const Value.absent(),
     int? attemptCount,
@@ -1551,6 +1584,7 @@ class OfflineOutboxOperation extends DataClass
     payload: payload ?? this.payload,
     operationState: operationState ?? this.operationState,
     createdAt: createdAt ?? this.createdAt,
+    updatedAt: updatedAt.present ? updatedAt.value : this.updatedAt,
     confirmedAt: confirmedAt.present ? confirmedAt.value : this.confirmedAt,
     nextAttemptAt: nextAttemptAt.present
         ? nextAttemptAt.value
@@ -1582,6 +1616,7 @@ class OfflineOutboxOperation extends DataClass
           ? data.operationState.value
           : this.operationState,
       createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
+      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
       confirmedAt: data.confirmedAt.present
           ? data.confirmedAt.value
           : this.confirmedAt,
@@ -1608,6 +1643,7 @@ class OfflineOutboxOperation extends DataClass
           ..write('payload: $payload, ')
           ..write('operationState: $operationState, ')
           ..write('createdAt: $createdAt, ')
+          ..write('updatedAt: $updatedAt, ')
           ..write('confirmedAt: $confirmedAt, ')
           ..write('nextAttemptAt: $nextAttemptAt, ')
           ..write('attemptCount: $attemptCount, ')
@@ -1626,6 +1662,7 @@ class OfflineOutboxOperation extends DataClass
     payload,
     operationState,
     createdAt,
+    updatedAt,
     confirmedAt,
     nextAttemptAt,
     attemptCount,
@@ -1643,6 +1680,7 @@ class OfflineOutboxOperation extends DataClass
           other.payload == this.payload &&
           other.operationState == this.operationState &&
           other.createdAt == this.createdAt &&
+          other.updatedAt == this.updatedAt &&
           other.confirmedAt == this.confirmedAt &&
           other.nextAttemptAt == this.nextAttemptAt &&
           other.attemptCount == this.attemptCount &&
@@ -1659,6 +1697,7 @@ class OfflineOutboxOperationsCompanion
   final Value<String> payload;
   final Value<String> operationState;
   final Value<DateTime> createdAt;
+  final Value<DateTime?> updatedAt;
   final Value<DateTime?> confirmedAt;
   final Value<DateTime?> nextAttemptAt;
   final Value<int> attemptCount;
@@ -1673,6 +1712,7 @@ class OfflineOutboxOperationsCompanion
     this.payload = const Value.absent(),
     this.operationState = const Value.absent(),
     this.createdAt = const Value.absent(),
+    this.updatedAt = const Value.absent(),
     this.confirmedAt = const Value.absent(),
     this.nextAttemptAt = const Value.absent(),
     this.attemptCount = const Value.absent(),
@@ -1688,6 +1728,7 @@ class OfflineOutboxOperationsCompanion
     required String payload,
     required String operationState,
     required DateTime createdAt,
+    this.updatedAt = const Value.absent(),
     this.confirmedAt = const Value.absent(),
     this.nextAttemptAt = const Value.absent(),
     this.attemptCount = const Value.absent(),
@@ -1710,6 +1751,7 @@ class OfflineOutboxOperationsCompanion
     Expression<String>? payload,
     Expression<String>? operationState,
     Expression<DateTime>? createdAt,
+    Expression<DateTime>? updatedAt,
     Expression<DateTime>? confirmedAt,
     Expression<DateTime>? nextAttemptAt,
     Expression<int>? attemptCount,
@@ -1725,6 +1767,7 @@ class OfflineOutboxOperationsCompanion
       if (payload != null) 'payload': payload,
       if (operationState != null) 'operation_state': operationState,
       if (createdAt != null) 'created_at': createdAt,
+      if (updatedAt != null) 'updated_at': updatedAt,
       if (confirmedAt != null) 'confirmed_at': confirmedAt,
       if (nextAttemptAt != null) 'next_attempt_at': nextAttemptAt,
       if (attemptCount != null) 'attempt_count': attemptCount,
@@ -1742,6 +1785,7 @@ class OfflineOutboxOperationsCompanion
     Value<String>? payload,
     Value<String>? operationState,
     Value<DateTime>? createdAt,
+    Value<DateTime?>? updatedAt,
     Value<DateTime?>? confirmedAt,
     Value<DateTime?>? nextAttemptAt,
     Value<int>? attemptCount,
@@ -1757,6 +1801,7 @@ class OfflineOutboxOperationsCompanion
       payload: payload ?? this.payload,
       operationState: operationState ?? this.operationState,
       createdAt: createdAt ?? this.createdAt,
+      updatedAt: updatedAt ?? this.updatedAt,
       confirmedAt: confirmedAt ?? this.confirmedAt,
       nextAttemptAt: nextAttemptAt ?? this.nextAttemptAt,
       attemptCount: attemptCount ?? this.attemptCount,
@@ -1792,6 +1837,9 @@ class OfflineOutboxOperationsCompanion
     if (createdAt.present) {
       map['created_at'] = Variable<DateTime>(createdAt.value);
     }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<DateTime>(updatedAt.value);
+    }
     if (confirmedAt.present) {
       map['confirmed_at'] = Variable<DateTime>(confirmedAt.value);
     }
@@ -1821,6 +1869,7 @@ class OfflineOutboxOperationsCompanion
           ..write('payload: $payload, ')
           ..write('operationState: $operationState, ')
           ..write('createdAt: $createdAt, ')
+          ..write('updatedAt: $updatedAt, ')
           ..write('confirmedAt: $confirmedAt, ')
           ..write('nextAttemptAt: $nextAttemptAt, ')
           ..write('attemptCount: $attemptCount, ')
@@ -2684,6 +2733,7 @@ typedef $$OfflineOutboxOperationsTableCreateCompanionBuilder =
       required String payload,
       required String operationState,
       required DateTime createdAt,
+      Value<DateTime?> updatedAt,
       Value<DateTime?> confirmedAt,
       Value<DateTime?> nextAttemptAt,
       Value<int> attemptCount,
@@ -2700,6 +2750,7 @@ typedef $$OfflineOutboxOperationsTableUpdateCompanionBuilder =
       Value<String> payload,
       Value<String> operationState,
       Value<DateTime> createdAt,
+      Value<DateTime?> updatedAt,
       Value<DateTime?> confirmedAt,
       Value<DateTime?> nextAttemptAt,
       Value<int> attemptCount,
@@ -2828,6 +2879,11 @@ class $$OfflineOutboxOperationsTableFilterComposer
     builder: (column) => ColumnFilters(column),
   );
 
+  ColumnFilters<DateTime> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
   ColumnFilters<DateTime> get confirmedAt => $composableBuilder(
     column: $table.confirmedAt,
     builder: (column) => ColumnFilters(column),
@@ -2952,6 +3008,11 @@ class $$OfflineOutboxOperationsTableOrderingComposer
     builder: (column) => ColumnOrderings(column),
   );
 
+  ColumnOrderings<DateTime> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
   ColumnOrderings<DateTime> get confirmedAt => $composableBuilder(
     column: $table.confirmedAt,
     builder: (column) => ColumnOrderings(column),
@@ -3015,6 +3076,9 @@ class $$OfflineOutboxOperationsTableAnnotationComposer
 
   GeneratedColumn<DateTime> get createdAt =>
       $composableBuilder(column: $table.createdAt, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get updatedAt =>
+      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
 
   GeneratedColumn<DateTime> get confirmedAt => $composableBuilder(
     column: $table.confirmedAt,
@@ -3141,6 +3205,7 @@ class $$OfflineOutboxOperationsTableTableManager
                 Value<String> payload = const Value.absent(),
                 Value<String> operationState = const Value.absent(),
                 Value<DateTime> createdAt = const Value.absent(),
+                Value<DateTime?> updatedAt = const Value.absent(),
                 Value<DateTime?> confirmedAt = const Value.absent(),
                 Value<DateTime?> nextAttemptAt = const Value.absent(),
                 Value<int> attemptCount = const Value.absent(),
@@ -3155,6 +3220,7 @@ class $$OfflineOutboxOperationsTableTableManager
                 payload: payload,
                 operationState: operationState,
                 createdAt: createdAt,
+                updatedAt: updatedAt,
                 confirmedAt: confirmedAt,
                 nextAttemptAt: nextAttemptAt,
                 attemptCount: attemptCount,
@@ -3171,6 +3237,7 @@ class $$OfflineOutboxOperationsTableTableManager
                 required String payload,
                 required String operationState,
                 required DateTime createdAt,
+                Value<DateTime?> updatedAt = const Value.absent(),
                 Value<DateTime?> confirmedAt = const Value.absent(),
                 Value<DateTime?> nextAttemptAt = const Value.absent(),
                 Value<int> attemptCount = const Value.absent(),
@@ -3185,6 +3252,7 @@ class $$OfflineOutboxOperationsTableTableManager
                 payload: payload,
                 operationState: operationState,
                 createdAt: createdAt,
+                updatedAt: updatedAt,
                 confirmedAt: confirmedAt,
                 nextAttemptAt: nextAttemptAt,
                 attemptCount: attemptCount,

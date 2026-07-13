@@ -46,6 +46,7 @@ class OfflineOutboxOperations extends Table {
   TextColumn get payload => text()();
   TextColumn get operationState => text()();
   DateTimeColumn get createdAt => dateTime()();
+  DateTimeColumn get updatedAt => dateTime().nullable()();
   DateTimeColumn get confirmedAt => dateTime().nullable()();
   DateTimeColumn get nextAttemptAt => dateTime().nullable()();
   IntColumn get attemptCount => integer().withDefault(const Constant(0))();
