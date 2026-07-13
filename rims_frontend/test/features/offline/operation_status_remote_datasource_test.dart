@@ -30,6 +30,8 @@ void main() {
 
   for (final testCase in <({String name, String key})>[
     (name: 'empty', key: ''),
+    (name: 'dot segment', key: '.'),
+    (name: 'double dot segment', key: '..'),
     (name: 'unicode', key: '幂等键'),
     (name: 'slash', key: 'draft/key'),
     (name: 'too long', key: List.filled(256, 'a').join()),
@@ -57,7 +59,12 @@ void main() {
     );
   }
 
-  for (final key in <String>[List.filled(255, 'a').join(), 'AZaz09._~-']) {
+  for (final key in <String>[
+    List.filled(255, 'a').join(),
+    'AZaz09._~-',
+    '.a',
+    'a..',
+  ]) {
     test('accepts valid boundary idempotency key: ${key.length}', () async {
       final adapter = _StatusAdapter(
         body:

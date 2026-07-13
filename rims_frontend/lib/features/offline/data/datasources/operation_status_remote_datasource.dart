@@ -151,7 +151,7 @@ final class ApiOperationStatusRemoteDataSource
 }
 
 bool _isValidIdempotencyKey(String key) {
-  if (key.isEmpty || key.length > 255) {
+  if (key.isEmpty || key.length > 255 || key == '.' || key == '..') {
     return false;
   }
   return RegExp(r'^[A-Za-z0-9._~-]+$').hasMatch(key);
