@@ -329,6 +329,7 @@ final class _MainAppState extends State<MainApp> {
       outboxRepository: _outboxRepository,
       outboxExecutor: _outboxExecutor,
       offlineOwnershipService: _offlineOwnershipService,
+      networkStatusService: _networkStatusService,
     );
     _tokenExpiredSubscription = _eventBus.on<TokenExpiredEvent>().listen((_) {
       unawaited(
@@ -431,6 +432,8 @@ final class _MainAppState extends State<MainApp> {
     return MaterialApp.router(
       title: 'RIMS',
       theme: AppTheme.light,
+      darkTheme: AppTheme.dark,
+      themeMode: ThemeMode.system,
       routerConfig: _router,
     );
   }

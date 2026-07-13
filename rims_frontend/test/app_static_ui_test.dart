@@ -16,7 +16,9 @@ import 'package:rims_frontend/features/home/presentation/view_models/home_view_m
 import 'package:rims_frontend/features/offline/data/repositories/drift_document_draft_repository.dart';
 import 'package:rims_frontend/features/offline/data/repositories/memory_offline_store.dart';
 import 'package:rims_frontend/features/offline/domain/entities/document_draft.dart';
+import 'package:rims_frontend/features/offline/domain/entities/network_reachability.dart';
 import 'package:rims_frontend/features/offline/domain/repositories/document_draft_repository.dart';
+import 'package:rims_frontend/features/offline/domain/services/network_status_service.dart';
 import 'package:rims_frontend/features/reports/domain/entities/report_data.dart';
 import 'package:rims_frontend/features/reports/domain/repositories/reports_repository.dart';
 import 'package:rims_frontend/routes/app_router.dart';
@@ -95,6 +97,25 @@ void main() {
 
     expect(find.byKey(const Key('tab-body-inventory')), findsOneWidget);
   });
+
+  testWidgets(
+    'shell shows API unreachable band without covering home content',
+    (tester) async {
+      final sessionController = AuthSessionController()..startSession(_session);
+      await _pumpApp(
+        tester,
+        initialLocation: RoutePaths.shell,
+        sessionController: sessionController,
+        networkStatusService: const _FakeNetworkStatusService(
+          NetworkReachability.unreachable,
+        ),
+      );
+
+      expect(find.text('网络可用，服务不可达'), findsOneWidget);
+      expect(find.text('你好，系统管理员'), findsOneWidget);
+      expect(find.text('在线，服务可用'), findsNothing);
+    },
+  );
 
   testWidgets('profile warehouse selector switches active warehouse', (
     tester,
@@ -554,6 +575,7 @@ Future<void> _pumpApp(
   AppEventBus? eventBus,
   ReportsRepository? reportsRepository,
   DocumentDraftRepository? documentDraftRepository,
+  NetworkStatusService? networkStatusService,
 }) async {
   final activeSessionController = sessionController ?? AuthSessionController();
 
@@ -565,11 +587,31 @@ Future<void> _pumpApp(
         eventBus: eventBus,
         reportsRepository: reportsRepository,
         documentDraftRepository: documentDraftRepository,
+        networkStatusService: networkStatusService,
         initialLocation: initialLocation,
       ),
     ),
   );
   await tester.pump();
+}
+
+final class _FakeNetworkStatusService implements NetworkStatusService {
+  const _FakeNetworkStatusService(this.current);
+
+  @override
+  final NetworkReachability current;
+
+  @override
+  Stream<NetworkReachability> get changes => const Stream.empty();
+
+  @override
+  Future<NetworkReachability> verify() async => current;
+
+  @override
+  void markOnlineFromRequest() {}
+
+  @override
+  Future<void> dispose() async {}
 }
 
 DocumentDraft _routeDraft(

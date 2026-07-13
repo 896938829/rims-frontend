@@ -14,6 +14,7 @@ import '../../../inventory/domain/entities/inventory_item.dart';
 import '../../../inventory/domain/entities/non_standard_inventory_item.dart';
 import '../../../inventory/domain/repositories/inventory_repository.dart';
 import '../../../offline/domain/entities/document_draft.dart';
+import '../../../offline/domain/entities/network_reachability.dart';
 import '../../../offline/domain/entities/outbox_operation.dart';
 import '../../../offline/domain/entities/outbox_graph.dart';
 import '../../../offline/domain/repositories/document_draft_repository.dart';
@@ -105,13 +106,15 @@ final class DocumentsViewModel extends ChangeNotifier {
     this.submissionStagingStore,
     this.accountId,
     this.observedRoleCode = '',
+    NetworkReachability initialReachability = NetworkReachability.online,
     Set<OutboxOperationKind> allowedOutboxKinds = const {
       ...OutboxOperationKind.values,
     },
     String Function()? draftIdFactory,
     DateTime Function()? now,
     this.autosaveDelay = const Duration(milliseconds: 300),
-  }) : _allowedOutboxKinds = Set.unmodifiable(allowedOutboxKinds),
+  }) : _networkReachability = initialReachability,
+       _allowedOutboxKinds = Set.unmodifiable(allowedOutboxKinds),
        _selectedAction = _actions.first,
        _recentDocuments = const [],
        _transactions = const [],
@@ -142,6 +145,7 @@ final class DocumentsViewModel extends ChangeNotifier {
   final String? accountId;
   final String observedRoleCode;
   Set<OutboxOperationKind> _allowedOutboxKinds;
+  NetworkReachability _networkReachability;
   final String Function() draftIdFactory;
   final DateTime Function() now;
   final Duration autosaveDelay;
@@ -235,6 +239,14 @@ final class DocumentsViewModel extends ChangeNotifier {
       _pendingOfflineSubmission?.review ?? _pendingLifecycleSubmission?.review;
   Failure? get offlineSubmissionFailure => _offlineSubmissionFailure;
   Set<OutboxOperationKind> get allowedOutboxKinds => _allowedOutboxKinds;
+  bool get canSubmitAuthoritatively =>
+      _networkReachability == NetworkReachability.online;
+
+  void updateNetworkReachability(NetworkReachability reachability) {
+    if (_networkReachability == reachability) return;
+    _networkReachability = reachability;
+    notifyListeners();
+  }
 
   void updateAllowedOutboxKinds(Set<OutboxOperationKind> allowedKinds) {
     _allowedOutboxKinds = Set.unmodifiable(allowedKinds);
@@ -1274,8 +1286,23 @@ final class DocumentsViewModel extends ChangeNotifier {
     _returnSourceError = '原销售单已失效，请重新选择';
   }
 
-  Future<bool> createDocument() async {
+  Future<bool> createDocument() => _submitDocument(prepareOffline: false);
+
+  Future<bool> prepareOfflineSubmission() =>
+      _submitDocument(prepareOffline: true);
+
+  Future<bool> _submitDocument({required bool prepareOffline}) async {
     if (_isSubmitting) {
+      return false;
+    }
+    if (!canSubmitAuthoritatively && !prepareOffline) {
+      _formError = '当前无法连接服务，请先保存草稿，或进入复核后保存到待同步';
+      notifyListeners();
+      return false;
+    }
+    if (canSubmitAuthoritatively && prepareOffline) {
+      _formError = '服务当前可用，请直接提交单据';
+      notifyListeners();
       return false;
     }
     if (_isAttachmentMutationInProgress) {
@@ -1418,6 +1445,16 @@ final class DocumentsViewModel extends ChangeNotifier {
       refDocId: isReturnAction ? returnSourceDocument?.id : null,
       remark: _remark,
     );
+    if (prepareOffline) {
+      final prepared = _prepareCreateForQueue(
+        request: request,
+        accountId: submittedAccountId,
+        localAggregateId: submittedDraftId,
+        requiresStatusProbe: false,
+      );
+      _releaseSubmissionBarrier();
+      return prepared;
+    }
     final result = await repository.createDocument(request);
     if (_isDisposed) return false;
 
@@ -1449,39 +1486,15 @@ final class DocumentsViewModel extends ChangeNotifier {
       created = true;
       notifyListeners();
     } else if (result case FailureResult<DocumentRecord>(:final failure)) {
-      if (_canOfferOfflineQueue(failure) &&
-          submittedAccountId != null &&
-          currentWarehouse != null &&
-          outboxRepository != null &&
-          submissionStagingStore != null) {
-        _pendingLifecycleSubmission = null;
-        _offlineSubmissionFailure = null;
-        _pendingOfflineSubmission = _PendingOfflineSubmission(
-          request: request,
-          accountId: submittedAccountId,
-          warehouseId: currentWarehouse!.id,
-          localAggregateId: submittedDraftId,
-          attachmentRequestIds: List.unmodifiable(_attachmentStagingIds),
-          requiresStatusProbe: failure is TransportUnknownFailure,
-          review: OfflineSubmissionReview(
-            warehouseName: currentWarehouse!.name,
-            documentType: request.typeLabel,
-            lineCount: request.effectiveLines.length,
-            lines: request.effectiveLines
-                .map((line) => '${line.productName} × ${line.quantity}')
-                .toList(growable: false),
-            staleAssumptions: [
-              request.docType == 5
-                  ? '离线同步将创建盘点单、确认差异并结转库存'
-                  : '离线同步将创建并完成单据以产生库存效果',
-              '库存、原单状态和权限将在同步前重新校验',
-              '附件内容必须与当前暂存快照一致',
-              '保存前需具备整张同步图的完整权限，任一权限缺失均不会入队',
-            ],
-          ),
-        );
-        _formError = '网络结果不确定，确认后可保存到待同步';
-      } else {
+      final preparedForQueue =
+          _canOfferOfflineQueue(failure) &&
+          _prepareCreateForQueue(
+            request: request,
+            accountId: submittedAccountId,
+            localAggregateId: submittedDraftId,
+            requiresStatusProbe: failure is TransportUnknownFailure,
+          );
+      if (!preparedForQueue) {
         _pendingOfflineSubmission = null;
         _formError = failure.message;
       }
@@ -1512,6 +1525,49 @@ final class DocumentsViewModel extends ChangeNotifier {
     _isSubmitting = false;
     notifyListeners();
     return created;
+  }
+
+  bool _prepareCreateForQueue({
+    required CreateDocumentRequest request,
+    required String? accountId,
+    required String localAggregateId,
+    required bool requiresStatusProbe,
+  }) {
+    final warehouse = currentWarehouse;
+    if (accountId == null ||
+        warehouse == null ||
+        outboxRepository == null ||
+        submissionStagingStore == null) {
+      _pendingOfflineSubmission = null;
+      _formError = '请先保存草稿，待同步服务当前不可用';
+      return false;
+    }
+    _pendingLifecycleSubmission = null;
+    _offlineSubmissionFailure = null;
+    _pendingOfflineSubmission = _PendingOfflineSubmission(
+      request: request,
+      accountId: accountId,
+      warehouseId: warehouse.id,
+      localAggregateId: localAggregateId,
+      attachmentRequestIds: List.unmodifiable(_attachmentStagingIds),
+      requiresStatusProbe: requiresStatusProbe,
+      review: OfflineSubmissionReview(
+        warehouseName: warehouse.name,
+        documentType: request.typeLabel,
+        lineCount: request.effectiveLines.length,
+        lines: request.effectiveLines
+            .map((line) => '${line.productName} × ${line.quantity}')
+            .toList(growable: false),
+        staleAssumptions: [
+          request.docType == 5 ? '离线同步将创建盘点单、确认差异并结转库存' : '离线同步将创建并完成单据以产生库存效果',
+          '库存、原单状态和权限将在同步前重新校验',
+          '附件内容必须与当前暂存快照一致',
+          '保存前需具备整张同步图的完整权限，任一权限缺失均不会入队',
+        ],
+      ),
+    );
+    _formError = '确认复核后可保存到待同步';
+    return true;
   }
 
   Future<bool> confirmOfflineSubmission() async {
@@ -1903,7 +1959,11 @@ final class DocumentsViewModel extends ChangeNotifier {
     if (_completingDocumentIds.contains(document.id)) {
       return false;
     }
-
+    if (!canSubmitAuthoritatively) {
+      _documentActionError = '当前无法连接服务，请前往同步中心处理已复核任务';
+      notifyListeners();
+      return false;
+    }
     final repository = this.repository;
     if (repository == null) {
       _documentActionError = invalidServiceMessage;

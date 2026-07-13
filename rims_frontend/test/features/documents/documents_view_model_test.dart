@@ -25,6 +25,7 @@ import 'package:rims_frontend/features/inventory/domain/entities/inventory_item.
 import 'package:rims_frontend/features/inventory/domain/entities/non_standard_inventory_item.dart';
 import 'package:rims_frontend/features/inventory/domain/repositories/inventory_repository.dart';
 import 'package:rims_frontend/features/offline/domain/entities/document_draft.dart';
+import 'package:rims_frontend/features/offline/domain/entities/network_reachability.dart';
 import 'package:rims_frontend/features/offline/domain/repositories/document_draft_repository.dart';
 import 'package:rims_frontend/features/offline/data/repositories/drift_document_draft_repository.dart';
 import 'package:rims_frontend/features/offline/data/repositories/memory_offline_store.dart';
@@ -676,6 +677,80 @@ void main() {
       }
     },
   );
+
+  test(
+    'known offline state blocks authoritative create before repository call',
+    () async {
+      final repository = _FakeDocumentsRepository();
+      final viewModel = DocumentsViewModel(
+        repository: repository,
+        initialReachability: NetworkReachability.offline,
+      )..addScannedProduct(_standardItem);
+
+      expect(await viewModel.createDocument(), isFalse);
+      expect(repository.createCallCount, 0);
+      expect(viewModel.formError, contains('保存草稿'));
+    },
+  );
+
+  test(
+    'known offline state can enter explicit reviewed queue without request',
+    () async {
+      final repository = _FakeDocumentsRepository();
+      final outbox = MemoryOutboxRepository(stateMachine: OutboxStateMachine());
+      final viewModel = _draftEnabledViewModel(
+        drafts: _FakeDocumentDraftRepository(),
+        documents: repository,
+        outbox: outbox,
+        submissionStagingStore: _OutboxSubmissionStagingStore(),
+        draftIdFactory: () => 'offline-draft',
+        networkReachability: NetworkReachability.unreachable,
+      )..addScannedProduct(_standardItem);
+
+      expect(await viewModel.prepareOfflineSubmission(), isTrue);
+      expect(repository.createCallCount, 0);
+      expect((await outbox.list('7')).successData, isEmpty);
+      expect(viewModel.offlineSubmissionReview, isNotNull);
+
+      expect(await viewModel.confirmOfflineSubmission(), isTrue);
+      expect((await outbox.list('7')).successData, isNotEmpty);
+    },
+  );
+
+  testWidgets(
+    'offline document form keeps draft and labels reviewed queue flow',
+    (tester) async {
+      final viewModel = DocumentsViewModel(
+        initialReachability: NetworkReachability.offline,
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: DocumentsPage(viewModel: viewModel)),
+        ),
+      );
+      await tester.pump();
+
+      final saveDraft = tester.widget<IconButton>(
+        find.byKey(const Key('document-save-draft-button')),
+      );
+      expect(saveDraft.onPressed, isNotNull);
+      expect(find.text('复核并保存到待同步'), findsOneWidget);
+      expect(find.text('创建单据'), findsNothing);
+    },
+  );
+
+  test('known offline state blocks authoritative lifecycle commands', () async {
+    final repository = _FakeDocumentsRepository();
+    final viewModel = DocumentsViewModel(
+      repository: repository,
+      initialReachability: NetworkReachability.unreachable,
+    );
+
+    expect(await viewModel.completeDocument(_draftSalesDocument), isFalse);
+    expect(repository.completeCallCount, 0);
+    expect(viewModel.documentActionError, contains('同步中心'));
+  });
 
   test('offline graph permission is all or none before enqueue', () async {
     final outbox = MemoryOutboxRepository(stateMachine: OutboxStateMachine());
@@ -3021,6 +3096,7 @@ DocumentsViewModel _draftEnabledViewModel({
   OutboxRepository? outbox,
   OutboxAttachmentStagingStore? submissionStagingStore,
   String roleCode = 'operator',
+  NetworkReachability networkReachability = NetworkReachability.online,
   String Function()? draftIdFactory,
   Set<OutboxOperationKind> allowedOutboxKinds = const {
     ...OutboxOperationKind.values,
@@ -3033,6 +3109,7 @@ DocumentsViewModel _draftEnabledViewModel({
   outboxRepository: outbox,
   submissionStagingStore: submissionStagingStore,
   observedRoleCode: roleCode,
+  initialReachability: networkReachability,
   allowedOutboxKinds: allowedOutboxKinds,
   currentWarehouse: const Warehouse(
     id: 11,

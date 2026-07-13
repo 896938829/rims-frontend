@@ -25,6 +25,7 @@ import '../../../inventory/domain/repositories/inventory_repository.dart';
 import '../../../offline/domain/repositories/document_draft_repository.dart';
 import '../../../offline/domain/repositories/outbox_repository.dart';
 import '../../../offline/domain/entities/outbox_operation.dart';
+import '../../../offline/domain/entities/network_reachability.dart';
 import '../../../offline/domain/services/outbox_executor.dart';
 import '../../../offline/presentation/view_models/draft_attachments_view_model.dart';
 import '../../../offline/presentation/widgets/draft_attachment_panel.dart';
@@ -58,6 +59,7 @@ final class DocumentsPage extends StatefulWidget {
     this.allowedOutboxKinds = const {...OutboxOperationKind.values},
     this.outboxContextReader,
     this.outboxContextGenerationReader,
+    this.networkReachability,
     super.key,
   });
 
@@ -84,6 +86,7 @@ final class DocumentsPage extends StatefulWidget {
   final Set<OutboxOperationKind> allowedOutboxKinds;
   final OutboxExecutionContext? Function()? outboxContextReader;
   final int Function()? outboxContextGenerationReader;
+  final NetworkReachability? networkReachability;
 
   @override
   State<DocumentsPage> createState() => _DocumentsPageState();
@@ -111,6 +114,8 @@ final class _DocumentsPageState extends State<DocumentsPage> {
           observedRoleCode: widget.observedRoleCode,
           outboxRepository: widget.outboxRepository,
           allowedOutboxKinds: widget.allowedOutboxKinds,
+          initialReachability:
+              widget.networkReachability ?? NetworkReachability.online,
           submissionStagingStore:
               widget.attachmentStagingStore is OutboxAttachmentStagingStore
               ? widget.attachmentStagingStore! as OutboxAttachmentStagingStore
@@ -135,6 +140,9 @@ final class _DocumentsPageState extends State<DocumentsPage> {
   void didUpdateWidget(covariant DocumentsPage oldWidget) {
     super.didUpdateWidget(oldWidget);
     viewModel.updateAllowedOutboxKinds(widget.allowedOutboxKinds);
+    if (widget.networkReachability case final reachability?) {
+      viewModel.updateNetworkReachability(reachability);
+    }
 
     if (widget.initialActionLabel != oldWidget.initialActionLabel) {
       _selectInitialAction();
@@ -884,45 +892,51 @@ final class _DocumentDetailActions extends StatelessWidget {
           label: '完成单据',
           icon: Icons.check_circle_outline,
           isBusy: viewModel.isCompletingDocument(document),
-          onPressed: () => unawaited(
-            _confirmAndRun(
-              context: context,
-              title: '完成单据',
-              content: '确认完成 ${document.number}？完成后将执行库存变更。',
-              confirmLabel: '确认完成',
-              run: () => viewModel.completeDocument(document),
-            ),
-          ),
+          onPressed: viewModel.canSubmitAuthoritatively
+              ? () => unawaited(
+                  _confirmAndRun(
+                    context: context,
+                    title: '完成单据',
+                    content: '确认完成 ${document.number}？完成后将执行库存变更。',
+                    confirmLabel: '确认完成',
+                    run: () => viewModel.completeDocument(document),
+                  ),
+                )
+              : null,
         ),
       if (viewModel.canConfirmStocktakeDocument(document))
         _DocumentDetailActionButton(
           label: '确认盘点差异',
           icon: Icons.fact_check_outlined,
           isBusy: viewModel.isCompletingDocument(document),
-          onPressed: () => unawaited(
-            _confirmAndRun(
-              context: context,
-              title: '确认盘点差异',
-              content: '确认 ${document.number} 的盘点差异？',
-              confirmLabel: '确认差异',
-              run: () => viewModel.confirmStocktakeDocument(document),
-            ),
-          ),
+          onPressed: viewModel.canSubmitAuthoritatively
+              ? () => unawaited(
+                  _confirmAndRun(
+                    context: context,
+                    title: '确认盘点差异',
+                    content: '确认 ${document.number} 的盘点差异？',
+                    confirmLabel: '确认差异',
+                    run: () => viewModel.confirmStocktakeDocument(document),
+                  ),
+                )
+              : null,
         ),
       if (viewModel.canSettleStocktakeDocument(document))
         _DocumentDetailActionButton(
           label: '结转盘点差异',
           icon: Icons.done_all_outlined,
           isBusy: viewModel.isCompletingDocument(document),
-          onPressed: () => unawaited(
-            _confirmAndRun(
-              context: context,
-              title: '结转盘点差异',
-              content: '确认结转 ${document.number}？结转后将应用库存差异。',
-              confirmLabel: '确认结转',
-              run: () => viewModel.settleStocktakeDocument(document),
-            ),
-          ),
+          onPressed: viewModel.canSubmitAuthoritatively
+              ? () => unawaited(
+                  _confirmAndRun(
+                    context: context,
+                    title: '结转盘点差异',
+                    content: '确认结转 ${document.number}？结转后将应用库存差异。',
+                    confirmLabel: '确认结转',
+                    run: () => viewModel.settleStocktakeDocument(document),
+                  ),
+                )
+              : null,
         ),
     ];
 
@@ -1013,7 +1027,7 @@ final class _DocumentDetailActionButton extends StatelessWidget {
   final String label;
   final IconData icon;
   final bool isBusy;
-  final VoidCallback onPressed;
+  final VoidCallback? onPressed;
 
   @override
   Widget build(BuildContext context) {
@@ -1316,11 +1330,15 @@ final class _DocumentFormState extends State<_DocumentForm> {
   }
 
   Future<void> _createDocument() async {
-    final created = await widget.viewModel.createDocument();
-    if (created) {
+    final authoritative = widget.viewModel.canSubmitAuthoritatively;
+    final completed = authoritative
+        ? await widget.viewModel.createDocument()
+        : await widget.viewModel.prepareOfflineSubmission();
+    if (authoritative && completed) {
       widget.eventBus?.publish(const GlobalRefreshRequestedEvent());
       return;
     }
+    if (!authoritative && !completed) return;
     final review = widget.viewModel.offlineSubmissionReview;
     if (review == null || !mounted) return;
     final confirmed = await showDialog<bool>(
@@ -1347,7 +1365,10 @@ final class _DocumentFormState extends State<_DocumentForm> {
       ),
     );
     if (confirmed == true) {
-      await widget.viewModel.confirmOfflineSubmission();
+      final queued = await widget.viewModel.confirmOfflineSubmission();
+      if (queued) {
+        widget.eventBus?.publish(const GlobalRefreshRequestedEvent());
+      }
     }
   }
 
@@ -1577,7 +1598,13 @@ final class _DocumentFormState extends State<_DocumentForm> {
                 borderRadius: BorderRadius.circular(8),
               ),
             ),
-            child: Text(viewModel.isSubmitting ? '创建中...' : '创建单据'),
+            child: Text(
+              viewModel.isSubmitting
+                  ? '处理中...'
+                  : viewModel.canSubmitAuthoritatively
+                  ? '创建单据'
+                  : '复核并保存到待同步',
+            ),
           ),
         ],
       ),
@@ -1916,15 +1943,17 @@ final class _RecentDocumentCard extends StatelessWidget {
                   label: '完成',
                   busyLabel: '完成中',
                   isBusy: viewModel.isCompletingDocument(document),
-                  onPressed: () => unawaited(
-                    _confirmAndRun(
-                      context: context,
-                      title: '完成单据',
-                      content: '确认完成 ${document.number}？完成后将执行库存变更。',
-                      confirmLabel: '确认完成',
-                      run: () => viewModel.completeDocument(document),
-                    ),
-                  ),
+                  onPressed: viewModel.canSubmitAuthoritatively
+                      ? () => unawaited(
+                          _confirmAndRun(
+                            context: context,
+                            title: '完成单据',
+                            content: '确认完成 ${document.number}？完成后将执行库存变更。',
+                            confirmLabel: '确认完成',
+                            run: () => viewModel.completeDocument(document),
+                          ),
+                        )
+                      : null,
                 ),
               ],
               if (viewModel.canConfirmStocktakeDocument(document)) ...[
@@ -1934,15 +1963,18 @@ final class _RecentDocumentCard extends StatelessWidget {
                   label: '确认差异',
                   busyLabel: '确认中',
                   isBusy: viewModel.isCompletingDocument(document),
-                  onPressed: () => unawaited(
-                    _confirmAndRun(
-                      context: context,
-                      title: '确认盘点差异',
-                      content: '确认 ${document.number} 的盘点差异？',
-                      confirmLabel: '确认差异',
-                      run: () => viewModel.confirmStocktakeDocument(document),
-                    ),
-                  ),
+                  onPressed: viewModel.canSubmitAuthoritatively
+                      ? () => unawaited(
+                          _confirmAndRun(
+                            context: context,
+                            title: '确认盘点差异',
+                            content: '确认 ${document.number} 的盘点差异？',
+                            confirmLabel: '确认差异',
+                            run: () =>
+                                viewModel.confirmStocktakeDocument(document),
+                          ),
+                        )
+                      : null,
                 ),
               ],
               if (viewModel.canSettleStocktakeDocument(document)) ...[
@@ -1952,15 +1984,18 @@ final class _RecentDocumentCard extends StatelessWidget {
                   label: '结转',
                   busyLabel: '结转中',
                   isBusy: viewModel.isCompletingDocument(document),
-                  onPressed: () => unawaited(
-                    _confirmAndRun(
-                      context: context,
-                      title: '结转盘点差异',
-                      content: '确认结转 ${document.number}？结转后将应用库存差异。',
-                      confirmLabel: '确认结转',
-                      run: () => viewModel.settleStocktakeDocument(document),
-                    ),
-                  ),
+                  onPressed: viewModel.canSubmitAuthoritatively
+                      ? () => unawaited(
+                          _confirmAndRun(
+                            context: context,
+                            title: '结转盘点差异',
+                            content: '确认结转 ${document.number}？结转后将应用库存差异。',
+                            confirmLabel: '确认结转',
+                            run: () =>
+                                viewModel.settleStocktakeDocument(document),
+                          ),
+                        )
+                      : null,
                 ),
               ],
             ],
@@ -2141,7 +2176,7 @@ final class _LifecycleButton extends StatelessWidget {
   final String label;
   final String busyLabel;
   final bool isBusy;
-  final VoidCallback onPressed;
+  final VoidCallback? onPressed;
 
   @override
   Widget build(BuildContext context) {

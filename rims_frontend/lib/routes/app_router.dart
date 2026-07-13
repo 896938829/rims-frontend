@@ -17,6 +17,7 @@ import '../features/inventory/domain/repositories/inventory_repository.dart';
 import '../features/offline/domain/repositories/document_draft_repository.dart';
 import '../features/offline/domain/repositories/outbox_repository.dart';
 import '../features/offline/domain/services/outbox_executor.dart';
+import '../features/offline/domain/services/network_status_service.dart';
 import '../features/offline/domain/services/offline_ownership_service.dart';
 import '../features/offline/domain/services/outbox_permission_policy.dart';
 import '../features/offline/presentation/pages/sync_center_page.dart';
@@ -45,6 +46,7 @@ GoRouter createAppRouter({
   OutboxRepository? outboxRepository,
   OutboxExecutorPort? outboxExecutor,
   OfflineOwnershipService? offlineOwnershipService,
+  NetworkStatusService? networkStatusService,
   String initialLocation = RoutePaths.login,
 }) {
   return GoRouter(
@@ -114,6 +116,7 @@ GoRouter createAppRouter({
           documentDraftRepository: documentDraftRepository,
           outboxRepository: outboxRepository,
           offlineOwnershipService: offlineOwnershipService,
+          networkStatusService: networkStatusService,
           initialDraftId: state.uri.queryParameters['draft'],
         ),
       ),

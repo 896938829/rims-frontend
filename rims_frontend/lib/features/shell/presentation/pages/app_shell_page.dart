@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 
 import '../../../../core/events/app_event.dart';
@@ -26,6 +27,9 @@ import '../../../offline/domain/entities/outbox_operation.dart';
 import '../../../offline/domain/services/outbox_permission_policy.dart';
 import '../../../offline/domain/services/outbox_executor.dart';
 import '../../../offline/domain/services/offline_ownership_service.dart';
+import '../../../offline/domain/services/network_status_service.dart';
+import '../../../offline/presentation/view_models/offline_status_view_model.dart';
+import '../../../offline/presentation/widgets/offline_status_bar.dart';
 import '../../../inventory/domain/entities/inventory_item.dart';
 import '../../../profile/presentation/pages/profile_page.dart';
 import '../../../reports/domain/repositories/reports_repository.dart';
@@ -40,6 +44,7 @@ import '../../../scanner/presentation/pages/scanner_page.dart';
 import '../../../scanner/presentation/view_models/scan_session_view_model.dart';
 import '../../../scanner/presentation/widgets/keyboard_wedge_listener.dart';
 import '../view_models/app_tab.dart';
+import '../../../../routes/route_paths.dart';
 
 final class AppShellPage extends StatefulWidget {
   const AppShellPage({
@@ -59,6 +64,7 @@ final class AppShellPage extends StatefulWidget {
     this.initialDraftId,
     this.outboxRepository,
     this.offlineOwnershipService,
+    this.networkStatusService,
     super.key,
   });
 
@@ -78,6 +84,7 @@ final class AppShellPage extends StatefulWidget {
   final String? initialDraftId;
   final OutboxRepository? outboxRepository;
   final OfflineOwnershipService? offlineOwnershipService;
+  final NetworkStatusService? networkStatusService;
 
   @override
   State<AppShellPage> createState() => _AppShellPageState();
@@ -91,6 +98,7 @@ final class _AppShellPageState extends State<AppShellPage> {
   bool _pendingDocumentScanner = false;
   StreamSubscription<GlobalRefreshRequestedEvent>? _refreshSubscription;
   final StreamController<String> _wedgeBarcodes = StreamController.broadcast();
+  OfflineStatusViewModel? _offlineStatusViewModel;
 
   @override
   void initState() {
@@ -99,6 +107,17 @@ final class _AppShellPageState extends State<AppShellPage> {
         ? AppTab.home
         : AppTab.documents;
     _subscribeToRefreshEvents();
+    final networkStatusService = widget.networkStatusService;
+    if (networkStatusService != null) {
+      _offlineStatusViewModel = OfflineStatusViewModel(
+        networkStatusService: networkStatusService,
+        outboxRepository: widget.outboxRepository,
+        accountIdReader: () =>
+            widget.sessionController.currentUser?.id.toString(),
+      );
+      widget.sessionController.addListener(_refreshOfflineStatus);
+      unawaited(_offlineStatusViewModel!.load());
+    }
   }
 
   @override
@@ -114,19 +133,38 @@ final class _AppShellPageState extends State<AppShellPage> {
   void dispose() {
     unawaited(_refreshSubscription?.cancel());
     unawaited(_wedgeBarcodes.close());
+    widget.sessionController.removeListener(_refreshOfflineStatus);
+    _offlineStatusViewModel?.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
+    final statusViewModel = _offlineStatusViewModel;
     return Scaffold(
-      body: KeyboardWedgeListener(
-        enabled: _currentTab == AppTab.inventory,
-        onBarcode: _wedgeBarcodes.add,
-        child: ListenableBuilder(
-          listenable: widget.sessionController,
-          builder: (context, child) => _tabBody,
-        ),
+      body: Column(
+        children: [
+          if (statusViewModel != null)
+            OfflineStatusBar(
+              viewModel: statusViewModel,
+              onOpenSyncCenter: () => context.push(RoutePaths.syncCenter),
+            ),
+          Expanded(
+            child: KeyboardWedgeListener(
+              enabled: _currentTab == AppTab.inventory,
+              onBarcode: _wedgeBarcodes.add,
+              child: ListenableBuilder(
+                listenable: widget.sessionController,
+                builder: (context, child) => statusViewModel == null
+                    ? _tabBody
+                    : ListenableBuilder(
+                        listenable: statusViewModel,
+                        builder: (context, child) => _tabBody,
+                      ),
+              ),
+            ),
+          ),
+        ],
       ),
       bottomNavigationBar: RimsBottomNavigation(
         currentTab: _currentTab,
@@ -152,6 +190,12 @@ final class _AppShellPageState extends State<AppShellPage> {
         reportsRepository: widget.reportsRepository,
         eventBus: widget.eventBus,
         onQuickActionSelected: _handleHomeQuickAction,
+        onDataFreshnessChanged: (fetchedAt, expiresAt) {
+          _offlineStatusViewModel?.updateDataFreshness(
+            fetchedAt: fetchedAt,
+            expiresAt: expiresAt,
+          );
+        },
       ),
       AppTab.inventory => InventoryPage(
         repository: widget.inventoryRepository,
@@ -193,6 +237,7 @@ final class _AppShellPageState extends State<AppShellPage> {
         outboxContextReader: () => _outboxExecutionContext,
         outboxContextGenerationReader: () =>
             widget.sessionController.contextGeneration,
+        networkReachability: _offlineStatusViewModel?.reachability,
       ),
       AppTab.reports => ReportsPage(
         repository: widget.reportsRepository,
@@ -337,9 +382,14 @@ final class _AppShellPageState extends State<AppShellPage> {
     _refreshSubscription = widget.eventBus
         ?.on<GlobalRefreshRequestedEvent>()
         .listen((_) {
+          unawaited(_offlineStatusViewModel?.load());
           unawaited(
             widget.sessionController.refreshSession(widget.authRepository),
           );
         });
+  }
+
+  void _refreshOfflineStatus() {
+    unawaited(_offlineStatusViewModel?.load());
   }
 }
