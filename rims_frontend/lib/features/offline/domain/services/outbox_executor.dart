@@ -121,13 +121,14 @@ final class OutboxExecutor implements OutboxExecutorPort {
   bool _isExecuting = false;
 
   @override
-  Future<OutboxExecutionReport> execute(OutboxReview review) async {
+  Future<OutboxExecutionReport> execute(OutboxReview requestedReview) async {
     if (_isExecuting) {
       return const OutboxExecutionReport(
         failure: StateFailure(message: 'Synchronization is already running.'),
       );
     }
 
+    var review = requestedReview;
     final contextFailure = _validateContext(review);
     if (contextFailure != null) {
       return OutboxExecutionReport(
@@ -144,6 +145,26 @@ final class OutboxExecutor implements OutboxExecutorPort {
 
     _isExecuting = true;
     try {
+      final componentResult = await repository.loadConnectedComponent(
+        accountId: review.accountId,
+        operationIds: review.operationIds,
+      );
+      if (componentResult case FailureResult<List<OutboxOperation>>(
+        :final failure,
+      )) {
+        return OutboxExecutionReport(failure: failure);
+      }
+      final component =
+          (componentResult as Success<List<OutboxOperation>>).data;
+      review = OutboxReview(
+        operationIds: Set.unmodifiable({
+          ...review.operationIds,
+          ...component.map((operation) => operation.operationId),
+        }),
+        accountId: review.accountId,
+        warehouseId: review.warehouseId,
+        permissionStamp: review.permissionStamp,
+      );
       final persistedReviewFailure = await _validatePersistedReview(
         review,
         const {},

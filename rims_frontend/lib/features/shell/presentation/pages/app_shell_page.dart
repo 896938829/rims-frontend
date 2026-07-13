@@ -22,6 +22,8 @@ import '../../../inventory/domain/repositories/inventory_repository.dart';
 import '../../../inventory/presentation/pages/inventory_page.dart';
 import '../../../offline/domain/repositories/document_draft_repository.dart';
 import '../../../offline/domain/repositories/outbox_repository.dart';
+import '../../../offline/domain/entities/outbox_operation.dart';
+import '../../../offline/domain/services/outbox_permission_policy.dart';
 import '../../../inventory/domain/entities/inventory_item.dart';
 import '../../../profile/presentation/pages/profile_page.dart';
 import '../../../reports/domain/repositories/reports_repository.dart';
@@ -78,6 +80,8 @@ final class AppShellPage extends StatefulWidget {
 }
 
 final class _AppShellPageState extends State<AppShellPage> {
+  static const OutboxPermissionPolicy _outboxPermissionPolicy =
+      OutboxPermissionPolicy();
   late AppTab _currentTab;
   String? _pendingDocumentActionLabel;
   bool _pendingDocumentScanner = false;
@@ -174,6 +178,7 @@ final class _AppShellPageState extends State<AppShellPage> {
         observedRoleCode: widget.sessionController.currentUser?.roleCode ?? '',
         initialDraftId: widget.initialDraftId,
         outboxRepository: widget.outboxRepository,
+        allowedOutboxKinds: _allowedOutboxKinds,
       ),
       AppTab.reports => ReportsPage(
         repository: widget.reportsRepository,
@@ -203,6 +208,15 @@ final class _AppShellPageState extends State<AppShellPage> {
         eventBus: widget.eventBus,
       ),
     };
+  }
+
+  Set<OutboxOperationKind> get _allowedOutboxKinds {
+    final user = widget.sessionController.currentUser;
+    final warehouse = widget.sessionController.currentWarehouse;
+    if (user == null || warehouse == null) return const {};
+    return _outboxPermissionPolicy
+        .contextFor(user: user, warehouseId: warehouse.id)
+        .allowedKinds;
   }
 
   Future<InventoryItem?> _openInventoryScanner(BuildContext context) async {

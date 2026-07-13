@@ -89,6 +89,52 @@ void runOutboxRepositoryContract(String name, OutboxHarnessFactory create) {
       );
     });
 
+    test('dependency component query returns the complete graph', () async {
+      final create = _operation('component-create', clock.value);
+      final attachment = _operation(
+        'component-attachment',
+        clock.value,
+        kind: OutboxOperationKind.attachmentUpload,
+      );
+      final complete = _operation(
+        'component-complete',
+        clock.value,
+        kind: OutboxOperationKind.documentComplete,
+      );
+      final unrelated = _operation('component-unrelated', clock.value);
+      await repository.enqueueGraph(
+        OutboxGraph(
+          operations: [create, attachment, complete],
+          dependencies: const {
+            'component-attachment': {'component-create'},
+            'component-complete': {'component-attachment'},
+          },
+        ),
+      );
+      await repository.enqueue(unrelated);
+
+      final component = await repository.loadConnectedComponent(
+        accountId: '7',
+        operationIds: {'component-attachment'},
+      );
+
+      expect(
+        component.successData.map((item) => item.operationId),
+        containsAll(<String>{
+          'component-create',
+          'component-attachment',
+          'component-complete',
+        }),
+      );
+      expect(
+        (await repository.loadConnectedComponent(
+          accountId: '7',
+          operationIds: {'missing'},
+        )).successData,
+        isEmpty,
+      );
+    });
+
     test('success atomically persists output and cleanup intent', () async {
       final operation = _operation('output-create', clock.value);
       await repository.enqueueGraph(OutboxGraph(operations: [operation]));

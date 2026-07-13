@@ -669,6 +669,59 @@ void main() {
     },
   );
 
+  test('offline graph permission is all or none before enqueue', () async {
+    final outbox = MemoryOutboxRepository(stateMachine: OutboxStateMachine());
+    final viewModel = _draftEnabledViewModel(
+      drafts: _FakeDocumentDraftRepository(),
+      documents: _FakeDocumentsRepository(
+        createResult: Future.value(const FailureResult(NetworkFailure())),
+      ),
+      outbox: outbox,
+      submissionStagingStore: _OutboxSubmissionStagingStore(),
+      draftIdFactory: () => 'draft-1',
+      allowedOutboxKinds: const {
+        OutboxOperationKind.documentCreate,
+        OutboxOperationKind.attachmentUpload,
+      },
+    )..addScannedProduct(_standardItem);
+
+    expect(await viewModel.createDocument(), isFalse);
+    expect(
+      viewModel.offlineSubmissionReview?.staleAssumptions,
+      contains(contains('完整权限')),
+    );
+    expect(await viewModel.confirmOfflineSubmission(), isFalse);
+    expect(viewModel.offlineSubmissionFailure, isA<AuthorizationFailure>());
+    expect(viewModel.formError, contains('完成'));
+    expect((await outbox.list('7')).successData, isEmpty);
+  });
+
+  test(
+    'permission revoked after offline offer still prevents every graph write',
+    () async {
+      final outbox = MemoryOutboxRepository(stateMachine: OutboxStateMachine());
+      final viewModel = _draftEnabledViewModel(
+        drafts: _FakeDocumentDraftRepository(),
+        documents: _FakeDocumentsRepository(
+          createResult: Future.value(const FailureResult(NetworkFailure())),
+        ),
+        outbox: outbox,
+        submissionStagingStore: _OutboxSubmissionStagingStore(),
+        draftIdFactory: () => 'draft-1',
+      )..addScannedProduct(_standardItem);
+
+      expect(await viewModel.createDocument(), isFalse);
+      viewModel.updateAllowedOutboxKinds(const {
+        OutboxOperationKind.documentCreate,
+        OutboxOperationKind.attachmentUpload,
+      });
+
+      expect(await viewModel.confirmOfflineSubmission(), isFalse);
+      expect(viewModel.offlineSubmissionFailure, isA<AuthorizationFailure>());
+      expect((await outbox.list('7')).successData, isEmpty);
+    },
+  );
+
   test('ordinary offline document types create then complete', () async {
     for (final action in const ['销售出库', '采购入库', '退货入库', '调拨单', '转标准']) {
       final outbox = MemoryOutboxRepository(stateMachine: OutboxStateMachine());
@@ -2883,6 +2936,9 @@ DocumentsViewModel _draftEnabledViewModel({
   OutboxAttachmentStagingStore? submissionStagingStore,
   String roleCode = 'operator',
   String Function()? draftIdFactory,
+  Set<OutboxOperationKind> allowedOutboxKinds = const {
+    ...OutboxOperationKind.values,
+  },
 }) => DocumentsViewModel(
   repository: documents,
   inventoryRepository: inventory,
@@ -2891,6 +2947,7 @@ DocumentsViewModel _draftEnabledViewModel({
   outboxRepository: outbox,
   submissionStagingStore: submissionStagingStore,
   observedRoleCode: roleCode,
+  allowedOutboxKinds: allowedOutboxKinds,
   currentWarehouse: const Warehouse(
     id: 11,
     code: 'MAIN',

@@ -256,6 +256,9 @@ final class _OperationList extends StatelessWidget {
         final operation = operations[index];
         return _OperationRow(
           operation: operation,
+          permissionBlocked: viewModel.isPermissionBlocked(
+            operation.operationId,
+          ),
           selected: viewModel.selectedOperationIds.contains(
             operation.operationId,
           ),
@@ -278,6 +281,7 @@ final class _OperationList extends StatelessWidget {
 final class _OperationRow extends StatelessWidget {
   const _OperationRow({
     required this.operation,
+    required this.permissionBlocked,
     required this.selected,
     required this.reviewed,
     required this.busy,
@@ -289,6 +293,7 @@ final class _OperationRow extends StatelessWidget {
   });
 
   final OutboxOperation operation;
+  final bool permissionBlocked;
   final bool selected;
   final bool reviewed;
   final bool busy;
@@ -303,8 +308,8 @@ final class _OperationRow extends StatelessWidget {
     final canCancel =
         operation.state == OutboxState.queued ||
         operation.state == OutboxState.retryableFailure;
-    final canReview = canCancel;
-    final canSelect = canCancel;
+    final canReview = canCancel && !permissionBlocked;
+    final canSelect = canCancel && !permissionBlocked;
     final canDiscard =
         operation.state == OutboxState.succeeded ||
         operation.state == OutboxState.cancelled ||
@@ -334,7 +339,10 @@ final class _OperationRow extends StatelessWidget {
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),
-                    _StateLabel(state: operation.state),
+                    _StateLabel(
+                      state: operation.state,
+                      permissionBlocked: permissionBlocked,
+                    ),
                   ],
                 ),
                 const SizedBox(height: 3),
@@ -384,20 +392,24 @@ final class _OperationRow extends StatelessWidget {
 }
 
 final class _StateLabel extends StatelessWidget {
-  const _StateLabel({required this.state});
+  const _StateLabel({required this.state, this.permissionBlocked = false});
 
   final OutboxState state;
+  final bool permissionBlocked;
 
   @override
   Widget build(BuildContext context) {
-    final color = switch (state) {
-      OutboxState.succeeded => AppColors.success,
-      OutboxState.conflict || OutboxState.permanentFailure => AppColors.error,
-      OutboxState.syncing => AppColors.info,
-      _ => AppColors.textSecondary,
-    };
+    final color = permissionBlocked
+        ? AppColors.error
+        : switch (state) {
+            OutboxState.succeeded => AppColors.success,
+            OutboxState.conflict ||
+            OutboxState.permanentFailure => AppColors.error,
+            OutboxState.syncing => AppColors.info,
+            _ => AppColors.textSecondary,
+          };
     return Text(
-      _stateLabel(state),
+      permissionBlocked ? '权限受阻' : _stateLabel(state),
       style: AppTextStyles.bodySmall.copyWith(color: color),
     );
   }

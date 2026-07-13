@@ -14,6 +14,11 @@ abstract interface class OutboxRepository {
 
   Future<Result<List<OutboxOperation>>> list(String accountId);
 
+  Future<Result<List<OutboxOperation>>> loadConnectedComponent({
+    required String accountId,
+    required Set<String> operationIds,
+  });
+
   Future<Result<List<OutboxOperation>>> ready(
     String accountId, {
     String? reviewStamp,

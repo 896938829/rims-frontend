@@ -174,6 +174,28 @@ final class MemoryOutboxRepository implements OutboxRepository {
   }
 
   @override
+  Future<Result<List<OutboxOperation>>> loadConnectedComponent({
+    required String accountId,
+    required Set<String> operationIds,
+  }) async {
+    final accountOperations = {
+      for (final operation in _operations.values)
+        if (operation.accountId == accountId) operation.operationId: operation,
+    };
+    final connectedIds = _connectedOperationIds(
+      accountOperations.keys.toSet(),
+      _dependencies,
+      operationIds,
+    );
+    final operations =
+        connectedIds
+            .map((operationId) => accountOperations[operationId]!)
+            .toList()
+          ..sort(_compareOperations);
+    return Success(List.unmodifiable(operations));
+  }
+
+  @override
   Future<Result<List<OutboxOperation>>> ready(
     String accountId, {
     String? reviewStamp,
@@ -840,6 +862,31 @@ final class MemoryOutboxRepository implements OutboxRepository {
 int _compareOperations(OutboxOperation left, OutboxOperation right) {
   final byTime = left.createdAt.compareTo(right.createdAt);
   return byTime != 0 ? byTime : left.operationId.compareTo(right.operationId);
+}
+
+Set<String> _connectedOperationIds(
+  Set<String> accountOperationIds,
+  Map<String, Set<String>> dependencies,
+  Set<String> requestedIds,
+) {
+  final connected = <String>{};
+  final pending = requestedIds.where(accountOperationIds.contains).toList();
+  while (pending.isNotEmpty) {
+    final current = pending.removeLast();
+    if (!connected.add(current)) continue;
+    pending.addAll(
+      (dependencies[current] ?? const <String>{}).where(
+        accountOperationIds.contains,
+      ),
+    );
+    for (final entry in dependencies.entries) {
+      if (entry.value.contains(current) &&
+          accountOperationIds.contains(entry.key)) {
+        pending.add(entry.key);
+      }
+    }
+  }
+  return connected;
 }
 
 bool _isActive(OutboxState state) =>

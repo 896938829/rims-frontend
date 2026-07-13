@@ -270,6 +270,66 @@ final class DriftOutboxRepository implements OutboxRepository {
   }
 
   @override
+  Future<Result<List<OutboxOperation>>> loadConnectedComponent({
+    required String accountId,
+    required Set<String> operationIds,
+  }) async {
+    try {
+      return await database.transaction(() async {
+        final operationQuery = database.select(database.offlineOutboxOperations)
+          ..where((row) => row.accountId.equals(accountId))
+          ..orderBy([
+            (row) => OrderingTerm.asc(row.createdAt),
+            (row) => OrderingTerm.asc(row.operationId),
+          ]);
+        final operationRows = await operationQuery.get();
+        final accountOperationIds = operationRows
+            .map((row) => row.operationId)
+            .toSet();
+        final edgeRows = accountOperationIds.isEmpty
+            ? const <OfflineOutboxDependency>[]
+            : await (database.select(database.offlineOutboxDependencies)
+                    ..where((row) => row.operationId.isIn(accountOperationIds)))
+                  .get();
+        final dependencies = <String, Set<String>>{};
+        for (final edge in edgeRows) {
+          if (!accountOperationIds.contains(edge.dependencyId)) continue;
+          dependencies
+              .putIfAbsent(edge.operationId, () => <String>{})
+              .add(edge.dependencyId);
+        }
+        final connectedIds = _connectedOperationIds(
+          accountOperationIds,
+          dependencies,
+          operationIds,
+        );
+        return Success(
+          List.unmodifiable(
+            operationRows
+                .where((row) => connectedIds.contains(row.operationId))
+                .map(_toDomainOperation),
+          ),
+        );
+      });
+    } on StateError catch (error) {
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to read offline dependency graph.',
+          cause: error,
+        ),
+      );
+    } on Exception catch (error) {
+      if (!_isStorageException(error)) rethrow;
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to read offline dependency graph.',
+          cause: error,
+        ),
+      );
+    }
+  }
+
+  @override
   Future<Result<List<OutboxOperation>>> ready(
     String accountId, {
     String? reviewStamp,
@@ -1664,6 +1724,31 @@ DateTime _nextReviewTimestamp(DateTime now, DateTime current) {
   final candidate = now.toUtc();
   final minimum = current.toUtc().add(const Duration(seconds: 1));
   return candidate.isAfter(minimum) ? candidate : minimum;
+}
+
+Set<String> _connectedOperationIds(
+  Set<String> accountOperationIds,
+  Map<String, Set<String>> dependencies,
+  Set<String> requestedIds,
+) {
+  final connected = <String>{};
+  final pending = requestedIds.where(accountOperationIds.contains).toList();
+  while (pending.isNotEmpty) {
+    final current = pending.removeLast();
+    if (!connected.add(current)) continue;
+    pending.addAll(
+      (dependencies[current] ?? const <String>{}).where(
+        accountOperationIds.contains,
+      ),
+    );
+    for (final entry in dependencies.entries) {
+      if (entry.value.contains(current) &&
+          accountOperationIds.contains(entry.key)) {
+        pending.add(entry.key);
+      }
+    }
+  }
+  return connected;
 }
 
 String _serializePayload(Map<String, Object?> payload) {

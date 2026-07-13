@@ -42,7 +42,8 @@ final class OutboxStateMachine {
           attemptCount: attemptCount,
           nextAttemptAt: transitionedAt.add(retryBackoff(attemptCount)),
           lastFailureCode: failureCode,
-          requiresStatusProbe: failure is NetworkFailure,
+          requiresStatusProbe:
+              failure is NetworkFailure || failure is TransportUnknownFailure,
           clearSyncingStartedAt: true,
         ),
       );

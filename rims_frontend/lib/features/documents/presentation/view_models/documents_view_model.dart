@@ -100,10 +100,14 @@ final class DocumentsViewModel extends ChangeNotifier {
     this.submissionStagingStore,
     this.accountId,
     this.observedRoleCode = '',
+    Set<OutboxOperationKind> allowedOutboxKinds = const {
+      ...OutboxOperationKind.values,
+    },
     String Function()? draftIdFactory,
     DateTime Function()? now,
     this.autosaveDelay = const Duration(milliseconds: 300),
-  }) : _selectedAction = _actions.first,
+  }) : _allowedOutboxKinds = Set.unmodifiable(allowedOutboxKinds),
+       _selectedAction = _actions.first,
        _recentDocuments = const [],
        _transactions = const [],
        draftIdFactory = draftIdFactory ?? const Uuid().v4,
@@ -132,6 +136,7 @@ final class DocumentsViewModel extends ChangeNotifier {
   final OutboxAttachmentStagingStore? submissionStagingStore;
   final String? accountId;
   final String observedRoleCode;
+  Set<OutboxOperationKind> _allowedOutboxKinds;
   final String Function() draftIdFactory;
   final DateTime Function() now;
   final Duration autosaveDelay;
@@ -204,6 +209,7 @@ final class DocumentsViewModel extends ChangeNotifier {
   _PendingOfflineSubmission? _pendingOfflineSubmission;
   _PendingLifecycleSubmission? _pendingLifecycleSubmission;
   bool _offlineEnqueueInFlight = false;
+  Failure? _offlineSubmissionFailure;
   final Map<String, String> _lifecycleRequestIds = {};
 
   @override
@@ -222,6 +228,13 @@ final class DocumentsViewModel extends ChangeNotifier {
   List<String> get flowSteps => const ['创建', '确认', '提交', '完成'];
   OfflineSubmissionReview? get offlineSubmissionReview =>
       _pendingOfflineSubmission?.review ?? _pendingLifecycleSubmission?.review;
+  Failure? get offlineSubmissionFailure => _offlineSubmissionFailure;
+  Set<OutboxOperationKind> get allowedOutboxKinds => _allowedOutboxKinds;
+
+  void updateAllowedOutboxKinds(Set<OutboxOperationKind> allowedKinds) {
+    _allowedOutboxKinds = Set.unmodifiable(allowedKinds);
+  }
+
   List<DocumentRecord> get recentDocuments =>
       List<DocumentRecord>.unmodifiable(_recentDocuments);
   List<DocumentRecord> get visibleDocuments {
@@ -1437,6 +1450,7 @@ final class DocumentsViewModel extends ChangeNotifier {
           outboxRepository != null &&
           submissionStagingStore != null) {
         _pendingLifecycleSubmission = null;
+        _offlineSubmissionFailure = null;
         _pendingOfflineSubmission = _PendingOfflineSubmission(
           request: request,
           accountId: submittedAccountId,
@@ -1457,6 +1471,7 @@ final class DocumentsViewModel extends ChangeNotifier {
                   : '离线同步将创建并完成单据以产生库存效果',
               '库存、原单状态和权限将在同步前重新校验',
               '附件内容必须与当前暂存快照一致',
+              '保存前需具备整张同步图的完整权限，任一权限缺失均不会入队',
             ],
           ),
         );
@@ -1502,6 +1517,7 @@ final class DocumentsViewModel extends ChangeNotifier {
     if (outbox == null || (create == null && lifecycle == null)) return false;
 
     _offlineEnqueueInFlight = true;
+    _offlineSubmissionFailure = null;
     _formError = null;
     _documentActionError = null;
     notifyListeners();
@@ -1627,6 +1643,12 @@ final class DocumentsViewModel extends ChangeNotifier {
       );
     }
 
+    final permissionFailure = _graphPermissionFailure(operations);
+    if (permissionFailure != null) {
+      _offlineSubmissionFailure = permissionFailure;
+      _formError = permissionFailure.message;
+      return false;
+    }
     final result = await outbox.enqueueGraph(
       OutboxGraph(operations: operations, dependencies: dependencies),
     );
@@ -1666,9 +1688,16 @@ final class DocumentsViewModel extends ChangeNotifier {
       createdAt: createdAt.add(const Duration(microseconds: 1)),
       requiresStatusProbe: pending.requiresStatusProbe,
     );
+    final operations = [referenceOperation, operation];
+    final permissionFailure = _graphPermissionFailure(operations);
+    if (permissionFailure != null) {
+      _offlineSubmissionFailure = permissionFailure;
+      _documentActionError = permissionFailure.message;
+      return false;
+    }
     final result = await outbox.enqueueGraph(
       OutboxGraph(
-        operations: [referenceOperation, operation],
+        operations: operations,
         dependencies: {
           operation.operationId: {referenceOperation.operationId},
         },
@@ -1681,6 +1710,19 @@ final class DocumentsViewModel extends ChangeNotifier {
     _pendingLifecycleSubmission = null;
     _documentActionError = '已保存到待同步，请前往同步中心复核';
     return true;
+  }
+
+  AuthorizationFailure? _graphPermissionFailure(
+    List<OutboxOperation> operations,
+  ) {
+    final denied = operations
+        .where((operation) => !_allowedOutboxKinds.contains(operation.kind))
+        .map((operation) => operation.kind.wireValue)
+        .toSet();
+    if (denied.isEmpty) return null;
+    return AuthorizationFailure(
+      message: '缺少完成整张待同步图所需权限（${denied.join('、')}），未保存任何操作',
+    );
   }
 
   Map<String, Object?> _outboxDocumentRequest(
@@ -1891,7 +1933,10 @@ final class DocumentsViewModel extends ChangeNotifier {
               documentType: document.title,
               lineCount: 0,
               lines: [document.number],
-              staleAssumptions: const ['单据状态、库存和权限将在同步前重新校验'],
+              staleAssumptions: const [
+                '单据状态、库存和权限将在同步前重新校验',
+                '保存前需具备引用单据和生命周期操作的完整权限',
+              ],
             ),
           );
           _documentActionError = '网络结果不确定，确认后可保存到待同步';

@@ -88,6 +88,72 @@ void main() {
     },
   );
 
+  test(
+    'permission blocked dependency component stays visible and cannot run a prefix',
+    () async {
+      await repository.enqueueGraph(
+        OutboxGraph(
+          operations: [
+            _operation('create'),
+            _operation('upload', kind: OutboxOperationKind.attachmentUpload),
+            _operation('complete', kind: OutboxOperationKind.documentComplete),
+          ],
+          dependencies: const {
+            'upload': {'create'},
+            'complete': {'upload'},
+          },
+        ),
+      );
+      context = const OutboxExecutionContext(
+        accountId: '7',
+        warehouseId: 11,
+        permissionStamp: 'role:operator@denied',
+        allowedKinds: {
+          OutboxOperationKind.documentCreate,
+          OutboxOperationKind.attachmentUpload,
+        },
+      );
+
+      await viewModel.load();
+
+      expect(viewModel.operations, hasLength(3));
+      expect(viewModel.waiting, isEmpty);
+      expect(
+        viewModel.attention.map((item) => item.operationId),
+        containsAll({'create', 'upload', 'complete'}),
+      );
+      expect(viewModel.permissionBlockedOperationIds, {
+        'create',
+        'upload',
+        'complete',
+      });
+      expect(await viewModel.review('create'), isFalse);
+      expect(viewModel.commandFailure, isA<AuthorizationFailure>());
+      await viewModel.retryAllReviewed();
+      expect(executor.reviews, isEmpty);
+
+      context = const OutboxExecutionContext(
+        accountId: '7',
+        warehouseId: 11,
+        permissionStamp: 'role:operator@restored',
+        allowedKinds: {
+          OutboxOperationKind.documentCreate,
+          OutboxOperationKind.attachmentUpload,
+          OutboxOperationKind.documentComplete,
+        },
+      );
+      await viewModel.refreshContext();
+      expect(viewModel.permissionBlockedOperationIds, isEmpty);
+      expect(await viewModel.review('create'), isTrue);
+      await viewModel.retryAllReviewed();
+      expect(executor.reviews.single.operationIds, {
+        'create',
+        'upload',
+        'complete',
+      });
+    },
+  );
+
   test('review persistently confirms an unconfirmed operation', () async {
     await repository.enqueue(_operation('op', confirmed: false));
     await viewModel.load();
@@ -446,6 +512,7 @@ OutboxOperation _operation(
   Map<String, Object?> payload = const {},
   bool confirmed = true,
   String accountId = '7',
+  OutboxOperationKind kind = OutboxOperationKind.documentCreate,
 }) {
   final now = DateTime.utc(2026, 7, 13);
   return OutboxOperation(
@@ -453,7 +520,7 @@ OutboxOperation _operation(
     idempotencyKey: key ?? 'key-$id',
     accountId: accountId,
     warehouseId: 11,
-    kind: OutboxOperationKind.documentCreate,
+    kind: kind,
     payload: payload,
     state: OutboxState.queued,
     createdAt: now,
@@ -525,6 +592,15 @@ final class _DeferredRepository implements OutboxRepository {
       listResults.isEmpty
       ? delegate.list(accountId)
       : listResults.removeFirst().future;
+
+  @override
+  Future<Result<List<OutboxOperation>>> loadConnectedComponent({
+    required String accountId,
+    required Set<String> operationIds,
+  }) => delegate.loadConnectedComponent(
+    accountId: accountId,
+    operationIds: operationIds,
+  );
 
   @override
   Future<Result<OutboxOperation>> confirm({

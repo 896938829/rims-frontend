@@ -24,6 +24,7 @@ import '../../../inventory/domain/entities/inventory_item.dart';
 import '../../../inventory/domain/repositories/inventory_repository.dart';
 import '../../../offline/domain/repositories/document_draft_repository.dart';
 import '../../../offline/domain/repositories/outbox_repository.dart';
+import '../../../offline/domain/entities/outbox_operation.dart';
 import '../../../offline/presentation/view_models/draft_attachments_view_model.dart';
 import '../../../offline/presentation/widgets/draft_attachment_panel.dart';
 import '../view_models/documents_view_model.dart';
@@ -53,6 +54,7 @@ final class DocumentsPage extends StatefulWidget {
     this.observedRoleCode = '',
     this.initialDraftId,
     this.outboxRepository,
+    this.allowedOutboxKinds = const {...OutboxOperationKind.values},
     super.key,
   });
 
@@ -76,6 +78,7 @@ final class DocumentsPage extends StatefulWidget {
   final String observedRoleCode;
   final String? initialDraftId;
   final OutboxRepository? outboxRepository;
+  final Set<OutboxOperationKind> allowedOutboxKinds;
 
   @override
   State<DocumentsPage> createState() => _DocumentsPageState();
@@ -102,6 +105,7 @@ final class _DocumentsPageState extends State<DocumentsPage> {
           accountId: widget.accountId,
           observedRoleCode: widget.observedRoleCode,
           outboxRepository: widget.outboxRepository,
+          allowedOutboxKinds: widget.allowedOutboxKinds,
           submissionStagingStore:
               widget.attachmentStagingStore is OutboxAttachmentStagingStore
               ? widget.attachmentStagingStore! as OutboxAttachmentStagingStore
@@ -125,6 +129,7 @@ final class _DocumentsPageState extends State<DocumentsPage> {
   @override
   void didUpdateWidget(covariant DocumentsPage oldWidget) {
     super.didUpdateWidget(oldWidget);
+    viewModel.updateAllowedOutboxKinds(widget.allowedOutboxKinds);
 
     if (widget.initialActionLabel != oldWidget.initialActionLabel) {
       _selectInitialAction();

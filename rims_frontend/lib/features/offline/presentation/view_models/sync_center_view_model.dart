@@ -32,6 +32,7 @@ final class SyncCenterViewModel extends ChangeNotifier {
   final OutboxExecutionContext? Function() contextReader;
   final Set<String> _reviewedOperationIds = {};
   final Set<String> _selectedOperationIds = {};
+  final Set<String> _permissionBlockedOperationIds = {};
   List<OutboxOperation> _operations = const [];
   String? _contextFingerprint;
   bool _isBusy = false;
@@ -46,6 +47,10 @@ final class SyncCenterViewModel extends ChangeNotifier {
       Set.unmodifiable(_reviewedOperationIds);
   Set<String> get selectedOperationIds =>
       Set.unmodifiable(_selectedOperationIds);
+  Set<String> get permissionBlockedOperationIds =>
+      Set.unmodifiable(_permissionBlockedOperationIds);
+  bool isPermissionBlocked(String operationId) =>
+      _permissionBlockedOperationIds.contains(operationId);
   bool get isBusy => _isBusy;
   bool get isLoading => _isLoading;
   Failure? get loadFailure => _loadFailure;
@@ -56,15 +61,17 @@ final class SyncCenterViewModel extends ChangeNotifier {
   List<OutboxOperation> get waiting => _operations
       .where(
         (operation) =>
-            operation.state == OutboxState.queued ||
-            operation.state == OutboxState.retryableFailure ||
-            operation.state == OutboxState.syncing,
+            !_permissionBlockedOperationIds.contains(operation.operationId) &&
+            (operation.state == OutboxState.queued ||
+                operation.state == OutboxState.retryableFailure ||
+                operation.state == OutboxState.syncing),
       )
       .toList(growable: false);
 
   List<OutboxOperation> get attention => _operations
       .where(
         (operation) =>
+            _permissionBlockedOperationIds.contains(operation.operationId) ||
             operation.state == OutboxState.conflict ||
             operation.state == OutboxState.permanentFailure,
       )
@@ -73,8 +80,9 @@ final class SyncCenterViewModel extends ChangeNotifier {
   List<OutboxOperation> get completed => _operations
       .where(
         (operation) =>
-            operation.state == OutboxState.succeeded ||
-            operation.state == OutboxState.cancelled,
+            !_permissionBlockedOperationIds.contains(operation.operationId) &&
+            (operation.state == OutboxState.succeeded ||
+                operation.state == OutboxState.cancelled),
       )
       .toList(growable: false);
 
@@ -96,6 +104,7 @@ final class SyncCenterViewModel extends ChangeNotifier {
     if (context == null) {
       if (!_acceptResult(generation, context)) return;
       _operations = const [];
+      _permissionBlockedOperationIds.clear();
       _loadFailure = const AuthenticationFailure();
       _isLoading = false;
       _notifyListeners();
@@ -103,20 +112,43 @@ final class SyncCenterViewModel extends ChangeNotifier {
     }
     final result = await repository.list(context.accountId);
     if (!_acceptResult(generation, context)) return;
-    result.when(
-      success: (operations) {
-        _operations = operations
-            .where(
-              (operation) =>
-                  operation.accountId == context.accountId &&
-                  operation.warehouseId == context.warehouseId &&
-                  context.allowedKinds.contains(operation.kind),
-            )
-            .toList(growable: false);
+    if (result case FailureResult<List<OutboxOperation>>(:final failure)) {
+      _operations = const [];
+      _permissionBlockedOperationIds.clear();
+      _loadFailure = failure;
+    } else {
+      _operations = (result as Success<List<OutboxOperation>>).data
+          .where(
+            (operation) =>
+                operation.accountId == context.accountId &&
+                operation.warehouseId == context.warehouseId,
+          )
+          .toList(growable: false);
+      final deniedIds = _operations
+          .where((operation) => !context.allowedKinds.contains(operation.kind))
+          .map((operation) => operation.operationId)
+          .toSet();
+      final component = await repository.loadConnectedComponent(
+        accountId: context.accountId,
+        operationIds: deniedIds,
+      );
+      if (!_acceptResult(generation, context)) return;
+      if (component case FailureResult<List<OutboxOperation>>(:final failure)) {
+        _loadFailure = failure;
+      } else {
+        final visibleIds = _operations
+            .map((operation) => operation.operationId)
+            .toSet();
+        _permissionBlockedOperationIds
+          ..clear()
+          ..addAll(
+            (component as Success<List<OutboxOperation>>).data
+                .map((operation) => operation.operationId)
+                .where(visibleIds.contains),
+          );
         _loadFailure = null;
-      },
-      failure: (failure) => _loadFailure = failure,
-    );
+      }
+    }
     _isLoading = false;
     final waitingIds = waiting
         .map((operation) => operation.operationId)
@@ -152,27 +184,47 @@ final class SyncCenterViewModel extends ChangeNotifier {
       return false;
     }
     try {
-      final result = await repository.confirm(
+      final componentResult = await repository.loadConnectedComponent(
         accountId: context.accountId,
-        operationId: operationId,
-        reviewStamp: context.reviewStamp,
-        expectedUpdatedAt: operation.updatedAt,
+        operationIds: {operationId},
       );
       if (!_acceptResult(snapshot.generation, context)) return false;
-      return result.when(
-        success: (confirmed) {
-          _reviewedOperationIds.add(operationId);
-          _operations = [
-            for (final item in _operations)
-              if (item.operationId == operationId) confirmed else item,
-          ];
-          return true;
-        },
-        failure: (failure) {
+      if (componentResult case FailureResult<List<OutboxOperation>>(
+        :final failure,
+      )) {
+        _commandFailure = failure;
+        return false;
+      }
+      final component = (componentResult as Success<List<OutboxOperation>>).data
+          .where((item) => item.warehouseId == context.warehouseId)
+          .toList(growable: false);
+      if (component.any((item) => !context.allowedKinds.contains(item.kind))) {
+        _commandFailure = const AuthorizationFailure(
+          message: '完整依赖图包含当前无权执行的操作，请恢复权限后重新复核',
+        );
+        return false;
+      }
+      final confirmedById = <String, OutboxOperation>{};
+      for (final item in component.where(_isReviewable)) {
+        final result = await repository.confirm(
+          accountId: context.accountId,
+          operationId: item.operationId,
+          reviewStamp: context.reviewStamp,
+          expectedUpdatedAt: item.updatedAt,
+        );
+        if (!_acceptResult(snapshot.generation, context)) return false;
+        if (result case FailureResult<OutboxOperation>(:final failure)) {
           _commandFailure = failure;
           return false;
-        },
-      );
+        }
+        confirmedById[item.operationId] =
+            (result as Success<OutboxOperation>).data;
+      }
+      _reviewedOperationIds.addAll(confirmedById.keys);
+      _operations = [
+        for (final item in _operations) confirmedById[item.operationId] ?? item,
+      ];
+      return true;
     } finally {
       _endCommand();
     }
@@ -284,20 +336,49 @@ final class SyncCenterViewModel extends ChangeNotifier {
       _endCommand();
       return;
     }
-    final eligibleOperationIds = operationIds
+    final requestedIds = operationIds
         .intersection(_reviewedOperationIds)
-        .where((id) {
-          final operation = _find(id);
-          return operation != null &&
-              _isAllowed(context, operation) &&
-              operation.reviewStamp == context.reviewStamp;
-        })
         .toSet();
-    if (eligibleOperationIds.isEmpty) {
+    if (requestedIds.isEmpty) {
       _endCommand();
       return;
     }
     try {
+      final componentResult = await repository.loadConnectedComponent(
+        accountId: context.accountId,
+        operationIds: requestedIds,
+      );
+      if (!_acceptResult(snapshot.generation, context)) return;
+      if (componentResult case FailureResult<List<OutboxOperation>>(
+        :final failure,
+      )) {
+        _commandFailure = failure;
+        return;
+      }
+      final component =
+          (componentResult as Success<List<OutboxOperation>>).data;
+      if (component.any((operation) => !_isAllowed(context, operation))) {
+        _commandFailure = const AuthorizationFailure(
+          message: '完整依赖图权限不足，未执行任何同步操作',
+        );
+        return;
+      }
+      final eligibleOperationIds = component
+          .where(_isReviewable)
+          .where(
+            (operation) =>
+                _reviewedOperationIds.contains(operation.operationId) &&
+                operation.reviewStamp == context.reviewStamp,
+          )
+          .map((operation) => operation.operationId)
+          .toSet();
+      if (eligibleOperationIds.length !=
+          component.where(_isReviewable).length) {
+        _commandFailure = const AuthorizationFailure(
+          message: '完整依赖图必须在当前权限上下文中重新复核',
+        );
+        return;
+      }
       for (final operationId in eligibleOperationIds) {
         final prepared = await repository.retryNow(
           accountId: context.accountId,
@@ -387,6 +468,7 @@ final class SyncCenterViewModel extends ChangeNotifier {
       _reviewedOperationIds.clear();
       _selectedOperationIds.clear();
       _operations = const [];
+      _permissionBlockedOperationIds.clear();
       _loadFailure = null;
     }
     _contextFingerprint = next;
@@ -442,6 +524,10 @@ final class SyncCenterViewModel extends ChangeNotifier {
       operation.accountId == context.accountId &&
       operation.warehouseId == context.warehouseId &&
       context.allowedKinds.contains(operation.kind);
+
+  bool _isReviewable(OutboxOperation operation) =>
+      operation.state == OutboxState.queued ||
+      operation.state == OutboxState.retryableFailure;
 
   void _rejectScope() {
     _commandFailure = const AuthorizationFailure(

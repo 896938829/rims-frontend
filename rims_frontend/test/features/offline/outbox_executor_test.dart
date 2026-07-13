@@ -568,6 +568,155 @@ void main() {
     expect(network.verifyCalls, 3);
     expect(report.skippedOperationReasons['missing'], 'not_ready');
   });
+
+  test(
+    'denied successor blocks the complete graph before any network',
+    () async {
+      await repository.enqueueGraph(
+        OutboxGraph(
+          operations: [
+            _operation('create', reviewStamp: '7\u000011\u0000chain@1'),
+            _operation(
+              'upload',
+              kind: OutboxOperationKind.attachmentUpload,
+              reviewStamp: '7\u000011\u0000chain@1',
+            ),
+            _operation(
+              'complete',
+              kind: OutboxOperationKind.documentComplete,
+              reviewStamp: '7\u000011\u0000chain@1',
+            ),
+          ],
+          dependencies: const {
+            'upload': {'create'},
+            'complete': {'upload'},
+          },
+        ),
+      );
+      final uploadHandler = _Handler(
+        kind: OutboxOperationKind.attachmentUpload,
+      );
+      final completeHandler = _Handler(
+        kind: OutboxOperationKind.documentComplete,
+      );
+      context = const OutboxExecutionContext(
+        accountId: '7',
+        warehouseId: 11,
+        permissionStamp: 'chain@1',
+        allowedKinds: {
+          OutboxOperationKind.documentCreate,
+          OutboxOperationKind.attachmentUpload,
+        },
+      );
+      final chainExecutor = OutboxExecutor(
+        repository: repository,
+        networkStatusService: network,
+        statusDataSource: status,
+        handlers: [handler, uploadHandler, completeHandler],
+        contextReader: () => context,
+      );
+
+      final report = await chainExecutor.execute(
+        const OutboxReview(
+          operationIds: {'create'},
+          accountId: '7',
+          warehouseId: 11,
+          permissionStamp: 'chain@1',
+        ),
+      );
+
+      expect(report.failure, isA<AuthorizationFailure>());
+      expect(report.reviewInvalidated, isTrue);
+      expect(network.verifyCalls, 0);
+      expect(handler.calls, isEmpty);
+      expect(uploadHandler.calls, isEmpty);
+      expect(completeHandler.calls, isEmpty);
+      expect(status.keys, isEmpty);
+
+      context = const OutboxExecutionContext(
+        accountId: '7',
+        warehouseId: 11,
+        permissionStamp: 'chain@2',
+        allowedKinds: {
+          OutboxOperationKind.documentCreate,
+          OutboxOperationKind.attachmentUpload,
+          OutboxOperationKind.documentComplete,
+        },
+      );
+      for (final operation in (await repository.list('7')).dataOrNull!) {
+        await repository.confirm(
+          accountId: '7',
+          operationId: operation.operationId,
+          reviewStamp: '7\u000011\u0000chain@2',
+        );
+      }
+
+      final restored = await chainExecutor.execute(
+        const OutboxReview(
+          operationIds: {'create'},
+          accountId: '7',
+          warehouseId: 11,
+          permissionStamp: 'chain@2',
+        ),
+      );
+
+      expect(restored.succeededOperationIds, ['create', 'upload', 'complete']);
+      expect(handler.calls, ['create']);
+      expect(uploadHandler.calls, ['upload']);
+      expect(completeHandler.calls, ['complete']);
+    },
+  );
+
+  for (final kind in const [
+    OutboxOperationKind.attachmentUpload,
+    OutboxOperationKind.documentComplete,
+  ]) {
+    test(
+      '$kind transport unknown retries status-first with the same key',
+      () async {
+        final kindHandler = _Handler(kind: kind)
+          ..results.addAll(const [
+            FailureResult(TransportUnknownFailure()),
+            Success<Object?>(null),
+          ]);
+        context = OutboxExecutionContext(
+          accountId: '7',
+          warehouseId: 11,
+          permissionStamp: 'kind@1',
+          allowedKinds: {kind},
+        );
+        final kindExecutor = OutboxExecutor(
+          repository: repository,
+          networkStatusService: network,
+          statusDataSource: status,
+          handlers: [kindHandler],
+          contextReader: () => context,
+          maxStatusProbes: 1,
+          delay: (_) async {},
+        );
+        await repository.enqueue(
+          _operation(
+            kind.wireValue,
+            kind: kind,
+            reviewStamp: '7\u000011\u0000kind@1',
+          ),
+        );
+
+        await kindExecutor.execute(review({kind.wireValue}));
+        expect((await stored(kind.wireValue)).requiresStatusProbe, isTrue);
+        now = now.add(const Duration(seconds: 3));
+        status.results.add(const FailureResult(NotFoundFailure()));
+        status.onCall = () => expect(kindHandler.calls, [kind.wireValue]);
+
+        final replay = await kindExecutor.execute(review({kind.wireValue}));
+
+        expect(replay.succeededOperationIds, [kind.wireValue]);
+        expect(status.keys, ['key-${kind.wireValue}']);
+        expect(kindHandler.calls, [kind.wireValue, kind.wireValue]);
+        expect(kindHandler.seenKeys.toSet(), {'key-${kind.wireValue}'});
+      },
+    );
+  }
 }
 
 OutboxOperation _operation(
@@ -644,6 +793,7 @@ final class _Handler implements OutboxOperationHandler {
 final class _StatusDataSource implements OperationStatusRemoteDataSource {
   final List<Result<OperationStatus>> results = [];
   final List<String> keys = [];
+  void Function()? onCall;
 
   @override
   Future<Result<OperationStatus>> loadStatus({
@@ -651,6 +801,7 @@ final class _StatusDataSource implements OperationStatusRemoteDataSource {
     required String scope,
   }) async {
     keys.add(key);
+    onCall?.call();
     return results.removeAt(0);
   }
 }
