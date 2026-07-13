@@ -11,7 +11,11 @@ import '../../domain/services/outbox_state_machine.dart';
 import 'memory_outbox_repository.dart';
 
 final class MemoryOfflineStore
-    implements OfflineStore, OutboxRepositoryOwner, OfflineOwnershipStore {
+    implements
+        OfflineStore,
+        ConditionalCacheRecordStorage,
+        OutboxRepositoryOwner,
+        OfflineOwnershipStore {
   MemoryOfflineStore({DateTime Function()? now})
     : outboxRepository = MemoryOutboxRepository(
         stateMachine: OutboxStateMachine(now: now),
@@ -94,6 +98,19 @@ final class MemoryOfflineStore
           record.key.accountId == accountId &&
           record.key.namespace == namespace,
     );
+  }
+
+  @override
+  Future<bool> deleteCacheRecordIfPayloadMatches({
+    required CacheKey key,
+    required int schemaVersion,
+    required String payloadField,
+    required Object? expectedValue,
+  }) async {
+    final storageKey = _cacheKey(key, schemaVersion);
+    final record = _cache[storageKey];
+    if (record?.payload[payloadField] != expectedValue) return false;
+    return _cache.remove(storageKey) != null;
   }
 
   @override

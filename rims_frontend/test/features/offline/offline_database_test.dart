@@ -75,6 +75,45 @@ void main() {
     },
   );
 
+  test('conditional cache delete cannot remove a newer projection', () async {
+    const key = CacheKey(
+      accountId: '7',
+      namespace: 'auth.session',
+      entityKey: 'active',
+    );
+    final now = DateTime.utc(2026, 7, 14);
+    await database.writeCache(
+      CacheRecord(
+        key: key,
+        payload: const {'_local_projection_id': 'projection-b'},
+        schemaVersion: 1,
+        fetchedAt: now,
+        expiresAt: now.add(const Duration(days: 1)),
+      ),
+    );
+
+    expect(
+      await database.deleteCacheRecordIfPayloadMatches(
+        key: key,
+        schemaVersion: 1,
+        payloadField: '_local_projection_id',
+        expectedValue: 'projection-a',
+      ),
+      isFalse,
+    );
+    expect(await database.readCache(key, schemaVersion: 1), isNotNull);
+    expect(
+      await database.deleteCacheRecordIfPayloadMatches(
+        key: key,
+        schemaVersion: 1,
+        payloadField: '_local_projection_id',
+        expectedValue: 'projection-b',
+      ),
+      isTrue,
+    );
+    expect(await database.readCache(key, schemaVersion: 1), isNull);
+  });
+
   test('schema uses the stable physical table names', () async {
     final rows = await database
         .customSelect("SELECT name FROM sqlite_master WHERE type = 'table'")

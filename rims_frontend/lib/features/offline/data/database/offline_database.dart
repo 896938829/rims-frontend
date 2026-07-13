@@ -27,7 +27,10 @@ part 'offline_database.g.dart';
   ],
 )
 final class OfflineDatabase extends _$OfflineDatabase
-    implements OfflineStore, OfflineOwnershipStore {
+    implements
+        OfflineStore,
+        ConditionalCacheRecordStorage,
+        OfflineOwnershipStore {
   OfflineDatabase.forTesting(super.executor);
 
   OfflineDatabase.native({
@@ -283,6 +286,29 @@ ON outbox_operations (operation_id, account_id)
         ))
         .go();
   }
+
+  @override
+  Future<bool> deleteCacheRecordIfPayloadMatches({
+    required CacheKey key,
+    required int schemaVersion,
+    required String payloadField,
+    required Object? expectedValue,
+  }) => transaction(() async {
+    final row =
+        await (select(offlineCacheEntries)..where(
+              (entry) => entry.cacheId.equals(_cacheId(key, schemaVersion)),
+            ))
+            .getSingleOrNull();
+    if (row == null ||
+        CacheRecordModel.decodePayload(row.payload)[payloadField] !=
+            expectedValue) {
+      return false;
+    }
+    return (delete(offlineCacheEntries)
+          ..where((entry) => entry.cacheId.equals(row.cacheId)))
+        .go()
+        .then((deleted) => deleted == 1);
+  });
 
   @override
   Future<void> saveDraft(DocumentDraft draft, {int? expectedVersion}) async {

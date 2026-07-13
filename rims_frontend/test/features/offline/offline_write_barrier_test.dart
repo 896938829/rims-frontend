@@ -624,6 +624,189 @@ void main() {
     },
   );
 
+  for (final secondaryAttemptFails in [false, true]) {
+    test(
+      'account switch secondary ${secondaryAttemptFails ? 'failure' : 'success'} '
+      'cannot consume an earlier primary block',
+      () async {
+        final barrier = OfflineWriteBarrier();
+        final store = _AttemptControlledOwnershipStore(
+          OfflineOwnershipReason.accountSwitch,
+          [
+            _ControlledOwnershipAttempt.successful(),
+            secondaryAttemptFails
+                ? _ControlledOwnershipAttempt.failed()
+                : _ControlledOwnershipAttempt.successful(),
+            _ControlledOwnershipAttempt.successful(),
+          ],
+        );
+        final ownership = OfflineOwnershipService(
+          store: store,
+          files: const _NoopFiles(),
+          scans: const _NoopScans(),
+          reviews: const _NoopReviews(),
+          databaseKeys: MemoryOfflineDatabaseKeyManager(),
+          mutationParticipants: [barrier],
+        );
+
+        expect(
+          (await ownership.apply(
+            const OfflineOwnershipIntent.accountSwitch(
+              previousAccountId: '8',
+              currentAccountId: '9',
+            ),
+          )).completed,
+          isTrue,
+        );
+        expect(ownership.canAccessOfflineData('8'), isFalse);
+
+        expect(
+          (await ownership.apply(
+            const OfflineOwnershipIntent.accountSwitch(
+              previousAccountId: '7',
+              currentAccountId: '8',
+            ),
+          )).completed,
+          isNot(secondaryAttemptFails),
+        );
+        expect(ownership.canAccessOfflineData('8'), isFalse);
+        await expectLater(
+          barrier.protect(accountId: '8', operation: () async {}),
+          throwsA(isA<OfflineWriteBlockedException>()),
+        );
+
+        await ownership.apply(
+          const OfflineOwnershipIntent.reauthenticated(accountId: '8'),
+        );
+        expect(ownership.canAccessOfflineData('8'), isTrue);
+
+        if (secondaryAttemptFails) {
+          expect(
+            (await ownership.apply(
+              const OfflineOwnershipIntent.accountSwitch(
+                previousAccountId: '7',
+                currentAccountId: '8',
+              ),
+            )).completed,
+            isTrue,
+          );
+        }
+        await ownership.apply(
+          const OfflineOwnershipIntent.reauthenticated(accountId: '7'),
+        );
+        expect(ownership.canAccessOfflineData('7'), isTrue);
+        expect(ownership.debugGenerationMetadataEntryCount, 0);
+      },
+    );
+  }
+
+  for (final throwAt in [0, 1]) {
+    test(
+      'participant acquisition throw at index $throwAt releases attempt',
+      () async {
+        final participants = [
+          _ThrowingMutationParticipant(throwOnAcquire: throwAt == 0),
+          _ThrowingMutationParticipant(throwOnAcquire: throwAt == 1),
+        ];
+        final ownership = OfflineOwnershipService(
+          store: MemoryOfflineStore(),
+          files: const _NoopFiles(),
+          scans: const _NoopScans(),
+          reviews: const _NoopReviews(),
+          databaseKeys: MemoryOfflineDatabaseKeyManager(),
+          mutationParticipants: participants,
+        );
+
+        expect(
+          () => ownership.apply(
+            const OfflineOwnershipIntent.permissionRefresh(accountId: '7'),
+          ),
+          throwsA(isA<StateError>()),
+        );
+        expect(ownership.canAccessOfflineData('7'), isTrue);
+        expect(ownership.debugGenerationMetadataEntryCount, 0);
+        for (final participant in participants) {
+          participant.throwOnAcquire = false;
+        }
+        expect(
+          (await ownership.apply(
+            const OfflineOwnershipIntent.permissionRefresh(accountId: '7'),
+          )).completed,
+          isTrue,
+        );
+        expect(ownership.debugGenerationMetadataEntryCount, 0);
+      },
+    );
+  }
+
+  test('asynchronous quiescence failure releases attempt handles', () async {
+    final participant = _ThrowingMutationParticipant(throwOnWait: true);
+    final ownership = OfflineOwnershipService(
+      store: MemoryOfflineStore(),
+      files: const _NoopFiles(),
+      scans: const _NoopScans(),
+      reviews: const _NoopReviews(),
+      databaseKeys: MemoryOfflineDatabaseKeyManager(),
+      mutationParticipants: [participant],
+    );
+
+    expect(
+      (await ownership.apply(
+        const OfflineOwnershipIntent.permissionRefresh(accountId: '7'),
+      )).completed,
+      isFalse,
+    );
+    expect(ownership.canAccessOfflineData('7'), isTrue);
+    expect(ownership.debugGenerationMetadataEntryCount, 0);
+
+    participant.throwOnWait = false;
+    expect(
+      (await ownership.apply(
+        const OfflineOwnershipIntent.permissionRefresh(accountId: '7'),
+      )).completed,
+      isTrue,
+    );
+  });
+
+  test(
+    'revocation retained-block acquisition failure releases all handles',
+    () async {
+      final participant = _ThrowingMutationParticipant(throwOnAcquireCall: 2);
+      final ownership = OfflineOwnershipService(
+        store: MemoryOfflineStore(),
+        files: const _NoopFiles(),
+        scans: const _NoopScans(),
+        reviews: const _NoopReviews(),
+        databaseKeys: MemoryOfflineDatabaseKeyManager(),
+        mutationParticipants: [participant],
+      );
+
+      await expectLater(
+        ownership.apply(
+          const OfflineOwnershipIntent.revocation(accountId: '7'),
+        ),
+        throwsA(isA<StateError>()),
+      );
+      expect(participant.activeBlocks, 0);
+      expect(ownership.canAccessOfflineData('7'), isTrue);
+      expect(ownership.debugGenerationMetadataEntryCount, 0);
+
+      participant.throwOnAcquireCall = null;
+      expect(
+        (await ownership.apply(
+          const OfflineOwnershipIntent.revocation(accountId: '7'),
+        )).completed,
+        isTrue,
+      );
+      expect(participant.activeBlocks, 1);
+      await ownership.apply(
+        const OfflineOwnershipIntent.reauthenticated(accountId: '7'),
+      );
+      expect(participant.activeBlocks, 0);
+      expect(ownership.debugGenerationMetadataEntryCount, 0);
+    },
+  );
+
   test('completed ownership generations are reclaimed', () async {
     final ownership = OfflineOwnershipService(
       store: MemoryOfflineStore(),
@@ -1349,6 +1532,51 @@ final class _BlockedScanStorage implements AsyncScanStorage {
     if (!writeStarted.isCompleted) writeStarted.complete();
     await releaseWrite.future;
     values[key] = value;
+  }
+}
+
+final class _ThrowingMutationParticipant implements OfflineMutationParticipant {
+  _ThrowingMutationParticipant({
+    this.throwOnAcquire = false,
+    this.throwOnWait = false,
+    this.throwOnAcquireCall,
+  });
+
+  bool throwOnAcquire;
+  bool throwOnWait;
+  int? throwOnAcquireCall;
+  int acquireCalls = 0;
+  int activeBlocks = 0;
+
+  @override
+  OfflineMutationBlock blockMutations(OfflineMutationScope scope) {
+    acquireCalls += 1;
+    if (throwOnAcquire || acquireCalls == throwOnAcquireCall) {
+      throw StateError('block acquisition failed');
+    }
+    activeBlocks += 1;
+    return _ThrowingMutationBlock(this);
+  }
+}
+
+final class _ThrowingMutationBlock implements OfflineMutationBlock {
+  _ThrowingMutationBlock(this.participant);
+
+  final _ThrowingMutationParticipant participant;
+  bool released = false;
+
+  @override
+  void release() {
+    if (released) return;
+    released = true;
+    participant.activeBlocks -= 1;
+  }
+
+  @override
+  Future<void> waitForQuiescence() async {
+    if (participant.throwOnWait) {
+      throw StateError('quiescence failed');
+    }
   }
 }
 

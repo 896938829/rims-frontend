@@ -188,14 +188,51 @@ final class AuthSessionController extends ChangeNotifier {
     }
   }
 
-  Future<bool> startSession(AuthSession session, {int? expectedEpoch}) async {
+  Future<bool> startSession(
+    AuthSession session, {
+    int? expectedEpoch,
+    AuthSessionTransaction? transaction,
+  }) async {
     if (_disposed || (expectedEpoch != null && expectedEpoch != _authEpoch)) {
+      await _abortTransaction(transaction);
       return false;
     }
     final epoch = ++_authEpoch;
     final previous = _session;
-    if (!await _prepareOwnershipChange(previous, session)) return false;
-    if (!_isCurrent(epoch)) return false;
+    if (!await _prepareOwnershipChange(previous, session)) {
+      await _abortTransaction(transaction);
+      return false;
+    }
+    if (!_isCurrent(epoch)) {
+      await _abortTransaction(transaction);
+      return false;
+    }
+    if (transaction != null) {
+      final Result<void> commitResult;
+      try {
+        commitResult = await transaction.commit();
+      } on Object catch (error) {
+        return _failSessionTransaction(
+          previous: previous,
+          transaction: transaction,
+          failure: LocalStorageFailure(
+            message: 'credential commit failed',
+            cause: error,
+          ),
+        );
+      }
+      if (commitResult case FailureResult<void>(failure: final failure)) {
+        return _failSessionTransaction(
+          previous: previous,
+          transaction: transaction,
+          failure: failure,
+        );
+      }
+      if (!_isCurrent(epoch)) {
+        await _abortTransaction(transaction);
+        return false;
+      }
+    }
     _session = session;
     _credentialsInvalidated = false;
     _restoreFailure = null;
@@ -207,6 +244,37 @@ final class AuthSessionController extends ChangeNotifier {
     _publishOwnershipChanges(previous, _session);
     notifyListeners();
     return true;
+  }
+
+  Future<bool> _failSessionTransaction({
+    required AuthSession? previous,
+    required AuthSessionTransaction transaction,
+    required Failure failure,
+  }) async {
+    await _abortTransaction(transaction);
+    _session = previous;
+    _credentialsInvalidated = previous == null;
+    _ownershipFailure = failure;
+    _sessionMessage = failure.message;
+    notifyListeners();
+    return false;
+  }
+
+  Future<void> _abortTransaction(AuthSessionTransaction? transaction) async {
+    if (transaction == null) return;
+    try {
+      final result = await transaction.abort();
+      if (result case FailureResult<void>(failure: final failure)) {
+        _ownershipFailure = failure;
+        _sessionMessage = failure.message;
+      }
+    } on Object catch (error) {
+      _ownershipFailure = LocalStorageFailure(
+        message: '登录事务清理失败，请重试',
+        cause: error,
+      );
+      _sessionMessage = _ownershipFailure!.message;
+    }
   }
 
   Future<bool> switchWarehouse({

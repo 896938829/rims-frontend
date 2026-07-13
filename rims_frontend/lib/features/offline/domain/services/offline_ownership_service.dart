@@ -348,17 +348,14 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
   final OfflineReviewInvalidator reviews;
   final OfflineDatabaseKeyManager databaseKeys;
   final List<OfflineMutationParticipant> _mutationParticipants;
-  final Map<
-    String,
-    Map<OfflineOwnershipReason, Map<int, List<_ParticipantBlock>>>
-  >
+  final Map<String, Map<_OwnershipBlockKey, Map<int, List<_ParticipantBlock>>>>
   _retainedMutationBlocks = {};
 
-  final Map<String, Map<OfflineOwnershipReason, Set<int>>> _blockedReasons = {};
+  final Map<String, Map<_OwnershipBlockKey, Set<int>>> _blockedReasons = {};
   final Set<String> _commandBlockedAccounts = {};
-  final Map<String, Map<OfflineOwnershipReason, int>>
-  _latestAttemptGenerations = {};
-  final Map<String, Map<OfflineOwnershipReason, int>>
+  final Map<String, Map<_OwnershipBlockKey, int>> _latestAttemptGenerations =
+      {};
+  final Map<String, Map<_OwnershipBlockKey, int>>
   _successfulAttemptGenerations = {};
   Future<void> _tail = Future<void>.value();
   int _previewSequence = 0;
@@ -380,7 +377,7 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
   bool canAccessOfflineData(String accountId) => !_isBlocked(accountId);
 
   int get debugGenerationMetadataEntryCount {
-    int countNested(Map<String, Map<OfflineOwnershipReason, int>> values) =>
+    int countNested(Map<String, Map<_OwnershipBlockKey, int>> values) =>
         values.values.fold(0, (sum, entries) => sum + entries.length);
     final retained = _retainedMutationBlocks.values.fold<int>(
       0,
@@ -548,7 +545,13 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
   @override
   Future<OfflineOwnershipReport> apply(OfflineOwnershipIntent intent) {
     final attempt = _startAttempt(intent);
-    final mutationBlocks = _beginMutationBlocks(_mutationScopesFor(intent));
+    late final List<_ParticipantBlock> mutationBlocks;
+    try {
+      mutationBlocks = _beginMutationBlocks(_mutationScopesFor(intent));
+    } on Object {
+      if (attempt != null) _discardAttempt(attempt);
+      rethrow;
+    }
     return _serialized(() async {
       final report = await _apply(intent, mutationBlocks);
       _finishMutationBlocks(intent, report, mutationBlocks, attempt);
@@ -797,21 +800,28 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
       _releaseMutationBlocks(blocks);
       return;
     }
+    if (report.failures.any(
+      (failure) => failure.step == OfflineOwnershipStep.mutationQuiescence,
+    )) {
+      _discardAttempt(attempt);
+      _releaseMutationBlocks(blocks);
+      return;
+    }
     for (final target in attempt.targets) {
       final isLatest =
-          _latestAttemptGenerations[target.accountId]?[target.reason] ==
+          _latestAttemptGenerations[target.accountId]?[target.key] ==
           attempt.generation;
       if (!isLatest || target.isSecondary) {
-        _unblockGeneration(target.accountId, target.reason, attempt.generation);
+        _unblockGeneration(target.accountId, target.key, attempt.generation);
         _releaseRetainedMutationBlocks(
           target.accountId,
-          target.reason,
+          target.key,
           attempt.generation,
         );
         if (isLatest) {
           _removeLatestGeneration(
             target.accountId,
-            target.reason,
+            target.key,
             attempt.generation,
           );
         }
@@ -824,15 +834,15 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
         _ => true,
       };
       if (!isPersistent && report.completed) {
-        _unblockGeneration(target.accountId, target.reason, attempt.generation);
+        _unblockGeneration(target.accountId, target.key, attempt.generation);
         _releaseRetainedMutationBlocks(
           target.accountId,
-          target.reason,
+          target.key,
           attempt.generation,
         );
         _removeLatestGeneration(
           target.accountId,
-          target.reason,
+          target.key,
           attempt.generation,
         );
         continue;
@@ -842,12 +852,19 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
         _recordSuccessfulAttempt(target, attempt.generation);
       }
       if (target.reason == OfflineOwnershipReason.revocation) {
-        final accountBlocks = _beginMutationBlocks([
-          OfflineMutationScope.account(target.accountId),
-        ]);
+        late final List<_ParticipantBlock> accountBlocks;
+        try {
+          accountBlocks = _beginMutationBlocks([
+            OfflineMutationScope.account(target.accountId),
+          ]);
+        } on Object {
+          _discardAttempt(attempt);
+          _releaseMutationBlocks(blocks);
+          rethrow;
+        }
         _retainMutationBlocks(
           target.accountId,
-          target.reason,
+          target.key,
           attempt.generation,
           accountBlocks,
         );
@@ -855,7 +872,7 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
       } else {
         _retainMutationBlocks(
           target.accountId,
-          target.reason,
+          target.key,
           attempt.generation,
           blocks,
         );
@@ -869,28 +886,39 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
     final generation = ++_attemptGeneration;
     final targets = _attemptTargetsFor(intent);
     for (final target in targets) {
-      _blockGeneration(target.accountId, target.reason, generation);
+      final key = target.key;
+      _blockGeneration(target.accountId, key, generation);
       final latest = _latestAttemptGenerations.putIfAbsent(
         target.accountId,
         () => {},
       );
-      final superseded = latest[target.reason];
-      latest[target.reason] = generation;
+      final superseded = latest[key];
+      latest[key] = generation;
       final successful = _successfulAttemptGenerations[target.accountId];
-      successful?.remove(target.reason);
+      successful?.remove(key);
       if (successful?.isEmpty ?? false) {
         _successfulAttemptGenerations.remove(target.accountId);
       }
       if (superseded != null) {
-        _unblockGeneration(target.accountId, target.reason, superseded);
-        _releaseRetainedMutationBlocks(
-          target.accountId,
-          target.reason,
-          superseded,
-        );
+        _unblockGeneration(target.accountId, key, superseded);
+        _releaseRetainedMutationBlocks(target.accountId, key, superseded);
       }
     }
     return _OwnershipAttempt(generation: generation, targets: targets);
+  }
+
+  void _discardAttempt(_OwnershipAttempt attempt) {
+    for (final target in attempt.targets) {
+      final key = target.key;
+      _unblockGeneration(target.accountId, key, attempt.generation);
+      _releaseRetainedMutationBlocks(target.accountId, key, attempt.generation);
+      _removeLatestGeneration(target.accountId, key, attempt.generation);
+      final successful = _successfulAttemptGenerations[target.accountId];
+      if (successful?[key] == attempt.generation) successful?.remove(key);
+      if (successful?.isEmpty ?? false) {
+        _successfulAttemptGenerations.remove(target.accountId);
+      }
+    }
   }
 
   List<_OwnershipAttemptTarget> _attemptTargetsFor(
@@ -924,12 +952,12 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
     _successfulAttemptGenerations.putIfAbsent(
       target.accountId,
       () => {},
-    )[target.reason] = generation;
+    )[target.key] = generation;
   }
 
   void _retainMutationBlocks(
     String accountId,
-    OfflineOwnershipReason reason,
+    _OwnershipBlockKey key,
     int generation,
     List<_ParticipantBlock> candidates,
   ) {
@@ -943,7 +971,7 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
         .toList(growable: false);
     if (matching.isEmpty) return;
     final byReason = _retainedMutationBlocks.putIfAbsent(accountId, () => {});
-    final byGeneration = byReason.putIfAbsent(reason, () => {});
+    final byGeneration = byReason.putIfAbsent(key, () => {});
     if (byGeneration.containsKey(generation)) return;
     byGeneration[generation] = matching;
     for (final entry in matching) {
@@ -953,16 +981,16 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
 
   void _releaseRetainedMutationBlocks(
     String accountId,
-    OfflineOwnershipReason reason,
+    _OwnershipBlockKey key,
     int generation,
   ) {
     final byReason = _retainedMutationBlocks[accountId];
-    final byGeneration = byReason?[reason];
+    final byGeneration = byReason?[key];
     final retained = byGeneration?.remove(generation);
     if (retained != null) {
       _releaseMutationBlocks(retained, includeRetained: true);
     }
-    if (byGeneration?.isEmpty ?? false) byReason?.remove(reason);
+    if (byGeneration?.isEmpty ?? false) byReason?.remove(key);
     if (byReason?.isEmpty ?? false) _retainedMutationBlocks.remove(accountId);
   }
 
@@ -981,35 +1009,35 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
 
   void _blockGeneration(
     String accountId,
-    OfflineOwnershipReason reason,
+    _OwnershipBlockKey key,
     int generation,
   ) {
     _blockedReasons
         .putIfAbsent(accountId, () => {})
-        .putIfAbsent(reason, () => {})
+        .putIfAbsent(key, () => {})
         .add(generation);
   }
 
   void _unblockGeneration(
     String accountId,
-    OfflineOwnershipReason reason,
+    _OwnershipBlockKey key,
     int generation,
   ) {
     final reasons = _blockedReasons[accountId];
     if (reasons == null) return;
-    final generations = reasons[reason];
+    final generations = reasons[key];
     generations?.remove(generation);
-    if (generations?.isEmpty ?? false) reasons.remove(reason);
+    if (generations?.isEmpty ?? false) reasons.remove(key);
     if (reasons.isEmpty) _blockedReasons.remove(accountId);
   }
 
   void _removeLatestGeneration(
     String accountId,
-    OfflineOwnershipReason reason,
+    _OwnershipBlockKey key,
     int generation,
   ) {
     final latest = _latestAttemptGenerations[accountId];
-    if (latest?[reason] == generation) latest?.remove(reason);
+    if (latest?[key] == generation) latest?.remove(key);
     if (latest?.isEmpty ?? false) _latestAttemptGenerations.remove(accountId);
   }
 
@@ -1192,6 +1220,31 @@ final class _OwnershipAttemptTarget {
   final String accountId;
   final OfflineOwnershipReason reason;
   final bool isSecondary;
+
+  _OwnershipBlockKey get key => _OwnershipBlockKey(
+    reason,
+    isSecondary
+        ? _OwnershipSlot.secondaryTransient
+        : _OwnershipSlot.primaryPersistent,
+  );
+}
+
+enum _OwnershipSlot { primaryPersistent, secondaryTransient }
+
+final class _OwnershipBlockKey {
+  const _OwnershipBlockKey(this.reason, this.slot);
+
+  final OfflineOwnershipReason reason;
+  final _OwnershipSlot slot;
+
+  @override
+  bool operator ==(Object other) =>
+      other is _OwnershipBlockKey &&
+      reason == other.reason &&
+      slot == other.slot;
+
+  @override
+  int get hashCode => Object.hash(reason, slot);
 }
 
 final class _OwnershipSnapshot {

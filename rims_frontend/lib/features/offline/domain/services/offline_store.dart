@@ -50,3 +50,12 @@ abstract interface class OfflineStore {
 
   Future<void> prune(DateTime now);
 }
+
+abstract interface class ConditionalCacheRecordStorage {
+  Future<bool> deleteCacheRecordIfPayloadMatches({
+    required CacheKey key,
+    required int schemaVersion,
+    required String payloadField,
+    required Object? expectedValue,
+  });
+}

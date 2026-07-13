@@ -187,7 +187,8 @@ final class _OfflineWriteBarrierBlock implements OfflineMutationBlock {
   }
 }
 
-final class WriteBarrierOfflineStore implements OfflineStore {
+final class WriteBarrierOfflineStore
+    implements OfflineStore, ConditionalCacheRecordStorage {
   const WriteBarrierOfflineStore({
     required this.delegate,
     required this.barrier,
@@ -247,6 +248,28 @@ final class WriteBarrierOfflineStore implements OfflineStore {
       accountId: accountId,
       namespace: namespace,
     ),
+  );
+
+  @override
+  Future<bool> deleteCacheRecordIfPayloadMatches({
+    required CacheKey key,
+    required int schemaVersion,
+    required String payloadField,
+    required Object? expectedValue,
+  }) => barrier.protect(
+    accountId: key.accountId,
+    operation: () {
+      final conditional = delegate is ConditionalCacheRecordStorage
+          ? delegate as ConditionalCacheRecordStorage
+          : null;
+      if (conditional == null) return Future.value(false);
+      return conditional.deleteCacheRecordIfPayloadMatches(
+        key: key,
+        schemaVersion: schemaVersion,
+        payloadField: payloadField,
+        expectedValue: expectedValue,
+      );
+    },
   );
 
   @override

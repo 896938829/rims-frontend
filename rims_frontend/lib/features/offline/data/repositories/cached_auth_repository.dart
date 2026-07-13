@@ -17,7 +17,8 @@ final class CachedAuthRepository
     implements
         AuthRepository,
         AuthSessionRestoreMetadata,
-        AuthCredentialInvalidator {
+        AuthCredentialInvalidator,
+        TransactionalAuthRepository {
   CachedAuthRepository({
     required this.delegate,
     required this.store,
@@ -35,6 +36,7 @@ final class CachedAuthRepository
 
   static const String _namespace = 'auth.session';
   static const String _entityKey = 'projection';
+  static const String _projectionIdField = '_local_projection_id';
 
   final AuthRepository delegate;
   final OfflineStore store;
@@ -216,8 +218,22 @@ final class CachedAuthRepository
     required String username,
     required String password,
   }) async {
+    final prepared = await prepareLogin(username: username, password: password);
+    return switch (prepared) {
+      Success<AuthSessionTransaction>(data: final transaction) =>
+        _commitPreparedLogin(transaction),
+      FailureResult<AuthSessionTransaction>(failure: final failure) =>
+        FailureResult(failure),
+    };
+  }
+
+  @override
+  Future<Result<AuthSessionTransaction>> prepareLogin({
+    required String username,
+    required String password,
+  }) async {
     try {
-      return await _login(username: username, password: password);
+      return await _prepareLogin(username: username, password: password);
     } on Object catch (error) {
       return FailureResult(
         LocalStorageFailure(
@@ -228,7 +244,7 @@ final class CachedAuthRepository
     }
   }
 
-  Future<Result<AuthSession>> _login({
+  Future<Result<AuthSessionTransaction>> _prepareLogin({
     required String username,
     required String password,
   }) async {
@@ -236,26 +252,30 @@ final class CachedAuthRepository
     final pendingFailure = await _retryPendingRevocation();
     if (pendingFailure != null) return FailureResult(pendingFailure);
     await _clearAbandonedPendingToken();
-    final transactionOwnerId = authTransactionOwnerFactory();
-    final usesTokenTransaction =
-        delegate is AuthTokenTransactionRepository &&
-        tokenStorage is AuthTokenTransactionStorage;
-    final Result<AuthSession> result;
-    if (delegate case final AuthTokenTransactionRepository owned) {
-      result = await owned.loginWithTokenOwner(
+    final Result<AuthSessionTransaction> prepared;
+    if (delegate case final TransactionalAuthRepository transactional) {
+      prepared = await transactional.prepareLogin(
         username: username,
         password: password,
-        ownerId: transactionOwnerId,
       );
     } else {
-      result = await delegate.login(username: username, password: password);
+      final result = await delegate.login(
+        username: username,
+        password: password,
+      );
+      prepared = switch (result) {
+        Success<AuthSession>(data: final session) => Success(
+          _AlreadyCommittedAuthSessionTransaction(session),
+        ),
+        FailureResult<AuthSession>(failure: final failure) => FailureResult(
+          failure,
+        ),
+      };
     }
-    if (result case Success<AuthSession>(:final data)) {
+    if (prepared case Success<AuthSessionTransaction>(data: final upstream)) {
+      final data = upstream.session;
       if (!_isCurrentEpoch(operationEpoch)) {
-        await _rollbackAccessToken(
-          data.accessToken,
-          ownerId: usesTokenTransaction ? transactionOwnerId : null,
-        );
+        await upstream.abort();
         return _staleSessionFailure();
       }
       final previousAccountId = await accountStorage
@@ -269,10 +289,7 @@ final class CachedAuthRepository
           ),
         );
         if (ownershipFailure != null) {
-          await _rollbackAccessToken(
-            data.accessToken,
-            ownerId: usesTokenTransaction ? transactionOwnerId : null,
-          );
+          await upstream.abort();
           return FailureResult(ownershipFailure);
         }
       }
@@ -280,60 +297,58 @@ final class CachedAuthRepository
         OfflineOwnershipIntent.reauthenticated(accountId: accountId),
       );
       if (reauthenticationFailure != null) {
-        await _rollbackAccessToken(
-          data.accessToken,
-          ownerId: usesTokenTransaction ? transactionOwnerId : null,
-        );
+        await upstream.abort();
         return FailureResult(reauthenticationFailure);
       }
       if (!_isCurrentEpoch(operationEpoch)) {
-        await _rollbackAccessToken(
-          data.accessToken,
-          ownerId: usesTokenTransaction ? transactionOwnerId : null,
-        );
+        await upstream.abort();
         return _staleSessionFailure();
       }
+      final projectionId = authTransactionOwnerFactory();
       try {
-        await _writeSession(data, expectedEpoch: operationEpoch);
-      } on _StaleAuthOperation {
-        await _rollbackAccessToken(
-          data.accessToken,
-          ownerId: usesTokenTransaction ? transactionOwnerId : null,
+        await _writeSession(
+          data,
+          expectedEpoch: operationEpoch,
+          projectionId: projectionId,
         );
+      } on _StaleAuthOperation {
+        await upstream.abort();
         return _staleSessionFailure();
+      } on Object {
+        await upstream.abort();
+        await _rollbackFailedSessionProjection(
+          accountId,
+          projectionId,
+          propagateFailure: true,
+        );
+        rethrow;
       }
-      if (usesTokenTransaction) {
-        try {
-          final committed = await (tokenStorage as AuthTokenTransactionStorage)
-              .commitAccessTokenForOwner(transactionOwnerId);
-          if (!committed) {
-            await _rollbackFailedSessionProjection(accountId);
-            return const FailureResult<AuthSession>(
-              LocalStorageFailure(
-                message: 'The local credential transaction was superseded.',
-              ),
-            );
-          }
-        } on Object catch (error) {
-          try {
-            await _rollbackAccessToken(
-              data.accessToken,
-              ownerId: transactionOwnerId,
-            );
-          } on Object {
-            // A failed rollback can only leave an unreadable pending token.
-          }
-          await _rollbackFailedSessionProjection(accountId);
-          return FailureResult(
-            LocalStorageFailure(
-              message: 'Unable to commit the local credential transaction.',
-              cause: error,
-            ),
-          );
-        }
-      }
+      return Success(
+        _CachedAuthSessionTransaction(
+          session: data,
+          upstream: upstream,
+          rollbackProjection: () => _rollbackFailedSessionProjection(
+            accountId,
+            projectionId,
+            propagateFailure: true,
+          ),
+        ),
+      );
     }
-    return result;
+    return prepared;
+  }
+
+  Future<Result<AuthSession>> _commitPreparedLogin(
+    AuthSessionTransaction transaction,
+  ) async {
+    final committed = await transaction.commit();
+    return switch (committed) {
+      Success<void>() => Success(transaction.session),
+      FailureResult<void>(failure: final failure) => () async {
+        await transaction.abort();
+        return FailureResult<AuthSession>(failure);
+      }(),
+    };
   }
 
   @override
@@ -424,13 +439,19 @@ final class CachedAuthRepository
   Future<CacheRecord> _writeSession(
     AuthSession session, {
     int? expectedEpoch,
+    String? projectionId,
   }) async {
     if (!_isCurrentEpoch(expectedEpoch)) throw const _StaleAuthOperation();
     final fetchedAt = now().toUtc();
     final accountId = session.user.id.toString();
     final record = CacheRecord(
       key: _cacheKey(accountId),
-      payload: _encodeSession(session),
+      payload: {
+        ..._encodeSession(session),
+        ...projectionId == null
+            ? const <String, Object?>{}
+            : {_projectionIdField: projectionId},
+      },
       schemaVersion: CachePolicy.references.schemaVersion,
       fetchedAt: fetchedAt,
       expiresAt: CachePolicy.references.expiresAt(fetchedAt),
@@ -443,30 +464,77 @@ final class CachedAuthRepository
       maxRecords: 1,
     );
     if (!_isCurrentEpoch(expectedEpoch)) {
-      await _deleteSessionProjection(accountId);
+      await _rollbackFailedSessionProjection(
+        accountId,
+        projectionId,
+        propagateFailure: projectionId != null,
+      );
       throw const _StaleAuthOperation();
     }
-    await accountStorage.saveAuthenticatedAccountId(accountId);
+    final transactional =
+        accountStorage is AuthenticatedAccountTransactionStorage
+        ? accountStorage as AuthenticatedAccountTransactionStorage
+        : null;
+    if (projectionId != null && transactional != null) {
+      await transactional.saveAuthenticatedAccountProjection(
+        accountId: accountId,
+        projectionId: projectionId,
+      );
+    } else {
+      await accountStorage.saveAuthenticatedAccountId(accountId);
+    }
     if (!_isCurrentEpoch(expectedEpoch)) {
-      await _rollbackFailedSessionProjection(accountId);
+      await _rollbackFailedSessionProjection(
+        accountId,
+        projectionId,
+        propagateFailure: projectionId != null,
+      );
       throw const _StaleAuthOperation();
     }
     return record;
   }
 
-  Future<void> _rollbackFailedSessionProjection(String accountId) async {
+  Future<void> _rollbackFailedSessionProjection(
+    String accountId,
+    String? projectionId, {
+    bool propagateFailure = false,
+  }) async {
+    Object? firstError;
     try {
-      await _deleteSessionProjection(accountId);
-    } on Object {
-      // The unreadable token remains the primary authentication boundary.
+      if (projectionId == null) {
+        await _deleteSessionProjection(accountId);
+      } else {
+        final projectionStore = store is WriteBarrierOfflineStore
+            ? (store as WriteBarrierOfflineStore).delegate
+            : store;
+        if (projectionStore
+            case final ConditionalCacheRecordStorage conditional) {
+          await conditional.deleteCacheRecordIfPayloadMatches(
+            key: _cacheKey(accountId),
+            schemaVersion: CachePolicy.references.schemaVersion,
+            payloadField: _projectionIdField,
+            expectedValue: projectionId,
+          );
+        }
+      }
+    } on Object catch (error) {
+      firstError = error;
     }
     try {
-      if (await accountStorage.readAuthenticatedAccountId() == accountId) {
+      final transactional =
+          accountStorage is AuthenticatedAccountTransactionStorage
+          ? accountStorage as AuthenticatedAccountTransactionStorage
+          : null;
+      if (projectionId != null && transactional != null) {
+        await transactional.clearAuthenticatedAccountProjection(projectionId);
+      } else if (await accountStorage.readAuthenticatedAccountId() ==
+          accountId) {
         await accountStorage.clearAuthenticatedAccountId();
       }
-    } on Object {
-      // A projection without a committed token cannot restore a session.
+    } on Object catch (error) {
+      firstError ??= error;
     }
+    if (propagateFailure && firstError != null) throw firstError;
   }
 
   Future<void> _discardInvalidProjection(String accountId) async {
@@ -609,25 +677,6 @@ final class CachedAuthRepository
     return null;
   }
 
-  Future<void> _rollbackAccessToken(
-    String expectedToken, {
-    String? ownerId,
-  }) async {
-    if (ownerId != null) {
-      if (tokenStorage case final AuthTokenTransactionStorage owned) {
-        await owned.clearAccessTokenForOwner(ownerId);
-        return;
-      }
-    }
-    if (tokenStorage case final ConditionalTokenStorage conditional) {
-      await conditional.clearAccessTokenIfMatches(expectedToken);
-      return;
-    }
-    if (await tokenStorage.readAccessToken() == expectedToken) {
-      await tokenStorage.clearAccessToken();
-    }
-  }
-
   Future<void> _clearAbandonedPendingToken() async {
     if (tokenStorage case final AuthTokenTransactionStorage transaction) {
       await transaction.clearPendingAccessToken();
@@ -714,6 +763,86 @@ final class CachedAuthRepository
 }
 
 String _newAuthTransactionOwnerId() => const Uuid().v4();
+
+final class _CachedAuthSessionTransaction implements AuthSessionTransaction {
+  const _CachedAuthSessionTransaction({
+    required this.session,
+    required this.upstream,
+    required this.rollbackProjection,
+  });
+
+  @override
+  final AuthSession session;
+  final AuthSessionTransaction upstream;
+  final Future<void> Function() rollbackProjection;
+
+  @override
+  Future<Result<void>> commit() async {
+    Result<void> result;
+    try {
+      result = await upstream.commit();
+    } on Object catch (error) {
+      result = FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to commit the local authentication session.',
+          cause: error,
+        ),
+      );
+    }
+    if (result is Success<void>) return result;
+    try {
+      await rollbackProjection();
+      return result;
+    } on Object catch (error) {
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to roll back the failed authentication session.',
+          cause: error,
+        ),
+      );
+    }
+  }
+
+  @override
+  Future<Result<void>> abort() async {
+    Result<void> upstreamResult;
+    try {
+      upstreamResult = await upstream.abort();
+    } on Object catch (error) {
+      upstreamResult = FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to abort the local credential transaction.',
+          cause: error,
+        ),
+      );
+    }
+    try {
+      await rollbackProjection();
+      return upstreamResult;
+    } on Object catch (error) {
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to roll back the local session projection.',
+          cause: error,
+        ),
+      );
+    }
+  }
+}
+
+final class _AlreadyCommittedAuthSessionTransaction
+    implements AuthSessionTransaction {
+  const _AlreadyCommittedAuthSessionTransaction(this.session);
+
+  @override
+  final AuthSession session;
+
+  @override
+  Future<Result<void>> abort() async => const Success(null);
+
+  @override
+  Future<Result<void>> commit() async => const Success(null);
+}
 
 final class _StaleAuthOperation implements Exception {
   const _StaleAuthOperation();

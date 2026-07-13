@@ -680,7 +680,7 @@ void main() {
     expect(staleResult, isA<FailureResult<AuthSession>>());
     expect(storage.token, 'token');
     expect(storage.tokenOwnerId, 'owner-b');
-    expect(storage.ownerClearAttempts, ['owner-a']);
+    expect(storage.ownerClearAttempts, isEmpty);
   });
 
   test(
@@ -716,7 +716,7 @@ void main() {
       expect(await stale, isA<FailureResult<AuthSession>>());
 
       expect(storage.token, isNull);
-      expect(storage.ownerClearAttempts, ['owner-a']);
+      expect(storage.ownerClearAttempts, isEmpty);
       final restarted = CachedAuthRepository(
         delegate: _FakeAuthRepository(
           restoreResult: const Success<AuthSession?>(null),
@@ -742,9 +742,14 @@ void main() {
       final remote = _ConcurrentSameTokenRemoteDataSource(
         newerBootstrapFails: newerBootstrapFails,
       );
+      final rawOwners = ['owner-a', 'owner-b'].iterator;
       final delegate = AuthRepositoryImpl(
         remoteDataSource: remote,
         secureStorage: storage,
+        tokenOwnerFactory: () {
+          rawOwners.moveNext();
+          return rawOwners.current;
+        },
       );
       final owners = ['owner-a', 'owner-b'].iterator;
       final repository = CachedAuthRepository(
@@ -817,9 +822,246 @@ void main() {
       ownership.blocker!.complete();
       expect(await login, isA<Success<AuthSession>>());
       expect(await storage.readAccessToken(), 'token');
-      expect(storage.committedOwnerIds, ['cached-owner']);
+      expect(storage.committedOwnerIds, ['owner-a']);
       expect(storage.accountId, '8');
+      expect(storage.accountProjectionId, 'cached-owner');
       expect((await rawStore.inspectAccount('8')).cacheEntries, 1);
+    },
+  );
+
+  test(
+    'controller is the final publisher of a cached login transaction',
+    () async {
+      final storage = _FakeSessionStorage();
+      final rawStore = MemoryOfflineStore();
+      final repository = CachedAuthRepository(
+        delegate: _ConcurrentLoginAuthRepository(storage),
+        store: rawStore,
+        tokenStorage: storage,
+        accountStorage: storage,
+        revocationStorage: storage,
+        ownershipCoordinator: _RecordingOwnershipCoordinator(),
+        authTransactionOwnerFactory: () => 'projection-1',
+        onSessionRevoked: () {},
+      );
+      final controller = AuthSessionController(
+        ownershipCoordinator: _RecordingOwnershipCoordinator(),
+      );
+      addTearDown(controller.dispose);
+      final epoch = controller.beginAuthenticationAttempt();
+
+      final prepared = await repository.prepareLogin(
+        username: 'bob',
+        password: 'secret',
+      );
+      final transaction = switch (prepared) {
+        Success<AuthSessionTransaction>(data: final value) => value,
+        FailureResult<AuthSessionTransaction>(failure: final failure) =>
+          throw TestFailure(failure.message),
+      };
+
+      expect(controller.session, isNull);
+      expect(await storage.readAccessToken(), isNull);
+      expect(storage.accountId, '8');
+      expect(storage.accountProjectionId, 'projection-1');
+      expect((await rawStore.inspectAccount('8')).cacheEntries, 1);
+
+      expect(
+        await controller.startSession(
+          transaction.session,
+          expectedEpoch: epoch,
+          transaction: transaction,
+        ),
+        isTrue,
+      );
+      expect(controller.session, _secondSameTokenSession);
+      expect(await storage.readAccessToken(), 'token');
+      expect(storage.committedOwnerIds, ['owner-a']);
+    },
+  );
+
+  test(
+    'controller commit failure aborts the cached projection and stays unrestorable',
+    () async {
+      final storage = _FakeSessionStorage()..failTokenCommits = true;
+      final rawStore = MemoryOfflineStore();
+      final repository = CachedAuthRepository(
+        delegate: _ConcurrentLoginAuthRepository(storage),
+        store: rawStore,
+        tokenStorage: storage,
+        accountStorage: storage,
+        revocationStorage: storage,
+        ownershipCoordinator: _RecordingOwnershipCoordinator(),
+        authTransactionOwnerFactory: () => 'projection-1',
+        onSessionRevoked: () {},
+      );
+      final controller = AuthSessionController(
+        ownershipCoordinator: _RecordingOwnershipCoordinator(),
+      );
+      addTearDown(controller.dispose);
+      final epoch = controller.beginAuthenticationAttempt();
+      final prepared = await repository.prepareLogin(
+        username: 'bob',
+        password: 'secret',
+      );
+      final transaction = (prepared as Success<AuthSessionTransaction>).data;
+
+      expect(
+        await controller.startSession(
+          transaction.session,
+          expectedEpoch: epoch,
+          transaction: transaction,
+        ),
+        isFalse,
+      );
+      expect(controller.session, isNull);
+      expect(controller.ownershipFailure, isA<LocalStorageFailure>());
+      expect(await storage.readAccessToken(), isNull);
+      expect(storage.accountId, isNull);
+      expect((await rawStore.inspectAccount('8')).cacheEntries, 0);
+    },
+  );
+
+  test(
+    'superseded controller epoch aborts its real pending token and projection',
+    () async {
+      final storage = _FakeSessionStorage();
+      final rawStore = MemoryOfflineStore();
+      final repository = CachedAuthRepository(
+        delegate: _ConcurrentLoginAuthRepository(storage),
+        store: rawStore,
+        tokenStorage: storage,
+        accountStorage: storage,
+        revocationStorage: storage,
+        ownershipCoordinator: _RecordingOwnershipCoordinator(),
+        authTransactionOwnerFactory: () => 'projection-1',
+        onSessionRevoked: () {},
+      );
+      final controller = AuthSessionController();
+      addTearDown(controller.dispose);
+      final staleEpoch = controller.beginAuthenticationAttempt();
+      final prepared = await repository.prepareLogin(
+        username: 'bob',
+        password: 'secret',
+      );
+      final transaction = (prepared as Success<AuthSessionTransaction>).data;
+
+      controller.beginAuthenticationAttempt();
+      expect(
+        await controller.startSession(
+          transaction.session,
+          expectedEpoch: staleEpoch,
+          transaction: transaction,
+        ),
+        isFalse,
+      );
+      expect(controller.session, isNull);
+      expect(await storage.readAccessToken(), isNull);
+      expect(storage.token, isNull);
+      expect(storage.accountId, isNull);
+      expect((await rawStore.inspectAccount('8')).cacheEntries, 0);
+    },
+  );
+
+  test('old cached abort cannot delete a newer account projection', () async {
+    final storage = _FakeSessionStorage();
+    final rawStore = MemoryOfflineStore();
+    final projections = ['projection-a', 'projection-b'].iterator;
+    final repository = CachedAuthRepository(
+      delegate: _ConcurrentLoginAuthRepository(storage),
+      store: rawStore,
+      tokenStorage: storage,
+      accountStorage: storage,
+      revocationStorage: storage,
+      ownershipCoordinator: _RecordingOwnershipCoordinator(),
+      authTransactionOwnerFactory: () {
+        projections.moveNext();
+        return projections.current;
+      },
+      onSessionRevoked: () {},
+    );
+
+    final older =
+        (await repository.prepareLogin(username: 'bob', password: 'secret')
+                as Success<AuthSessionTransaction>)
+            .data;
+    final newer =
+        (await repository.prepareLogin(username: 'bob', password: 'secret')
+                as Success<AuthSessionTransaction>)
+            .data;
+
+    expect(await older.abort(), const Success<void>(null));
+    expect(storage.accountId, '8');
+    expect(storage.accountProjectionId, 'projection-b');
+    expect((await rawStore.inspectAccount('8')).cacheEntries, 1);
+    expect(await newer.commit(), const Success<void>(null));
+    expect(await storage.readAccessToken(), 'token');
+  });
+
+  test(
+    'partial account projection write is rolled back before prepare fails',
+    () async {
+      final storage = _FakeSessionStorage()..failAccountProjectionWrites = true;
+      final rawStore = MemoryOfflineStore();
+      final repository = CachedAuthRepository(
+        delegate: _ConcurrentLoginAuthRepository(storage),
+        store: rawStore,
+        tokenStorage: storage,
+        accountStorage: storage,
+        revocationStorage: storage,
+        ownershipCoordinator: _RecordingOwnershipCoordinator(),
+        authTransactionOwnerFactory: () => 'projection-1',
+        onSessionRevoked: () {},
+      );
+
+      final result = await repository.prepareLogin(
+        username: 'bob',
+        password: 'secret',
+      );
+
+      expect(result, isA<FailureResult<AuthSessionTransaction>>());
+      expect(await storage.readAccessToken(), isNull);
+      expect(storage.token, isNull);
+      expect(storage.accountId, isNull);
+      expect((await rawStore.inspectAccount('8')).cacheEntries, 0);
+    },
+  );
+
+  test(
+    'projection rollback failure remains visible after token abort',
+    () async {
+      final storage = _FakeSessionStorage();
+      final repository = CachedAuthRepository(
+        delegate: _ConcurrentLoginAuthRepository(storage),
+        store: MemoryOfflineStore(),
+        tokenStorage: storage,
+        accountStorage: storage,
+        revocationStorage: storage,
+        ownershipCoordinator: _RecordingOwnershipCoordinator(),
+        authTransactionOwnerFactory: () => 'projection-1',
+        onSessionRevoked: () {},
+      );
+      final controller = AuthSessionController();
+      addTearDown(controller.dispose);
+      final staleEpoch = controller.beginAuthenticationAttempt();
+      final prepared = await repository.prepareLogin(
+        username: 'bob',
+        password: 'secret',
+      );
+      final transaction = (prepared as Success<AuthSessionTransaction>).data;
+      storage.failAccountProjectionClears = true;
+      controller.beginAuthenticationAttempt();
+
+      expect(
+        await controller.startSession(
+          transaction.session,
+          expectedEpoch: staleEpoch,
+          transaction: transaction,
+        ),
+        isFalse,
+      );
+      expect(await storage.readAccessToken(), isNull);
+      expect(controller.ownershipFailure, isA<LocalStorageFailure>());
     },
   );
 
@@ -1341,17 +1583,23 @@ final class _FakeSessionStorage
         ConditionalTokenStorage,
         AuthTokenTransactionStorage,
         AuthenticatedAccountStorage,
+        AuthenticatedAccountTransactionStorage,
         PendingRevocationStorage,
         ConditionalPendingRevocationStorage {
   _FakeSessionStorage({this.token}) : tokenCommitted = token != null;
 
   String? token;
   String? tokenOwnerId;
+  int latestAttemptVersion = 0;
+  int? tokenAttemptVersion;
   bool tokenCommitted;
   bool failTokenCommits = false;
+  bool failAccountProjectionWrites = false;
+  bool failAccountProjectionClears = false;
   Object? tokenReadError;
   final List<String> committedOwnerIds = [];
   String? accountId;
+  String? accountProjectionId;
   String? pendingRevocationAccountId;
   final Map<_RevocationStorageFailure, int> _remainingFailures = {};
   final List<String> conditionalClearAttempts = [];
@@ -1377,6 +1625,7 @@ final class _FakeSessionStorage
     _throwIf(_RevocationStorageFailure.clearCredential);
     token = null;
     tokenOwnerId = null;
+    tokenAttemptVersion = null;
     tokenCommitted = false;
   }
 
@@ -1389,11 +1638,22 @@ final class _FakeSessionStorage
   }
 
   @override
-  Future<bool> clearAccessTokenForOwner(String ownerId) async {
+  Future<bool> clearAccessTokenForOwner(
+    String ownerId, {
+    required int attemptVersion,
+  }) async {
     ownerClearAttempts.add(ownerId);
-    if (tokenOwnerId != ownerId) return false;
+    if (tokenOwnerId != ownerId || tokenAttemptVersion != attemptVersion) {
+      return false;
+    }
     await clearAccessToken();
     return true;
+  }
+
+  @override
+  Future<int> beginAccessTokenAttempt(String ownerId) async {
+    latestAttemptVersion += 1;
+    return latestAttemptVersion;
   }
 
   @override
@@ -1404,9 +1664,17 @@ final class _FakeSessionStorage
   }
 
   @override
-  Future<bool> commitAccessTokenForOwner(String ownerId) async {
+  Future<bool> commitAccessTokenForOwner(
+    String ownerId, {
+    required int attemptVersion,
+  }) async {
     if (failTokenCommits) throw StateError('token commit failed');
-    if (tokenOwnerId != ownerId || token == null) return false;
+    if (latestAttemptVersion != attemptVersion ||
+        tokenOwnerId != ownerId ||
+        tokenAttemptVersion != attemptVersion ||
+        token == null) {
+      return false;
+    }
     tokenCommitted = true;
     committedOwnerIds.add(ownerId);
     return true;
@@ -1422,23 +1690,29 @@ final class _FakeSessionStorage
   Future<void> saveAccessToken(String token) async {
     this.token = token;
     tokenOwnerId = null;
+    tokenAttemptVersion = null;
     tokenCommitted = true;
   }
 
   @override
-  Future<void> savePendingAccessTokenForOwner({
+  Future<bool> savePendingAccessTokenForOwner({
     required String token,
     required String ownerId,
+    required int attemptVersion,
   }) async {
+    if (attemptVersion != latestAttemptVersion) return false;
     this.token = token;
     tokenOwnerId = ownerId;
+    tokenAttemptVersion = attemptVersion;
     tokenCommitted = false;
+    return true;
   }
 
   @override
   Future<void> clearAuthenticatedAccountId() async {
     _throwIf(_RevocationStorageFailure.clearAccount);
     accountId = null;
+    accountProjectionId = null;
   }
 
   @override
@@ -1447,6 +1721,30 @@ final class _FakeSessionStorage
   @override
   Future<void> saveAuthenticatedAccountId(String accountId) async {
     this.accountId = accountId;
+    accountProjectionId = null;
+  }
+
+  @override
+  Future<void> saveAuthenticatedAccountProjection({
+    required String accountId,
+    required String projectionId,
+  }) async {
+    if (failAccountProjectionWrites) {
+      throw StateError('account projection write failed');
+    }
+    this.accountId = accountId;
+    accountProjectionId = projectionId;
+  }
+
+  @override
+  Future<bool> clearAuthenticatedAccountProjection(String projectionId) async {
+    if (failAccountProjectionClears) {
+      throw StateError('account projection clear failed');
+    }
+    if (accountProjectionId != projectionId) return false;
+    accountId = null;
+    accountProjectionId = null;
+    return true;
   }
 
   @override
@@ -1663,47 +1961,68 @@ final class _FakeAuthRepository implements AuthRepository {
 }
 
 final class _ConcurrentLoginAuthRepository
-    implements AuthRepository, AuthTokenTransactionRepository {
+    implements AuthRepository, TransactionalAuthRepository {
   _ConcurrentLoginAuthRepository(this.storage);
 
   final _FakeSessionStorage storage;
   final Completer<void> aliceStarted = Completer<void>();
   final Completer<void> releaseAlice = Completer<void>();
   bool bobFails = false;
+  int _ownerSequence = 0;
 
   @override
   Future<Result<AuthSession>> login({
     required String username,
     required String password,
   }) async {
-    return loginWithTokenOwner(
-      username: username,
-      password: password,
-      ownerId: 'raw-${username.hashCode}',
-    );
+    final prepared = await prepareLogin(username: username, password: password);
+    return switch (prepared) {
+      Success<AuthSessionTransaction>(data: final transaction) => () async {
+        final committed = await transaction.commit();
+        return switch (committed) {
+          Success<void>() => Success(transaction.session),
+          FailureResult<void>(failure: final failure) =>
+            FailureResult<AuthSession>(failure),
+        };
+      }(),
+      FailureResult<AuthSessionTransaction>(failure: final failure) =>
+        FailureResult<AuthSession>(failure),
+    };
   }
 
   @override
-  Future<Result<AuthSession>> loginWithTokenOwner({
+  Future<Result<AuthSessionTransaction>> prepareLogin({
     required String username,
     required String password,
-    required String ownerId,
   }) async {
+    _ownerSequence += 1;
+    final ownerId = _ownerSequence == 1 ? 'owner-a' : 'owner-b';
+    final attemptVersion = await storage.beginAccessTokenAttempt(ownerId);
     if (username == 'alice') {
-      await storage.savePendingAccessTokenForOwner(
-        token: 'token',
-        ownerId: ownerId,
-      );
       aliceStarted.complete();
       await releaseAlice.future;
-      return const Success(_session);
     }
-    if (bobFails) return const FailureResult(AuthenticationFailure());
-    await storage.savePendingAccessTokenForOwner(
+    if (username != 'alice' && bobFails) {
+      return const FailureResult(AuthenticationFailure());
+    }
+    final published = await storage.savePendingAccessTokenForOwner(
       token: 'token',
       ownerId: ownerId,
+      attemptVersion: attemptVersion,
     );
-    return const Success(_secondSameTokenSession);
+    if (!published) {
+      return const FailureResult(
+        LocalStorageFailure(message: 'credential superseded'),
+      );
+    }
+    return Success(
+      _FakeStoredSessionTransaction(
+        storage: storage,
+        ownerId: ownerId,
+        attemptVersion: attemptVersion,
+        session: username == 'alice' ? _session : _secondSameTokenSession,
+      ),
+    );
   }
 
   @override
@@ -1716,6 +2035,44 @@ final class _ConcurrentLoginAuthRepository
   @override
   Future<Result<Warehouse>> switchCurrentWarehouse(Warehouse warehouse) async =>
       Success(warehouse);
+}
+
+final class _FakeStoredSessionTransaction implements AuthSessionTransaction {
+  const _FakeStoredSessionTransaction({
+    required this.storage,
+    required this.ownerId,
+    required this.attemptVersion,
+    required this.session,
+  });
+
+  final _FakeSessionStorage storage;
+  final String ownerId;
+  final int attemptVersion;
+
+  @override
+  final AuthSession session;
+
+  @override
+  Future<Result<void>> abort() async {
+    await storage.clearAccessTokenForOwner(
+      ownerId,
+      attemptVersion: attemptVersion,
+    );
+    return const Success(null);
+  }
+
+  @override
+  Future<Result<void>> commit() async {
+    final committed = await storage.commitAccessTokenForOwner(
+      ownerId,
+      attemptVersion: attemptVersion,
+    );
+    return committed
+        ? const Success(null)
+        : const FailureResult(
+            LocalStorageFailure(message: 'credential superseded'),
+          );
+  }
 }
 
 final class _ThrowingCredentialRepository

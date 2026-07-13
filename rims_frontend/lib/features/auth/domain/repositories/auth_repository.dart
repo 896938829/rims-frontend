@@ -16,11 +16,18 @@ abstract interface class AuthCredentialInvalidator {
   Future<void> expireCredentials();
 }
 
-abstract interface class AuthTokenTransactionRepository {
-  Future<Result<AuthSession>> loginWithTokenOwner({
+abstract interface class AuthSessionTransaction {
+  AuthSession get session;
+
+  Future<Result<void>> commit();
+
+  Future<Result<void>> abort();
+}
+
+abstract interface class TransactionalAuthRepository {
+  Future<Result<AuthSessionTransaction>> prepareLogin({
     required String username,
     required String password,
-    required String ownerId,
   });
 }
 

@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 
+import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
 import '../../domain/entities/auth_session.dart';
 import '../../domain/repositories/auth_repository.dart';
@@ -56,39 +57,68 @@ final class LoginViewModel extends ChangeNotifier {
     final authEpoch = sessionController.beginAuthenticationAttempt();
     notifyListeners();
 
-    late final Result<AuthSession> result;
     try {
-      result = await authRepository.login(
+      if (authRepository case final TransactionalAuthRepository transactional) {
+        final prepared = await transactional.prepareLogin(
+          username: username,
+          password: password,
+        );
+        _isLoading = false;
+        return switch (prepared) {
+          Success<AuthSessionTransaction>(data: final transaction) =>
+            _startTransaction(transaction, authEpoch),
+          FailureResult<AuthSessionTransaction>(failure: final failure) =>
+            _showFailure(failure),
+        };
+      }
+      final result = await authRepository.login(
         username: username,
         password: password,
       );
+      _isLoading = false;
+      return switch (result) {
+        Success<AuthSession>(data: final session) => _startSession(
+          session,
+          authEpoch,
+        ),
+        FailureResult<AuthSession>(failure: final failure) => _showFailure(
+          failure,
+        ),
+      };
     } on Object catch (_) {
       _isLoading = false;
       _errorMessage = '登录失败，请重试';
       notifyListeners();
       return false;
     }
+  }
 
-    _isLoading = false;
+  Future<bool> _startTransaction(
+    AuthSessionTransaction transaction,
+    int authEpoch,
+  ) => _startSession(transaction.session, authEpoch, transaction: transaction);
 
-    return switch (result) {
-      Success<AuthSession>(data: final session) => () async {
-        final started = await sessionController.startSession(
-          session,
-          expectedEpoch: authEpoch,
-        );
-        if (!started) {
-          _errorMessage =
-              sessionController.ownershipFailure?.message ?? '无法切换本机离线数据归属';
-        }
-        notifyListeners();
-        return started;
-      }(),
-      FailureResult<AuthSession>(failure: final failure) => () {
-        _errorMessage = failure.message;
-        notifyListeners();
-        return false;
-      }(),
-    };
+  Future<bool> _startSession(
+    AuthSession session,
+    int authEpoch, {
+    AuthSessionTransaction? transaction,
+  }) async {
+    final started = await sessionController.startSession(
+      session,
+      expectedEpoch: authEpoch,
+      transaction: transaction,
+    );
+    if (!started) {
+      _errorMessage =
+          sessionController.ownershipFailure?.message ?? '无法切换本机离线数据归属';
+    }
+    notifyListeners();
+    return started;
+  }
+
+  bool _showFailure(Failure failure) {
+    _errorMessage = failure.message;
+    notifyListeners();
+    return false;
   }
 }

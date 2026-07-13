@@ -73,6 +73,130 @@ void main() {
       expect(repository.lastPassword, 'valid-password');
     });
 
+    test(
+      'transactional login commits only after controller acceptance',
+      () async {
+        late final AuthSessionController sessionController;
+        late final _FakeAuthSessionTransaction transaction;
+        transaction = _FakeAuthSessionTransaction(
+          onCommit: () {
+            transaction.commitObservedAcceptedSession =
+                sessionController.session == _session;
+          },
+        );
+        final repository = _TransactionalAuthRepository(
+          transaction: transaction,
+        );
+        sessionController = AuthSessionController();
+        final viewModel =
+            LoginViewModel(
+                authRepository: repository,
+                sessionController: sessionController,
+              )
+              ..updateUsername('admin')
+              ..updatePassword('valid-password');
+
+        expect(await viewModel.login(), isTrue);
+
+        expect(repository.prepareCalls, 1);
+        expect(repository.loginCalls, 0);
+        expect(transaction.commitCalls, 1);
+        expect(transaction.abortCalls, 0);
+        expect(transaction.commitObservedAcceptedSession, isFalse);
+        expect(sessionController.session, _session);
+      },
+    );
+
+    test(
+      'ownership failure aborts a prepared login without committing',
+      () async {
+        final transaction = _FakeAuthSessionTransaction();
+        final repository = _TransactionalAuthRepository(
+          transaction: transaction,
+        );
+        final sessionController = AuthSessionController(
+          ownershipCoordinator: const _FailingOwnershipCoordinator(),
+        );
+        final viewModel =
+            LoginViewModel(
+                authRepository: repository,
+                sessionController: sessionController,
+              )
+              ..updateUsername('admin')
+              ..updatePassword('valid-password');
+
+        expect(await viewModel.login(), isFalse);
+
+        expect(transaction.commitCalls, 0);
+        expect(transaction.abortCalls, 1);
+        expect(sessionController.session, isNull);
+        expect(viewModel.errorMessage, contains('ownership failed'));
+      },
+    );
+
+    test(
+      'superseded controller epoch aborts a delayed prepared login',
+      () async {
+        final prepared = Completer<Result<AuthSessionTransaction>>();
+        final transaction = _FakeAuthSessionTransaction();
+        final repository = _TransactionalAuthRepository(
+          transaction: transaction,
+          prepared: prepared.future,
+        );
+        final sessionController = AuthSessionController();
+        final viewModel =
+            LoginViewModel(
+                authRepository: repository,
+                sessionController: sessionController,
+              )
+              ..updateUsername('admin')
+              ..updatePassword('valid-password');
+
+        final login = viewModel.login();
+        while (repository.prepareCalls == 0) {
+          await Future<void>.delayed(Duration.zero);
+        }
+        sessionController.beginAuthenticationAttempt();
+        prepared.complete(Success(transaction));
+
+        expect(await login, isFalse);
+        expect(transaction.commitCalls, 0);
+        expect(transaction.abortCalls, 1);
+        expect(sessionController.session, isNull);
+      },
+    );
+
+    for (final commitThrows in [false, true]) {
+      test('commit ${commitThrows ? 'throw' : 'failure'} revokes the accepted '
+          'session and reports a typed UI failure', () async {
+        final transaction = _FakeAuthSessionTransaction(
+          commitResult: const FailureResult<void>(
+            LocalStorageFailure(message: 'credential commit failed'),
+          ),
+          throwOnCommit: commitThrows,
+        );
+        final repository = _TransactionalAuthRepository(
+          transaction: transaction,
+        );
+        final sessionController = AuthSessionController();
+        final viewModel =
+            LoginViewModel(
+                authRepository: repository,
+                sessionController: sessionController,
+              )
+              ..updateUsername('admin')
+              ..updatePassword('valid-password');
+
+        expect(await viewModel.login(), isFalse);
+
+        expect(transaction.commitCalls, 1);
+        expect(transaction.abortCalls, 1);
+        expect(sessionController.session, isNull);
+        expect(sessionController.canAuthenticateRequests, isFalse);
+        expect(viewModel.errorMessage, contains('credential commit failed'));
+      });
+    }
+
     test('shows backend failure message for invalid credentials', () async {
       final sessionController = AuthSessionController();
       final repository = _FakeAuthRepository(
@@ -479,6 +603,101 @@ final class _FakeAuthRepository implements AuthRepository {
   Future<void> logout() async {
     logoutCallCount += 1;
   }
+}
+
+final class _TransactionalAuthRepository
+    implements AuthRepository, TransactionalAuthRepository {
+  _TransactionalAuthRepository({required this.transaction, this.prepared});
+
+  final AuthSessionTransaction transaction;
+  final Future<Result<AuthSessionTransaction>>? prepared;
+  int prepareCalls = 0;
+  int loginCalls = 0;
+
+  @override
+  Future<Result<AuthSessionTransaction>> prepareLogin({
+    required String username,
+    required String password,
+  }) async {
+    prepareCalls += 1;
+    return prepared ?? Success(transaction);
+  }
+
+  @override
+  Future<Result<AuthSession>> login({
+    required String username,
+    required String password,
+  }) async {
+    loginCalls += 1;
+    return Success(transaction.session);
+  }
+
+  @override
+  Future<void> logout() async {}
+
+  @override
+  Future<Result<AuthSession?>> restoreSession() async => const Success(null);
+
+  @override
+  Future<Result<Warehouse>> switchCurrentWarehouse(Warehouse warehouse) async =>
+      Success(warehouse);
+}
+
+final class _FakeAuthSessionTransaction implements AuthSessionTransaction {
+  _FakeAuthSessionTransaction({
+    this.commitResult = const Success<void>(null),
+    this.throwOnCommit = false,
+    this.onCommit,
+  });
+
+  final Result<void> commitResult;
+  final bool throwOnCommit;
+  final void Function()? onCommit;
+  int commitCalls = 0;
+  int abortCalls = 0;
+  bool commitObservedAcceptedSession = false;
+
+  @override
+  AuthSession get session => _session;
+
+  @override
+  Future<Result<void>> commit() async {
+    commitCalls += 1;
+    onCommit?.call();
+    if (throwOnCommit) throw StateError('credential commit failed');
+    return commitResult;
+  }
+
+  @override
+  Future<Result<void>> abort() async {
+    abortCalls += 1;
+    return const Success(null);
+  }
+}
+
+final class _FailingOwnershipCoordinator
+    implements OfflineOwnershipCoordinator {
+  const _FailingOwnershipCoordinator();
+
+  @override
+  Future<OfflineOwnershipReport> apply(OfflineOwnershipIntent intent) async =>
+      OfflineOwnershipReport(
+        reason: intent.reason,
+        accountId: intent.accountId,
+        executedCounts: const OfflineOwnershipCounts(),
+        failures: const [
+          OfflineOwnershipFailure(
+            step: OfflineOwnershipStep.store,
+            message: 'ownership failed',
+          ),
+        ],
+      );
+
+  @override
+  bool canAccessOfflineData(String accountId) => false;
+
+  @override
+  bool canSync(String accountId) => false;
 }
 
 final class _EmptyOwnershipStore implements OfflineOwnershipStore {

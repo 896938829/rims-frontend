@@ -347,6 +347,41 @@ void main() {
       },
     );
 
+    test(
+      'raw login allocates its durable attempt before the remote response',
+      () async {
+        final storage = _FakeTokenStorage();
+        final remoteDataSource = _DelayedLoginRemoteDataSource();
+        final owners = ['owner-a', 'owner-b'].iterator;
+        final repository = AuthRepositoryImpl(
+          remoteDataSource: remoteDataSource,
+          secureStorage: storage,
+          tokenOwnerFactory: () {
+            owners.moveNext();
+            return owners.current;
+          },
+        );
+
+        final older = repository.login(username: 'alice', password: 'secret');
+        await remoteDataSource.aliceStarted.future;
+        expect(storage.latestAttemptVersion, 1);
+
+        final newer = await repository.login(
+          username: 'bob',
+          password: 'secret',
+        );
+        expect(newer, isA<Success<AuthSession>>());
+        expect(storage.latestAttemptVersion, 2);
+        expect(storage.ownerId, 'owner-b');
+        expect(await storage.readAccessToken(), 'same-token');
+
+        remoteDataSource.releaseAlice.complete();
+        expect(await older, isA<FailureResult<AuthSession>>());
+        expect(storage.ownerId, 'owner-b');
+        expect(await storage.readAccessToken(), 'same-token');
+      },
+    );
+
     test('login rejects user without username before saving token', () async {
       final storage = _FakeTokenStorage();
       final remoteDataSource = _FakeAuthRemoteDataSource(
@@ -641,6 +676,8 @@ final class _FakeTokenStorage
   final List<String> conditionalClearAttempts = [];
   final List<String> ownerClearAttempts = [];
   String? ownerId;
+  int latestAttemptVersion = 0;
+  int? tokenAttemptVersion;
   bool tokenCommitted;
   bool failWrites = false;
   bool failCommits = false;
@@ -654,6 +691,7 @@ final class _FakeTokenStorage
     clearCallCount += 1;
     accessToken = null;
     ownerId = null;
+    tokenAttemptVersion = null;
     tokenCommitted = false;
   }
 
@@ -666,11 +704,22 @@ final class _FakeTokenStorage
   }
 
   @override
-  Future<bool> clearAccessTokenForOwner(String ownerId) async {
+  Future<bool> clearAccessTokenForOwner(
+    String ownerId, {
+    required int attemptVersion,
+  }) async {
     ownerClearAttempts.add(ownerId);
-    if (this.ownerId != ownerId) return false;
+    if (this.ownerId != ownerId || tokenAttemptVersion != attemptVersion) {
+      return false;
+    }
     await clearAccessToken();
     return true;
+  }
+
+  @override
+  Future<int> beginAccessTokenAttempt(String ownerId) async {
+    latestAttemptVersion += 1;
+    return latestAttemptVersion;
   }
 
   @override
@@ -681,9 +730,17 @@ final class _FakeTokenStorage
   }
 
   @override
-  Future<bool> commitAccessTokenForOwner(String ownerId) async {
+  Future<bool> commitAccessTokenForOwner(
+    String ownerId, {
+    required int attemptVersion,
+  }) async {
     if (failCommits) throw StateError('token commit failed');
-    if (this.ownerId != ownerId || accessToken == null) return false;
+    if (latestAttemptVersion != attemptVersion ||
+        this.ownerId != ownerId ||
+        tokenAttemptVersion != attemptVersion ||
+        accessToken == null) {
+      return false;
+    }
     tokenCommitted = true;
     committedOwnerIds.add(ownerId);
     return true;
@@ -701,19 +758,24 @@ final class _FakeTokenStorage
     saveCallCount += 1;
     accessToken = token;
     ownerId = null;
+    tokenAttemptVersion = null;
     tokenCommitted = true;
   }
 
   @override
-  Future<void> savePendingAccessTokenForOwner({
+  Future<bool> savePendingAccessTokenForOwner({
     required String token,
     required String ownerId,
+    required int attemptVersion,
   }) async {
     if (failWrites) throw StateError('token write failed');
+    if (attemptVersion != latestAttemptVersion) return false;
     saveCallCount += 1;
     accessToken = token;
     this.ownerId = ownerId;
+    tokenAttemptVersion = attemptVersion;
     tokenCommitted = false;
+    return true;
   }
 }
 
@@ -778,4 +840,48 @@ final class _FakeAuthRemoteDataSource implements AuthRemoteDataSource {
   }) async {
     return loginResult;
   }
+}
+
+final class _DelayedLoginRemoteDataSource implements AuthRemoteDataSource {
+  final Completer<void> aliceStarted = Completer<void>();
+  final Completer<void> releaseAlice = Completer<void>();
+
+  @override
+  Future<Result<LoginResponseModel>> login({
+    required String username,
+    required String password,
+  }) async {
+    if (username == 'alice') {
+      aliceStarted.complete();
+      await releaseAlice.future;
+    }
+    return Success(
+      LoginResponseModel(
+        token: 'same-token',
+        user: AppUserModel(
+          id: username == 'alice' ? 7 : 8,
+          username: username,
+          realName: username,
+          roleCode: 'user',
+          roleName: 'User',
+        ),
+      ),
+    );
+  }
+
+  @override
+  Future<Result<List<WarehouseModel>>> loadWarehouses({
+    String? accessToken,
+  }) async => const Success([
+    WarehouseModel(id: 1, code: 'WH001', name: 'Warehouse', isDefault: true),
+  ]);
+
+  @override
+  Future<Result<AppUserModel>> loadCurrentUser() async =>
+      const FailureResult(UnknownFailure());
+
+  @override
+  Future<Result<WarehouseModel?>> switchCurrentWarehouse(
+    int warehouseId,
+  ) async => const FailureResult(UnknownFailure());
 }
