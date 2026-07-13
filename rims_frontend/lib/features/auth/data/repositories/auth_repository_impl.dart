@@ -8,7 +8,8 @@ import '../../domain/repositories/auth_repository.dart';
 import '../datasources/auth_remote_datasource.dart';
 import '../models/auth_models.dart';
 
-final class AuthRepositoryImpl implements AuthRepository {
+final class AuthRepositoryImpl
+    implements AuthRepository, AuthCredentialInvalidator {
   const AuthRepositoryImpl({
     required this.remoteDataSource,
     required this.secureStorage,
@@ -160,6 +161,9 @@ final class AuthRepositoryImpl implements AuthRepository {
   Future<void> logout() {
     return secureStorage.clearAccessToken();
   }
+
+  @override
+  Future<void> expireCredentials() => logout();
 
   T? _firstWhereOrNull<T>(Iterable<T> values, bool Function(T value) test) {
     for (final value in values) {

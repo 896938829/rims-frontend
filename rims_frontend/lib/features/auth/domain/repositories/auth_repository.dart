@@ -12,6 +12,10 @@ abstract interface class AuthSessionRestoreMetadata {
   DateTime? get lastRestoreExpiresAt;
 }
 
+abstract interface class AuthCredentialInvalidator {
+  Future<void> expireCredentials();
+}
+
 abstract interface class AuthRepository {
   Future<Result<AuthSession?>> restoreSession();
 

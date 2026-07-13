@@ -9,6 +9,7 @@ import '../../domain/entities/cache_snapshot.dart';
 import '../../domain/entities/document_draft.dart';
 import '../../domain/entities/outbox_operation.dart';
 import '../../domain/services/offline_store.dart';
+import '../../domain/services/offline_ownership_service.dart';
 import '../models/cache_record_model.dart';
 import 'offline_tables.dart';
 
@@ -24,7 +25,8 @@ part 'offline_database.g.dart';
     OfflineOutboxCleanupIntents,
   ],
 )
-final class OfflineDatabase extends _$OfflineDatabase implements OfflineStore {
+final class OfflineDatabase extends _$OfflineDatabase
+    implements OfflineStore, OfflineOwnershipStore {
   OfflineDatabase.forTesting(super.executor);
 
   OfflineDatabase.native({
@@ -213,6 +215,14 @@ ON outbox_operations (operation_id, account_id)
       offlineCacheEntries,
     )..addColumns([count])).getSingle();
     return row.read(count) ?? 0;
+  }
+
+  Future<void> rekey(String encryptionKey) async {
+    if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(encryptionKey)) {
+      throw ArgumentError.value(encryptionKey.length, 'encryptionKey');
+    }
+    await customStatement('PRAGMA rekey = "x\'$encryptionKey\'";');
+    await customSelect('PRAGMA user_version').get();
   }
 
   @override
@@ -503,34 +513,119 @@ ON outbox_operations (operation_id, account_id)
 
   @override
   Future<void> clearAccount(String accountId) async {
+    await clearOwnedAccount(accountId, preserveDrafts: false);
+  }
+
+  @override
+  Future<OfflineStoreOwnershipSnapshot> inspectAccount(String accountId) async {
+    final cacheRows = await (select(
+      offlineCacheEntries,
+    )..where((row) => row.accountId.equals(accountId))).get();
+    final drafts = await listDrafts(accountId);
+    final operations = await (select(
+      offlineOutboxOperations,
+    )..where((row) => row.accountId.equals(accountId))).get();
+    return OfflineStoreOwnershipSnapshot(
+      cacheEntries: cacheRows.length,
+      drafts: drafts.length,
+      outboxOperations: operations.length,
+      draftAttachmentRequestIds: {
+        for (final draft in drafts) ...draft.attachmentStagingIds,
+      },
+    );
+  }
+
+  @override
+  Future<void> clearOwnedAccount(
+    String accountId, {
+    required bool preserveDrafts,
+  }) async {
     await transaction(() async {
-      await (delete(
-        offlineOutboxResolutions,
-      )..where((resolution) => resolution.accountId.equals(accountId))).go();
-      final operationIds =
-          await (selectOnly(offlineOutboxOperations)
-                ..addColumns([offlineOutboxOperations.operationId])
-                ..where(offlineOutboxOperations.accountId.equals(accountId)))
-              .map((row) => row.read(offlineOutboxOperations.operationId)!)
-              .get();
-      for (final operationId in operationIds) {
-        await (delete(offlineOutboxDependencies)..where(
-              (dependency) =>
-                  dependency.operationId.equals(operationId) |
-                  dependency.dependencyId.equals(operationId),
-            ))
-            .go();
+      await _deleteOutboxForAccount(accountId);
+      if (!preserveDrafts) {
+        await (delete(
+          offlineDocumentDrafts,
+        )..where((draft) => draft.accountId.equals(accountId))).go();
       }
-      await (delete(
-        offlineOutboxOperations,
-      )..where((operation) => operation.accountId.equals(accountId))).go();
-      await (delete(
-        offlineDocumentDrafts,
-      )..where((draft) => draft.accountId.equals(accountId))).go();
       await (delete(
         offlineCacheEntries,
       )..where((entry) => entry.accountId.equals(accountId))).go();
     });
+  }
+
+  @override
+  Future<void> clearAccountCache(String accountId) async {
+    await (delete(
+      offlineCacheEntries,
+    )..where((entry) => entry.accountId.equals(accountId))).go();
+  }
+
+  @override
+  Future<void> clearAccountOfflineWork(String accountId) async {
+    await transaction(() async {
+      await _deleteOutboxForAccount(accountId);
+      await (delete(
+        offlineDocumentDrafts,
+      )..where((draft) => draft.accountId.equals(accountId))).go();
+    });
+  }
+
+  @override
+  Future<void> invalidatePermissionScopedCache(String accountId) async {
+    await (delete(offlineCacheEntries)..where(
+          (entry) =>
+              entry.accountId.equals(accountId) &
+              entry.namespace.equals('auth.session').not(),
+        ))
+        .go();
+  }
+
+  @override
+  Future<void> discardSessionProjection(String accountId) async {
+    await (delete(offlineCacheEntries)..where(
+          (entry) =>
+              entry.accountId.equals(accountId) &
+              entry.namespace.equals('auth.session'),
+        ))
+        .go();
+  }
+
+  @override
+  Future<void> clearAllSensitiveData() async {
+    await transaction(() async {
+      await delete(offlineOutboxDependencies).go();
+      await delete(offlineOutboxResolutions).go();
+      await delete(offlineOutboxCleanupIntents).go();
+      await delete(offlineOutboxOperations).go();
+      await delete(offlineDocumentDrafts).go();
+      await delete(offlineCacheEntries).go();
+    });
+  }
+
+  Future<void> _deleteOutboxForAccount(String accountId) async {
+    await (delete(
+      offlineOutboxResolutions,
+    )..where((resolution) => resolution.accountId.equals(accountId))).go();
+    await (delete(
+      offlineOutboxCleanupIntents,
+    )..where((intent) => intent.accountId.equals(accountId))).go();
+    final operationIds =
+        await (selectOnly(offlineOutboxOperations)
+              ..addColumns([offlineOutboxOperations.operationId])
+              ..where(offlineOutboxOperations.accountId.equals(accountId)))
+            .map((row) => row.read(offlineOutboxOperations.operationId)!)
+            .get();
+    for (final operationId in operationIds) {
+      await (delete(offlineOutboxDependencies)..where(
+            (dependency) =>
+                dependency.operationId.equals(operationId) |
+                dependency.dependencyId.equals(operationId),
+          ))
+          .go();
+    }
+    await (delete(
+      offlineOutboxOperations,
+    )..where((operation) => operation.accountId.equals(accountId))).go();
   }
 
   @override

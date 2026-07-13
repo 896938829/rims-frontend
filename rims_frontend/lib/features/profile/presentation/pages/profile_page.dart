@@ -19,9 +19,18 @@ import '../../../attachments/domain/services/attachment_share_service.dart';
 import '../../../attachments/domain/services/attachment_staging_store.dart';
 import '../../../auth/domain/entities/app_user.dart';
 import '../../../auth/domain/entities/warehouse.dart';
+import '../../../offline/domain/services/offline_ownership_service.dart';
 import '../view_models/profile_security_view_model.dart';
 import '../view_models/profile_view_model.dart';
 import '../widgets/device_permissions_panel.dart';
+
+typedef PreviewOfflineData =
+    Future<OfflineClearPreview> Function({
+      required String accountId,
+      required OfflineClearCommand command,
+    });
+typedef ExecuteOfflineClear =
+    Future<OfflineOwnershipReport> Function(OfflineClearPreview preview);
 
 final class ProfilePage extends StatelessWidget {
   const ProfilePage({
@@ -29,6 +38,7 @@ final class ProfilePage extends StatelessWidget {
     this.warehouse,
     this.warehouses = const [],
     this.onLogout,
+    this.onLogoutRequested,
     this.onWarehouseSelected,
     this.isSwitchingWarehouse = false,
     this.warehouseSwitchMessage,
@@ -40,6 +50,8 @@ final class ProfilePage extends StatelessWidget {
     this.attachmentStagingStore,
     this.attachmentShareService,
     this.attachmentUserId,
+    this.previewOfflineData,
+    this.executeOfflineClear,
     super.key,
   });
 
@@ -47,6 +59,7 @@ final class ProfilePage extends StatelessWidget {
   final Warehouse? warehouse;
   final List<Warehouse> warehouses;
   final VoidCallback? onLogout;
+  final Future<void> Function(DraftRetentionChoice choice)? onLogoutRequested;
   final ValueChanged<Warehouse>? onWarehouseSelected;
   final bool isSwitchingWarehouse;
   final String? warehouseSwitchMessage;
@@ -58,6 +71,8 @@ final class ProfilePage extends StatelessWidget {
   final AttachmentStagingStore? attachmentStagingStore;
   final AttachmentShareService? attachmentShareService;
   final String? attachmentUserId;
+  final PreviewOfflineData? previewOfflineData;
+  final ExecuteOfflineClear? executeOfflineClear;
 
   @override
   Widget build(BuildContext context) {
@@ -87,10 +102,6 @@ final class ProfilePage extends StatelessWidget {
               isSwitchingWarehouse: isSwitchingWarehouse,
               warehouseSwitchMessage: warehouseSwitchMessage,
             ),
-          if (effectiveViewModel != null) ...[
-            const SizedBox(height: 14),
-            const _DataAndCacheCard(),
-          ],
           if (effectiveViewModel != null && adminRepository != null) ...[
             const SizedBox(height: 14),
             _AccountSecurityCard(repository: adminRepository!),
@@ -130,8 +141,16 @@ final class ProfilePage extends StatelessWidget {
             const SizedBox(height: 14),
             AdminRolesPanel(repository: adminRepository, eventBus: eventBus),
           ],
+          if (effectiveViewModel != null) ...[
+            const SizedBox(height: 14),
+            _DataAndCacheCard(
+              accountId: effectiveViewModel.user.id.toString(),
+              previewOfflineData: previewOfflineData,
+              executeOfflineClear: executeOfflineClear,
+            ),
+          ],
           const SizedBox(height: 14),
-          _LogoutCard(onLogout: onLogout),
+          _LogoutCard(onLogout: onLogout, onLogoutRequested: onLogoutRequested),
           const SizedBox(height: 14),
           const DevicePermissionsPanel(),
         ],
@@ -140,8 +159,25 @@ final class ProfilePage extends StatelessWidget {
   }
 }
 
-final class _DataAndCacheCard extends StatelessWidget {
-  const _DataAndCacheCard();
+final class _DataAndCacheCard extends StatefulWidget {
+  const _DataAndCacheCard({
+    required this.accountId,
+    this.previewOfflineData,
+    this.executeOfflineClear,
+  });
+
+  final String accountId;
+  final PreviewOfflineData? previewOfflineData;
+  final ExecuteOfflineClear? executeOfflineClear;
+
+  @override
+  State<_DataAndCacheCard> createState() => _DataAndCacheCardState();
+}
+
+final class _DataAndCacheCardState extends State<_DataAndCacheCard> {
+  bool _isRunning = false;
+  String? _resultMessage;
+  bool _resultIsFailure = false;
 
   @override
   Widget build(BuildContext context) {
@@ -175,8 +211,143 @@ final class _DataAndCacheCard extends StatelessWidget {
               onTap: () => context.push(RoutePaths.syncCenter),
             ),
           ),
+          Material(
+            type: MaterialType.transparency,
+            child: ListTile(
+              key: const Key('profile-clear-cache-command'),
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.delete_sweep_outlined),
+              title: const Text('清除缓存'),
+              trailing: _isRunning
+                  ? const Icon(Icons.hourglass_top)
+                  : const Icon(Icons.chevron_right),
+              onTap: _canRun
+                  ? () => _runCommand(OfflineClearCommand.cache)
+                  : null,
+            ),
+          ),
+          Material(
+            type: MaterialType.transparency,
+            child: ListTile(
+              key: const Key('profile-clear-offline-work-command'),
+              dense: true,
+              contentPadding: EdgeInsets.zero,
+              leading: const Icon(Icons.work_off_outlined),
+              title: const Text('清除离线工作'),
+              trailing: _isRunning
+                  ? const Icon(Icons.hourglass_top)
+                  : const Icon(Icons.chevron_right),
+              onTap: _canRun
+                  ? () => _runCommand(OfflineClearCommand.offlineWork)
+                  : null,
+            ),
+          ),
+          if (_resultMessage != null)
+            Padding(
+              padding: const EdgeInsets.only(right: 8, bottom: 8),
+              child: Text(
+                _resultMessage!,
+                key: const Key('profile-offline-clear-result'),
+                style: AppTextStyles.bodySmall.copyWith(
+                  color: _resultIsFailure ? AppColors.error : AppColors.success,
+                ),
+              ),
+            ),
         ],
       ),
+    );
+  }
+
+  bool get _canRun =>
+      !_isRunning &&
+      widget.previewOfflineData != null &&
+      widget.executeOfflineClear != null;
+
+  Future<void> _runCommand(OfflineClearCommand command) async {
+    setState(() {
+      _isRunning = true;
+      _resultMessage = null;
+    });
+    try {
+      final preview = await widget.previewOfflineData!(
+        accountId: widget.accountId,
+        command: command,
+      );
+      if (!mounted) return;
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: Text(command == OfflineClearCommand.cache ? '清除缓存' : '清除离线工作'),
+          content: _OfflineClearPreviewContent(preview: preview),
+          actions: [
+            TextButton(
+              key: const Key('offline-clear-cancel'),
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              key: const Key('offline-clear-confirm'),
+              onPressed: () => Navigator.of(context).pop(true),
+              child: const Text('确认清除'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true || !mounted) return;
+      final report = await widget.executeOfflineClear!(preview);
+      if (!mounted) return;
+      setState(() {
+        _resultIsFailure = !report.completed;
+        _resultMessage = report.completed
+            ? command == OfflineClearCommand.cache
+                  ? '缓存已清除'
+                  : '离线工作已清除'
+            : report.failures.map((failure) => failure.message).join(' ');
+      });
+    } on Object catch (error) {
+      if (!mounted) return;
+      setState(() {
+        _resultIsFailure = true;
+        _resultMessage = '清理失败：${error.runtimeType}';
+      });
+    } finally {
+      if (mounted) setState(() => _isRunning = false);
+    }
+  }
+}
+
+final class _OfflineClearPreviewContent extends StatelessWidget {
+  const _OfflineClearPreviewContent({required this.preview});
+
+  final OfflineClearPreview preview;
+
+  @override
+  Widget build(BuildContext context) {
+    final counts = preview.counts;
+    final lines = preview.command == OfflineClearCommand.cache
+        ? [
+            '缓存记录：${counts.cacheEntries} 项',
+            '已下载文件：${counts.downloads} 项',
+            '不会删除草稿或待同步操作',
+          ]
+        : [
+            '草稿：${counts.drafts} 项',
+            '待同步操作：${counts.outboxOperations} 项',
+            '暂存附件：${counts.stagedTransfers} 项',
+            '扫码会话：${counts.scanSessions} 项',
+            '缓存记录和已下载文件将保留',
+          ];
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        for (final line in lines)
+          Padding(
+            padding: const EdgeInsets.symmetric(vertical: 3),
+            child: Text(line),
+          ),
+      ],
     );
   }
 }
@@ -397,9 +568,10 @@ final class _WarehouseSelectorRow extends StatelessWidget {
 }
 
 final class _LogoutCard extends StatelessWidget {
-  const _LogoutCard({required this.onLogout});
+  const _LogoutCard({required this.onLogout, required this.onLogoutRequested});
 
   final VoidCallback? onLogout;
+  final Future<void> Function(DraftRetentionChoice choice)? onLogoutRequested;
 
   @override
   Widget build(BuildContext context) {
@@ -407,7 +579,9 @@ final class _LogoutCard extends StatelessWidget {
       padding: const EdgeInsets.all(10),
       child: TextButton.icon(
         key: const Key('profile-logout-button'),
-        onPressed: onLogout,
+        onPressed: onLogoutRequested == null
+            ? onLogout
+            : () => _requestLogout(context),
         icon: const Icon(Icons.logout, color: AppColors.error),
         label: Text(
           '退出登录',
@@ -418,6 +592,35 @@ final class _LogoutCard extends StatelessWidget {
         ),
       ),
     );
+  }
+
+  Future<void> _requestLogout(BuildContext context) async {
+    final choice = await showDialog<DraftRetentionChoice>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('退出登录'),
+        content: const Text('请选择本机草稿的处理方式。其他缓存与离线工作将清除。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('取消'),
+          ),
+          TextButton(
+            key: const Key('profile-logout-delete-drafts'),
+            onPressed: () =>
+                Navigator.of(context).pop(DraftRetentionChoice.delete),
+            child: const Text('删除草稿'),
+          ),
+          FilledButton(
+            key: const Key('profile-logout-retain-drafts'),
+            onPressed: () =>
+                Navigator.of(context).pop(DraftRetentionChoice.retainLocally),
+            child: const Text('本机保留'),
+          ),
+        ],
+      ),
+    );
+    if (choice != null) await onLogoutRequested?.call(choice);
   }
 }
 

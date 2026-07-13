@@ -8,6 +8,8 @@ import 'package:rims_frontend/features/offline/domain/services/offline_store.dar
 import 'package:rims_frontend/features/scanner/domain/entities/scan_data.dart';
 import 'package:rims_frontend/features/scanner/domain/services/scan_lookup_cache.dart';
 import 'package:rims_frontend/features/scanner/domain/services/scan_session_store.dart';
+import 'package:rims_frontend/features/offline/domain/services/offline_ownership_service.dart';
+import 'package:rims_frontend/features/offline/data/services/offline_scan_ownership_adapter.dart';
 
 void main() {
   group('ScanLookupCache', () {
@@ -340,6 +342,41 @@ void main() {
       expect(storage.values, isNot(contains(key)));
     });
 
+    test(
+      'ownership inventory counts account sessions and clears all scopes',
+      () async {
+        final sessions = ScanSessionStore(storage: MemoryScanStorage());
+        for (final warehouseId in [1, 2]) {
+          await sessions.save(
+            userId: 'alice',
+            warehouseId: warehouseId,
+            session: ScanSessionSnapshot(
+              mode: ScanMode.batch,
+              lines: [
+                ScanLine(item: _item(productId: warehouseId), quantity: 1),
+              ],
+            ),
+          );
+        }
+        await sessions.save(
+          userId: 'bob',
+          warehouseId: 3,
+          session: ScanSessionSnapshot(
+            mode: ScanMode.batch,
+            lines: [ScanLine(item: _item(productId: 3), quantity: 1)],
+          ),
+        );
+        final ownership = sessions as OfflineOwnedScanStore;
+
+        expect(await ownership.countForAccount('alice'), 2);
+        await ownership.clearForAccount('alice');
+        expect(await ownership.countForAccount('alice'), 0);
+        expect(await ownership.countForAccount('bob'), 1);
+        await ownership.clearAll();
+        expect(await ownership.countForAccount('bob'), 0);
+      },
+    );
+
     test('logout clears all cache and drafts for that user only', () async {
       final storage = MemoryScanStorage();
       final cache = ScanLookupCache(storage: storage);
@@ -375,6 +412,41 @@ void main() {
       );
       expect(await sessions.restore(userId: 'bob', warehouseId: 2), isNotNull);
     });
+
+    test(
+      'ownership adapter clears scan lookup and session legacy scopes together',
+      () async {
+        final storage = MemoryScanStorage();
+        final cache = ScanLookupCache(storage: storage);
+        final sessions = ScanSessionStore(storage: storage);
+        await cache.put(
+          userId: 'alice',
+          warehouseId: 1,
+          barcode: 'A',
+          item: _item(productId: 1),
+        );
+        await sessions.save(
+          userId: 'alice',
+          warehouseId: 1,
+          session: ScanSessionSnapshot(
+            mode: ScanMode.batch,
+            lines: [ScanLine(item: _item(productId: 1), quantity: 1)],
+          ),
+        );
+        final ownership = OfflineScanOwnershipAdapter(
+          sessions: sessions,
+          lookupCache: cache,
+        );
+
+        await ownership.clearForAccount('alice');
+
+        expect(await ownership.countForAccount('alice'), 0);
+        expect(
+          await cache.get(userId: 'alice', warehouseId: 1, barcode: 'A'),
+          isNull,
+        );
+      },
+    );
   });
 }
 

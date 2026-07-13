@@ -11,6 +11,7 @@ import 'package:rims_frontend/features/auth/domain/entities/app_user.dart';
 import 'package:rims_frontend/features/auth/domain/entities/warehouse.dart';
 import 'package:rims_frontend/features/profile/presentation/pages/profile_page.dart';
 import 'package:rims_frontend/features/profile/presentation/view_models/profile_view_model.dart';
+import 'package:rims_frontend/features/offline/domain/services/offline_ownership_service.dart';
 
 import '../admin/admin_page_test_support.dart';
 
@@ -141,8 +142,15 @@ void main() {
     );
     expect(find.byKey(const Key('profile-admin-warehouses')), findsOneWidget);
     expect(find.text('仓库管理'), findsOneWidget);
-    await tester.drag(find.byType(ListView), const Offset(0, -700));
-    await tester.pumpAndSettle();
+    for (
+      var index = 0;
+      index < 8 &&
+          find.byKey(const Key('profile-admin-roles-panel')).evaluate().isEmpty;
+      index += 1
+    ) {
+      await tester.drag(find.byType(ListView), const Offset(0, -300));
+      await tester.pumpAndSettle();
+    }
     expect(find.byKey(const Key('profile-admin-roles-panel')), findsOneWidget);
     expect(find.text('角色权限'), findsOneWidget);
   });
@@ -303,6 +311,129 @@ void main() {
     expect(repository.changePasswordRequest?.oldPassword, 'old-secret');
     expect(repository.changePasswordRequest?.newPassword, 'new-secret');
   });
+
+  testWidgets(
+    'data commands preview exact categories and cancellation performs no clear',
+    (tester) async {
+      var executions = 0;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: ProfilePage(
+              user: _ordinaryUser,
+              warehouse: _warehouse,
+              previewOfflineData:
+                  ({required accountId, required command}) async =>
+                      const OfflineClearPreview(
+                        accountId: '2',
+                        command: OfflineClearCommand.cache,
+                        counts: OfflineOwnershipCounts(
+                          cacheEntries: 4,
+                          drafts: 2,
+                          outboxOperations: 3,
+                          stagedTransfers: 5,
+                          downloads: 6,
+                          scanSessions: 7,
+                        ),
+                        sequence: 1,
+                      ),
+              executeOfflineClear: (preview) async {
+                executions += 1;
+                return OfflineOwnershipReport(
+                  reason: null,
+                  accountId: preview.accountId,
+                  executedCounts: preview.counts,
+                  failures: const [],
+                );
+              },
+            ),
+          ),
+        ),
+      );
+      await tester.scrollUntilVisible(
+        find.byKey(const Key('profile-clear-cache-command')),
+        300,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.tap(find.byKey(const Key('profile-clear-cache-command')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('缓存记录：4 项'), findsOneWidget);
+      expect(find.text('已下载文件：6 项'), findsOneWidget);
+      expect(find.text('不会删除草稿或待同步操作'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('offline-clear-cancel')));
+      await tester.pumpAndSettle();
+      expect(executions, 0);
+    },
+  );
+
+  testWidgets(
+    'clear command reports execution success and typed failure visibly',
+    (tester) async {
+      var fail = false;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: ProfilePage(
+              user: _ordinaryUser,
+              warehouse: _warehouse,
+              previewOfflineData:
+                  ({required accountId, required command}) async =>
+                      OfflineClearPreview(
+                        accountId: accountId,
+                        command: command,
+                        counts: const OfflineOwnershipCounts(
+                          drafts: 2,
+                          outboxOperations: 3,
+                          stagedTransfers: 5,
+                          scanSessions: 7,
+                        ),
+                        sequence: 2,
+                      ),
+              executeOfflineClear: (preview) async => OfflineOwnershipReport(
+                reason: null,
+                accountId: preview.accountId,
+                executedCounts: preview.counts,
+                failures: fail
+                    ? const [
+                        OfflineOwnershipFailure(
+                          step: OfflineOwnershipStep.files,
+                          message: '暂存文件清理失败',
+                        ),
+                      ]
+                    : const [],
+              ),
+            ),
+          ),
+        ),
+      );
+      await tester.scrollUntilVisible(
+        find.byKey(const Key('profile-clear-offline-work-command')),
+        300,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.tap(
+        find.byKey(const Key('profile-clear-offline-work-command')),
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('草稿：2 项'), findsOneWidget);
+      expect(find.text('待同步操作：3 项'), findsOneWidget);
+      expect(find.text('暂存附件：5 项'), findsOneWidget);
+      expect(find.text('扫码会话：7 项'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('offline-clear-confirm')));
+      await tester.pumpAndSettle();
+      expect(find.text('离线工作已清除'), findsOneWidget);
+
+      fail = true;
+      await tester.tap(
+        find.byKey(const Key('profile-clear-offline-work-command')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('offline-clear-confirm')));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('暂存文件清理失败'), findsOneWidget);
+    },
+  );
 }
 
 const _adminUser = AppUser(

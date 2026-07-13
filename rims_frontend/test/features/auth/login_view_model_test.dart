@@ -94,10 +94,11 @@ void main() {
       expect(sessionController.isAuthenticated, isFalse);
     });
 
-    test('logout clears active session', () {
-      final sessionController = AuthSessionController()..startSession(_session);
+    test('logout clears active session', () async {
+      final sessionController = AuthSessionController();
+      await sessionController.startSession(_session);
 
-      sessionController.logout();
+      await sessionController.logout(authRepository: _FakeAuthRepository());
 
       expect(sessionController.isAuthenticated, isFalse);
       expect(sessionController.currentUser, isNull);
@@ -129,8 +130,8 @@ void main() {
     test(
       'restoreSession clears session and exposes failure when restore fails',
       () async {
-        final sessionController = AuthSessionController()
-          ..startSession(_session);
+        final sessionController = AuthSessionController();
+        await sessionController.startSession(_session);
         final repository = _FakeAuthRepository(
           restoreResult: const FailureResult<AuthSession?>(
             AuthenticationFailure(message: '登录已过期', businessCode: 10001),
@@ -148,8 +149,8 @@ void main() {
     test(
       'refreshSession preserves active session when background restore fails',
       () async {
-        final sessionController = AuthSessionController()
-          ..startSession(_session);
+        final sessionController = AuthSessionController();
+        await sessionController.startSession(_session);
         final repository = _FakeAuthRepository(
           restoreResult: const FailureResult<AuthSession?>(
             NetworkFailure(message: '刷新失败'),
@@ -169,8 +170,8 @@ void main() {
     test(
       'refreshSession preserves active warehouse when backend omits current marker',
       () async {
-        final sessionController = AuthSessionController()
-          ..startSession(_beijingActiveSession);
+        final sessionController = AuthSessionController();
+        await sessionController.startSession(_beijingActiveSession);
         final repository = _FakeAuthRepository(
           restoreResult: const Success<AuthSession?>(_multiWarehouseSession),
         );
@@ -186,8 +187,8 @@ void main() {
     test(
       'refreshSession clears active session when authentication fails',
       () async {
-        final sessionController = AuthSessionController()
-          ..startSession(_session);
+        final sessionController = AuthSessionController();
+        await sessionController.startSession(_session);
         final repository = _FakeAuthRepository(
           restoreResult: const FailureResult<AuthSession?>(
             AuthenticationFailure(message: '登录已过期', businessCode: 10001),
@@ -207,8 +208,8 @@ void main() {
     test(
       'switchWarehouse updates current warehouse after backend confirms it',
       () async {
-        final sessionController = AuthSessionController()
-          ..startSession(_multiWarehouseSession);
+        final sessionController = AuthSessionController();
+        await sessionController.startSession(_multiWarehouseSession);
         final repository = _FakeAuthRepository(
           switchWarehouseResult: const Success<Warehouse>(_beijingWarehouse),
         );
@@ -229,8 +230,8 @@ void main() {
     test(
       'switchWarehouse keeps current warehouse when backend rejects it',
       () async {
-        final sessionController = AuthSessionController()
-          ..startSession(_multiWarehouseSession);
+        final sessionController = AuthSessionController();
+        await sessionController.startSession(_multiWarehouseSession);
         final repository = _FakeAuthRepository(
           switchWarehouseResult: const FailureResult<Warehouse>(
             AuthorizationFailure(message: '无权访问该仓库'),
@@ -255,7 +256,7 @@ void main() {
         final sessionController = AuthSessionController();
         expect(sessionController.contextGeneration, 0);
 
-        sessionController.startSession(_multiWarehouseSession);
+        await sessionController.startSession(_multiWarehouseSession);
         expect(sessionController.contextGeneration, 1);
 
         await sessionController.switchWarehouse(
@@ -274,7 +275,7 @@ void main() {
         );
         expect(sessionController.contextGeneration, 2);
 
-        sessionController.logout();
+        await sessionController.logout(authRepository: _FakeAuthRepository());
         expect(sessionController.contextGeneration, 3);
       },
     );

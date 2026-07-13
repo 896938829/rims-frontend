@@ -25,6 +25,7 @@ import '../../../offline/domain/repositories/outbox_repository.dart';
 import '../../../offline/domain/entities/outbox_operation.dart';
 import '../../../offline/domain/services/outbox_permission_policy.dart';
 import '../../../offline/domain/services/outbox_executor.dart';
+import '../../../offline/domain/services/offline_ownership_service.dart';
 import '../../../inventory/domain/entities/inventory_item.dart';
 import '../../../profile/presentation/pages/profile_page.dart';
 import '../../../reports/domain/repositories/reports_repository.dart';
@@ -57,6 +58,7 @@ final class AppShellPage extends StatefulWidget {
     this.documentDraftRepository,
     this.initialDraftId,
     this.outboxRepository,
+    this.offlineOwnershipService,
     super.key,
   });
 
@@ -75,6 +77,7 @@ final class AppShellPage extends StatefulWidget {
   final DocumentDraftRepository? documentDraftRepository;
   final String? initialDraftId;
   final OutboxRepository? outboxRepository;
+  final OfflineOwnershipService? offlineOwnershipService;
 
   @override
   State<AppShellPage> createState() => _AppShellPageState();
@@ -133,6 +136,9 @@ final class _AppShellPageState extends State<AppShellPage> {
   }
 
   Widget get _tabBody {
+    if (widget.sessionController.isOwnershipTransitioning) {
+      return const Center(child: Text('正在保护本机离线数据...'));
+    }
     return switch (_currentTab) {
       AppTab.home => HomePage(
         user: widget.sessionController.currentUser,
@@ -203,6 +209,15 @@ final class _AppShellPageState extends State<AppShellPage> {
         onLogout: () {
           unawaited(_logout());
         },
+        onLogoutRequested: (choice) => _logout(choice),
+        previewOfflineData: offlineOwnershipService == null
+            ? null
+            : ({required accountId, required command}) =>
+                  offlineOwnershipService!.preview(
+                    accountId: accountId,
+                    command: command,
+                  ),
+        executeOfflineClear: offlineOwnershipService?.executeClear,
         adminRepository: widget.adminRepository,
         attachmentsRepository: widget.attachmentsRepository,
         attachmentPicker: widget.attachmentPicker,
@@ -219,6 +234,7 @@ final class _AppShellPageState extends State<AppShellPage> {
   }
 
   OutboxExecutionContext? get _outboxExecutionContext {
+    if (!widget.sessionController.canSync) return null;
     final user = widget.sessionController.currentUser;
     final warehouse = widget.sessionController.currentWarehouse;
     if (user == null || warehouse == null) return null;
@@ -301,13 +317,16 @@ final class _AppShellPageState extends State<AppShellPage> {
     }
   }
 
-  Future<void> _logout() async {
-    await widget.authRepository.logout();
-    if (!mounted) {
-      return;
-    }
+  OfflineOwnershipService? get offlineOwnershipService =>
+      widget.offlineOwnershipService;
 
-    widget.sessionController.logout();
+  Future<void> _logout([
+    DraftRetentionChoice draftRetention = DraftRetentionChoice.delete,
+  ]) async {
+    await widget.sessionController.logout(
+      authRepository: widget.authRepository,
+      draftRetention: draftRetention,
+    );
   }
 
   void _subscribeToRefreshEvents() {

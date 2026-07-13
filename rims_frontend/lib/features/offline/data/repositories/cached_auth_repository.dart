@@ -7,15 +7,20 @@ import '../../../auth/domain/entities/warehouse.dart';
 import '../../../auth/domain/repositories/auth_repository.dart';
 import '../../domain/entities/cache_snapshot.dart';
 import '../../domain/services/offline_store.dart';
+import '../../domain/services/offline_ownership_service.dart';
 import '../services/cache_policy.dart';
 
 final class CachedAuthRepository
-    implements AuthRepository, AuthSessionRestoreMetadata {
+    implements
+        AuthRepository,
+        AuthSessionRestoreMetadata,
+        AuthCredentialInvalidator {
   CachedAuthRepository({
     required this.delegate,
     required this.store,
     required this.tokenStorage,
     required this.accountStorage,
+    this.ownershipCoordinator,
     DateTime Function()? now,
   }) : now = now ?? DateTime.now;
 
@@ -26,6 +31,7 @@ final class CachedAuthRepository
   final OfflineStore store;
   final TokenStorage tokenStorage;
   final AuthenticatedAccountStorage accountStorage;
+  final OfflineOwnershipCoordinator? ownershipCoordinator;
   final DateTime Function() now;
 
   @override
@@ -43,7 +49,6 @@ final class CachedAuthRepository
     final token = (await tokenStorage.readAccessToken())?.trim();
     final accountId = await accountStorage.readAuthenticatedAccountId();
     if (token == null || token.isEmpty) {
-      await _clearAccount(accountId);
       return delegate.restoreSession();
     }
 
@@ -63,12 +68,26 @@ final class CachedAuthRepository
     required String? previousAccountId,
   }) async {
     if (session == null) {
-      await _clearAccount(previousAccountId);
+      if (previousAccountId != null) {
+        final ownershipFailure = await _applyOwnership(
+          OfflineOwnershipIntent.tokenExpiry(accountId: previousAccountId),
+        );
+        if (ownershipFailure != null) return FailureResult(ownershipFailure);
+      }
       return const Success(null);
     }
     final accountId = session.user.id.toString();
     if (previousAccountId != null && previousAccountId != accountId) {
-      await _clearAccount(previousAccountId);
+      final ownershipFailure = await _applyOwnership(
+        OfflineOwnershipIntent.accountSwitch(
+          previousAccountId: previousAccountId,
+          currentAccountId: accountId,
+        ),
+      );
+      if (ownershipFailure != null) return FailureResult(ownershipFailure);
+    } else if (previousAccountId == accountId) {
+      final ownershipFailure = await _preparePermissionRefresh(session);
+      if (ownershipFailure != null) return FailureResult(ownershipFailure);
     }
     final record = await _writeSession(session);
     lastRestoreSource = AuthSessionSource.network;
@@ -83,7 +102,18 @@ final class CachedAuthRepository
     required String? accountId,
   }) async {
     if (failure is AuthenticationFailure || failure is AuthorizationFailure) {
-      await _clearAccount(accountId);
+      if (accountId != null) {
+        final ownershipFailure = await _applyOwnership(
+          failure is AuthorizationFailure
+              ? OfflineOwnershipIntent.revocation(accountId: accountId)
+              : OfflineOwnershipIntent.tokenExpiry(accountId: accountId),
+        );
+        if (failure is AuthorizationFailure && ownershipFailure == null) {
+          await delegate.logout();
+          await accountStorage.clearAuthenticatedAccountId();
+        }
+        if (ownershipFailure != null) return FailureResult(ownershipFailure);
+      }
       return FailureResult(failure);
     }
     if (failure is! NetworkFailure || accountId == null) {
@@ -94,7 +124,6 @@ final class CachedAuthRepository
       schemaVersion: CachePolicy.references.schemaVersion,
     );
     if (record == null) {
-      await _clearAccount(accountId);
       return FailureResult(failure);
     }
     if (!CachePolicy.references.canFallbackTo(record, now())) {
@@ -103,7 +132,7 @@ final class CachedAuthRepository
     try {
       final session = _decodeSession(record.payload, token);
       if (session.user.id.toString() != accountId) {
-        await _clearAccount(accountId);
+        await _discardInvalidProjection(accountId);
         return FailureResult(failure);
       }
       lastRestoreSource = AuthSessionSource.cache;
@@ -111,7 +140,7 @@ final class CachedAuthRepository
       lastRestoreExpiresAt = record.expiresAt;
       return Success(session);
     } on Object {
-      await _clearAccount(accountId);
+      await _discardInvalidProjection(accountId);
       return FailureResult(failure);
     }
   }
@@ -123,6 +152,21 @@ final class CachedAuthRepository
   }) async {
     final result = await delegate.login(username: username, password: password);
     if (result case Success<AuthSession>(:final data)) {
+      final previousAccountId = await accountStorage
+          .readAuthenticatedAccountId();
+      final accountId = data.user.id.toString();
+      if (previousAccountId != null && previousAccountId != accountId) {
+        final ownershipFailure = await _applyOwnership(
+          OfflineOwnershipIntent.accountSwitch(
+            previousAccountId: previousAccountId,
+            currentAccountId: accountId,
+          ),
+        );
+        if (ownershipFailure != null) {
+          await delegate.logout();
+          return FailureResult(ownershipFailure);
+        }
+      }
       await _writeSession(data);
     }
     return result;
@@ -143,6 +187,19 @@ final class CachedAuthRepository
           try {
             final previous = _decodeSession(record.payload, token);
             final previousWarehouseId = previous.currentWarehouse?.id;
+            if (previousWarehouseId != null &&
+                previousWarehouseId != confirmed.id) {
+              final ownershipFailure = await _applyOwnership(
+                OfflineOwnershipIntent.warehouseSwitch(
+                  accountId: accountId,
+                  previousWarehouseId: previousWarehouseId,
+                  currentWarehouseId: confirmed.id,
+                ),
+              );
+              if (ownershipFailure != null) {
+                return FailureResult(ownershipFailure);
+              }
+            }
             final updated = AuthSession(
               accessToken: token,
               user: previous.user,
@@ -155,15 +212,8 @@ final class CachedAuthRepository
                   .toList(growable: false),
             );
             await _writeSession(updated);
-            if (previousWarehouseId != null &&
-                previousWarehouseId != confirmed.id) {
-              await store.invalidateWarehouseCache(
-                accountId: accountId,
-                warehouseId: previousWarehouseId,
-              );
-            }
           } on Object {
-            await store.clearAccount(accountId);
+            await _discardInvalidProjection(accountId);
           }
         }
       }
@@ -175,7 +225,17 @@ final class CachedAuthRepository
   Future<void> logout() async {
     final accountId = await accountStorage.readAuthenticatedAccountId();
     await delegate.logout();
-    await _clearAccount(accountId);
+    if (accountId != null) await accountStorage.clearAuthenticatedAccountId();
+    _clearMetadata();
+  }
+
+  @override
+  Future<void> expireCredentials() async {
+    if (delegate case final AuthCredentialInvalidator invalidator) {
+      await invalidator.expireCredentials();
+    } else {
+      await delegate.logout();
+    }
     _clearMetadata();
   }
 
@@ -200,9 +260,50 @@ final class CachedAuthRepository
     return record;
   }
 
-  Future<void> _clearAccount(String? accountId) async {
-    if (accountId != null) await store.clearAccount(accountId);
+  Future<void> _discardInvalidProjection(String accountId) async {
+    await _applyOwnership(
+      OfflineOwnershipIntent.invalidSessionProjection(accountId: accountId),
+    );
     await accountStorage.clearAuthenticatedAccountId();
+  }
+
+  Future<Failure?> _applyOwnership(OfflineOwnershipIntent intent) async {
+    final coordinator = ownershipCoordinator;
+    if (coordinator == null) return null;
+    final report = await coordinator.apply(intent);
+    if (report.completed) return null;
+    return LocalStorageFailure(
+      message: report.failures.map((failure) => failure.message).join(' '),
+      cause: report,
+    );
+  }
+
+  Future<Failure?> _preparePermissionRefresh(AuthSession session) async {
+    final accountId = session.user.id.toString();
+    final record = await store.readCache(
+      _cacheKey(accountId),
+      schemaVersion: CachePolicy.references.schemaVersion,
+    );
+    if (record == null) return null;
+    late final AuthSession previous;
+    try {
+      previous = _decodeSession(record.payload, session.accessToken);
+    } on Object {
+      await _discardInvalidProjection(accountId);
+      return null;
+    }
+    if (_authorizationFingerprint(previous) ==
+        _authorizationFingerprint(session)) {
+      return null;
+    }
+    return _applyOwnership(
+      OfflineOwnershipIntent.permissionRefresh(accountId: accountId),
+    );
+  }
+
+  String _authorizationFingerprint(AuthSession session) {
+    final permissions = session.user.permissionCodes.toList()..sort();
+    return '${session.user.roleCode}:${permissions.join(',')}';
   }
 
   void _clearMetadata() {

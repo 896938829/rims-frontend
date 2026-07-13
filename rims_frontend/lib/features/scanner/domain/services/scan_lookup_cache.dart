@@ -271,6 +271,11 @@ final class ScanLookupCache {
     await Future.wait(matchingKeys.map(storage.delete));
   }
 
+  Future<void> clearAllLegacy() async {
+    final matchingKeys = await storage.keys(prefix: _keyPrefix);
+    await Future.wait(matchingKeys.map(storage.delete));
+  }
+
   Future<void> _putOffline({
     required String userId,
     required int warehouseId,

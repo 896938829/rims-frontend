@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import '../entities/scan_data.dart';
 import 'scan_lookup_cache.dart';
+import '../../../offline/domain/services/offline_ownership_service.dart';
 
 final class ScanSessionSnapshot {
   const ScanSessionSnapshot({required this.mode, required this.lines});
@@ -10,7 +11,7 @@ final class ScanSessionSnapshot {
   final List<ScanLine> lines;
 }
 
-final class ScanSessionStore {
+final class ScanSessionStore implements OfflineOwnedScanStore {
   ScanSessionStore({AsyncScanStorage? storage})
     : storage = storage ?? SharedPreferencesAsyncScanStorage();
 
@@ -103,6 +104,21 @@ final class ScanSessionStore {
   Future<void> clearForUser(String userId) async {
     final prefix = '$_keyPrefix${Uri.encodeComponent(userId)}.';
     final matchingKeys = await storage.keys(prefix: prefix);
+    await Future.wait(matchingKeys.map(storage.delete));
+  }
+
+  @override
+  Future<int> countForAccount(String accountId) async {
+    final prefix = '$_keyPrefix${Uri.encodeComponent(accountId)}.';
+    return (await storage.keys(prefix: prefix)).length;
+  }
+
+  @override
+  Future<void> clearForAccount(String accountId) => clearForUser(accountId);
+
+  @override
+  Future<void> clearAll() async {
+    final matchingKeys = await storage.keys(prefix: _keyPrefix);
     await Future.wait(matchingKeys.map(storage.delete));
   }
 }

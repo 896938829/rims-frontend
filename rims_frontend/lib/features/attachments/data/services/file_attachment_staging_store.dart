@@ -8,6 +8,7 @@ import 'package:crypto/crypto.dart';
 
 import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
+import '../../../offline/domain/services/offline_ownership_service.dart';
 import '../../domain/entities/attachment.dart';
 import '../../domain/services/attachment_picker.dart';
 import '../../domain/services/attachment_staging_store.dart';
@@ -34,7 +35,8 @@ final class FileAttachmentStagingStore
         AttachmentStagingStore,
         DraftAttachmentStagingStore,
         OutboxAttachmentStagingStore,
-        OutboxAttachmentUploadStagingStore {
+        OutboxAttachmentUploadStagingStore,
+        OfflineOwnedFileStore {
   static final _accountOperations = _AsyncKeyedLock();
 
   FileAttachmentStagingStore({
@@ -839,6 +841,132 @@ final class FileAttachmentStagingStore
 
   Future<bool> userDirectoryExists(String userId) async {
     return (await _userDirectory(userId, create: false)).exists();
+  }
+
+  @override
+  Future<OfflineFileOwnershipSnapshot> inspectAccount(String accountId) {
+    return _withUserLock(accountId, () async {
+      final recovered = await _recoverForUser(accountId);
+      final staged = recovered.when(
+        success: (items) => items.length,
+        failure: (failure) => throw StateError(failure.message),
+      );
+      final directory = await _userDirectory(accountId, create: false);
+      final downloads = Directory(
+        '${directory.path}${Platform.pathSeparator}downloads',
+      );
+      var downloadCount = 0;
+      if (await downloads.exists()) {
+        await for (final entity in downloads.list()) {
+          if (entity is File && !entity.path.endsWith('.tmp')) {
+            downloadCount += 1;
+          }
+        }
+      }
+      return OfflineFileOwnershipSnapshot(
+        stagedTransfers: staged,
+        downloads: downloadCount,
+      );
+    });
+  }
+
+  @override
+  Future<void> clearAccountFiles(
+    String accountId, {
+    required Set<String> retainStagedRequestIds,
+  }) {
+    return _withUserLock(accountId, () async {
+      if (retainStagedRequestIds.isEmpty) {
+        final result = await _clearForUser(accountId);
+        result.when(
+          success: (_) {},
+          failure: (failure) => throw StateError(failure.message),
+        );
+        return;
+      }
+      final directory = await _userDirectory(accountId, create: false);
+      if (!await directory.exists()) return;
+      await _completePendingCleanup(directory);
+      final items = await _readManifest(directory);
+      final retained = <StagedAttachment>[];
+      for (final item in items) {
+        if (retainStagedRequestIds.contains(item.pending.requestId) &&
+            await File(item.pending.stagedPath).exists()) {
+          retained.add(item);
+        } else {
+          await _deleteFile(File(item.pending.stagedPath));
+          final thumbnail = item.thumbnailPath;
+          if (thumbnail != null) await _deleteFile(File(thumbnail));
+        }
+      }
+      final retainedPaths = <String>{
+        for (final item in retained)
+          File(item.pending.stagedPath).absolute.path,
+        for (final item in retained)
+          if (item.thumbnailPath != null)
+            File(item.thumbnailPath!).absolute.path,
+      };
+      for (final name in const ['staged', 'thumbnails']) {
+        final ownedDirectory = Directory(
+          '${directory.path}${Platform.pathSeparator}$name',
+        );
+        if (!await ownedDirectory.exists()) continue;
+        await for (final entity in ownedDirectory.list()) {
+          if (entity is File && !retainedPaths.contains(entity.absolute.path)) {
+            await _deleteFile(entity);
+          }
+        }
+      }
+      await _writeManifest(directory, retained);
+      final downloads = Directory(
+        '${directory.path}${Platform.pathSeparator}downloads',
+      );
+      if (await downloads.exists()) await downloads.delete(recursive: true);
+    });
+  }
+
+  @override
+  Future<void> clearDownloads(String accountId) {
+    return _withUserLock(accountId, () async {
+      final directory = await _userDirectory(accountId, create: false);
+      final downloads = Directory(
+        '${directory.path}${Platform.pathSeparator}downloads',
+      );
+      if (await downloads.exists()) await downloads.delete(recursive: true);
+    });
+  }
+
+  @override
+  Future<void> clearStagedTransfers(String accountId) {
+    return _withUserLock(accountId, () async {
+      final directory = await _userDirectory(accountId, create: false);
+      if (!await directory.exists()) return;
+      for (final name in const ['staged', 'thumbnails']) {
+        final ownedDirectory = Directory(
+          '${directory.path}${Platform.pathSeparator}$name',
+        );
+        if (await ownedDirectory.exists()) {
+          await ownedDirectory.delete(recursive: true);
+        }
+      }
+      for (final name in const [
+        'manifest.json',
+        'manifest.json.tmp',
+        _pendingCleanupFilename,
+      ]) {
+        await _deleteIfExists(
+          File('${directory.path}${Platform.pathSeparator}$name'),
+        );
+      }
+    });
+  }
+
+  @override
+  Future<void> clearAllFiles() async {
+    final root = await _attachmentRoot(create: false);
+    await _accountOperations.run(root.absolute.path, () async {
+      if (await root.exists()) await root.delete(recursive: true);
+    });
   }
 
   Failure? _validate(SelectedAttachmentSource selection, int existingCount) {

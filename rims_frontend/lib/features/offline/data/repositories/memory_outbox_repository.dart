@@ -668,6 +668,14 @@ final class MemoryOutboxRepository implements OutboxRepository {
     return const Success<void>(null);
   }
 
+  Future<void> clearAll() async {
+    _operations.clear();
+    _dependencies.clear();
+    _replacementByOriginal.clear();
+    _payloadFingerprintByOperation.clear();
+    _cleanupIntents.clear();
+  }
+
   @override
   Future<Result<int>> prune({required String accountId}) async {
     final currentTime = now().toUtc();

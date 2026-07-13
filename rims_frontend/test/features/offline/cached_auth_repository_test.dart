@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rims_frontend/core/events/app_event.dart';
 import 'package:rims_frontend/core/events/app_event_bus.dart';
@@ -13,6 +15,7 @@ import 'package:rims_frontend/features/offline/data/repositories/cached_auth_rep
 import 'package:rims_frontend/features/offline/data/repositories/memory_offline_store.dart';
 import 'package:rims_frontend/features/offline/domain/entities/cache_snapshot.dart';
 import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.dart';
+import 'package:rims_frontend/features/offline/domain/services/offline_ownership_service.dart';
 
 void main() {
   final now = DateTime.utc(2026, 7, 13, 12);
@@ -56,7 +59,7 @@ void main() {
     final result = await repository.restoreSession();
 
     expect(result, isA<FailureResult<AuthSession?>>());
-    expect(storage.accountId, isNull);
+    expect(storage.accountId, '7');
   });
 
   test('cached projection is rejected on secure account mismatch', () async {
@@ -64,7 +67,13 @@ void main() {
       restoreResult: const Success(_session),
     );
     final storage = _FakeSessionStorage(token: 'token');
-    final repository = _repository(delegate, storage, now: now);
+    final ownership = _RecordingOwnershipCoordinator();
+    final repository = _repository(
+      delegate,
+      storage,
+      now: now,
+      ownership: ownership,
+    );
     await repository.restoreSession();
     storage.accountId = '8';
     delegate.restoreResult = const FailureResult(NetworkFailure());
@@ -72,54 +81,76 @@ void main() {
     final result = await repository.restoreSession();
 
     expect(result, isA<FailureResult<AuthSession?>>());
-    expect(storage.accountId, isNull);
+    expect(storage.accountId, '8');
+    expect(ownership.intents, isEmpty);
   });
 
-  test('warehouse switch invalidates old warehouse cache scope', () async {
-    final delegate = _FakeAuthRepository(
-      restoreResult: const Success(_session),
-      switchResult: const Success(_warehouse12),
-    );
-    final storage = _FakeSessionStorage(token: 'token');
-    final store = MemoryOfflineStore();
-    final repository = _repository(delegate, storage, store: store, now: now);
-    await repository.restoreSession();
-    await store.writeCache(
-      CacheRecord(
-        key: const CacheKey(
-          accountId: '7',
-          warehouseId: 11,
-          namespace: 'inventory',
-          entityKey: 'page=1',
+  test(
+    'warehouse switch leaves invalidation to the ownership coordinator',
+    () async {
+      final delegate = _FakeAuthRepository(
+        restoreResult: const Success(_session),
+        switchResult: const Success(_warehouse12),
+      );
+      final storage = _FakeSessionStorage(token: 'token');
+      final store = MemoryOfflineStore();
+      final ownership = _RecordingOwnershipCoordinator();
+      final repository = _repository(
+        delegate,
+        storage,
+        store: store,
+        now: now,
+        ownership: ownership,
+      );
+      await repository.restoreSession();
+      await store.writeCache(
+        CacheRecord(
+          key: const CacheKey(
+            accountId: '7',
+            warehouseId: 11,
+            namespace: 'inventory',
+            entityKey: 'page=1',
+          ),
+          payload: const {},
+          schemaVersion: 1,
+          fetchedAt: now,
+          expiresAt: now.add(const Duration(days: 1)),
         ),
-        payload: const {},
-        schemaVersion: 1,
-        fetchedAt: now,
-        expiresAt: now.add(const Duration(days: 1)),
-      ),
-    );
+      );
 
-    await repository.switchCurrentWarehouse(_warehouse12);
+      await repository.switchCurrentWarehouse(_warehouse12);
 
-    expect(
-      await store.readCache(
-        const CacheKey(
-          accountId: '7',
-          warehouseId: 11,
-          namespace: 'inventory',
-          entityKey: 'page=1',
+      expect(
+        ownership.intents.last.reason,
+        OfflineOwnershipReason.warehouseSwitch,
+      );
+
+      expect(
+        await store.readCache(
+          const CacheKey(
+            accountId: '7',
+            warehouseId: 11,
+            namespace: 'inventory',
+            entityKey: 'page=1',
+          ),
         ),
-      ),
-      isNull,
-    );
-  });
+        isNotNull,
+      );
+    },
+  );
 
   test('successful permission refresh replaces cached projection', () async {
     final delegate = _FakeAuthRepository(
       restoreResult: const Success(_session),
     );
     final storage = _FakeSessionStorage(token: 'token');
-    final repository = _repository(delegate, storage, now: now);
+    final ownership = _RecordingOwnershipCoordinator();
+    final repository = _repository(
+      delegate,
+      storage,
+      now: now,
+      ownership: ownership,
+    );
     await repository.restoreSession();
     delegate.restoreResult = const Success(_adminSession);
     await repository.restoreSession();
@@ -130,9 +161,13 @@ void main() {
     expect(cached?.user.roleCode, 'admin');
     expect(cached?.user.isAdmin, isTrue);
     expect(cached?.user.permissionCodes, {'document:complete'});
+    expect(
+      ownership.intents.map((intent) => intent.reason),
+      contains(OfflineOwnershipReason.permissionRefresh),
+    );
   });
 
-  test('logout clears the same Memory outbox used by Sync Center', () async {
+  test('repository logout never bypasses the ownership coordinator', () async {
     final delegate = _FakeAuthRepository(
       restoreResult: const Success(_session),
     );
@@ -157,8 +192,29 @@ void main() {
 
     await repository.logout();
 
-    expect((await store.outboxRepository.list('7') as Success).data, isEmpty);
+    expect(
+      (await store.outboxRepository.list('7') as Success).data,
+      hasLength(1),
+    );
+    expect(storage.accountId, isNull);
   });
+
+  test(
+    'token credential expiry preserves the prior account reference for safe reauthentication',
+    () async {
+      final delegate = _FakeAuthRepository(
+        restoreResult: const Success(_session),
+      );
+      final storage = _FakeSessionStorage(token: 'token');
+      final repository = _repository(delegate, storage, now: now);
+      await repository.restoreSession();
+
+      await repository.expireCredentials();
+
+      expect(delegate.logoutCalls, 1);
+      expect(storage.accountId, '7');
+    },
+  );
 
   test('offline login is never satisfied from an existing cache', () async {
     final delegate = _FakeAuthRepository(
@@ -179,20 +235,27 @@ void main() {
   });
 
   test(
-    'authentication failure clears account cache and secure reference',
+    'authentication failure preserves owned data and secure account reference',
     () async {
       final delegate = _FakeAuthRepository(
         restoreResult: const Success(_session),
       );
       final storage = _FakeSessionStorage(token: 'token');
       final store = MemoryOfflineStore();
-      final repository = _repository(delegate, storage, store: store, now: now);
+      final ownership = _RecordingOwnershipCoordinator();
+      final repository = _repository(
+        delegate,
+        storage,
+        store: store,
+        now: now,
+        ownership: ownership,
+      );
       await repository.restoreSession();
       delegate.restoreResult = const FailureResult(AuthenticationFailure());
 
       await repository.restoreSession();
 
-      expect(storage.accountId, isNull);
+      expect(storage.accountId, '7');
       expect(
         await store.readCache(
           const CacheKey(
@@ -201,8 +264,93 @@ void main() {
             entityKey: 'projection',
           ),
         ),
-        isNull,
+        isNotNull,
       );
+      expect(
+        ownership.intents.single.reason,
+        OfflineOwnershipReason.tokenExpiry,
+      );
+    },
+  );
+
+  test(
+    'authorization failure requests full revocation without direct clearing',
+    () async {
+      final delegate = _FakeAuthRepository(
+        restoreResult: const Success(_session),
+      );
+      final storage = _FakeSessionStorage(token: 'token');
+      final store = MemoryOfflineStore();
+      final ownership = _RecordingOwnershipCoordinator();
+      final repository = _repository(
+        delegate,
+        storage,
+        store: store,
+        now: now,
+        ownership: ownership,
+      );
+      await repository.restoreSession();
+      delegate.restoreResult = const FailureResult(AuthorizationFailure());
+
+      await repository.restoreSession();
+
+      expect(ownership.intents.last.reason, OfflineOwnershipReason.revocation);
+    },
+  );
+
+  test(
+    'failed revocation retains credentials so cleanup can be retried',
+    () async {
+      final delegate = _FakeAuthRepository(
+        restoreResult: const Success(_session),
+      );
+      final storage = _FakeSessionStorage(token: 'token');
+      final ownership = _RecordingOwnershipCoordinator();
+      final repository = _repository(
+        delegate,
+        storage,
+        now: now,
+        ownership: ownership,
+      );
+      await repository.restoreSession();
+      delegate.restoreResult = const FailureResult(AuthorizationFailure());
+      ownership.failNext = true;
+
+      final result = await repository.restoreSession();
+
+      expect(result, isA<FailureResult<AuthSession?>>());
+      expect(delegate.logoutCalls, 0);
+      expect(storage.token, 'token');
+      expect(storage.accountId, '7');
+    },
+  );
+
+  test(
+    'network restore account switch is cleaned before the new projection is exposed',
+    () async {
+      final delegate = _FakeAuthRepository(
+        restoreResult: const Success(_session),
+      );
+      final storage = _FakeSessionStorage(token: 'token');
+      final ownership = _RecordingOwnershipCoordinator();
+      final repository = _repository(
+        delegate,
+        storage,
+        now: now,
+        ownership: ownership,
+      );
+      await repository.restoreSession();
+      delegate.restoreResult = const Success(_secondAccountSession);
+
+      final restored = _sessionFrom(await repository.restoreSession());
+
+      expect(restored?.user.id, 8);
+      expect(
+        ownership.intents.last.reason,
+        OfflineOwnershipReason.accountSwitch,
+      );
+      expect(ownership.intents.last.accountId, '7');
+      expect(ownership.intents.last.currentAccountId, '8');
     },
   );
 
@@ -217,7 +365,7 @@ void main() {
       });
       final accountEvent = eventBus.on<AccountOwnershipChangedEvent>().first;
 
-      controller.startSession(_session);
+      await controller.startSession(_session);
 
       expect((await accountEvent).currentAccountId, '7');
       final warehouseEvent = eventBus
@@ -235,12 +383,94 @@ void main() {
       expect(event.currentWarehouseId, 12);
     },
   );
+
+  test(
+    'controller does not expose a switched account until ownership cleanup completes',
+    () async {
+      final ownership = _RecordingOwnershipCoordinator();
+      final controller = AuthSessionController(ownershipCoordinator: ownership);
+      addTearDown(controller.dispose);
+      await controller.startSession(_session);
+      final blocker = Completer<void>();
+      ownership.blocker = blocker;
+
+      final switching = controller.startSession(_secondAccountSession);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(controller.currentUser?.id, 7);
+      expect(controller.isOwnershipTransitioning, isTrue);
+      expect(controller.canAccessOfflineData, isFalse);
+      blocker.complete();
+      expect(await switching, isTrue);
+      expect(controller.currentUser?.id, 8);
+    },
+  );
+
+  test(
+    'controller keeps the prior account active when account cleanup fails',
+    () async {
+      final ownership = _RecordingOwnershipCoordinator();
+      final controller = AuthSessionController(ownershipCoordinator: ownership);
+      addTearDown(controller.dispose);
+      await controller.startSession(_session);
+      ownership.failNext = true;
+
+      final switched = await controller.startSession(_secondAccountSession);
+
+      expect(switched, isFalse);
+      expect(controller.currentUser?.id, 7);
+      expect(controller.ownershipFailure, isNotNull);
+    },
+  );
+
+  test(
+    'controller distinguishes logout retention, token expiry, warehouse, and permission reasons',
+    () async {
+      final ownership = _RecordingOwnershipCoordinator();
+      final repository = _FakeAuthRepository(
+        restoreResult: const Success(_adminSession),
+        switchResult: const Success(_warehouse12),
+      );
+      final controller = AuthSessionController(ownershipCoordinator: ownership);
+      addTearDown(controller.dispose);
+      await controller.startSession(_session);
+
+      await controller.refreshSession(repository);
+      await controller.switchWarehouse(
+        authRepository: repository,
+        warehouse: _warehouse12,
+      );
+      await controller.expireSession(authRepository: repository);
+
+      expect(
+        ownership.intents.map((intent) => intent.reason),
+        containsAllInOrder([
+          OfflineOwnershipReason.reauthenticated,
+          OfflineOwnershipReason.permissionRefresh,
+          OfflineOwnershipReason.warehouseSwitch,
+          OfflineOwnershipReason.tokenExpiry,
+        ]),
+      );
+
+      await controller.startSession(_session);
+      await controller.logout(
+        authRepository: repository,
+        draftRetention: DraftRetentionChoice.retainLocally,
+      );
+      expect(ownership.intents.last.reason, OfflineOwnershipReason.logout);
+      expect(
+        ownership.intents.last.draftRetention,
+        DraftRetentionChoice.retainLocally,
+      );
+    },
+  );
 }
 
 CachedAuthRepository _repository(
   _FakeAuthRepository delegate,
   _FakeSessionStorage storage, {
   MemoryOfflineStore? store,
+  OfflineOwnershipCoordinator? ownership,
   required DateTime now,
 }) {
   return CachedAuthRepository(
@@ -248,8 +478,47 @@ CachedAuthRepository _repository(
     store: store ?? MemoryOfflineStore(),
     tokenStorage: storage,
     accountStorage: storage,
+    ownershipCoordinator: ownership,
     now: () => now,
   );
+}
+
+final class _RecordingOwnershipCoordinator
+    implements OfflineOwnershipCoordinator {
+  final List<OfflineOwnershipIntent> intents = [];
+  Completer<void>? blocker;
+  bool failNext = false;
+
+  @override
+  Future<OfflineOwnershipReport> apply(OfflineOwnershipIntent intent) async {
+    intents.add(intent);
+    final activeBlocker = blocker;
+    if (activeBlocker != null) {
+      await activeBlocker.future;
+      blocker = null;
+    }
+    final shouldFail = failNext;
+    failNext = false;
+    return OfflineOwnershipReport(
+      reason: intent.reason,
+      accountId: intent.accountId,
+      executedCounts: const OfflineOwnershipCounts(),
+      failures: shouldFail
+          ? const [
+              OfflineOwnershipFailure(
+                step: OfflineOwnershipStep.store,
+                message: 'cleanup failed',
+              ),
+            ]
+          : const [],
+    );
+  }
+
+  @override
+  bool canAccessOfflineData(String accountId) => true;
+
+  @override
+  bool canSync(String accountId) => true;
 }
 
 AuthSession? _sessionFrom(Result<AuthSession?> result) {
@@ -298,6 +567,7 @@ final class _FakeAuthRepository implements AuthRepository {
   Result<AuthSession> loginResult;
   Result<Warehouse> switchResult;
   int loginCalls = 0;
+  int logoutCalls = 0;
 
   @override
   Future<Result<AuthSession?>> restoreSession() async => restoreResult;
@@ -317,7 +587,9 @@ final class _FakeAuthRepository implements AuthRepository {
   }
 
   @override
-  Future<void> logout() async {}
+  Future<void> logout() async {
+    logoutCalls += 1;
+  }
 }
 
 const _warehouse11 = Warehouse(
@@ -358,4 +630,17 @@ const _adminSession = AuthSession(
   user: _admin,
   currentWarehouse: _warehouse11,
   warehouses: [_warehouse11, _warehouse12],
+);
+
+const _secondAccountSession = AuthSession(
+  accessToken: 'token-8',
+  user: AppUser(
+    id: 8,
+    username: 'bob',
+    realName: 'Bob',
+    roleCode: 'user',
+    roleName: '普通用户',
+  ),
+  currentWarehouse: _warehouse12,
+  warehouses: [_warehouse12],
 );

@@ -58,6 +58,9 @@ void main() {
           expiresAt: fetchedAt.add(const Duration(hours: 1)),
         ),
       );
+      final rotatedKey = '08' * 32;
+      await database.rekey(rotatedKey);
+      stored = rotatedKey;
       await database.close();
 
       final header = await File(path)
@@ -100,4 +103,41 @@ void main() {
       isTrue,
     );
   });
+
+  test(
+    'database key rotator persists a fresh key only after rekey succeeds',
+    () async {
+      var stored = '11' * 32;
+      final rekeys = <String>[];
+      final rotator = OfflineDatabaseKeyRotator(
+        readKey: () async => stored,
+        writeKey: (value) async => stored = value,
+        rekey: (value) async => rekeys.add(value),
+        randomBytes: () => List<int>.filled(32, 0x22),
+      );
+
+      await rotator.rotateAfterRevocation();
+
+      expect(stored, '22' * 32);
+      expect(rekeys, ['22' * 32]);
+    },
+  );
+
+  test(
+    'database key persistence failure rolls the live database key back',
+    () async {
+      final oldKey = '11' * 32;
+      final rekeys = <String>[];
+      final rotator = OfflineDatabaseKeyRotator(
+        readKey: () async => oldKey,
+        writeKey: (_) async => throw StateError('secure storage unavailable'),
+        rekey: (value) async => rekeys.add(value),
+        randomBytes: () => List<int>.filled(32, 0x33),
+      );
+
+      await expectLater(rotator.rotateAfterRevocation(), throwsStateError);
+
+      expect(rekeys, ['33' * 32, oldKey]);
+    },
+  );
 }

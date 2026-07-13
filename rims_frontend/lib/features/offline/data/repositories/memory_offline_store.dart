@@ -5,10 +5,12 @@ import '../../domain/entities/document_draft.dart';
 import '../../domain/entities/outbox_operation.dart';
 import '../../domain/repositories/outbox_repository.dart';
 import '../../domain/services/offline_store.dart';
+import '../../domain/services/offline_ownership_service.dart';
 import '../../domain/services/outbox_state_machine.dart';
 import 'memory_outbox_repository.dart';
 
-final class MemoryOfflineStore implements OfflineStore, OutboxRepositoryOwner {
+final class MemoryOfflineStore
+    implements OfflineStore, OutboxRepositoryOwner, OfflineOwnershipStore {
   MemoryOfflineStore({DateTime Function()? now})
     : outboxRepository = MemoryOutboxRepository(
         stateMachine: OutboxStateMachine(now: now),
@@ -176,10 +178,74 @@ final class MemoryOfflineStore implements OfflineStore, OutboxRepositoryOwner {
 
   @override
   Future<void> clearAccount(String accountId) async {
+    await clearOwnedAccount(accountId, preserveDrafts: false);
+  }
+
+  @override
+  Future<OfflineStoreOwnershipSnapshot> inspectAccount(String accountId) async {
+    final drafts = await listDrafts(accountId);
+    final operations = _successOrThrow(await outboxRepository.list(accountId));
+    return OfflineStoreOwnershipSnapshot(
+      cacheEntries: _cache.values
+          .where((record) => record.key.accountId == accountId)
+          .length,
+      drafts: drafts.length,
+      outboxOperations: operations.length,
+      draftAttachmentRequestIds: {
+        for (final draft in drafts) ...draft.attachmentStagingIds,
+      },
+    );
+  }
+
+  @override
+  Future<void> clearOwnedAccount(
+    String accountId, {
+    required bool preserveDrafts,
+  }) async {
     _cache.removeWhere((_, record) => record.key.accountId == accountId);
+    if (!preserveDrafts) {
+      _drafts.removeWhere((_, draft) => draft.accountId == accountId);
+    }
+    _throwLegacyFailure(await outboxRepository.clearAccount(accountId));
+    _legacyOperationAccounts.removeWhere((_, owner) => owner == accountId);
+  }
+
+  @override
+  Future<void> clearAccountCache(String accountId) async {
+    _cache.removeWhere((_, record) => record.key.accountId == accountId);
+  }
+
+  @override
+  Future<void> clearAccountOfflineWork(String accountId) async {
     _drafts.removeWhere((_, draft) => draft.accountId == accountId);
     _throwLegacyFailure(await outboxRepository.clearAccount(accountId));
     _legacyOperationAccounts.removeWhere((_, owner) => owner == accountId);
+  }
+
+  @override
+  Future<void> invalidatePermissionScopedCache(String accountId) async {
+    _cache.removeWhere(
+      (_, record) =>
+          record.key.accountId == accountId &&
+          record.key.namespace != 'auth.session',
+    );
+  }
+
+  @override
+  Future<void> discardSessionProjection(String accountId) async {
+    _cache.removeWhere(
+      (_, record) =>
+          record.key.accountId == accountId &&
+          record.key.namespace == 'auth.session',
+    );
+  }
+
+  @override
+  Future<void> clearAllSensitiveData() async {
+    _cache.clear();
+    _drafts.clear();
+    _legacyOperationAccounts.clear();
+    await outboxRepository.clearAll();
   }
 
   @override

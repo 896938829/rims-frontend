@@ -12,6 +12,7 @@ import 'package:rims_frontend/core/result/failure.dart';
 import 'package:rims_frontend/core/result/result.dart';
 import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.dart';
 import 'package:rims_frontend/features/offline/domain/services/attachment_staging_protection.dart';
+import 'package:rims_frontend/features/offline/domain/services/offline_ownership_service.dart';
 
 void main() {
   late Directory root;
@@ -60,6 +61,46 @@ void main() {
     originalName: name,
     mimeType: mime,
     fileSize: size,
+  );
+
+  test(
+    'ownership inventory counts real files and preserves retained draft staging',
+    () async {
+      final staging = store();
+      await staging.stage(
+        userId: '42',
+        binding: AttachmentBinding.documentDraft('draft-1'),
+        selection: selection(),
+        existingCount: 0,
+      );
+      await staging.saveDownload(
+        userId: '42',
+        originalName: 'receipt.pdf',
+        bytes: Uint8List.fromList([5, 6, 7]),
+      );
+      final ownership = staging as OfflineOwnedFileStore;
+
+      expect(
+        await ownership.inspectAccount('42'),
+        isA<OfflineFileOwnershipSnapshot>()
+            .having((value) => value.stagedTransfers, 'stagedTransfers', 1)
+            .having((value) => value.downloads, 'downloads', 1),
+      );
+
+      await ownership.clearAccountFiles(
+        '42',
+        retainStagedRequestIds: const {'request-1'},
+      );
+      expect(
+        await ownership.inspectAccount('42'),
+        isA<OfflineFileOwnershipSnapshot>()
+            .having((value) => value.stagedTransfers, 'stagedTransfers', 1)
+            .having((value) => value.downloads, 'downloads', 0),
+      );
+
+      await ownership.clearStagedTransfers('42');
+      expect((await ownership.inspectAccount('42')).stagedTransfers, 0);
+    },
   );
 
   test(

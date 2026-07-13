@@ -3,15 +3,18 @@ import 'package:flutter/foundation.dart';
 import '../../../../core/events/app_event.dart';
 import '../../../../core/events/app_event_bus.dart';
 import '../../../../core/result/failure.dart';
+import '../../../../core/result/result.dart';
 import '../../domain/entities/app_user.dart';
 import '../../domain/entities/auth_session.dart';
 import '../../domain/entities/warehouse.dart';
 import '../../domain/repositories/auth_repository.dart';
+import '../../../offline/domain/services/offline_ownership_service.dart';
 
 final class AuthSessionController extends ChangeNotifier {
-  AuthSessionController({this.eventBus});
+  AuthSessionController({this.eventBus, this.ownershipCoordinator});
 
   final AppEventBus? eventBus;
+  final OfflineOwnershipCoordinator? ownershipCoordinator;
   AuthSession? _session;
   bool _isRestoring = false;
   bool _isSwitchingWarehouse = false;
@@ -22,6 +25,9 @@ final class AuthSessionController extends ChangeNotifier {
   DateTime? _sessionFetchedAt;
   DateTime? _sessionExpiresAt;
   int _contextGeneration = 0;
+  bool _isOwnershipTransitioning = false;
+  Failure? _ownershipFailure;
+  OfflineOwnershipReport? _lastOwnershipReport;
 
   AuthSession? get session => _session;
   AppUser? get currentUser => _session?.user;
@@ -38,6 +44,22 @@ final class AuthSessionController extends ChangeNotifier {
   DateTime? get sessionFetchedAt => _sessionFetchedAt;
   DateTime? get sessionExpiresAt => _sessionExpiresAt;
   int get contextGeneration => _contextGeneration;
+  bool get isOwnershipTransitioning => _isOwnershipTransitioning;
+  Failure? get ownershipFailure => _ownershipFailure;
+  OfflineOwnershipReport? get lastOwnershipReport => _lastOwnershipReport;
+  bool get canAccessOfflineData {
+    final accountId = currentUser?.id.toString();
+    return !_isOwnershipTransitioning &&
+        accountId != null &&
+        (ownershipCoordinator?.canAccessOfflineData(accountId) ?? true);
+  }
+
+  bool get canSync {
+    final accountId = currentUser?.id.toString();
+    return !_isOwnershipTransitioning &&
+        accountId != null &&
+        (ownershipCoordinator?.canSync(accountId) ?? true);
+  }
 
   Future<void> restoreSession(AuthRepository authRepository) async {
     await _restoreSession(
@@ -65,30 +87,40 @@ final class AuthSessionController extends ChangeNotifier {
 
     final result = await authRepository.restoreSession();
 
-    result.when(
-      success: (session) {
-        _session = _sessionWithActiveWarehouse(
+    switch (result) {
+      case Success<AuthSession?>(data: final session):
+        final candidate = _sessionWithActiveWarehouse(
           restoredSession: session,
           activeSession: activeSession,
           preserveActiveWarehouse: preserveActiveSessionOnFailure,
         );
-        _restoreFailure = null;
-        _sessionMessage = null;
-        final AuthSessionRestoreMetadata? metadata =
-            authRepository is AuthSessionRestoreMetadata
-            ? authRepository as AuthSessionRestoreMetadata
-            : null;
-        _sessionSource = session == null
-            ? null
-            : metadata?.lastRestoreSource ?? AuthSessionSource.network;
-        _sessionFetchedAt = session == null
-            ? null
-            : metadata?.lastRestoreFetchedAt;
-        _sessionExpiresAt = session == null
-            ? null
-            : metadata?.lastRestoreExpiresAt;
-      },
-      failure: (failure) {
+        final ownershipReady = await _prepareOwnershipChange(
+          activeSession,
+          candidate,
+        );
+        if (ownershipReady) {
+          _session = candidate;
+          _restoreFailure = null;
+          _sessionMessage = null;
+          final AuthSessionRestoreMetadata? metadata =
+              authRepository is AuthSessionRestoreMetadata
+              ? authRepository as AuthSessionRestoreMetadata
+              : null;
+          _sessionSource = session == null
+              ? null
+              : metadata?.lastRestoreSource ?? AuthSessionSource.network;
+          _sessionFetchedAt = session == null
+              ? null
+              : metadata?.lastRestoreFetchedAt;
+          _sessionExpiresAt = session == null
+              ? null
+              : metadata?.lastRestoreExpiresAt;
+        } else {
+          _session = activeSession;
+          _restoreFailure = _ownershipFailure;
+          _sessionMessage = _ownershipFailure?.message;
+        }
+      case FailureResult<AuthSession?>(failure: final failure):
         if (!preserveActiveSessionOnFailure ||
             activeSession == null ||
             failure is AuthenticationFailure) {
@@ -99,16 +131,16 @@ final class AuthSessionController extends ChangeNotifier {
         _restoreFailure = failure;
         _sessionMessage = failure.message;
         if (_session == null) _clearSourceMetadata();
-      },
-    );
+    }
 
     _isRestoring = false;
     _publishOwnershipChanges(activeSession, _session);
     notifyListeners();
   }
 
-  void startSession(AuthSession session) {
+  Future<bool> startSession(AuthSession session) async {
     final previous = _session;
+    if (!await _prepareOwnershipChange(previous, session)) return false;
     _session = session;
     _restoreFailure = null;
     _switchWarehouseFailure = null;
@@ -118,6 +150,7 @@ final class AuthSessionController extends ChangeNotifier {
     _sessionExpiresAt = null;
     _publishOwnershipChanges(previous, _session);
     notifyListeners();
+    return true;
   }
 
   Future<bool> switchWarehouse({
@@ -141,8 +174,9 @@ final class AuthSessionController extends ChangeNotifier {
 
     final result = await authRepository.switchCurrentWarehouse(warehouse);
 
-    final success = result.when(
-      success: (confirmedWarehouse) {
+    final bool success;
+    switch (result) {
+      case Success<Warehouse>(data: final confirmedWarehouse):
         final updatedWarehouses = activeSession.warehouses
             .map(
               (candidate) => candidate.id == confirmedWarehouse.id
@@ -150,29 +184,48 @@ final class AuthSessionController extends ChangeNotifier {
                   : candidate,
             )
             .toList(growable: false);
-        _session = AuthSession(
+        final updatedSession = AuthSession(
           accessToken: activeSession.accessToken,
           user: activeSession.user,
           currentWarehouse: confirmedWarehouse,
           warehouses: updatedWarehouses,
         );
+        if (!await _prepareOwnershipChange(activeSession, updatedSession)) {
+          _switchWarehouseFailure = _ownershipFailure;
+          success = false;
+          break;
+        }
+        _session = updatedSession;
         _publishOwnershipChanges(activeSession, _session);
         _switchWarehouseFailure = null;
-        return true;
-      },
-      failure: (failure) {
+        success = true;
+      case FailureResult<Warehouse>(failure: final failure):
         _switchWarehouseFailure = failure;
-        return false;
-      },
-    );
+        success = false;
+    }
 
     _isSwitchingWarehouse = false;
     notifyListeners();
     return success;
   }
 
-  void expireSession({String message = '登录已过期，请重新登录'}) {
+  Future<OfflineOwnershipReport?> expireSession({
+    AuthRepository? authRepository,
+    String message = '登录已过期，请重新登录',
+  }) async {
     final previous = _session;
+    final accountId = previous?.user.id.toString();
+    final report = accountId == null
+        ? null
+        : await _runOwnership(
+            OfflineOwnershipIntent.tokenExpiry(accountId: accountId),
+          );
+    final repository = authRepository;
+    if (repository is AuthCredentialInvalidator) {
+      await (repository as AuthCredentialInvalidator).expireCredentials();
+    } else {
+      await repository?.logout();
+    }
     _session = null;
     _restoreFailure = null;
     _switchWarehouseFailure = null;
@@ -180,16 +233,32 @@ final class AuthSessionController extends ChangeNotifier {
     _clearSourceMetadata();
     _publishOwnershipChanges(previous, _session);
     notifyListeners();
+    return report;
   }
 
-  void logout() {
+  Future<OfflineOwnershipReport?> logout({
+    required AuthRepository authRepository,
+    DraftRetentionChoice draftRetention = DraftRetentionChoice.delete,
+  }) async {
     if (_session == null &&
         _restoreFailure == null &&
         _sessionMessage == null) {
-      return;
+      await authRepository.logout();
+      return null;
     }
 
     final previous = _session;
+    final accountId = previous?.user.id.toString();
+    final report = accountId == null
+        ? null
+        : await _runOwnership(
+            OfflineOwnershipIntent.logout(
+              accountId: accountId,
+              draftRetention: draftRetention,
+            ),
+          );
+    if (report != null && !report.completed) return report;
+    await authRepository.logout();
     _session = null;
     _restoreFailure = null;
     _switchWarehouseFailure = null;
@@ -197,6 +266,106 @@ final class AuthSessionController extends ChangeNotifier {
     _clearSourceMetadata();
     _publishOwnershipChanges(previous, _session);
     notifyListeners();
+    return report;
+  }
+
+  Future<bool> _prepareOwnershipChange(
+    AuthSession? previous,
+    AuthSession? current,
+  ) async {
+    if (current == null) return true;
+    final currentAccountId = current.user.id.toString();
+    if (previous == null) {
+      final report = await _runOwnership(
+        OfflineOwnershipIntent.reauthenticated(accountId: currentAccountId),
+      );
+      return report?.completed ?? true;
+    }
+
+    final previousAccountId = previous.user.id.toString();
+    if (previousAccountId != currentAccountId) {
+      final report = await _runOwnership(
+        OfflineOwnershipIntent.accountSwitch(
+          previousAccountId: previousAccountId,
+          currentAccountId: currentAccountId,
+        ),
+      );
+      return report?.completed ?? true;
+    }
+
+    if (_authorizationFingerprint(previous) !=
+        _authorizationFingerprint(current)) {
+      final report = await _runOwnership(
+        OfflineOwnershipIntent.permissionRefresh(accountId: currentAccountId),
+      );
+      if (report != null && !report.completed) return false;
+    }
+    final previousWarehouseId = previous.currentWarehouse?.id;
+    final currentWarehouseId = current.currentWarehouse?.id;
+    if (previousWarehouseId != null &&
+        currentWarehouseId != null &&
+        previousWarehouseId != currentWarehouseId) {
+      final report = await _runOwnership(
+        OfflineOwnershipIntent.warehouseSwitch(
+          accountId: currentAccountId,
+          previousWarehouseId: previousWarehouseId,
+          currentWarehouseId: currentWarehouseId,
+        ),
+      );
+      if (report != null && !report.completed) return false;
+    }
+    return true;
+  }
+
+  Future<OfflineOwnershipReport?> _runOwnership(
+    OfflineOwnershipIntent intent,
+  ) async {
+    final coordinator = ownershipCoordinator;
+    if (coordinator == null) {
+      _ownershipFailure = null;
+      return null;
+    }
+    _isOwnershipTransitioning = true;
+    _ownershipFailure = null;
+    notifyListeners();
+    try {
+      final report = await coordinator.apply(intent);
+      _lastOwnershipReport = report;
+      if (!report.completed) {
+        _ownershipFailure = LocalStorageFailure(
+          message: report.failures.map((failure) => failure.message).join(' '),
+          cause: report,
+        );
+      }
+      return report;
+    } on Object catch (error) {
+      _ownershipFailure = LocalStorageFailure(
+        message: '离线数据归属处理失败',
+        cause: error,
+      );
+      final report = OfflineOwnershipReport(
+        reason: intent.reason,
+        accountId: intent.accountId,
+        executedCounts: const OfflineOwnershipCounts(),
+        failures: [
+          OfflineOwnershipFailure(
+            step: OfflineOwnershipStep.store,
+            message: _ownershipFailure!.message,
+            cause: error,
+          ),
+        ],
+      );
+      _lastOwnershipReport = report;
+      return report;
+    } finally {
+      _isOwnershipTransitioning = false;
+      notifyListeners();
+    }
+  }
+
+  String _authorizationFingerprint(AuthSession session) {
+    final permissions = session.user.permissionCodes.toList()..sort();
+    return '${session.user.roleCode}:${permissions.join(',')}';
   }
 
   void _clearSourceMetadata() {

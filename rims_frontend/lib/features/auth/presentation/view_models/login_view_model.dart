@@ -1,5 +1,7 @@
 import 'package:flutter/foundation.dart';
 
+import '../../../../core/result/result.dart';
+import '../../domain/entities/auth_session.dart';
 import '../../domain/repositories/auth_repository.dart';
 import 'auth_session_controller.dart';
 
@@ -60,17 +62,21 @@ final class LoginViewModel extends ChangeNotifier {
 
     _isLoading = false;
 
-    return result.when(
-      success: (session) {
-        sessionController.startSession(session);
+    return switch (result) {
+      Success<AuthSession>(data: final session) => () async {
+        final started = await sessionController.startSession(session);
+        if (!started) {
+          _errorMessage =
+              sessionController.ownershipFailure?.message ?? '无法切换本机离线数据归属';
+        }
         notifyListeners();
-        return true;
-      },
-      failure: (failure) {
+        return started;
+      }(),
+      FailureResult<AuthSession>(failure: final failure) => () {
         _errorMessage = failure.message;
         notifyListeners();
         return false;
-      },
-    );
+      }(),
+    };
   }
 }

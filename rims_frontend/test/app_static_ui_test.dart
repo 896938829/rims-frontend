@@ -326,8 +326,10 @@ void main() {
     await _login(tester);
     await tester.tap(find.text('我的'));
     await tester.pumpAndSettle();
-    await tester.ensureVisible(find.text('退出登录'));
+    await _scrollToProfileLogout(tester);
     await tester.tap(find.text('退出登录'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('profile-logout-delete-drafts')));
     await tester.pumpAndSettle();
 
     expect(find.text('登录'), findsWidgets);
@@ -340,8 +342,10 @@ void main() {
     await _login(tester);
     await tester.tap(find.text('我的'));
     await tester.pumpAndSettle();
-    await tester.ensureVisible(find.text('退出登录'));
+    await _scrollToProfileLogout(tester);
     await tester.tap(find.text('退出登录'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('profile-logout-delete-drafts')));
     await tester.pumpAndSettle();
 
     expect(authRepository.logoutCallCount, 1);
@@ -528,6 +532,18 @@ void main() {
       expect(find.text('销售出库'), findsOneWidget);
     },
   );
+}
+
+Future<void> _scrollToProfileLogout(WidgetTester tester) async {
+  for (
+    var index = 0;
+    index < 20 && find.text('退出登录').evaluate().isEmpty;
+    index += 1
+  ) {
+    await tester.drag(find.byType(ListView).first, const Offset(0, -300));
+    await tester.pumpAndSettle();
+  }
+  expect(find.text('退出登录'), findsOneWidget);
 }
 
 Future<void> _pumpApp(

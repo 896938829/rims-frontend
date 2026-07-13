@@ -36,6 +36,7 @@ import 'features/inventory/data/repositories/inventory_repository_impl.dart';
 import 'features/inventory/domain/repositories/inventory_repository.dart';
 import 'features/offline/domain/services/offline_store.dart';
 import 'features/offline/data/database/offline_database.dart';
+import 'features/offline/data/database/offline_database_factory.dart';
 import 'features/offline/data/datasources/operation_status_remote_datasource.dart';
 import 'features/offline/data/repositories/drift_outbox_repository.dart';
 import 'features/offline/data/repositories/memory_outbox_repository.dart';
@@ -43,6 +44,8 @@ import 'features/offline/data/services/connectivity_network_status_service.dart'
 import 'features/offline/data/services/attachment_outbox_handler.dart';
 import 'features/offline/data/services/document_outbox_handler.dart';
 import 'features/offline/data/services/outbox_cleanup_coordinator.dart';
+import 'features/offline/data/services/outbox_review_invalidator.dart';
+import 'features/offline/data/services/offline_scan_ownership_adapter.dart';
 import 'features/offline/data/repositories/cached_auth_repository.dart';
 import 'features/offline/data/repositories/cached_inventory_repository.dart';
 import 'features/offline/data/repositories/cached_documents_repository.dart';
@@ -57,6 +60,7 @@ import 'features/offline/domain/services/attachment_staging_protection.dart';
 import 'features/offline/domain/services/outbox_executor.dart';
 import 'features/offline/domain/services/outbox_permission_policy.dart';
 import 'features/offline/domain/services/outbox_state_machine.dart';
+import 'features/offline/domain/services/offline_ownership_service.dart';
 import 'features/reports/data/datasources/reports_remote_datasource.dart';
 import 'features/reports/data/repositories/reports_repository_impl.dart';
 import 'features/reports/domain/repositories/reports_repository.dart';
@@ -70,12 +74,14 @@ class MainApp extends StatefulWidget {
     required this.offlineStore,
     this.networkStatusService,
     this.outboxHandlers = const [],
+    this.offlineDatabaseKeyManager,
     super.key,
   });
 
   final OfflineStore offlineStore;
   final NetworkStatusService? networkStatusService;
   final List<OutboxOperationHandler> outboxHandlers;
+  final OfflineDatabaseKeyManager? offlineDatabaseKeyManager;
 
   @override
   State<MainApp> createState() => _MainAppState();
@@ -94,10 +100,6 @@ final class _MainAppState extends State<MainApp> {
   late final AttachmentsRepositoryImpl _attachmentsRepository;
   late final PlatformAttachmentShareService _attachmentShareService;
   StreamSubscription<TokenExpiredEvent>? _tokenExpiredSubscription;
-  StreamSubscription<AccountOwnershipChangedEvent>?
-  _accountOwnershipSubscription;
-  StreamSubscription<WarehouseOwnershipChangedEvent>?
-  _warehouseOwnershipSubscription;
   late final ApiClient _apiClient;
   late final AuthRepository _authRepository;
   late final DocumentsRepository _documentsRepository;
@@ -108,18 +110,15 @@ final class _MainAppState extends State<MainApp> {
   late final OperationStatusRemoteDataSource _operationStatusDataSource;
   late final OutboxExecutor _outboxExecutor;
   late final OutboxCleanupCoordinator _outboxCleanupCoordinator;
+  late final OfflineOwnershipService _offlineOwnershipService;
   late final AdminRepositoryImpl _adminRepository;
   late final GoRouter _router;
   late final NetworkStatusService _networkStatusService;
   Dio? _healthClient;
-  String? _activeUserId;
 
   @override
   void initState() {
     super.initState();
-    _sessionController = AuthSessionController(eventBus: _eventBus);
-    _scanLookupCache = ScanLookupCache(offlineStore: widget.offlineStore);
-    _sessionController.addListener(_handleSessionOwnership);
     _networkStatusService =
         widget.networkStatusService ?? _createNetworkStatusService();
     final fieldConfig = FieldOperationsTestConfig.current;
@@ -132,6 +131,35 @@ final class _MainAppState extends State<MainApp> {
     _attachmentStagingStore = FileAttachmentStagingStore(
       rootDirectory: getApplicationSupportDirectory,
       idFactory: const Uuid().v4,
+    );
+    _outboxRepository = outboxRepositoryForOfflineStore(widget.offlineStore);
+    _scanLookupCache = ScanLookupCache(offlineStore: widget.offlineStore);
+    final ownershipStore = widget.offlineStore;
+    if (ownershipStore is! OfflineOwnershipStore) {
+      throw StateError('Offline store must support ownership operations.');
+    }
+    final databaseKeyManager =
+        widget.offlineDatabaseKeyManager ??
+        (widget.offlineStore is OfflineDatabase
+            ? OfflineDatabaseKeyRotator(
+                readKey: _secureStorage.readOfflineDatabaseKey,
+                writeKey: _secureStorage.saveOfflineDatabaseKey,
+                rekey: (widget.offlineStore as OfflineDatabase).rekey,
+              )
+            : MemoryOfflineDatabaseKeyManager());
+    _offlineOwnershipService = OfflineOwnershipService(
+      store: ownershipStore as OfflineOwnershipStore,
+      files: _attachmentStagingStore,
+      scans: OfflineScanOwnershipAdapter(
+        sessions: _scanSessionStore,
+        lookupCache: _scanLookupCache,
+      ),
+      reviews: OutboxReviewInvalidator(repository: _outboxRepository),
+      databaseKeys: databaseKeyManager,
+    );
+    _sessionController = AuthSessionController(
+      eventBus: _eventBus,
+      ownershipCoordinator: _offlineOwnershipService,
     );
     _attachmentShareService = PlatformAttachmentShareService();
     unawaited(_attachmentPicker.recoverLostData());
@@ -180,6 +208,7 @@ final class _MainAppState extends State<MainApp> {
       store: widget.offlineStore,
       tokenStorage: _secureStorage,
       accountStorage: _secureStorage,
+      ownershipCoordinator: _offlineOwnershipService,
     );
     final documentsRemoteDataSource = ApiDocumentsRemoteDataSource(_apiClient);
     final documentsRepository = DocumentsRepositoryImpl(
@@ -214,7 +243,6 @@ final class _MainAppState extends State<MainApp> {
     _documentDraftRepository = DriftDocumentDraftRepository(
       store: widget.offlineStore,
     );
-    _outboxRepository = outboxRepositoryForOfflineStore(widget.offlineStore);
     _operationStatusDataSource = ApiOperationStatusRemoteDataSource(_apiClient);
     final handlers = <OutboxOperationKind, OutboxOperationHandler>{
       OutboxOperationKind.attachmentUpload: AttachmentOutboxHandler(
@@ -272,37 +300,19 @@ final class _MainAppState extends State<MainApp> {
       documentDraftRepository: _documentDraftRepository,
       outboxRepository: _outboxRepository,
       outboxExecutor: _outboxExecutor,
+      offlineOwnershipService: _offlineOwnershipService,
     );
     _tokenExpiredSubscription = _eventBus.on<TokenExpiredEvent>().listen((_) {
-      unawaited(_authRepository.logout());
-      _sessionController.expireSession();
+      unawaited(
+        _sessionController.expireSession(authRepository: _authRepository),
+      );
     });
-    _accountOwnershipSubscription = _eventBus
-        .on<AccountOwnershipChangedEvent>()
-        .listen((event) {
-          final previous = event.previousAccountId;
-          if (previous != null && previous != event.currentAccountId) {
-            unawaited(widget.offlineStore.clearAccount(previous));
-          }
-        });
-    _warehouseOwnershipSubscription = _eventBus
-        .on<WarehouseOwnershipChangedEvent>()
-        .listen((event) {
-          final previous = event.previousWarehouseId;
-          if (previous != null && previous != event.currentWarehouseId) {
-            unawaited(
-              widget.offlineStore.invalidateWarehouseCache(
-                accountId: event.accountId,
-                warehouseId: previous,
-              ),
-            );
-          }
-        });
-    unawaited(_sessionController.restoreSession(_authRepository));
+    unawaited(_restoreSessionAndMaintain());
     unawaited(_networkStatusService.verify());
   }
 
   OutboxExecutionContext? _outboxExecutionContext() {
+    if (!_sessionController.canSync) return null;
     final user = _sessionController.currentUser;
     final warehouse = _sessionController.currentWarehouse;
     if (user == null || warehouse == null) return null;
@@ -314,14 +324,11 @@ final class _MainAppState extends State<MainApp> {
 
   @override
   void dispose() {
-    _sessionController.removeListener(_handleSessionOwnership);
     final picker = _attachmentPicker;
     if (picker is FieldOperationsAttachmentPicker) {
       unawaited(picker.cleanup());
     }
     unawaited(_tokenExpiredSubscription?.cancel());
-    unawaited(_accountOwnershipSubscription?.cancel());
-    unawaited(_warehouseOwnershipSubscription?.cancel());
     unawaited(_eventBus.dispose());
     unawaited(_networkStatusService.dispose());
     _healthClient?.close(force: true);
@@ -353,19 +360,12 @@ final class _MainAppState extends State<MainApp> {
     );
   }
 
-  void _handleSessionOwnership() {
-    final nextUserId = _sessionController.session?.user.id.toString();
-    final previousUserId = _activeUserId;
-    _activeUserId = nextUserId;
-    if (nextUserId != null) {
-      unawaited(_maintainOfflineFiles(nextUserId));
+  Future<void> _restoreSessionAndMaintain() async {
+    await _sessionController.restoreSession(_authRepository);
+    final accountId = _sessionController.currentUser?.id.toString();
+    if (accountId != null && _sessionController.canAccessOfflineData) {
+      await _maintainOfflineFiles(accountId);
     }
-    if (previousUserId == null || previousUserId == nextUserId) {
-      return;
-    }
-    unawaited(_scanLookupCache.clearForUser(previousUserId));
-    unawaited(_scanSessionStore.clearForUser(previousUserId));
-    unawaited(_attachmentStagingStore.clearForUser(previousUserId));
   }
 
   Future<void> _maintainOfflineFiles(String accountId) async {
