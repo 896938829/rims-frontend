@@ -194,6 +194,19 @@ final class MemoryOfflineStore
       draftAttachmentRequestIds: {
         for (final draft in drafts) ...draft.attachmentStagingIds,
       },
+      contentIdentities: {
+        for (final record in _cache.values)
+          if (record.key.accountId == accountId)
+            'cache:${record.key.namespace}:${record.key.warehouseId}:'
+                '${record.key.entityKey}:${record.schemaVersion}:'
+                '${record.fetchedAt.toIso8601String()}',
+        for (final draft in drafts)
+          'draft:${draft.id}:${draft.version}:${draft.updatedAt.toIso8601String()}:'
+              '${(draft.attachmentStagingIds.toList()..sort()).join(',')}',
+        for (final operation in operations)
+          'outbox:${operation.operationId}:${operation.state.name}:'
+              '${operation.updatedAt.toIso8601String()}',
+      },
     );
   }
 

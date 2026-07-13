@@ -22,6 +22,10 @@ final class AuthInterceptor extends Interceptor {
     RequestInterceptorHandler handler,
   ) async {
     try {
+      if (options.headers.containsKey('Authorization')) {
+        handler.next(options);
+        return;
+      }
       final token = await _tokenReader();
 
       if (token != null && token.isNotEmpty) {

@@ -15,7 +15,7 @@ abstract interface class AuthRemoteDataSource {
     required String password,
   });
 
-  Future<Result<List<WarehouseModel>>> loadWarehouses();
+  Future<Result<List<WarehouseModel>>> loadWarehouses({String? accessToken});
 
   Future<Result<WarehouseModel?>> switchCurrentWarehouse(int warehouseId);
 }
@@ -52,9 +52,14 @@ final class ApiAuthRemoteDataSource implements AuthRemoteDataSource {
   }
 
   @override
-  Future<Result<List<WarehouseModel>>> loadWarehouses() async {
+  Future<Result<List<WarehouseModel>>> loadWarehouses({
+    String? accessToken,
+  }) async {
     final result = await _apiClient.get<dynamic>(
       ApiEndpoints.currentUserWarehouses,
+      options: accessToken == null
+          ? null
+          : Options(headers: {'Authorization': 'Bearer $accessToken'}),
     );
 
     return _mapEnvelope(result, _parseWarehouses);

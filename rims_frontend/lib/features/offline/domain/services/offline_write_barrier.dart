@@ -46,11 +46,12 @@ final class OfflineWriteBarrier implements OfflineMutationParticipant {
       return Future<T>.error(ArgumentError.value(accountIds, 'accountIds'));
     }
     final inherited = Zone.current[this];
-    if (inherited is _WritePermit && inherited.covers(normalized)) {
-      return Future<T>.sync(operation);
-    }
-    if (_globalBlocks > 0 ||
-        normalized.any((accountId) => (_accountBlocks[accountId] ?? 0) > 0)) {
+    final hasPermit = inherited is _WritePermit && inherited.covers(normalized);
+    if (!hasPermit &&
+        (_globalBlocks > 0 ||
+            normalized.any(
+              (accountId) => (_accountBlocks[accountId] ?? 0) > 0,
+            ))) {
       return Future<T>.error(OfflineWriteBlockedException(normalized));
     }
     for (final accountId in normalized) {
@@ -61,10 +62,13 @@ final class OfflineWriteBarrier implements OfflineMutationParticipant {
       );
     }
     _signalStateChange();
-    return runZoned(
-      () => Future<T>.sync(operation),
-      zoneValues: {this: _WritePermit(normalized, global: false)},
-    ).whenComplete(() {
+    final future = hasPermit
+        ? Future<T>.sync(operation)
+        : runZoned(
+            () => Future<T>.sync(operation),
+            zoneValues: {this: _WritePermit(normalized, global: false)},
+          );
+    return future.whenComplete(() {
       for (final accountId in normalized) {
         final remaining = (_activeByAccount[accountId] ?? 1) - 1;
         if (remaining == 0) {
@@ -79,20 +83,21 @@ final class OfflineWriteBarrier implements OfflineMutationParticipant {
 
   Future<T> protectAll<T>(Future<T> Function() operation) {
     final inherited = Zone.current[this];
-    if (inherited is _WritePermit && inherited.global) {
-      return Future<T>.sync(operation);
-    }
-    if (_globalBlocks > 0 || _accountBlocks.isNotEmpty) {
+    final hasPermit = inherited is _WritePermit && inherited.global;
+    if (!hasPermit && (_globalBlocks > 0 || _accountBlocks.isNotEmpty)) {
       return Future<T>.error(
         OfflineWriteBlockedException(_accountBlocks.keys.toSet()),
       );
     }
     _activeGlobal += 1;
     _signalStateChange();
-    return runZoned(
-      () => Future<T>.sync(operation),
-      zoneValues: {this: const _WritePermit({}, global: true)},
-    ).whenComplete(() {
+    final future = hasPermit
+        ? Future<T>.sync(operation)
+        : runZoned(
+            () => Future<T>.sync(operation),
+            zoneValues: {this: const _WritePermit({}, global: true)},
+          );
+    return future.whenComplete(() {
       _activeGlobal -= 1;
       _signalStateChange();
     });
@@ -199,7 +204,10 @@ final class WriteBarrierOfflineStore implements OfflineStore {
 
   @override
   Future<CacheRecord?> readCache(CacheKey key, {int? schemaVersion}) =>
-      delegate.readCache(key, schemaVersion: schemaVersion);
+      barrier.protect(
+        accountId: key.accountId,
+        operation: () => delegate.readCache(key, schemaVersion: schemaVersion),
+      );
 
   @override
   Future<void> enforceCacheLimit({
@@ -250,8 +258,10 @@ final class WriteBarrierOfflineStore implements OfflineStore {
       );
 
   @override
-  Future<List<DocumentDraft>> listDrafts(String accountId) =>
-      delegate.listDrafts(accountId);
+  Future<List<DocumentDraft>> listDrafts(String accountId) => barrier.protect(
+    accountId: accountId,
+    operation: () => delegate.listDrafts(accountId),
+  );
 
   @override
   Future<void> deleteDraft({
@@ -276,7 +286,10 @@ final class WriteBarrierOfflineStore implements OfflineStore {
 
   @override
   Future<List<OutboxOperation>> readyOperations(String accountId) =>
-      delegate.readyOperations(accountId);
+      barrier.protect(
+        accountId: accountId,
+        operation: () => delegate.readyOperations(accountId),
+      );
 
   @override
   Future<void> transition(
@@ -323,6 +336,11 @@ final class WriteBarrierOutboxRepository implements OutboxRepository {
     }
   }
 
+  Future<Result<T>> _read<T>(
+    String accountId,
+    Future<Result<T>> Function() operation,
+  ) => _write(accountId, operation);
+
   @override
   Future<Result<List<OutboxOperation>>> enqueueGraph(OutboxGraph graph) async {
     final accountIds = graph.operations.map((value) => value.accountId).toSet();
@@ -353,22 +371,28 @@ final class WriteBarrierOutboxRepository implements OutboxRepository {
 
   @override
   Future<Result<List<OutboxOperation>>> list(String accountId) =>
-      delegate.list(accountId);
+      _read(accountId, () => delegate.list(accountId));
 
   @override
   Future<Result<List<OutboxOperation>>> loadConnectedComponent({
     required String accountId,
     required Set<String> operationIds,
-  }) => delegate.loadConnectedComponent(
-    accountId: accountId,
-    operationIds: operationIds,
+  }) => _read(
+    accountId,
+    () => delegate.loadConnectedComponent(
+      accountId: accountId,
+      operationIds: operationIds,
+    ),
   );
 
   @override
   Future<Result<List<OutboxOperation>>> ready(
     String accountId, {
     String? reviewStamp,
-  }) => delegate.ready(accountId, reviewStamp: reviewStamp);
+  }) => _read(
+    accountId,
+    () => delegate.ready(accountId, reviewStamp: reviewStamp),
+  );
 
   @override
   Future<Result<OutboxOperation>> confirm({
@@ -457,15 +481,18 @@ final class WriteBarrierOutboxRepository implements OutboxRepository {
   Future<Result<Map<String, OutboxOperationOutput>>> loadDependencyOutputs({
     required String accountId,
     required String operationId,
-  }) => delegate.loadDependencyOutputs(
-    accountId: accountId,
-    operationId: operationId,
+  }) => _read(
+    accountId,
+    () => delegate.loadDependencyOutputs(
+      accountId: accountId,
+      operationId: operationId,
+    ),
   );
 
   @override
   Future<Result<List<OutboxCleanupIntent>>> listCleanupIntents(
     String accountId,
-  ) => delegate.listCleanupIntents(accountId);
+  ) => _read(accountId, () => delegate.listCleanupIntents(accountId));
 
   @override
   Future<Result<void>> recordCleanupFailure({

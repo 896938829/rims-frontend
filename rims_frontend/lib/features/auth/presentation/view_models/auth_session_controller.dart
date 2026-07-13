@@ -29,6 +29,8 @@ final class AuthSessionController extends ChangeNotifier {
   Failure? _ownershipFailure;
   OfflineOwnershipReport? _lastOwnershipReport;
   bool _credentialsInvalidated = false;
+  int _authEpoch = 0;
+  bool _disposed = false;
 
   AuthSession? get session => _session;
   AppUser? get currentUser => _session?.user;
@@ -49,6 +51,9 @@ final class AuthSessionController extends ChangeNotifier {
   Failure? get ownershipFailure => _ownershipFailure;
   OfflineOwnershipReport? get lastOwnershipReport => _lastOwnershipReport;
   bool get canAuthenticateRequests => !_credentialsInvalidated;
+  int get authEpoch => _authEpoch;
+
+  int beginAuthenticationAttempt() => ++_authEpoch;
   bool get canAccessOfflineData {
     final accountId = currentUser?.id.toString();
     return !_isOwnershipTransitioning &&
@@ -78,10 +83,11 @@ final class AuthSessionController extends ChangeNotifier {
     AuthRepository authRepository, {
     required bool preserveActiveSessionOnFailure,
   }) async {
-    if (_isRestoring) {
+    if (_isRestoring || _disposed) {
       return;
     }
 
+    var epoch = ++_authEpoch;
     final activeSession = _session;
     _isRestoring = true;
     _restoreFailure = null;
@@ -89,6 +95,25 @@ final class AuthSessionController extends ChangeNotifier {
 
     try {
       final result = await authRepository.restoreSession();
+      final carriesSecurityFailure = switch (result) {
+        FailureResult<AuthSession?>(
+          failure: AuthenticationFailure() ||
+              AuthorizationFailure() ||
+              RevocationCleanupFailure(),
+        ) =>
+          true,
+        _ => false,
+      };
+      if (!_isCurrent(epoch) &&
+          _authEpoch == epoch + 1 &&
+          _session == null &&
+          _credentialsInvalidated &&
+          carriesSecurityFailure) {
+        // The repository synchronously invalidated this exact restore while it
+        // continued its durable cleanup. Keep observing its typed outcome.
+        epoch = _authEpoch;
+      }
+      if (!_isCurrent(epoch)) return;
 
       switch (result) {
         case Success<AuthSession?>(data: final session):
@@ -101,6 +126,7 @@ final class AuthSessionController extends ChangeNotifier {
             activeSession,
             candidate,
           );
+          if (!_isCurrent(epoch)) return;
           if (ownershipReady) {
             _session = candidate;
             _credentialsInvalidated = candidate == null;
@@ -144,6 +170,7 @@ final class AuthSessionController extends ChangeNotifier {
           if (_session == null) _clearSourceMetadata();
       }
     } on Object catch (error) {
+      if (!_isCurrent(epoch)) return;
       _session = null;
       _credentialsInvalidated = true;
       _restoreFailure = LocalStorageFailure(
@@ -154,14 +181,21 @@ final class AuthSessionController extends ChangeNotifier {
       _clearSourceMetadata();
     } finally {
       _isRestoring = false;
-      _publishOwnershipChanges(activeSession, _session);
-      notifyListeners();
+      if (_isCurrent(epoch)) {
+        _publishOwnershipChanges(activeSession, _session);
+        notifyListeners();
+      }
     }
   }
 
-  Future<bool> startSession(AuthSession session) async {
+  Future<bool> startSession(AuthSession session, {int? expectedEpoch}) async {
+    if (_disposed || (expectedEpoch != null && expectedEpoch != _authEpoch)) {
+      return false;
+    }
+    final epoch = ++_authEpoch;
     final previous = _session;
     if (!await _prepareOwnershipChange(previous, session)) return false;
+    if (!_isCurrent(epoch)) return false;
     _session = session;
     _credentialsInvalidated = false;
     _restoreFailure = null;
@@ -191,50 +225,66 @@ final class AuthSessionController extends ChangeNotifier {
     }
 
     _isSwitchingWarehouse = true;
+    final epoch = _authEpoch;
     _switchWarehouseFailure = null;
     notifyListeners();
 
-    final result = await authRepository.switchCurrentWarehouse(warehouse);
+    try {
+      final result = await authRepository.switchCurrentWarehouse(warehouse);
+      if (!_isCurrent(epoch)) return false;
 
-    final bool success;
-    switch (result) {
-      case Success<Warehouse>(data: final confirmedWarehouse):
-        final updatedWarehouses = activeSession.warehouses
-            .map(
-              (candidate) => candidate.id == confirmedWarehouse.id
-                  ? confirmedWarehouse
-                  : candidate,
-            )
-            .toList(growable: false);
-        final updatedSession = AuthSession(
-          accessToken: activeSession.accessToken,
-          user: activeSession.user,
-          currentWarehouse: confirmedWarehouse,
-          warehouses: updatedWarehouses,
-        );
-        if (!await _prepareOwnershipChange(activeSession, updatedSession)) {
-          _switchWarehouseFailure = _ownershipFailure;
+      final bool success;
+      switch (result) {
+        case Success<Warehouse>(data: final confirmedWarehouse):
+          final updatedWarehouses = activeSession.warehouses
+              .map(
+                (candidate) => candidate.id == confirmedWarehouse.id
+                    ? confirmedWarehouse
+                    : candidate,
+              )
+              .toList(growable: false);
+          final updatedSession = AuthSession(
+            accessToken: activeSession.accessToken,
+            user: activeSession.user,
+            currentWarehouse: confirmedWarehouse,
+            warehouses: updatedWarehouses,
+          );
+          if (!await _prepareOwnershipChange(activeSession, updatedSession) ||
+              !_isCurrent(epoch)) {
+            _switchWarehouseFailure = _ownershipFailure;
+            success = false;
+            break;
+          }
+          _session = updatedSession;
+          _publishOwnershipChanges(activeSession, _session);
+          _switchWarehouseFailure = null;
+          success = true;
+        case FailureResult<Warehouse>(failure: final failure):
+          _switchWarehouseFailure = failure;
           success = false;
-          break;
-        }
-        _session = updatedSession;
-        _publishOwnershipChanges(activeSession, _session);
-        _switchWarehouseFailure = null;
-        success = true;
-      case FailureResult<Warehouse>(failure: final failure):
-        _switchWarehouseFailure = failure;
-        success = false;
+      }
+      return success;
+    } on Object catch (error) {
+      if (_isCurrent(epoch)) {
+        _switchWarehouseFailure = LocalStorageFailure(
+          message: '切换仓库失败，请重试',
+          cause: error,
+        );
+      }
+      return false;
+    } finally {
+      _isSwitchingWarehouse = false;
+      if (_isCurrent(epoch)) {
+        notifyListeners();
+      }
     }
-
-    _isSwitchingWarehouse = false;
-    notifyListeners();
-    return success;
   }
 
   Future<OfflineOwnershipReport?> expireSession({
     AuthRepository? authRepository,
     String message = '登录已过期，请重新登录',
   }) async {
+    ++_authEpoch;
     final previous = _session;
     final accountId = previous?.user.id.toString();
     _session = null;
@@ -277,6 +327,7 @@ final class AuthSessionController extends ChangeNotifier {
     required AuthRepository authRepository,
     DraftRetentionChoice draftRetention = DraftRetentionChoice.delete,
   }) async {
+    ++_authEpoch;
     if (_session == null &&
         _restoreFailure == null &&
         _sessionMessage == null) {
@@ -308,6 +359,7 @@ final class AuthSessionController extends ChangeNotifier {
   }
 
   void invalidateRevokedSession() {
+    ++_authEpoch;
     final previous = _session;
     _session = null;
     _credentialsInvalidated = true;
@@ -319,6 +371,7 @@ final class AuthSessionController extends ChangeNotifier {
   }
 
   void invalidateExpiredSession() {
+    ++_authEpoch;
     final previous = _session;
     _session = null;
     _credentialsInvalidated = true;
@@ -504,5 +557,14 @@ final class AuthSessionController extends ChangeNotifier {
     }
 
     return null;
+  }
+
+  bool _isCurrent(int epoch) => !_disposed && epoch == _authEpoch;
+
+  @override
+  void dispose() {
+    _disposed = true;
+    ++_authEpoch;
+    super.dispose();
   }
 }

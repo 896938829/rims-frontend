@@ -298,6 +298,29 @@ final class ScanLookupCache {
     await Future.wait(matchingKeys.map(storage.delete));
   }
 
+  Future<void> clearForWarehouse(String userId, int warehouseId) async {
+    await offlineStore?.invalidateWarehouseCache(
+      accountId: userId,
+      warehouseId: warehouseId,
+    );
+    await storage.delete(storageKey(userId: userId, warehouseId: warehouseId));
+  }
+
+  Future<Set<String>> legacyContentIdentitiesForUser(String userId) async {
+    final prefix = '$_keyPrefix${Uri.encodeComponent(userId)}.';
+    final keys = await storage.keys(prefix: prefix);
+    final identities = <String>{};
+    for (final key in keys) {
+      identities.add('lookup:$key:${await storage.read(key) ?? ''}');
+    }
+    return identities;
+  }
+
+  Future<int> legacyCountForUser(String userId) async {
+    final prefix = '$_keyPrefix${Uri.encodeComponent(userId)}.';
+    return (await storage.keys(prefix: prefix)).length;
+  }
+
   Future<void> clearAllLegacy() async {
     final matchingKeys = await storage.keys(prefix: _keyPrefix);
     await Future.wait(matchingKeys.map(storage.delete));

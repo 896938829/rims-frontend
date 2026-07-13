@@ -316,6 +316,49 @@ void main() {
     );
 
     test(
+      'switchWarehouse contains thrown storage errors and can retry',
+      () async {
+        final controller = AuthSessionController();
+        await controller.startSession(_multiWarehouseSession);
+        final failed = await controller.switchWarehouse(
+          authRepository: _FakeAuthRepository(
+            switchFuture: Future.error(StateError('storage failed')),
+          ),
+          warehouse: _beijingWarehouse,
+        );
+        expect(failed, isFalse);
+        expect(controller.isSwitchingWarehouse, isFalse);
+        expect(controller.switchWarehouseFailure, isA<LocalStorageFailure>());
+
+        final retried = await controller.switchWarehouse(
+          authRepository: _FakeAuthRepository(
+            switchWarehouseResult: const Success(_beijingWarehouse),
+          ),
+          warehouse: _beijingWarehouse,
+        );
+        expect(retried, isTrue);
+      },
+    );
+
+    test('blocked restore cannot resurrect a session after logout', () async {
+      final controller = AuthSessionController();
+      await controller.startSession(_session);
+      final blocked = Completer<Result<AuthSession?>>();
+      final restore = controller.refreshSession(
+        _FakeAuthRepository(restoreFuture: blocked.future),
+      );
+      await Future<void>.delayed(Duration.zero);
+      await controller.logout(authRepository: _FakeAuthRepository());
+
+      blocked.complete(const Success<AuthSession?>(_session));
+      await restore;
+
+      expect(controller.session, isNull);
+      expect(controller.canAuthenticateRequests, isFalse);
+      expect(controller.isRestoring, isFalse);
+    });
+
+    test(
       'session context generation changes only after ownership changes',
       () async {
         final sessionController = AuthSessionController();
@@ -392,6 +435,7 @@ final class _FakeAuthRepository implements AuthRepository {
       UnknownFailure(),
     ),
     this.restoreFuture,
+    this.switchFuture,
   }) : _result = result ?? const FailureResult<AuthSession>(UnknownFailure()),
        _restoreResult =
            restoreResult ?? const FailureResult<AuthSession?>(UnknownFailure());
@@ -400,6 +444,7 @@ final class _FakeAuthRepository implements AuthRepository {
   final Result<AuthSession?> _restoreResult;
   final Result<Warehouse> switchWarehouseResult;
   final Future<Result<AuthSession?>>? restoreFuture;
+  final Future<Result<Warehouse>>? switchFuture;
   int loginCallCount = 0;
   int restoreCallCount = 0;
   int logoutCallCount = 0;
@@ -427,7 +472,7 @@ final class _FakeAuthRepository implements AuthRepository {
   @override
   Future<Result<Warehouse>> switchCurrentWarehouse(Warehouse warehouse) async {
     lastSwitchWarehouseId = warehouse.id;
-    return switchWarehouseResult;
+    return switchFuture ?? switchWarehouseResult;
   }
 
   @override

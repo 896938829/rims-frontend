@@ -6,6 +6,7 @@ import 'package:rims_frontend/core/events/app_event_bus.dart';
 import 'package:rims_frontend/core/result/failure.dart';
 import 'package:rims_frontend/core/result/result.dart';
 import 'package:rims_frontend/core/storage/app_secure_storage.dart';
+import 'package:rims_frontend/core/storage/pending_revocation_journal.dart';
 import 'package:rims_frontend/features/auth/data/datasources/auth_remote_datasource.dart';
 import 'package:rims_frontend/features/auth/data/models/auth_models.dart';
 import 'package:rims_frontend/features/auth/data/repositories/auth_repository_impl.dart';
@@ -491,10 +492,65 @@ void main() {
       expect(result, isA<FailureResult<AuthSession?>>());
       expect(delegate.logoutCalls, 1);
       expect(storage.token, isNull);
-      expect(storage.accountId, '7');
+      expect(storage.accountId, isNull);
       expect(storage.pendingRevocationAccountId, '7');
     },
   );
+
+  test('fallback revocation journal survives primary marker failure', () async {
+    final storage = _FakeSessionStorage(token: 'revoked-token')
+      ..accountId = '7'
+      ..failNext(_RevocationStorageFailure.saveMarker);
+    final journal = MemoryPendingRevocationJournal();
+    final firstOwnership = _RecordingOwnershipCoordinator()..failNext = true;
+    final first = CachedAuthRepository(
+      delegate: _FakeAuthRepository(
+        restoreResult: const FailureResult(AuthorizationFailure()),
+      ),
+      store: MemoryOfflineStore(),
+      tokenStorage: storage,
+      accountStorage: storage,
+      revocationStorage: storage,
+      revocationJournal: journal,
+      ownershipCoordinator: firstOwnership,
+      onSessionRevoked: () {},
+    );
+
+    expect(await first.restoreSession(), isA<FailureResult<AuthSession?>>());
+    expect(storage.token, isNull);
+    expect(storage.accountId, isNull);
+    expect(await journal.readAccountIds(), {'7'});
+
+    final loginDelegate = _FakeAuthRepository(
+      restoreResult: const Success<AuthSession?>(null),
+      loginResult: const Success(_session),
+    );
+    final restartedOwnership = _RecordingOwnershipCoordinator()
+      ..failNext = true;
+    final restarted = CachedAuthRepository(
+      delegate: loginDelegate,
+      store: MemoryOfflineStore(),
+      tokenStorage: storage,
+      accountStorage: storage,
+      revocationStorage: storage,
+      revocationJournal: journal,
+      ownershipCoordinator: restartedOwnership,
+      onSessionRevoked: () {},
+    );
+    expect(
+      await restarted.login(username: 'alice', password: 'secret'),
+      isA<FailureResult<AuthSession>>(),
+    );
+    expect(loginDelegate.loginCalls, 0);
+    expect(await journal.readAccountIds(), {'7'});
+
+    expect(
+      await restarted.login(username: 'alice', password: 'secret'),
+      isA<Success<AuthSession>>(),
+    );
+    expect(loginDelegate.loginCalls, 1);
+    expect(await journal.readAccountIds(), isEmpty);
+  });
 
   test(
     'revocation keeps the durable marker until account metadata is cleared',
@@ -560,7 +616,7 @@ void main() {
       await refresh;
       expect(controller.restoreFailure, isA<RevocationCleanupFailure>());
       expect(storage.token, isNull);
-      expect(storage.accountId, '7');
+      expect(storage.accountId, isNull);
 
       delegate.restoreResult = const Success<AuthSession?>(null);
       final retried = await repository.restoreSession();
@@ -623,9 +679,7 @@ void main() {
                 (intent) => intent.reason == OfflineOwnershipReason.revocation,
               )
               .length,
-          storageFailure == _RevocationStorageFailure.saveMarker
-              ? 1
-              : greaterThanOrEqualTo(2),
+          greaterThanOrEqualTo(2),
         );
       },
     );
@@ -981,8 +1035,9 @@ final class _MutableAuthRemoteDataSource implements AuthRemoteDataSource {
   Future<Result<AppUserModel>> loadCurrentUser() async => currentUserResult;
 
   @override
-  Future<Result<List<WarehouseModel>>> loadWarehouses() async =>
-      warehousesResult;
+  Future<Result<List<WarehouseModel>>> loadWarehouses({
+    String? accessToken,
+  }) async => warehousesResult;
 
   @override
   Future<Result<LoginResponseModel>> login({

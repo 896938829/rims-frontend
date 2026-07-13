@@ -532,6 +532,16 @@ ON outbox_operations (operation_id, account_id)
       draftAttachmentRequestIds: {
         for (final draft in drafts) ...draft.attachmentStagingIds,
       },
+      contentIdentities: {
+        for (final row in cacheRows)
+          'cache:${row.cacheId}:${row.recordSchemaVersion}:${row.fetchedAt.toIso8601String()}',
+        for (final draft in drafts)
+          'draft:${draft.id}:${draft.version}:${draft.updatedAt.toIso8601String()}:'
+              '${(draft.attachmentStagingIds.toList()..sort()).join(',')}',
+        for (final operation in operations)
+          'outbox:${operation.operationId}:${operation.operationState}:'
+              '${operation.updatedAt?.toIso8601String() ?? operation.createdAt.toIso8601String()}',
+      },
     );
   }
 

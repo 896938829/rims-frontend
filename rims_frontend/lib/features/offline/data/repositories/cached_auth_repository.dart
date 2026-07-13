@@ -1,6 +1,7 @@
 import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
 import '../../../../core/storage/app_secure_storage.dart';
+import '../../../../core/storage/pending_revocation_journal.dart';
 import '../../../auth/domain/entities/app_user.dart';
 import '../../../auth/domain/entities/auth_session.dart';
 import '../../../auth/domain/entities/warehouse.dart';
@@ -8,6 +9,7 @@ import '../../../auth/domain/repositories/auth_repository.dart';
 import '../../domain/entities/cache_snapshot.dart';
 import '../../domain/services/offline_store.dart';
 import '../../domain/services/offline_ownership_service.dart';
+import '../../domain/services/offline_write_barrier.dart';
 import '../services/cache_policy.dart';
 
 final class CachedAuthRepository
@@ -24,6 +26,8 @@ final class CachedAuthRepository
     required this.onSessionRevoked,
     this.onSessionExpired,
     this.ownershipCoordinator,
+    this.authEpochReader,
+    this.revocationJournal,
     DateTime Function()? now,
   }) : now = now ?? DateTime.now;
 
@@ -36,6 +40,8 @@ final class CachedAuthRepository
   final AuthenticatedAccountStorage accountStorage;
   final PendingRevocationStorage revocationStorage;
   final OfflineOwnershipCoordinator? ownershipCoordinator;
+  final int Function()? authEpochReader;
+  final PendingRevocationJournal? revocationJournal;
   final void Function() onSessionRevoked;
   final void Function()? onSessionExpired;
   final DateTime Function() now;
@@ -71,6 +77,7 @@ final class CachedAuthRepository
   }
 
   Future<Result<AuthSession?>> _restoreSession() async {
+    final operationEpoch = authEpochReader?.call();
     _clearMetadata();
     final pendingFailure = await _retryPendingRevocation();
     if (pendingFailure != null) return FailureResult(pendingFailure);
@@ -85,6 +92,7 @@ final class CachedAuthRepository
       Success<AuthSession?>(:final data) => _handleNetworkRestore(
         data,
         previousAccountId: accountId,
+        operationEpoch: operationEpoch,
       ),
       FailureResult<AuthSession?>(failure: final failure) =>
         _handleRestoreFailure(failure, token: token, accountId: accountId),
@@ -94,6 +102,7 @@ final class CachedAuthRepository
   Future<Result<AuthSession?>> _handleNetworkRestore(
     AuthSession? session, {
     required String? previousAccountId,
+    required int? operationEpoch,
   }) async {
     if (session == null) {
       if (previousAccountId != null) {
@@ -117,7 +126,8 @@ final class CachedAuthRepository
       final ownershipFailure = await _preparePermissionRefresh(session);
       if (ownershipFailure != null) return FailureResult(ownershipFailure);
     }
-    final record = await _writeSession(session);
+    if (!_isCurrentEpoch(operationEpoch)) return _staleSessionFailure();
+    final record = await _writeSession(session, expectedEpoch: operationEpoch);
     lastRestoreSource = AuthSessionSource.network;
     lastRestoreFetchedAt = record.fetchedAt;
     lastRestoreExpiresAt = record.expiresAt;
@@ -204,10 +214,12 @@ final class CachedAuthRepository
     required String username,
     required String password,
   }) async {
+    final operationEpoch = authEpochReader?.call();
     final pendingFailure = await _retryPendingRevocation();
     if (pendingFailure != null) return FailureResult(pendingFailure);
     final result = await delegate.login(username: username, password: password);
     if (result case Success<AuthSession>(:final data)) {
+      if (!_isCurrentEpoch(operationEpoch)) return _staleSessionFailure();
       final previousAccountId = await accountStorage
           .readAuthenticatedAccountId();
       final accountId = data.user.id.toString();
@@ -230,15 +242,18 @@ final class CachedAuthRepository
         await delegate.logout();
         return FailureResult(reauthenticationFailure);
       }
-      await _writeSession(data);
+      if (!_isCurrentEpoch(operationEpoch)) return _staleSessionFailure();
+      await _writeSession(data, expectedEpoch: operationEpoch);
     }
     return result;
   }
 
   @override
   Future<Result<Warehouse>> switchCurrentWarehouse(Warehouse warehouse) async {
+    final operationEpoch = authEpochReader?.call();
     final result = await delegate.switchCurrentWarehouse(warehouse);
     if (result case Success<Warehouse>(data: final confirmed)) {
+      if (!_isCurrentEpoch(operationEpoch)) return _staleWarehouseFailure();
       final accountId = await accountStorage.readAuthenticatedAccountId();
       final token = await tokenStorage.readAccessToken();
       if (accountId != null && token != null && token.isNotEmpty) {
@@ -274,7 +289,10 @@ final class CachedAuthRepository
                   )
                   .toList(growable: false),
             );
-            await _writeSession(updated);
+            if (!_isCurrentEpoch(operationEpoch)) {
+              return _staleWarehouseFailure();
+            }
+            await _writeSession(updated, expectedEpoch: operationEpoch);
           } on Object {
             await _discardInvalidProjection(accountId);
           }
@@ -302,7 +320,11 @@ final class CachedAuthRepository
     _clearMetadata();
   }
 
-  Future<CacheRecord> _writeSession(AuthSession session) async {
+  Future<CacheRecord> _writeSession(
+    AuthSession session, {
+    int? expectedEpoch,
+  }) async {
+    if (!_isCurrentEpoch(expectedEpoch)) throw const _StaleAuthOperation();
     final fetchedAt = now().toUtc();
     final accountId = session.user.id.toString();
     final record = CacheRecord(
@@ -319,6 +341,10 @@ final class CachedAuthRepository
       namespace: _namespace,
       maxRecords: 1,
     );
+    if (!_isCurrentEpoch(expectedEpoch)) {
+      await _deleteSessionProjection(accountId);
+      throw const _StaleAuthOperation();
+    }
     await accountStorage.saveAuthenticatedAccountId(accountId);
     return record;
   }
@@ -352,23 +378,40 @@ final class CachedAuthRepository
   Future<RevocationCleanupFailure?> _completeRevocation(
     String accountId, {
     required bool persistMarker,
+    bool notifyRevocation = true,
   }) async {
     _volatilePendingRevocationAccountId = accountId;
     _revocationInvalidated = true;
-    onSessionRevoked();
+    if (notifyRevocation) onSessionRevoked();
+    Object? firstError;
+    var hasDurableMarker = !persistMarker;
     if (persistMarker) {
       try {
         await revocationStorage.savePendingRevocationAccountId(accountId);
+        hasDurableMarker = true;
       } on Object catch (error) {
-        return RevocationCleanupFailure(
-          message: 'Revoked credential cleanup could not be scheduled.',
-          cause: error,
-        );
+        firstError = error;
+      }
+      try {
+        await revocationJournal?.addAccountId(accountId);
+        hasDurableMarker = hasDurableMarker || revocationJournal != null;
+      } on Object catch (error) {
+        firstError ??= error;
       }
     }
-    Object? firstError;
+    // Quarantine every independently recoverable projection before cleanup.
     try {
       await _expireDelegateCredentials();
+    } on Object catch (error) {
+      firstError ??= error;
+    }
+    try {
+      await accountStorage.clearAuthenticatedAccountId();
+    } on Object catch (error) {
+      firstError ??= error;
+    }
+    try {
+      await _deleteSessionProjection(accountId);
     } on Object catch (error) {
       firstError ??= error;
     }
@@ -378,18 +421,12 @@ final class CachedAuthRepository
     if (ownershipFailure != null) {
       firstError ??= ownershipFailure;
     }
-    if (firstError == null) {
+    if (firstError == null && hasDurableMarker) {
       try {
-        await accountStorage.clearAuthenticatedAccountId();
+        await revocationStorage.clearPendingRevocationAccountId();
+        await revocationJournal?.clear();
       } on Object catch (error) {
         firstError = error;
-      }
-      if (firstError == null) {
-        try {
-          await revocationStorage.clearPendingRevocationAccountId();
-        } on Object catch (error) {
-          firstError = error;
-        }
       }
     }
     if (firstError != null) {
@@ -407,21 +444,39 @@ final class CachedAuthRepository
 
   Future<RevocationCleanupFailure?> _retryPendingRevocation() async {
     String? durablePendingRevocation;
+    Set<String> journalPending = const {};
+    Object? primaryReadError;
     try {
       durablePendingRevocation = await revocationStorage
           .readPendingRevocationAccountId();
+    } on Object catch (error) {
+      primaryReadError = error;
+    }
+    try {
+      journalPending = await revocationJournal?.readAccountIds() ?? const {};
     } on Object catch (error) {
       return RevocationCleanupFailure(
         message: 'Pending credential revocation could not be verified.',
         cause: error,
       );
     }
+    if (primaryReadError != null &&
+        journalPending.isEmpty &&
+        _volatilePendingRevocationAccountId == null) {
+      return RevocationCleanupFailure(
+        message: 'Pending credential revocation could not be verified.',
+        cause: primaryReadError,
+      );
+    }
     final pendingRevocation =
-        durablePendingRevocation ?? _volatilePendingRevocationAccountId;
+        durablePendingRevocation ??
+        journalPending.firstOrNull ??
+        _volatilePendingRevocationAccountId;
     if (pendingRevocation == null) return null;
     return _completeRevocation(
       pendingRevocation,
       persistMarker: durablePendingRevocation == null,
+      notifyRevocation: false,
     );
   }
 
@@ -469,6 +524,32 @@ final class CachedAuthRepository
     lastRestoreFetchedAt = null;
     lastRestoreExpiresAt = null;
   }
+
+  bool _isCurrentEpoch(int? expected) =>
+      expected == null || authEpochReader?.call() == expected;
+
+  Future<void> _deleteSessionProjection(String accountId) {
+    final projectionStore = store is WriteBarrierOfflineStore
+        ? (store as WriteBarrierOfflineStore).delegate
+        : store;
+    return projectionStore.deleteCacheNamespace(
+      accountId: accountId,
+      namespace: _namespace,
+    );
+  }
+
+  FailureResult<T> _staleSessionFailure<T>() => FailureResult<T>(
+    const StateFailure(message: 'Authentication operation was superseded.'),
+  );
+
+  FailureResult<Warehouse> _staleWarehouseFailure() =>
+      const FailureResult<Warehouse>(
+        StateFailure(message: 'Warehouse switch was superseded.'),
+      );
+}
+
+final class _StaleAuthOperation implements Exception {
+  const _StaleAuthOperation();
 }
 
 CacheKey _cacheKey(String accountId) => CacheKey(

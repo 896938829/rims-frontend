@@ -139,6 +139,10 @@ final class _AppShellPageState extends State<AppShellPage> {
     if (widget.sessionController.isOwnershipTransitioning) {
       return const Center(child: Text('正在保护本机离线数据...'));
     }
+    if (!widget.sessionController.canAccessOfflineData &&
+        _currentTab != AppTab.profile) {
+      return const Center(child: Text('本机离线数据暂不可用，请在个人中心重试'));
+    }
     return switch (_currentTab) {
       AppTab.home => HomePage(
         user: widget.sessionController.currentUser,

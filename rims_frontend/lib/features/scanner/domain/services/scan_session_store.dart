@@ -122,6 +122,16 @@ final class ScanSessionStore implements OfflineOwnedScanStore {
     return (await storage.keys(prefix: prefix)).length;
   }
 
+  Future<Set<String>> contentIdentitiesForAccount(String accountId) async {
+    final prefix = '$_keyPrefix${Uri.encodeComponent(accountId)}.';
+    final keys = await storage.keys(prefix: prefix);
+    final identities = <String>{};
+    for (final key in keys) {
+      identities.add('scan-session:$key:${await storage.read(key) ?? ''}');
+    }
+    return identities;
+  }
+
   @override
   Future<void> clearForAccount(String accountId) => _clearForUser(accountId);
 

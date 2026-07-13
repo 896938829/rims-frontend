@@ -156,6 +156,7 @@ void main() {
         expect(fixture.service.canSync('7'), isTrue);
         expect(fixture.store.invalidatedWarehouses, [('7', 11)]);
         expect(fixture.reviews.calls, [('7', 11)]);
+        expect(fixture.scans.clearedLookupWarehouses, [('7', 11)]);
         expect(fixture.store.clearAccountCalls, isEmpty);
       },
     );
@@ -172,6 +173,7 @@ void main() {
         expect(report.completed, isTrue);
         expect(fixture.store.permissionInvalidations, ['7']);
         expect(fixture.reviews.calls, [('7', null)]);
+        expect(fixture.scans.clearedLookupAccounts, ['7']);
         expect(fixture.store.clearAccountCalls, isEmpty);
         expect(fixture.files.clearAccountCalls, isEmpty);
       },
@@ -339,6 +341,32 @@ void main() {
         expect(fixture.files.clearedDownloads, isEmpty);
       },
     );
+
+    test('equal-count cache replacement requires reconfirmation', () async {
+      final store = _FakeOwnershipStore(
+        snapshots: {
+          '7': const OfflineStoreOwnershipSnapshot(
+            cacheEntries: 1,
+            contentIdentities: {'cache:old:1'},
+          ),
+        },
+      );
+      final fixture = _Fixture(store: store);
+      final preview = await fixture.service.preview(
+        accountId: '7',
+        command: OfflineClearCommand.cache,
+      );
+      store.snapshots['7'] = const OfflineStoreOwnershipSnapshot(
+        cacheEntries: 1,
+        contentIdentities: {'cache:new:1'},
+      );
+
+      final changed = await fixture.service.executeClear(preview);
+
+      expect(changed.requiresReconfirmation, isTrue);
+      expect(store.clearCacheCalls, isEmpty);
+      expect(fixture.files.clearedDownloads, isEmpty);
+    });
 
     test('ownership mutations are serialized', () async {
       final blocker = Completer<void>();
@@ -710,13 +738,32 @@ final class _FakeOwnedFiles implements OfflineOwnedFileStore {
   }
 }
 
-final class _FakeOwnedScans implements OfflineOwnedScanStore {
+final class _FakeOwnedScans
+    implements OfflineOwnedScanStore, OfflineLookupOwnershipStore {
   _FakeOwnedScans({Map<String, int>? counts})
     : counts = counts ?? <String, int>{};
 
   final Map<String, int> counts;
   List<String>? order;
   final List<String> clearedAccounts = [];
+  final List<String> clearedLookupAccounts = [];
+  final List<(String, int)> clearedLookupWarehouses = [];
+
+  @override
+  Future<int> countLookupCacheForAccount(String accountId) async => 0;
+
+  @override
+  Future<void> clearLookupCacheForAccount(String accountId) async {
+    clearedLookupAccounts.add(accountId);
+  }
+
+  @override
+  Future<void> clearLookupCacheForWarehouse(
+    String accountId,
+    int warehouseId,
+  ) async {
+    clearedLookupWarehouses.add((accountId, warehouseId));
+  }
 
   @override
   Future<int> countForAccount(String accountId) async => counts[accountId] ?? 0;

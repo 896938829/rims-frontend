@@ -222,6 +222,27 @@ void main() {
       );
     },
   );
+
+  test('login bootstrap warehouse request uses only its explicit token', () async {
+    final adapter = _CapturingAdapter(
+      body: '{"code":0,"message":"ok","data":{"list":[]}}',
+    );
+    final dio = Dio()..httpClientAdapter = adapter;
+    final dataSource = ApiAuthRemoteDataSource(
+      ApiClient(
+        dio: dio,
+        tokenReader: () async => throw StateError('global token gate closed'),
+        enableLogging: false,
+      ),
+    );
+
+    final result = await dataSource.loadWarehouses(
+      accessToken: 'fresh-response-token',
+    );
+
+    expect(result.isSuccess, isTrue);
+    expect(adapter.lastAuthorization, 'Bearer fresh-response-token');
+  });
 }
 
 Future<void> _expectWarehouseListFailure({
@@ -249,6 +270,7 @@ final class _CapturingAdapter implements HttpClientAdapter {
 
   final String body;
   String? lastPath;
+  String? lastAuthorization;
 
   @override
   Future<ResponseBody> fetch(
@@ -257,6 +279,7 @@ final class _CapturingAdapter implements HttpClientAdapter {
     Future<void>? cancelFuture,
   ) async {
     lastPath = options.path;
+    lastAuthorization = options.headers['Authorization']?.toString();
 
     return ResponseBody.fromString(
       body,

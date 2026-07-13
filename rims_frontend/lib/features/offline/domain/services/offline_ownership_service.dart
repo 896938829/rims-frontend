@@ -103,22 +103,26 @@ final class OfflineStoreOwnershipSnapshot {
     this.drafts = 0,
     this.outboxOperations = 0,
     this.draftAttachmentRequestIds = const {},
+    this.contentIdentities = const {},
   });
 
   final int cacheEntries;
   final int drafts;
   final int outboxOperations;
   final Set<String> draftAttachmentRequestIds;
+  final Set<String> contentIdentities;
 }
 
 final class OfflineFileOwnershipSnapshot {
   const OfflineFileOwnershipSnapshot({
     this.stagedTransfers = 0,
     this.downloads = 0,
+    this.contentIdentities = const {},
   });
 
   final int stagedTransfers;
   final int downloads;
+  final Set<String> contentIdentities;
 }
 
 final class OfflineOwnershipCounts {
@@ -165,12 +169,14 @@ final class OfflineClearPreview {
     required this.command,
     required this.counts,
     required this.sequence,
+    this.contentRevision = '',
   });
 
   final String accountId;
   final OfflineClearCommand command;
   final OfflineOwnershipCounts counts;
   final int sequence;
+  final String contentRevision;
 }
 
 final class OfflineOwnershipFailure {
@@ -256,6 +262,18 @@ abstract interface class OfflineOwnedScanStore {
   Future<void> clearAll();
 }
 
+abstract interface class OfflineScanOwnershipInspector {
+  Future<Set<String>> contentIdentitiesForAccount(String accountId);
+}
+
+abstract interface class OfflineLookupOwnershipStore {
+  Future<int> countLookupCacheForAccount(String accountId);
+
+  Future<void> clearLookupCacheForAccount(String accountId);
+
+  Future<void> clearLookupCacheForWarehouse(String accountId, int warehouseId);
+}
+
 abstract interface class OfflineReviewInvalidator {
   Future<void> invalidate({required String accountId, int? warehouseId});
 }
@@ -330,7 +348,8 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
   final OfflineReviewInvalidator reviews;
   final OfflineDatabaseKeyManager databaseKeys;
   final List<OfflineMutationParticipant> _mutationParticipants;
-  final Map<String, List<_ParticipantBlock>> _retainedMutationBlocks = {};
+  final Map<String, Map<OfflineOwnershipReason, List<_ParticipantBlock>>>
+  _retainedMutationBlocks = {};
 
   final Map<String, Set<OfflineOwnershipReason>> _blockedReasons = {};
   final Set<String> _commandBlockedAccounts = {};
@@ -365,12 +384,13 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
         await Future.wait(
           mutationBlocks.map((entry) => entry.block.waitForQuiescence()),
         );
-        final counts = await _inspect(accountId);
+        final snapshot = await _capture(accountId);
         return OfflineClearPreview(
           accountId: accountId,
           command: command,
-          counts: counts,
+          counts: snapshot.counts,
           sequence: ++_previewSequence,
+          contentRevision: snapshot.revisionFor(command),
         );
       } finally {
         _releaseMutationBlocks(mutationBlocks);
@@ -397,10 +417,11 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
           failures: failures,
         );
       }
-      final executedCounts = await _inspectWithFailure(
+      final currentSnapshot = await _captureWithFailure(
         preview.accountId,
         failures,
       );
+      final executedCounts = currentSnapshot.counts;
       if (failures.isNotEmpty) {
         return OfflineOwnershipReport(
           reason: null,
@@ -409,7 +430,9 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
           failures: failures,
         );
       }
-      if (executedCounts != preview.counts) {
+      final currentRevision = currentSnapshot.revisionFor(preview.command);
+      if (executedCounts != preview.counts ||
+          currentRevision != preview.contentRevision) {
         return OfflineOwnershipReport(
           reason: null,
           accountId: preview.accountId,
@@ -420,43 +443,58 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
             command: preview.command,
             counts: executedCounts,
             sequence: ++_previewSequence,
+            contentRevision: currentRevision,
           ),
           failures: const [],
         );
       }
       switch (preview.command) {
         case OfflineClearCommand.cache:
+          final failureCount = failures.length;
           await _step(
             OfflineOwnershipStep.store,
             'Unable to clear cached records.',
             () => store.clearAccountCache(preview.accountId),
             failures,
           );
-          await _step(
-            OfflineOwnershipStep.files,
-            'Unable to clear downloaded files.',
-            () => files.clearDownloads(preview.accountId),
-            failures,
-          );
+          if (failures.length == failureCount) {
+            await _step(
+              OfflineOwnershipStep.files,
+              'Unable to clear downloaded files.',
+              () => files.clearDownloads(preview.accountId),
+              failures,
+            );
+            if (scans case final OfflineLookupOwnershipStore lookups) {
+              await _step(
+                OfflineOwnershipStep.scanSessions,
+                'Unable to clear scanner lookup cache.',
+                () => lookups.clearLookupCacheForAccount(preview.accountId),
+                failures,
+              );
+            }
+          }
         case OfflineClearCommand.offlineWork:
+          final failureCount = failures.length;
           await _step(
             OfflineOwnershipStep.store,
             'Unable to clear drafts and queued work.',
             () => store.clearAccountOfflineWork(preview.accountId),
             failures,
           );
-          await _step(
-            OfflineOwnershipStep.files,
-            'Unable to clear staged transfers.',
-            () => files.clearStagedTransfers(preview.accountId),
-            failures,
-          );
-          await _step(
-            OfflineOwnershipStep.scanSessions,
-            'Unable to clear scan sessions.',
-            () => scans.clearForAccount(preview.accountId),
-            failures,
-          );
+          if (failures.length == failureCount) {
+            await _step(
+              OfflineOwnershipStep.files,
+              'Unable to clear staged transfers.',
+              () => files.clearStagedTransfers(preview.accountId),
+              failures,
+            );
+            await _step(
+              OfflineOwnershipStep.scanSessions,
+              'Unable to clear scan sessions.',
+              () => scans.clearForAccount(preview.accountId),
+              failures,
+            );
+          }
       }
       final remaining = await _inspectWithFailure(preview.accountId, failures);
       return OfflineOwnershipReport(
@@ -543,6 +581,17 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
             ),
             failures,
           );
+          if (scans case final OfflineLookupOwnershipStore lookups) {
+            await _step(
+              OfflineOwnershipStep.scanSessions,
+              'Unable to invalidate scanner lookup cache.',
+              () => lookups.clearLookupCacheForWarehouse(
+                intent.accountId,
+                previousWarehouseId,
+              ),
+              failures,
+            );
+          }
           await _step(
             OfflineOwnershipStep.reviewedSyncAuthority,
             'Unable to invalidate reviewed warehouse operations.',
@@ -563,6 +612,14 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
           () => store.invalidatePermissionScopedCache(intent.accountId),
           failures,
         );
+        if (scans case final OfflineLookupOwnershipStore lookups) {
+          await _step(
+            OfflineOwnershipStep.scanSessions,
+            'Unable to invalidate scanner lookup cache.',
+            () => lookups.clearLookupCacheForAccount(intent.accountId),
+            failures,
+          );
+        }
         await _step(
           OfflineOwnershipStep.reviewedSyncAuthority,
           'Unable to invalidate reviewed operations.',
@@ -592,24 +649,27 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
           }
         }
       case OfflineOwnershipReason.revocation:
+        final sensitiveFailureCount = failures.length;
         await _step(
           OfflineOwnershipStep.store,
           'Unable to clear offline database data.',
           store.clearAllSensitiveData,
           failures,
         );
-        await _step(
-          OfflineOwnershipStep.files,
-          'Unable to clear all offline files.',
-          files.clearAllFiles,
-          failures,
-        );
-        await _step(
-          OfflineOwnershipStep.scanSessions,
-          'Unable to clear all scan sessions.',
-          scans.clearAll,
-          failures,
-        );
+        if (failures.length == sensitiveFailureCount) {
+          await _step(
+            OfflineOwnershipStep.files,
+            'Unable to clear all offline files.',
+            files.clearAllFiles,
+            failures,
+          );
+          await _step(
+            OfflineOwnershipStep.scanSessions,
+            'Unable to clear all scan sessions.',
+            scans.clearAll,
+            failures,
+          );
+        }
         if (failures.isEmpty) {
           await _step(
             OfflineOwnershipStep.databaseKey,
@@ -702,26 +762,53 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
                 OfflineOwnershipReason.revocation,
               ) ??
               false)) {
-        _releaseRetainedMutationBlocks(intent.accountId);
+        _releaseRetainedMutationBlocks(
+          intent.accountId,
+          OfflineOwnershipReason.logout,
+        );
+        _releaseRetainedMutationBlocks(
+          intent.accountId,
+          OfflineOwnershipReason.tokenExpiry,
+        );
+        _releaseRetainedMutationBlocks(
+          intent.accountId,
+          OfflineOwnershipReason.invalidSessionProjection,
+        );
+        _releaseRetainedMutationBlocks(
+          intent.accountId,
+          OfflineOwnershipReason.revocation,
+        );
       }
       return;
     }
     switch (intent.reason) {
       case OfflineOwnershipReason.logout ||
-          OfflineOwnershipReason.invalidSessionProjection:
-        _retainMutationBlocks(intent.accountId, blocks);
+          OfflineOwnershipReason.invalidSessionProjection ||
+          OfflineOwnershipReason.tokenExpiry:
+        _retainMutationBlocks(intent.accountId, intent.reason, blocks);
       case OfflineOwnershipReason.accountSwitch:
-        _retainMutationBlocks(intent.accountId, blocks);
+        _retainMutationBlocks(intent.accountId, intent.reason, blocks);
+        final current = intent.currentAccountId;
+        if (current != null) {
+          if (report.completed) {
+            _releaseRetainedMutationBlocks(current, intent.reason);
+          } else {
+            _retainMutationBlocks(current, intent.reason, blocks);
+          }
+        }
       case OfflineOwnershipReason.revocation:
         final accountBlocks = _beginMutationBlocks([
           OfflineMutationScope.account(intent.accountId),
         ]);
-        _retainMutationBlocks(intent.accountId, accountBlocks);
+        _retainMutationBlocks(intent.accountId, intent.reason, accountBlocks);
         _releaseMutationBlocks(accountBlocks);
       case OfflineOwnershipReason.warehouseSwitch ||
-          OfflineOwnershipReason.permissionRefresh ||
-          OfflineOwnershipReason.tokenExpiry:
-        break;
+          OfflineOwnershipReason.permissionRefresh:
+        if (report.completed) {
+          _releaseRetainedMutationBlocks(intent.accountId, intent.reason);
+        } else {
+          _retainMutationBlocks(intent.accountId, intent.reason, blocks);
+        }
       case OfflineOwnershipReason.reauthenticated:
         break;
     }
@@ -730,6 +817,7 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
 
   void _retainMutationBlocks(
     String accountId,
+    OfflineOwnershipReason reason,
     List<_ParticipantBlock> candidates,
   ) {
     final matching = candidates
@@ -741,18 +829,24 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
         )
         .toList(growable: false);
     if (matching.isEmpty) return;
-    if (_retainedMutationBlocks.containsKey(accountId)) return;
-    _retainedMutationBlocks[accountId] = matching;
+    final byReason = _retainedMutationBlocks.putIfAbsent(accountId, () => {});
+    if (byReason.containsKey(reason)) return;
+    byReason[reason] = matching;
     for (final entry in matching) {
       entry.retained = true;
     }
   }
 
-  void _releaseRetainedMutationBlocks(String accountId) {
-    final retained = _retainedMutationBlocks.remove(accountId);
+  void _releaseRetainedMutationBlocks(
+    String accountId,
+    OfflineOwnershipReason reason,
+  ) {
+    final byReason = _retainedMutationBlocks[accountId];
+    final retained = byReason?.remove(reason);
     if (retained != null) {
       _releaseMutationBlocks(retained, includeRetained: true);
     }
+    if (byReason?.isEmpty ?? false) _retainedMutationBlocks.remove(accountId);
   }
 
   void _releaseMutationBlocks(
@@ -806,27 +900,30 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
     required Set<String> retainedStagedRequestIds,
     required List<OfflineOwnershipFailure> failures,
   }) async {
+    final failureCount = failures.length;
     await _step(
       OfflineOwnershipStep.store,
       'Unable to clear account offline data.',
       () => store.clearOwnedAccount(accountId, preserveDrafts: preserveDrafts),
       failures,
     );
-    await _step(
-      OfflineOwnershipStep.files,
-      'Unable to clear account offline files.',
-      () => files.clearAccountFiles(
-        accountId,
-        retainStagedRequestIds: retainedStagedRequestIds,
-      ),
-      failures,
-    );
-    await _step(
-      OfflineOwnershipStep.scanSessions,
-      'Unable to clear account scan sessions.',
-      () => scans.clearForAccount(accountId),
-      failures,
-    );
+    if (failures.length == failureCount) {
+      await _step(
+        OfflineOwnershipStep.files,
+        'Unable to clear account offline files.',
+        () => files.clearAccountFiles(
+          accountId,
+          retainStagedRequestIds: retainedStagedRequestIds,
+        ),
+        failures,
+      );
+      await _step(
+        OfflineOwnershipStep.scanSessions,
+        'Unable to clear account scan sessions.',
+        () => scans.clearForAccount(accountId),
+        failures,
+      );
+    }
   }
 
   Future<Set<String>?> _draftAttachmentIds(
@@ -850,21 +947,59 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
   }
 
   Future<OfflineOwnershipCounts> _inspect(String accountId) async {
+    return (await _capture(accountId)).counts;
+  }
+
+  Future<_OwnershipSnapshot> _capture(String accountId) async {
     final values = await Future.wait<Object>([
       store.inspectAccount(accountId),
       files.inspectAccount(accountId),
       scans.countForAccount(accountId),
+      if (scans case final OfflineScanOwnershipInspector inspector)
+        inspector.contentIdentitiesForAccount(accountId),
     ]);
     final stored = values[0] as OfflineStoreOwnershipSnapshot;
     final ownedFiles = values[1] as OfflineFileOwnershipSnapshot;
-    return OfflineOwnershipCounts(
-      cacheEntries: stored.cacheEntries,
+    final lookupStore = scans is OfflineLookupOwnershipStore
+        ? scans as OfflineLookupOwnershipStore
+        : null;
+    final legacyLookupCount = lookupStore == null
+        ? 0
+        : await lookupStore.countLookupCacheForAccount(accountId);
+    final counts = OfflineOwnershipCounts(
+      cacheEntries: stored.cacheEntries + legacyLookupCount,
       drafts: stored.drafts,
       outboxOperations: stored.outboxOperations,
       stagedTransfers: ownedFiles.stagedTransfers,
       downloads: ownedFiles.downloads,
       scanSessions: values[2] as int,
     );
+    return _OwnershipSnapshot(
+      counts: counts,
+      storeIdentities: stored.contentIdentities,
+      fileIdentities: ownedFiles.contentIdentities,
+      scanIdentities: values.length > 3
+          ? values[3] as Set<String>
+          : {'scan-count:${counts.scanSessions}'},
+    );
+  }
+
+  Future<_OwnershipSnapshot> _captureWithFailure(
+    String accountId,
+    List<OfflineOwnershipFailure> failures,
+  ) async {
+    try {
+      return await _capture(accountId);
+    } on Object catch (error) {
+      failures.add(
+        OfflineOwnershipFailure(
+          step: OfflineOwnershipStep.preview,
+          message: 'Unable to inspect exact offline data counts.',
+          cause: error,
+        ),
+      );
+      return const _OwnershipSnapshot(counts: OfflineOwnershipCounts());
+    }
   }
 
   Future<OfflineOwnershipCounts> _inspectWithFailure(
@@ -919,4 +1054,45 @@ final class _ParticipantBlock {
   final OfflineMutationScope scope;
   final OfflineMutationBlock block;
   bool retained = false;
+}
+
+final class _OwnershipSnapshot {
+  const _OwnershipSnapshot({
+    required this.counts,
+    this.storeIdentities = const {},
+    this.fileIdentities = const {},
+    this.scanIdentities = const {},
+  });
+
+  final OfflineOwnershipCounts counts;
+  final Set<String> storeIdentities;
+  final Set<String> fileIdentities;
+  final Set<String> scanIdentities;
+
+  String revisionFor(OfflineClearCommand command) {
+    final prefixes = switch (command) {
+      OfflineClearCommand.cache => const ['cache:', 'download:', 'lookup:'],
+      OfflineClearCommand.offlineWork => const [
+        'draft:',
+        'outbox:',
+        'staged:',
+        'scan-session:',
+      ],
+    };
+    final identities = <String>{
+      ...storeIdentities,
+      ...fileIdentities,
+      ...scanIdentities,
+    }.where((identity) => prefixes.any(identity.startsWith)).toList()..sort();
+    return _stableRevision(identities);
+  }
+}
+
+String _stableRevision(Iterable<String> values) {
+  var hash = 0xcbf29ce484222325;
+  for (final codeUnit in values.join('\n').codeUnits) {
+    hash ^= codeUnit;
+    hash = (hash * 0x100000001b3) & 0x7fffffffffffffff;
+  }
+  return hash.toRadixString(16).padLeft(16, '0');
 }

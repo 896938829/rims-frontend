@@ -21,6 +21,7 @@ import 'package:rims_frontend/features/offline/data/repositories/memory_offline_
 import 'package:rims_frontend/features/offline/domain/entities/cache_snapshot.dart';
 import 'package:rims_frontend/features/offline/domain/entities/document_draft.dart';
 import 'package:rims_frontend/features/offline/domain/entities/outbox_graph.dart';
+import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.dart';
 import 'package:rims_frontend/features/offline/domain/services/offline_ownership_service.dart';
 import 'package:rims_frontend/features/offline/domain/services/offline_store.dart';
 import 'package:rims_frontend/features/offline/domain/services/outbox_state_machine.dart';
@@ -31,6 +32,65 @@ import 'package:rims_frontend/features/scanner/domain/services/scan_lookup_cache
 import 'package:rims_frontend/features/scanner/domain/services/scan_session_store.dart';
 
 void main() {
+  test(
+    'detached nested permit remains active until its future settles',
+    () async {
+      final barrier = OfflineWriteBarrier();
+      final nestedEntered = Completer<void>();
+      final nestedRelease = Completer<void>();
+      late Future<void> nested;
+
+      await barrier.protect(
+        accountId: '7',
+        operation: () async {
+          nested = barrier.protect(
+            accountId: '7',
+            operation: () async {
+              nestedEntered.complete();
+              await nestedRelease.future;
+            },
+          );
+        },
+      );
+      await nestedEntered.future;
+      final block = barrier.blockMutations(
+        const OfflineMutationScope.account('7'),
+      );
+      var drained = false;
+      final drain = block.waitForQuiescence().then((_) => drained = true);
+      await Future<void>.delayed(Duration.zero);
+      expect(drained, isFalse);
+
+      nestedRelease.complete();
+      await nested;
+      await drain;
+      expect(drained, isTrue);
+      block.release();
+    },
+  );
+
+  test('blocked account wrappers reject reads as well as writes', () async {
+    final barrier = OfflineWriteBarrier();
+    final store = WriteBarrierOfflineStore(
+      delegate: MemoryOfflineStore(),
+      barrier: barrier,
+    );
+    final outbox = WriteBarrierOutboxRepository(
+      delegate: MemoryOutboxRepository(stateMachine: OutboxStateMachine()),
+      barrier: barrier,
+    );
+    final block = barrier.blockMutations(
+      const OfflineMutationScope.account('7'),
+    );
+
+    await expectLater(
+      store.listDrafts('7'),
+      throwsA(isA<OfflineWriteBlockedException>()),
+    );
+    expect(await outbox.list('7'), isA<FailureResult<List<OutboxOperation>>>());
+    block.release();
+  });
+
   test('the outbox wrapper preserves empty graph validation', () async {
     final repository = WriteBarrierOutboxRepository(
       delegate: MemoryOutboxRepository(stateMachine: OutboxStateMachine()),
@@ -443,9 +503,12 @@ void main() {
 
       expect(initialFailure, isA<FailureResult<AuthSession?>>());
       expect(storage.pendingRevocationAccountId, isNull);
-      expect(storage.token, 'revoked-token');
-      expect(firstFiles.clearAllCalls, 0);
+      expect(storage.token, isNull);
+      expect(storage.accountId, isNull);
+      expect(firstFiles.clearAllCalls, 1);
       expect(firstKeys.generation, 0);
+
+      firstFiles.failNextClearAll = true;
 
       final volatileRetry = await firstRepository.login(
         username: 'alice',
@@ -454,7 +517,7 @@ void main() {
 
       expect(volatileRetry, isA<FailureResult<AuthSession>>());
       expect(firstDelegate.loginCalls, 0);
-      expect(firstFiles.clearAllCalls, 1);
+      expect(firstFiles.clearAllCalls, 2);
       expect(storage.token, isNull);
       expect(storage.pendingRevocationAccountId, '7');
       expect(firstKeys.generation, 0);
@@ -562,9 +625,10 @@ void main() {
 
     expect(storage.pendingMarkerWriteCalls, 2);
     expect(storage.pendingRevocationAccountId, isNull);
-    expect(storage.token, 'revoked-token');
-    expect(files.clearAllCalls, 0);
-    expect(keys.generation, 0);
+    expect(storage.token, isNull);
+    expect(storage.accountId, isNull);
+    expect(files.clearAllCalls, 2);
+    expect(keys.generation, 2);
     expect(delegate.loginCalls, 0);
   });
 

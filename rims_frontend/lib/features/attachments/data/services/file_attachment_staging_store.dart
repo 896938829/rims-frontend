@@ -264,6 +264,13 @@ final class FileAttachmentStagingStore
         return Success(upgraded);
       }
       return Success(item);
+    } on FormatException catch (error) {
+      return FailureResult(
+        ValidationFailure(
+          message: 'Staged attachment ownership is invalid.',
+          cause: error,
+        ),
+      );
     } on Object catch (error) {
       return FailureResult(
         LocalStorageFailure(
@@ -417,6 +424,13 @@ final class FileAttachmentStagingStore
       }
       return Success(
         AttachmentUploadSnapshot(pending: pending, bytes: read.bytes),
+      );
+    } on FormatException catch (error) {
+      return FailureResult(
+        ValidationFailure(
+          message: 'Staged attachment ownership is invalid.',
+          cause: error,
+        ),
       );
     } on Object catch (error) {
       return FailureResult(
@@ -863,8 +877,8 @@ final class FileAttachmentStagingStore
   Future<OfflineFileOwnershipSnapshot> inspectAccount(String accountId) {
     return _withUserLock(accountId, () async {
       final recovered = await _recoverForUser(accountId);
-      final staged = recovered.when(
-        success: (items) => items.length,
+      final stagedItems = recovered.when(
+        success: (items) => items,
         failure: (failure) => throw StateError(failure.message),
       );
       final directory = await _userDirectory(accountId, create: false);
@@ -872,16 +886,28 @@ final class FileAttachmentStagingStore
         '${directory.path}${Platform.pathSeparator}downloads',
       );
       var downloadCount = 0;
+      final downloadIdentities = <String>{};
       if (await downloads.exists()) {
         await for (final entity in downloads.list()) {
           if (entity is File && !entity.path.endsWith('.tmp')) {
             downloadCount += 1;
+            final stat = await entity.stat();
+            downloadIdentities.add(
+              'download:${_filename(entity.path)}:${stat.size}:'
+              '${stat.modified.toUtc().toIso8601String()}',
+            );
           }
         }
       }
       return OfflineFileOwnershipSnapshot(
-        stagedTransfers: staged,
+        stagedTransfers: stagedItems.length,
         downloads: downloadCount,
+        contentIdentities: {
+          for (final item in stagedItems)
+            'staged:${item.pending.requestId}:${item.sha256}:'
+                '${item.pending.fileSize}:${item.thumbnailPath ?? ''}',
+          ...downloadIdentities,
+        },
       );
     }, privileged: true);
   }
@@ -1062,17 +1088,27 @@ final class FileAttachmentStagingStore
     }
     final rawItems = decoded['items']! as List<Object?>;
     final items = <StagedAttachment>[];
+    var invalidItemFound = false;
     for (final raw in rawItems) {
       try {
         final item = _stagedFromJson(raw);
-        if (await _isTrustedManifestItem(directory, item)) items.add(item);
+        if (await _isTrustedManifestItem(directory, item)) {
+          items.add(item);
+        } else {
+          invalidItemFound = true;
+        }
       } on Object {
-        // Invalid persisted entries are excluded from every file operation.
+        invalidItemFound = true;
       }
     }
     await _onManifestRead?.call(file);
     if (items.length != rawItems.length) {
       await _writeManifest(directory, items);
+    }
+    if (invalidItemFound) {
+      throw const FormatException(
+        'Unsafe attachment manifest entries were quarantined.',
+      );
     }
     return items;
   }
@@ -1115,11 +1151,8 @@ final class FileAttachmentStagingStore
     final canonicalRoot = await _canonicalPath(stagedRoot);
     final canonicalFile = await _canonicalPath(File(item.pending.stagedPath));
     final comparableRoot = _comparablePath(canonicalRoot);
-    final comparableFile = _comparablePath(canonicalFile);
     if (_filename(canonicalFile) != '${item.pending.requestId}.$extension' ||
-        !comparableFile.startsWith(
-          '$comparableRoot${Platform.pathSeparator}',
-        )) {
+        _comparablePath(File(canonicalFile).parent.path) != comparableRoot) {
       return null;
     }
     return canonicalFile;
@@ -1133,9 +1166,8 @@ final class FileAttachmentStagingStore
     final canonicalRoot = await _canonicalPath(root);
     final canonicalFile = await _canonicalPath(File(path));
     final comparableRoot = _comparablePath(canonicalRoot);
-    final comparableFile = _comparablePath(canonicalFile);
     return _filename(canonicalFile) == expectedFilename &&
-        comparableFile.startsWith('$comparableRoot${Platform.pathSeparator}');
+        _comparablePath(File(canonicalFile).parent.path) == comparableRoot;
   }
 
   Future<void> _writeManifest(

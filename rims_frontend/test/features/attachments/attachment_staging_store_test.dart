@@ -486,10 +486,7 @@ void main() {
 
     await writeMaliciousManifest();
     final recovered = await staging.recoverForUser('42');
-    expect(
-      recovered.when(success: (items) => items, failure: (_) => null),
-      isEmpty,
-    );
+    expect(recovered.isFailure, isTrue);
     expect(externalFile.existsSync(), isTrue);
     expect(externalThumbnail.existsSync(), isTrue);
 

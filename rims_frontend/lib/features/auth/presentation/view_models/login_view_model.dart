@@ -53,18 +53,30 @@ final class LoginViewModel extends ChangeNotifier {
 
     _isLoading = true;
     _errorMessage = null;
+    final authEpoch = sessionController.beginAuthenticationAttempt();
     notifyListeners();
 
-    final result = await authRepository.login(
-      username: username,
-      password: password,
-    );
+    late final Result<AuthSession> result;
+    try {
+      result = await authRepository.login(
+        username: username,
+        password: password,
+      );
+    } on Object catch (_) {
+      _isLoading = false;
+      _errorMessage = '登录失败，请重试';
+      notifyListeners();
+      return false;
+    }
 
     _isLoading = false;
 
     return switch (result) {
       Success<AuthSession>(data: final session) => () async {
-        final started = await sessionController.startSession(session);
+        final started = await sessionController.startSession(
+          session,
+          expectedEpoch: authEpoch,
+        );
         if (!started) {
           _errorMessage =
               sessionController.ownershipFailure?.message ?? '无法切换本机离线数据归属';

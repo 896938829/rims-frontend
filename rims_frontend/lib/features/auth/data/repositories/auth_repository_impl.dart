@@ -120,7 +120,9 @@ final class AuthRepositoryImpl
     required AppUser user,
     required bool clearTokenOnAnyFailure,
   }) async {
-    final warehouseResult = await remoteDataSource.loadWarehouses();
+    final warehouseResult = await remoteDataSource.loadWarehouses(
+      accessToken: clearTokenOnAnyFailure ? token : null,
+    );
     return warehouseResult.when(
       success: (warehouseModels) {
         final warehouses = warehouseModels

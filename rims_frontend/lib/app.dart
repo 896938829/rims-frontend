@@ -14,6 +14,7 @@ import 'core/network/api_endpoints.dart';
 import 'core/result/failure.dart';
 import 'core/result/result.dart';
 import 'core/storage/app_secure_storage.dart';
+import 'core/storage/pending_revocation_journal.dart';
 import 'core/theme/app_theme.dart';
 import 'features/admin/data/datasources/admin_remote_datasource.dart';
 import 'features/admin/data/repositories/admin_repository_impl.dart';
@@ -229,7 +230,9 @@ final class _MainAppState extends State<MainApp> {
       tokenStorage: _secureStorage,
       accountStorage: _secureStorage,
       revocationStorage: _secureStorage,
+      revocationJournal: SharedPreferencesPendingRevocationJournal(),
       ownershipCoordinator: _offlineOwnershipService,
+      authEpochReader: () => _sessionController.authEpoch,
       onSessionRevoked: _sessionController.invalidateRevokedSession,
       onSessionExpired: _sessionController.invalidateExpiredSession,
     );

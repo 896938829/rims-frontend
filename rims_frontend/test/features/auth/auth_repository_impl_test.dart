@@ -255,6 +255,48 @@ void main() {
       },
     );
 
+    test('login bootstraps warehouses with only the response token', () async {
+      final storage = _FakeTokenStorage(accessToken: 'old-invalid-token');
+      final remoteDataSource = _FakeAuthRemoteDataSource(
+        loginResult: const Success<LoginResponseModel>(
+          LoginResponseModel(
+            token: 'fresh-login-token',
+            user: AppUserModel(
+              id: 7,
+              username: 'alice',
+              realName: 'Alice',
+              roleCode: 'user',
+              roleName: 'User',
+            ),
+          ),
+        ),
+        warehousesResult: const Success<List<WarehouseModel>>([
+          WarehouseModel(
+            id: 1,
+            code: 'WH001',
+            name: 'Warehouse',
+            isDefault: true,
+          ),
+        ]),
+      );
+      final repository = AuthRepositoryImpl(
+        remoteDataSource: remoteDataSource,
+        secureStorage: storage,
+      );
+
+      final result = await repository.login(
+        username: 'alice',
+        password: 'secret',
+      );
+
+      expect(result, isA<Success<AuthSession>>());
+      expect(remoteDataSource.lastWarehouseAccessToken, 'fresh-login-token');
+      expect(
+        remoteDataSource.lastWarehouseAccessToken,
+        isNot('old-invalid-token'),
+      );
+    });
+
     test('login rejects user without username before saving token', () async {
       final storage = _FakeTokenStorage();
       final remoteDataSource = _FakeAuthRemoteDataSource(
@@ -419,10 +461,15 @@ final class _FakeAuthRemoteDataSource implements AuthRemoteDataSource {
   }
 
   @override
-  Future<Result<List<WarehouseModel>>> loadWarehouses() async {
+  Future<Result<List<WarehouseModel>>> loadWarehouses({
+    String? accessToken,
+  }) async {
+    lastWarehouseAccessToken = accessToken;
     loadWarehousesCallCount += 1;
     return warehousesResult;
   }
+
+  String? lastWarehouseAccessToken;
 
   @override
   Future<Result<WarehouseModel?>> switchCurrentWarehouse(
