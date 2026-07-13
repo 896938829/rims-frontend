@@ -5,6 +5,7 @@ import '../../../../core/result/result.dart';
 import '../../domain/entities/outbox_operation.dart';
 import '../../domain/repositories/outbox_repository.dart';
 import '../../domain/services/outbox_state_machine.dart';
+import '../models/cache_record_model.dart';
 
 final class MemoryOutboxRepository implements OutboxRepository {
   MemoryOutboxRepository({
@@ -23,6 +24,7 @@ final class MemoryOutboxRepository implements OutboxRepository {
   final Map<String, OutboxOperation> _operations = {};
   final Map<String, Set<String>> _dependencies = {};
   final Map<String, String> _replacementByOriginal = {};
+  final Map<String, String> _payloadFingerprintByOperation = {};
 
   @override
   Future<Result<OutboxOperation>> enqueue(
@@ -31,9 +33,10 @@ final class MemoryOutboxRepository implements OutboxRepository {
   }) async {
     final failure = _validateEnqueue(operation, dependencies);
     if (failure != null) return FailureResult(failure);
-    _validatePayload(operation.payload);
+    final payloadJson = _serializePayload(operation.payload);
     _operations[operation.operationId] = operation;
     _dependencies[operation.operationId] = Set.unmodifiable(dependencies);
+    _payloadFingerprintByOperation[operation.operationId] = payloadJson;
     return Success(operation);
   }
 
@@ -131,7 +134,7 @@ final class MemoryOutboxRepository implements OutboxRepository {
         ),
       );
     }
-    _validatePayload(replacement.payload);
+    final payloadJson = _serializePayload(replacement.payload);
     final dependencyFingerprint = _dependencyFingerprint(dependencies);
     final existingId = _replacementByOriginal[conflictedOperationId];
     final existing = existingId == null ? null : _operations[existingId];
@@ -140,6 +143,7 @@ final class MemoryOutboxRepository implements OutboxRepository {
       return _replayOrConflict(
         existing,
         claimed,
+        payloadJson,
         _dependencyFingerprint(
           _dependencies[existing.operationId] ?? const <String>{},
         ),
@@ -174,8 +178,33 @@ final class MemoryOutboxRepository implements OutboxRepository {
     if (validation != null) return FailureResult(validation);
     _operations[claimed.operationId] = claimed;
     _dependencies[claimed.operationId] = Set.unmodifiable(dependencies);
+    _payloadFingerprintByOperation[claimed.operationId] = payloadJson;
     _replacementByOriginal[conflictedOperationId] = claimed.operationId;
     return Success(claimed);
+  }
+
+  @override
+  Future<Result<void>> clearAccount(String accountId) async {
+    final operationIds = _operations.values
+        .where((operation) => operation.accountId == accountId)
+        .map((operation) => operation.operationId)
+        .toSet();
+    _replacementByOriginal.removeWhere(
+      (originalId, replacementId) =>
+          operationIds.contains(originalId) ||
+          operationIds.contains(replacementId),
+    );
+    _operations.removeWhere((operationId, _) {
+      if (!operationIds.contains(operationId)) return false;
+      _payloadFingerprintByOperation.remove(operationId);
+      return true;
+    });
+    _dependencies.removeWhere(
+      (operationId, parents) =>
+          operationIds.contains(operationId) ||
+          parents.any(operationIds.contains),
+    );
+    return const Success<void>(null);
   }
 
   @override
@@ -223,6 +252,7 @@ final class MemoryOutboxRepository implements OutboxRepository {
     for (final operationId in expiredIds) {
       _operations.remove(operationId);
       _dependencies.remove(operationId);
+      _payloadFingerprintByOperation.remove(operationId);
     }
     _dependencies.updateAll(
       (_, dependencies) => Set.unmodifiable(
@@ -352,6 +382,7 @@ final class MemoryOutboxRepository implements OutboxRepository {
   Result<OutboxOperation> _replayOrConflict(
     OutboxOperation existing,
     OutboxOperation requested,
+    String requestedPayloadJson,
     String storedDependencyFingerprint,
     String requestedDependencyFingerprint,
   ) {
@@ -359,7 +390,8 @@ final class MemoryOutboxRepository implements OutboxRepository {
         existing.idempotencyKey == requested.idempotencyKey &&
         existing.kind == requested.kind &&
         existing.warehouseId == requested.warehouseId &&
-        _deepEquals(existing.payload, requested.payload) &&
+        _payloadFingerprintByOperation[existing.operationId] ==
+            requestedPayloadJson &&
         storedDependencyFingerprint == requestedDependencyFingerprint) {
       return Success(existing);
     }
@@ -405,34 +437,14 @@ bool _blocksDependencies(OutboxState state) =>
     state == OutboxState.permanentFailure ||
     state == OutboxState.cancelled;
 
-bool _deepEquals(Object? left, Object? right) {
-  if (identical(left, right)) return true;
-  if (left is Map && right is Map) {
-    if (left.length != right.length) return false;
-    return left.entries.every(
-      (entry) =>
-          right.containsKey(entry.key) &&
-          _deepEquals(entry.value, right[entry.key]),
-    );
-  }
-  if (left is List && right is List) {
-    if (left.length != right.length) return false;
-    for (var index = 0; index < left.length; index += 1) {
-      if (!_deepEquals(left[index], right[index])) return false;
-    }
-    return true;
-  }
-  return left == right;
-}
-
 String _dependencyFingerprint(Set<String> dependencies) {
   final sorted = dependencies.toList()..sort();
   return sorted.join('\u0000');
 }
 
-void _validatePayload(Map<String, Object?> payload) {
+String _serializePayload(Map<String, Object?> payload) {
   try {
-    jsonEncode(payload);
+    return CacheRecordModel.canonicalJson(payload);
   } on JsonUnsupportedObjectError catch (error) {
     final cause = error.cause;
     if (cause is StateError) throw cause;

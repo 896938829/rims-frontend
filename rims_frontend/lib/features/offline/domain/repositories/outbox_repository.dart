@@ -31,5 +31,7 @@ abstract interface class OutboxRepository {
     Set<String> dependencies = const {},
   });
 
+  Future<Result<void>> clearAccount(String accountId);
+
   Future<Result<int>> prune({required String accountId});
 }

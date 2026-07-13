@@ -302,6 +302,7 @@ ORDER BY operation.created_at ASC, operation.operation_id ASC
           return _replayOrConflict(
             existing.replacement,
             claimed,
+            payloadJson,
             existing.edgeDependencyFingerprint,
             dependencyFingerprint,
           );
@@ -354,6 +355,7 @@ ORDER BY operation.created_at ASC, operation.operation_id ASC
         return _replayOrConflict(
           existing.replacement,
           claimed,
+          payloadJson,
           existing.edgeDependencyFingerprint,
           dependencyFingerprint,
         );
@@ -376,6 +378,29 @@ ORDER BY operation.created_at ASC, operation.operation_id ASC
       return FailureResult(
         LocalStorageFailure(
           message: 'Unable to resolve offline conflict.',
+          cause: error,
+        ),
+      );
+    }
+  }
+
+  @override
+  Future<Result<void>> clearAccount(String accountId) async {
+    try {
+      await database.clearAccount(accountId);
+      return const Success<void>(null);
+    } on StateError catch (error) {
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to clear offline account data.',
+          cause: error,
+        ),
+      );
+    } on Exception catch (error) {
+      if (!_isStorageException(error)) rethrow;
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to clear offline account data.',
           cause: error,
         ),
       );
@@ -643,6 +668,7 @@ SELECT 1 AS found FROM ancestors WHERE operation_id = ? LIMIT 1
   Result<OutboxOperation> _replayOrConflict(
     OfflineOutboxOperation existing,
     OutboxOperation requested,
+    String requestedPayloadJson,
     String storedDependencyFingerprint,
     String requestedDependencyFingerprint,
   ) {
@@ -652,8 +678,7 @@ SELECT 1 AS found FROM ancestors WHERE operation_id = ? LIMIT 1
         operation.idempotencyKey == requested.idempotencyKey &&
         operation.kind == requested.kind &&
         operation.warehouseId == requested.warehouseId &&
-        _serializePayload(operation.payload) ==
-            _serializePayload(requested.payload) &&
+        _serializePayload(operation.payload) == requestedPayloadJson &&
         storedDependencyFingerprint == requestedDependencyFingerprint;
     if (isSameRequest) return Success(operation);
     return const FailureResult(

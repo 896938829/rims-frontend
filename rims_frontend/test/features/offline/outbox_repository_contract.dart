@@ -560,11 +560,119 @@ void runOutboxRepositoryContract(String name, OutboxHarnessFactory create) {
         );
       },
     );
+
+    test('conflict replay serializes requested payload exactly once', () async {
+      await repository.enqueue(_operation('single-json-conflict', clock.value));
+      await repository.transition(
+        accountId: '7',
+        operationId: 'single-json-conflict',
+        next: OutboxState.syncing,
+      );
+      await repository.transition(
+        accountId: '7',
+        operationId: 'single-json-conflict',
+        next: OutboxState.conflict,
+      );
+      await repository.resolveConflict(
+        accountId: '7',
+        conflictedOperationId: 'single-json-conflict',
+        replacement: OutboxOperation(
+          operationId: 'single-json-replacement',
+          idempotencyKey: 'key-single-json-replacement',
+          accountId: '7',
+          warehouseId: 11,
+          kind: OutboxOperationKind.documentCreate,
+          payload: const {'value': 1},
+          state: OutboxState.queued,
+          createdAt: clock.value,
+          confirmedAt: clock.value,
+        ),
+      );
+      final stateful = _SingleUseJsonObject();
+
+      final replay = await repository.resolveConflict(
+        accountId: '7',
+        conflictedOperationId: 'single-json-conflict',
+        replacement: OutboxOperation(
+          operationId: 'single-json-replacement',
+          idempotencyKey: 'key-single-json-replacement',
+          accountId: '7',
+          warehouseId: 11,
+          kind: OutboxOperationKind.documentCreate,
+          payload: {'value': stateful},
+          state: OutboxState.queued,
+          createdAt: clock.value,
+          confirmedAt: clock.value,
+        ),
+      );
+
+      expect(replay, isA<Success<OutboxOperation>>());
+      expect(stateful.calls, 1);
+    });
+
+    test(
+      'clearAccount removes resolution graph only for its account',
+      () async {
+        for (final accountId in ['7', '8']) {
+          final original = _operation(
+            'clear-original-$accountId',
+            clock.value,
+            accountId: accountId,
+          );
+          await repository.enqueue(original);
+          await repository.transition(
+            accountId: accountId,
+            operationId: original.operationId,
+            next: OutboxState.syncing,
+          );
+          await repository.transition(
+            accountId: accountId,
+            operationId: original.operationId,
+            next: OutboxState.conflict,
+          );
+          await repository.resolveConflict(
+            accountId: accountId,
+            conflictedOperationId: original.operationId,
+            replacement: _operation(
+              'clear-replacement-$accountId',
+              clock.value,
+              accountId: accountId,
+            ),
+          );
+        }
+
+        final cleared = await repository.clearAccount('7');
+
+        expect(cleared, isA<Success<void>>());
+        expect((await repository.list('7')).successData, isEmpty);
+        expect((await repository.list('8')).successData, hasLength(2));
+        final retainedReplay = await repository.resolveConflict(
+          accountId: '8',
+          conflictedOperationId: 'clear-original-8',
+          replacement: _operation(
+            'clear-replacement-8',
+            clock.value,
+            accountId: '8',
+          ),
+        );
+        expect(retainedReplay, isA<Success<OutboxOperation>>());
+      },
+    );
   });
 }
 
 final class _ThrowingJsonObject {
   Object? toJson() => throw StateError('custom serialization failed');
+}
+
+final class _SingleUseJsonObject {
+  int calls = 0;
+
+  Object? toJson() {
+    calls += 1;
+    if (calls > 1) throw StateError('serialized more than once');
+    return 1;
+  }
 }
 
 extension<T> on Result<T> {

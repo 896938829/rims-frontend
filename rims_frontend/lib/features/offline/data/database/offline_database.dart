@@ -117,11 +117,7 @@ WHERE replacement_of IS NOT NULL
 CREATE UNIQUE INDEX IF NOT EXISTS outbox_operation_account_identity
 ON outbox_operations (operation_id, account_id)
 ''');
-      await customStatement(
-        'CREATE UNIQUE INDEX IF NOT EXISTS outbox_replacement_once '
-        'ON outbox_operations(replacement_of) '
-        'WHERE replacement_of IS NOT NULL',
-      );
+      await customStatement('DROP INDEX IF EXISTS outbox_replacement_once');
     },
   );
 
@@ -330,6 +326,13 @@ ON outbox_operations (operation_id, account_id)
     OutboxOperation operation,
     Set<String> dependencies,
   ) async {
+    if (operation.replacementOf != null) {
+      throw ArgumentError.value(
+        operation.replacementOf,
+        'operation.replacementOf',
+        'Replacement ownership can only be created by conflict resolution.',
+      );
+    }
     if (dependencies.contains(operation.operationId)) {
       throw ArgumentError.value(
         operation.operationId,
@@ -462,6 +465,9 @@ ON outbox_operations (operation_id, account_id)
   @override
   Future<void> clearAccount(String accountId) async {
     await transaction(() async {
+      await (delete(
+        offlineOutboxResolutions,
+      )..where((resolution) => resolution.accountId.equals(accountId))).go();
       final operationIds =
           await (selectOnly(offlineOutboxOperations)
                 ..addColumns([offlineOutboxOperations.operationId])

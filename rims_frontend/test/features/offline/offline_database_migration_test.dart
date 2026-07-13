@@ -136,7 +136,7 @@ void main() {
     );
     expect(
       indexes.map((row) => row.read<String>('name')),
-      contains('outbox_replacement_once'),
+      isNot(contains('outbox_replacement_once')),
     );
     expect(
       migratedConflict.read<int>('updated_at'),
@@ -173,6 +173,9 @@ void main() {
       final foreignKeys = await database
           .customSelect('PRAGMA foreign_key_list(outbox_resolutions)')
           .get();
+      final indexes = await database
+          .customSelect('PRAGMA index_list(outbox_operations)')
+          .get();
       final replacement = _operation('replacement', createdAt);
 
       final replay = await repository.resolveConflict(
@@ -200,6 +203,10 @@ void main() {
         '["dep-a","dep-b"]',
       );
       expect(foreignKeys, hasLength(4));
+      expect(
+        indexes.map((row) => row.read<String>('name')),
+        isNot(contains('outbox_replacement_once')),
+      );
       expect(replay, isA<Success<OutboxOperation>>());
       expect(
         (changedDependencies as FailureResult<OutboxOperation>).failure,

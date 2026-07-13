@@ -1,9 +1,13 @@
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:rims_frontend/core/result/result.dart';
 import 'package:rims_frontend/features/offline/data/database/offline_database.dart';
+import 'package:rims_frontend/features/offline/data/repositories/drift_outbox_repository.dart';
+import 'package:rims_frontend/features/offline/data/repositories/memory_offline_store.dart';
 import 'package:rims_frontend/features/offline/domain/entities/cache_snapshot.dart';
 import 'package:rims_frontend/features/offline/domain/entities/document_draft.dart';
 import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.dart';
+import 'package:rims_frontend/features/offline/domain/services/outbox_state_machine.dart';
 
 void main() {
   late OfflineDatabase database;
@@ -287,6 +291,109 @@ void main() {
     expect(await database.readyOperations('7'), isEmpty);
   });
 
+  test('legacy stores reject replacement ownership pollution', () async {
+    final now = DateTime.utc(2026, 7, 13);
+    final polluted = _operation(
+      'polluted',
+      now,
+      OutboxOperationKind.documentCreate,
+    ).copyWith(replacementOf: 'original');
+    final memory = MemoryOfflineStore();
+
+    await expectLater(
+      database.enqueue(polluted, const {}),
+      throwsArgumentError,
+    );
+    await expectLater(memory.enqueue(polluted, const {}), throwsArgumentError);
+    expect(await database.readyOperations('7'), isEmpty);
+    expect(await memory.readyOperations('7'), isEmpty);
+  });
+
+  test(
+    'resolution survives legacy guard and clearAccount removes its full graph',
+    () async {
+      final now = DateTime.utc(2026, 7, 13);
+      final repository = DriftOutboxRepository(
+        database: database,
+        stateMachine: OutboxStateMachine(now: () => now),
+        now: () => now,
+      );
+      for (final accountId in ['7', '8']) {
+        final original = _operationForAccount(
+          'original-$accountId',
+          accountId,
+          now,
+        );
+        await repository.enqueue(original);
+        await repository.transition(
+          accountId: accountId,
+          operationId: original.operationId,
+          next: OutboxState.syncing,
+        );
+        await repository.transition(
+          accountId: accountId,
+          operationId: original.operationId,
+          next: OutboxState.conflict,
+        );
+        final resolved = await repository.resolveConflict(
+          accountId: accountId,
+          conflictedOperationId: original.operationId,
+          replacement: _operationForAccount(
+            'replacement-$accountId',
+            accountId,
+            now,
+          ),
+        );
+        expect(resolved, isA<Success<OutboxOperation>>());
+        await database.writeCache(
+          CacheRecord(
+            key: CacheKey(
+              accountId: accountId,
+              namespace: 'session',
+              entityKey: 'me',
+            ),
+            payload: const {},
+            schemaVersion: 1,
+            fetchedAt: now,
+            expiresAt: now.add(const Duration(hours: 1)),
+          ),
+        );
+        await database.saveDraft(
+          DocumentDraft(
+            id: 'draft-$accountId',
+            accountId: accountId,
+            warehouseId: 11,
+            payload: const {},
+            createdAt: now,
+            updatedAt: now,
+          ),
+        );
+      }
+
+      await database.clearAccount('7');
+
+      for (final entry in {
+        'cache_records': 1,
+        'document_drafts': 1,
+        'outbox_operations': 2,
+        'outbox_resolutions': 1,
+      }.entries) {
+        final rows = await database
+            .customSelect('SELECT account_id FROM ${entry.key}')
+            .get();
+        expect(rows, hasLength(entry.value));
+        expect(
+          rows.map((row) => row.read<String>('account_id')),
+          everyElement('8'),
+        );
+      }
+      final dependencies = await database
+          .customSelect('SELECT * FROM outbox_dependencies')
+          .get();
+      expect(dependencies, isEmpty);
+    },
+  );
+
   test('enqueue enforces a hard 500 operation cap per account', () async {
     final now = DateTime.utc(2026, 7, 13);
     for (var index = 0; index < 500; index += 1) {
@@ -361,6 +468,24 @@ OutboxOperation _operation(String id, DateTime now, OutboxOperationKind kind) {
     accountId: '7',
     warehouseId: 11,
     kind: kind,
+    payload: const {},
+    state: OutboxState.queued,
+    createdAt: now,
+    confirmedAt: now,
+  );
+}
+
+OutboxOperation _operationForAccount(
+  String id,
+  String accountId,
+  DateTime now,
+) {
+  return OutboxOperation(
+    operationId: id,
+    idempotencyKey: 'key-$id',
+    accountId: accountId,
+    warehouseId: 11,
+    kind: OutboxOperationKind.documentCreate,
     payload: const {},
     state: OutboxState.queued,
     createdAt: now,

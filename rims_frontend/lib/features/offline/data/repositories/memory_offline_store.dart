@@ -119,6 +119,13 @@ final class MemoryOfflineStore implements OfflineStore {
     OutboxOperation operation,
     Set<String> dependencies,
   ) async {
+    if (operation.replacementOf != null) {
+      throw ArgumentError.value(
+        operation.replacementOf,
+        'operation.replacementOf',
+        'Replacement ownership can only be created by conflict resolution.',
+      );
+    }
     if (dependencies.contains(operation.operationId)) {
       throw ArgumentError.value(operation.operationId, 'dependencies');
     }

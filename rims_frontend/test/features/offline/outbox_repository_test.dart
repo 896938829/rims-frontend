@@ -457,6 +457,7 @@ INSERT INTO outbox_resolutions (
       ),
     );
     _expectLocalStorageFailure(await failingRepository.prune(accountId: '7'));
+    _expectLocalStorageFailure(await failingRepository.clearAccount('7'));
     _expectLocalStorageFailure(
       await failingRepository.resolveConflict(
         accountId: '7',
