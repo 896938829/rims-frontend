@@ -1,8 +1,11 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:rims_frontend/core/network/api_client.dart';
 import 'package:rims_frontend/core/events/app_event.dart';
 import 'package:rims_frontend/core/events/app_event_bus.dart';
 import 'package:rims_frontend/core/result/failure.dart';
@@ -14,6 +17,8 @@ import 'package:rims_frontend/features/attachments/domain/services/attachment_pi
 import 'package:rims_frontend/features/attachments/domain/services/attachment_staging_store.dart';
 import 'package:rims_frontend/features/documents/domain/entities/document_data.dart';
 import 'package:rims_frontend/features/documents/domain/repositories/documents_repository.dart';
+import 'package:rims_frontend/features/documents/data/datasources/documents_remote_datasource.dart';
+import 'package:rims_frontend/features/documents/data/repositories/documents_repository_impl.dart';
 import 'package:rims_frontend/features/documents/presentation/pages/documents_page.dart';
 import 'package:rims_frontend/features/documents/presentation/view_models/documents_view_model.dart';
 import 'package:rims_frontend/features/inventory/domain/entities/inventory_item.dart';
@@ -664,7 +669,9 @@ void main() {
       final unknown = _draftEnabledViewModel(
         drafts: _FakeDocumentDraftRepository(),
         documents: _FakeDocumentsRepository(
-          createResult: Future.value(const FailureResult(UnknownFailure())),
+          createResult: Future.value(
+            const FailureResult(TransportUnknownFailure()),
+          ),
         ),
         outbox: unknownOutbox,
         submissionStagingStore: _OutboxSubmissionStagingStore(),
@@ -697,6 +704,50 @@ void main() {
       expect(rejected.offlineSubmissionReview, isNull);
       expect((await rejectedOutbox.list('7')).successData, isEmpty);
       expect(rejected.formError, 'bad lines');
+    },
+  );
+
+  test(
+    'real datasource offers only unknown transport and rejects protocol unknown',
+    () async {
+      Future<DocumentsViewModel> createViewModel(
+        HttpClientAdapter adapter,
+      ) async {
+        final outbox = MemoryOutboxRepository(
+          stateMachine: OutboxStateMachine(),
+        );
+        final repository = DocumentsRepositoryImpl(
+          remoteDataSource: ApiDocumentsRemoteDataSource(
+            ApiClient(
+              dio: Dio()..httpClientAdapter = adapter,
+              enableLogging: false,
+            ),
+          ),
+        );
+        return _draftEnabledViewModel(
+          drafts: _FakeDocumentDraftRepository(),
+          documents: repository,
+          outbox: outbox,
+          submissionStagingStore: _OutboxSubmissionStagingStore(),
+          draftIdFactory: () => 'real-datasource-draft',
+        )..addScannedProduct(_standardItem);
+      }
+
+      final protocolUnknown = await createViewModel(
+        _DocumentSubmitAdapter(body: '[]'),
+      );
+      await protocolUnknown.createDocument();
+
+      expect(protocolUnknown.formError, 'Invalid API response');
+      expect(protocolUnknown.offlineSubmissionReview, isNull);
+
+      final transportUnknown = await createViewModel(
+        const _DocumentSubmitAdapter(throwUnknownTransport: true),
+      );
+      await transportUnknown.createDocument();
+
+      expect(transportUnknown.offlineSubmissionReview, isNotNull);
+      expect(await transportUnknown.confirmOfflineSubmission(), isTrue);
     },
   );
 
@@ -1540,10 +1591,13 @@ void main() {
       expect(viewModel.offlineSubmissionReview?.documentType, isNotEmpty);
       expect(await viewModel.confirmOfflineSubmission(), isTrue);
 
-      final queued = (await outbox.list('7')).successData.single;
-      expect(queued.kind, OutboxOperationKind.documentComplete);
-      expect(queued.payload['documentId'], _draftSalesDocument.id);
-      expect(queued.idempotencyKey, repository.completedRequestIds.single);
+      final queued = (await outbox.list('7')).successData;
+      expect(queued.map((operation) => operation.kind), [
+        OutboxOperationKind.documentReference,
+        OutboxOperationKind.documentComplete,
+      ]);
+      expect(queued.last.payload, {'version': 1});
+      expect(queued.last.idempotencyKey, repository.completedRequestIds.single);
     },
   );
 
@@ -2727,6 +2781,42 @@ final class _OutboxSubmissionStagingStore
   }) async => const Success(null);
 }
 
+final class _DocumentSubmitAdapter implements HttpClientAdapter {
+  const _DocumentSubmitAdapter({
+    this.body =
+        '{"code":0,"message":"ok","data":{"id":91,"docNo":"DOC-91","docType":2,"docTypeName":"销售出库","statusName":"草稿"}}',
+    this.throwUnknownTransport = false,
+  });
+
+  final String body;
+  final bool throwUnknownTransport;
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    if (throwUnknownTransport) {
+      throw DioException(
+        requestOptions: options,
+        type: DioExceptionType.unknown,
+        error: const SocketException('response boundary lost'),
+      );
+    }
+    return ResponseBody.fromString(
+      body,
+      200,
+      headers: {
+        Headers.contentTypeHeader: [Headers.jsonContentType],
+      },
+    );
+  }
+
+  @override
+  void close({bool force = false}) {}
+}
+
 extension _SuccessData<T> on Result<T> {
   T get successData => switch (this) {
     Success<T>(:final data) => data,
@@ -2999,8 +3089,11 @@ final class _PageDraftStaging implements AttachmentStagingStore {
   }
 
   @override
-  Future<Result<void>> cleanupStale({required Duration maxAge}) async =>
-      const Success(null);
+  Future<Result<void>> cleanupStale({
+    required String userId,
+    required Duration maxAge,
+    Set<String> protectedRequestIds = const {},
+  }) async => const Success(null);
 
   @override
   Future<Result<void>> clearForUser(String userId) async => const Success(null);

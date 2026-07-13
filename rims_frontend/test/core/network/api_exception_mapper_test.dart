@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rims_frontend/core/network/api_exception_mapper.dart';
@@ -86,6 +88,18 @@ void main() {
       );
 
       expect(failure, isA<NetworkFailure>());
+    });
+
+    test('distinguishes an unknown transport result from protocol unknown', () {
+      final failure = const ApiExceptionMapper().map(
+        DioException(
+          requestOptions: RequestOptions(path: '/documents'),
+          type: DioExceptionType.unknown,
+          error: const SocketException('connection closed without response'),
+        ),
+      );
+
+      expect(failure, isA<TransportUnknownFailure>());
     });
 
     test('maps request cancellation without treating it as authentication', () {

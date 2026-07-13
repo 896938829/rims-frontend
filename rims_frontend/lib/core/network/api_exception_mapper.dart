@@ -1,6 +1,7 @@
 import 'package:dio/dio.dart';
 
 import '../result/failure.dart';
+import 'api_business_failure_mapper.dart';
 import 'api_envelope.dart';
 
 final class ApiExceptionMapper {
@@ -13,6 +14,13 @@ final class ApiExceptionMapper {
 
     if (error.type == DioExceptionType.cancel) {
       return CancellationFailure(cause: error);
+    }
+
+    if (error.type == DioExceptionType.unknown && error.response == null) {
+      return TransportUnknownFailure(
+        message: _messageFrom(error),
+        cause: error,
+      );
     }
 
     final statusCode = error.response?.statusCode;
@@ -32,8 +40,8 @@ final class ApiExceptionMapper {
     }
 
     if (businessCode != null && businessCode != 0) {
-      return _failureFromBusinessCode(
-        businessCode,
+      return const ApiBusinessFailureMapper().map(
+        businessCode: businessCode,
         message: message,
         statusCode: statusCode,
         traceId: traceId,
@@ -48,80 +56,6 @@ final class ApiExceptionMapper {
       traceId: traceId,
       cause: error,
     );
-  }
-
-  Failure _failureFromBusinessCode(
-    int businessCode, {
-    required String message,
-    required int? statusCode,
-    required String? traceId,
-    required Object cause,
-  }) {
-    return switch (businessCode) {
-      10001 => AuthenticationFailure(
-        message: message,
-        statusCode: statusCode,
-        businessCode: businessCode,
-        traceId: traceId,
-        cause: cause,
-      ),
-      10002 => AuthorizationFailure(
-        message: message,
-        statusCode: statusCode,
-        businessCode: businessCode,
-        traceId: traceId,
-        cause: cause,
-      ),
-      10003 => ValidationFailure(
-        message: message,
-        statusCode: statusCode,
-        businessCode: businessCode,
-        traceId: traceId,
-        cause: cause,
-      ),
-      10004 => NotFoundFailure(
-        message: message,
-        statusCode: statusCode,
-        businessCode: businessCode,
-        traceId: traceId,
-        cause: cause,
-      ),
-      10005 || 20003 => ConflictFailure(
-        message: message,
-        statusCode: statusCode,
-        businessCode: businessCode,
-        traceId: traceId,
-        cause: cause,
-      ),
-      20001 => InventoryFailure(
-        message: message,
-        statusCode: statusCode,
-        businessCode: businessCode,
-        traceId: traceId,
-        cause: cause,
-      ),
-      20002 => StateFailure(
-        message: message,
-        statusCode: statusCode,
-        businessCode: businessCode,
-        traceId: traceId,
-        cause: cause,
-      ),
-      50000 => ServerFailure(
-        message: message,
-        statusCode: statusCode,
-        businessCode: businessCode,
-        traceId: traceId,
-        cause: cause,
-      ),
-      _ => UnknownFailure(
-        message: message,
-        statusCode: statusCode,
-        businessCode: businessCode,
-        traceId: traceId,
-        cause: cause,
-      ),
-    };
   }
 
   Failure _failureFromStatusCode(

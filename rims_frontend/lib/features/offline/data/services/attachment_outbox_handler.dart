@@ -1,4 +1,3 @@
-import '../../../../core/events/app_event.dart';
 import '../../../../core/events/app_event_bus.dart';
 import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
@@ -6,6 +5,8 @@ import '../../../attachments/data/datasources/attachments_remote_datasource.dart
 import '../../../attachments/domain/entities/attachment.dart';
 import '../../../attachments/domain/services/attachment_staging_store.dart';
 import '../../domain/entities/outbox_operation.dart';
+import '../../domain/entities/outbox_graph.dart';
+import '../../domain/entities/outbox_cleanup_intent.dart';
 import '../../domain/repositories/document_draft_repository.dart';
 import '../../domain/services/outbox_executor.dart';
 
@@ -29,7 +30,10 @@ final class AttachmentOutboxHandler implements OutboxOperationHandler {
   String get statusScope => 'POST /api/v1/files/upload';
 
   @override
-  Future<Result<Object?>> execute(OutboxOperation operation) async {
+  Future<Result<OutboxHandlerSuccess>> execute(
+    OutboxOperation operation, {
+    Map<String, OutboxOperationOutput> dependencyOutputs = const {},
+  }) async {
     if (operation.kind != kind) {
       return const FailureResult(
         ValidationFailure(message: 'Attachment outbox handler kind mismatch.'),
@@ -48,6 +52,29 @@ final class AttachmentOutboxHandler implements OutboxOperationHandler {
         ValidationFailure(message: 'Attachment idempotency key changed.'),
       );
     }
+    final dependencyDocumentIds = dependencyOutputs.values
+        .map((output) => output.data['documentId'])
+        .whereType<int>()
+        .where((id) => id > 0)
+        .toSet();
+    if (payload.localAggregateId != null) {
+      if (dependencyDocumentIds.length != 1) {
+        return const FailureResult(
+          ValidationFailure(
+            message: 'Draft attachment requires authoritative document output.',
+          ),
+        );
+      }
+      final rebound = await stagingStore.rebindDocumentDraft(
+        userId: operation.accountId,
+        localAggregateId: payload.localAggregateId!,
+        documentId: dependencyDocumentIds.single,
+        requestIds: [payload.requestId],
+      );
+      if (rebound case FailureResult<void>(:final failure)) {
+        return FailureResult(failure);
+      }
+    }
     final loaded = await stagingStore.loadStaged(
       userId: operation.accountId,
       requestId: payload.requestId,
@@ -63,7 +90,8 @@ final class AttachmentOutboxHandler implements OutboxOperationHandler {
       );
     }
     if (staged.pending.binding.businessType == 'document_draft' ||
-        staged.pending.binding.localDraftId != null) {
+        staged.pending.binding.localDraftId != null ||
+        staged.pending.binding.businessId <= 0) {
       return const FailureResult(
         ValidationFailure(
           message: 'Draft attachment has no authoritative document binding.',
@@ -79,40 +107,25 @@ final class AttachmentOutboxHandler implements OutboxOperationHandler {
       return FailureResult(failure);
     }
 
-    final cleanup = payload.cleanup;
-    if (cleanup != null) {
-      final cleaned = await stagingStore.removeStagedAttachments(
-        userId: operation.accountId,
-        requestIds: cleanup.attachmentRequestIds,
-      );
-      if (cleaned case FailureResult<void>(:final failure)) {
-        return FailureResult(failure);
-      }
-      try {
-        await draftRepository.delete(
-          accountId: operation.accountId,
-          draftId: cleanup.draftId,
-        );
-      } on Object catch (error) {
-        return FailureResult(
-          LocalStorageFailure(
-            message: 'Unable to clean submitted attachment draft.',
-            cause: error,
-          ),
-        );
-      }
-      eventBus.publish(const GlobalRefreshRequestedEvent());
-    } else if (payload.localAggregateId == null) {
-      final cleaned = await stagingStore.removeStagedAttachments(
-        userId: operation.accountId,
-        requestIds: [payload.requestId],
-      );
-      if (cleaned case FailureResult<void>(:final failure)) {
-        return FailureResult(failure);
-      }
-      eventBus.publish(const GlobalRefreshRequestedEvent());
-    }
-    return Success<Object?>((uploaded as Success).data);
+    final model = (uploaded as Success).data;
+    return Success(
+      OutboxHandlerSuccess(
+        output: OutboxOperationOutput(
+          version: 1,
+          data: {
+            'attachmentId': model.id,
+            'documentId': staged.pending.binding.businessId,
+          },
+        ),
+        cleanup:
+            payload.cleanup?.toRequest() ??
+            (payload.localAggregateId == null
+                ? OutboxCleanupRequest(
+                    attachmentRequestIds: [payload.requestId],
+                  )
+                : null),
+      ),
+    );
   }
 }
 
@@ -201,6 +214,11 @@ final class _AttachmentCleanup {
 
   final String draftId;
   final List<String> attachmentRequestIds;
+
+  OutboxCleanupRequest toRequest() => OutboxCleanupRequest(
+    draftId: draftId,
+    attachmentRequestIds: attachmentRequestIds,
+  );
 }
 
 String _string(Map<String, Object?> json, String key) {

@@ -1262,6 +1262,15 @@ class $OfflineOutboxOperationsTable extends OfflineOutboxOperations
         type: DriftSqlType.dateTime,
         requiredDuringInsert: false,
       );
+  static const VerificationMeta _outputMeta = const VerificationMeta('output');
+  @override
+  late final GeneratedColumn<String> output = GeneratedColumn<String>(
+    'output',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
   @override
   List<GeneratedColumn> get $columns => [
     operationId,
@@ -1281,6 +1290,7 @@ class $OfflineOutboxOperationsTable extends OfflineOutboxOperations
     reviewStamp,
     requiresStatusProbe,
     syncingStartedAt,
+    output,
   ];
   @override
   String get aliasedName => _alias ?? actualTableName;
@@ -1451,6 +1461,12 @@ class $OfflineOutboxOperationsTable extends OfflineOutboxOperations
         ),
       );
     }
+    if (data.containsKey('output')) {
+      context.handle(
+        _outputMeta,
+        output.isAcceptableOrUnknown(data['output']!, _outputMeta),
+      );
+    }
     return context;
   }
 
@@ -1533,6 +1549,10 @@ class $OfflineOutboxOperationsTable extends OfflineOutboxOperations
         DriftSqlType.dateTime,
         data['${effectivePrefix}syncing_started_at'],
       ),
+      output: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}output'],
+      ),
     );
   }
 
@@ -1561,6 +1581,7 @@ class OfflineOutboxOperation extends DataClass
   final String? reviewStamp;
   final bool requiresStatusProbe;
   final DateTime? syncingStartedAt;
+  final String? output;
   const OfflineOutboxOperation({
     required this.operationId,
     required this.idempotencyKey,
@@ -1579,6 +1600,7 @@ class OfflineOutboxOperation extends DataClass
     this.reviewStamp,
     required this.requiresStatusProbe,
     this.syncingStartedAt,
+    this.output,
   });
   @override
   Map<String, Expression> toColumns(bool nullToAbsent) {
@@ -1613,6 +1635,9 @@ class OfflineOutboxOperation extends DataClass
     map['requires_status_probe'] = Variable<bool>(requiresStatusProbe);
     if (!nullToAbsent || syncingStartedAt != null) {
       map['syncing_started_at'] = Variable<DateTime>(syncingStartedAt);
+    }
+    if (!nullToAbsent || output != null) {
+      map['output'] = Variable<String>(output);
     }
     return map;
   }
@@ -1650,6 +1675,9 @@ class OfflineOutboxOperation extends DataClass
       syncingStartedAt: syncingStartedAt == null && nullToAbsent
           ? const Value.absent()
           : Value(syncingStartedAt),
+      output: output == null && nullToAbsent
+          ? const Value.absent()
+          : Value(output),
     );
   }
 
@@ -1680,6 +1708,7 @@ class OfflineOutboxOperation extends DataClass
       syncingStartedAt: serializer.fromJson<DateTime?>(
         json['syncingStartedAt'],
       ),
+      output: serializer.fromJson<String?>(json['output']),
     );
   }
   @override
@@ -1703,6 +1732,7 @@ class OfflineOutboxOperation extends DataClass
       'reviewStamp': serializer.toJson<String?>(reviewStamp),
       'requiresStatusProbe': serializer.toJson<bool>(requiresStatusProbe),
       'syncingStartedAt': serializer.toJson<DateTime?>(syncingStartedAt),
+      'output': serializer.toJson<String?>(output),
     };
   }
 
@@ -1724,6 +1754,7 @@ class OfflineOutboxOperation extends DataClass
     Value<String?> reviewStamp = const Value.absent(),
     bool? requiresStatusProbe,
     Value<DateTime?> syncingStartedAt = const Value.absent(),
+    Value<String?> output = const Value.absent(),
   }) => OfflineOutboxOperation(
     operationId: operationId ?? this.operationId,
     idempotencyKey: idempotencyKey ?? this.idempotencyKey,
@@ -1750,6 +1781,7 @@ class OfflineOutboxOperation extends DataClass
     syncingStartedAt: syncingStartedAt.present
         ? syncingStartedAt.value
         : this.syncingStartedAt,
+    output: output.present ? output.value : this.output,
   );
   OfflineOutboxOperation copyWithCompanion(
     OfflineOutboxOperationsCompanion data,
@@ -1798,6 +1830,7 @@ class OfflineOutboxOperation extends DataClass
       syncingStartedAt: data.syncingStartedAt.present
           ? data.syncingStartedAt.value
           : this.syncingStartedAt,
+      output: data.output.present ? data.output.value : this.output,
     );
   }
 
@@ -1820,7 +1853,8 @@ class OfflineOutboxOperation extends DataClass
           ..write('replacementOf: $replacementOf, ')
           ..write('reviewStamp: $reviewStamp, ')
           ..write('requiresStatusProbe: $requiresStatusProbe, ')
-          ..write('syncingStartedAt: $syncingStartedAt')
+          ..write('syncingStartedAt: $syncingStartedAt, ')
+          ..write('output: $output')
           ..write(')'))
         .toString();
   }
@@ -1844,6 +1878,7 @@ class OfflineOutboxOperation extends DataClass
     reviewStamp,
     requiresStatusProbe,
     syncingStartedAt,
+    output,
   );
   @override
   bool operator ==(Object other) =>
@@ -1865,7 +1900,8 @@ class OfflineOutboxOperation extends DataClass
           other.replacementOf == this.replacementOf &&
           other.reviewStamp == this.reviewStamp &&
           other.requiresStatusProbe == this.requiresStatusProbe &&
-          other.syncingStartedAt == this.syncingStartedAt);
+          other.syncingStartedAt == this.syncingStartedAt &&
+          other.output == this.output);
 }
 
 class OfflineOutboxOperationsCompanion
@@ -1887,6 +1923,7 @@ class OfflineOutboxOperationsCompanion
   final Value<String?> reviewStamp;
   final Value<bool> requiresStatusProbe;
   final Value<DateTime?> syncingStartedAt;
+  final Value<String?> output;
   final Value<int> rowid;
   const OfflineOutboxOperationsCompanion({
     this.operationId = const Value.absent(),
@@ -1906,6 +1943,7 @@ class OfflineOutboxOperationsCompanion
     this.reviewStamp = const Value.absent(),
     this.requiresStatusProbe = const Value.absent(),
     this.syncingStartedAt = const Value.absent(),
+    this.output = const Value.absent(),
     this.rowid = const Value.absent(),
   });
   OfflineOutboxOperationsCompanion.insert({
@@ -1926,6 +1964,7 @@ class OfflineOutboxOperationsCompanion
     this.reviewStamp = const Value.absent(),
     this.requiresStatusProbe = const Value.absent(),
     this.syncingStartedAt = const Value.absent(),
+    this.output = const Value.absent(),
     this.rowid = const Value.absent(),
   }) : operationId = Value(operationId),
        idempotencyKey = Value(idempotencyKey),
@@ -1953,6 +1992,7 @@ class OfflineOutboxOperationsCompanion
     Expression<String>? reviewStamp,
     Expression<bool>? requiresStatusProbe,
     Expression<DateTime>? syncingStartedAt,
+    Expression<String>? output,
     Expression<int>? rowid,
   }) {
     return RawValuesInsertable({
@@ -1974,6 +2014,7 @@ class OfflineOutboxOperationsCompanion
       if (requiresStatusProbe != null)
         'requires_status_probe': requiresStatusProbe,
       if (syncingStartedAt != null) 'syncing_started_at': syncingStartedAt,
+      if (output != null) 'output': output,
       if (rowid != null) 'rowid': rowid,
     });
   }
@@ -1996,6 +2037,7 @@ class OfflineOutboxOperationsCompanion
     Value<String?>? reviewStamp,
     Value<bool>? requiresStatusProbe,
     Value<DateTime?>? syncingStartedAt,
+    Value<String?>? output,
     Value<int>? rowid,
   }) {
     return OfflineOutboxOperationsCompanion(
@@ -2016,6 +2058,7 @@ class OfflineOutboxOperationsCompanion
       reviewStamp: reviewStamp ?? this.reviewStamp,
       requiresStatusProbe: requiresStatusProbe ?? this.requiresStatusProbe,
       syncingStartedAt: syncingStartedAt ?? this.syncingStartedAt,
+      output: output ?? this.output,
       rowid: rowid ?? this.rowid,
     );
   }
@@ -2074,6 +2117,9 @@ class OfflineOutboxOperationsCompanion
     if (syncingStartedAt.present) {
       map['syncing_started_at'] = Variable<DateTime>(syncingStartedAt.value);
     }
+    if (output.present) {
+      map['output'] = Variable<String>(output.value);
+    }
     if (rowid.present) {
       map['rowid'] = Variable<int>(rowid.value);
     }
@@ -2100,6 +2146,7 @@ class OfflineOutboxOperationsCompanion
           ..write('reviewStamp: $reviewStamp, ')
           ..write('requiresStatusProbe: $requiresStatusProbe, ')
           ..write('syncingStartedAt: $syncingStartedAt, ')
+          ..write('output: $output, ')
           ..write('rowid: $rowid')
           ..write(')'))
         .toString();
@@ -2723,6 +2770,615 @@ class OfflineOutboxResolutionsCompanion
   }
 }
 
+class $OfflineOutboxCleanupIntentsTable extends OfflineOutboxCleanupIntents
+    with
+        TableInfo<
+          $OfflineOutboxCleanupIntentsTable,
+          OfflineOutboxCleanupIntent
+        > {
+  @override
+  final GeneratedDatabase attachedDatabase;
+  final String? _alias;
+  $OfflineOutboxCleanupIntentsTable(this.attachedDatabase, [this._alias]);
+  static const VerificationMeta _operationIdMeta = const VerificationMeta(
+    'operationId',
+  );
+  @override
+  late final GeneratedColumn<String> operationId = GeneratedColumn<String>(
+    'operation_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+    defaultConstraints: GeneratedColumn.constraintIsAlways(
+      'REFERENCES outbox_operations (operation_id) ON DELETE CASCADE',
+    ),
+  );
+  static const VerificationMeta _accountIdMeta = const VerificationMeta(
+    'accountId',
+  );
+  @override
+  late final GeneratedColumn<String> accountId = GeneratedColumn<String>(
+    'account_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.string,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _warehouseIdMeta = const VerificationMeta(
+    'warehouseId',
+  );
+  @override
+  late final GeneratedColumn<int> warehouseId = GeneratedColumn<int>(
+    'warehouse_id',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _draftIdMeta = const VerificationMeta(
+    'draftId',
+  );
+  @override
+  late final GeneratedColumn<String> draftId = GeneratedColumn<String>(
+    'draft_id',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  static const VerificationMeta _attachmentRequestIdsMeta =
+      const VerificationMeta('attachmentRequestIds');
+  @override
+  late final GeneratedColumn<String> attachmentRequestIds =
+      GeneratedColumn<String>(
+        'attachment_request_ids',
+        aliasedName,
+        false,
+        type: DriftSqlType.string,
+        requiredDuringInsert: true,
+      );
+  static const VerificationMeta _createdAtMeta = const VerificationMeta(
+    'createdAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> createdAt = GeneratedColumn<DateTime>(
+    'created_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _updatedAtMeta = const VerificationMeta(
+    'updatedAt',
+  );
+  @override
+  late final GeneratedColumn<DateTime> updatedAt = GeneratedColumn<DateTime>(
+    'updated_at',
+    aliasedName,
+    false,
+    type: DriftSqlType.dateTime,
+    requiredDuringInsert: true,
+  );
+  static const VerificationMeta _attemptCountMeta = const VerificationMeta(
+    'attemptCount',
+  );
+  @override
+  late final GeneratedColumn<int> attemptCount = GeneratedColumn<int>(
+    'attempt_count',
+    aliasedName,
+    false,
+    type: DriftSqlType.int,
+    requiredDuringInsert: false,
+    defaultValue: const Constant(0),
+  );
+  static const VerificationMeta _lastFailureMeta = const VerificationMeta(
+    'lastFailure',
+  );
+  @override
+  late final GeneratedColumn<String> lastFailure = GeneratedColumn<String>(
+    'last_failure',
+    aliasedName,
+    true,
+    type: DriftSqlType.string,
+    requiredDuringInsert: false,
+  );
+  @override
+  List<GeneratedColumn> get $columns => [
+    operationId,
+    accountId,
+    warehouseId,
+    draftId,
+    attachmentRequestIds,
+    createdAt,
+    updatedAt,
+    attemptCount,
+    lastFailure,
+  ];
+  @override
+  String get aliasedName => _alias ?? actualTableName;
+  @override
+  String get actualTableName => $name;
+  static const String $name = 'outbox_cleanup_intents';
+  @override
+  VerificationContext validateIntegrity(
+    Insertable<OfflineOutboxCleanupIntent> instance, {
+    bool isInserting = false,
+  }) {
+    final context = VerificationContext();
+    final data = instance.toColumns(true);
+    if (data.containsKey('operation_id')) {
+      context.handle(
+        _operationIdMeta,
+        operationId.isAcceptableOrUnknown(
+          data['operation_id']!,
+          _operationIdMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_operationIdMeta);
+    }
+    if (data.containsKey('account_id')) {
+      context.handle(
+        _accountIdMeta,
+        accountId.isAcceptableOrUnknown(data['account_id']!, _accountIdMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_accountIdMeta);
+    }
+    if (data.containsKey('warehouse_id')) {
+      context.handle(
+        _warehouseIdMeta,
+        warehouseId.isAcceptableOrUnknown(
+          data['warehouse_id']!,
+          _warehouseIdMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_warehouseIdMeta);
+    }
+    if (data.containsKey('draft_id')) {
+      context.handle(
+        _draftIdMeta,
+        draftId.isAcceptableOrUnknown(data['draft_id']!, _draftIdMeta),
+      );
+    }
+    if (data.containsKey('attachment_request_ids')) {
+      context.handle(
+        _attachmentRequestIdsMeta,
+        attachmentRequestIds.isAcceptableOrUnknown(
+          data['attachment_request_ids']!,
+          _attachmentRequestIdsMeta,
+        ),
+      );
+    } else if (isInserting) {
+      context.missing(_attachmentRequestIdsMeta);
+    }
+    if (data.containsKey('created_at')) {
+      context.handle(
+        _createdAtMeta,
+        createdAt.isAcceptableOrUnknown(data['created_at']!, _createdAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_createdAtMeta);
+    }
+    if (data.containsKey('updated_at')) {
+      context.handle(
+        _updatedAtMeta,
+        updatedAt.isAcceptableOrUnknown(data['updated_at']!, _updatedAtMeta),
+      );
+    } else if (isInserting) {
+      context.missing(_updatedAtMeta);
+    }
+    if (data.containsKey('attempt_count')) {
+      context.handle(
+        _attemptCountMeta,
+        attemptCount.isAcceptableOrUnknown(
+          data['attempt_count']!,
+          _attemptCountMeta,
+        ),
+      );
+    }
+    if (data.containsKey('last_failure')) {
+      context.handle(
+        _lastFailureMeta,
+        lastFailure.isAcceptableOrUnknown(
+          data['last_failure']!,
+          _lastFailureMeta,
+        ),
+      );
+    }
+    return context;
+  }
+
+  @override
+  Set<GeneratedColumn> get $primaryKey => {operationId};
+  @override
+  OfflineOutboxCleanupIntent map(
+    Map<String, dynamic> data, {
+    String? tablePrefix,
+  }) {
+    final effectivePrefix = tablePrefix != null ? '$tablePrefix.' : '';
+    return OfflineOutboxCleanupIntent(
+      operationId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}operation_id'],
+      )!,
+      accountId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}account_id'],
+      )!,
+      warehouseId: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}warehouse_id'],
+      )!,
+      draftId: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}draft_id'],
+      ),
+      attachmentRequestIds: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}attachment_request_ids'],
+      )!,
+      createdAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}created_at'],
+      )!,
+      updatedAt: attachedDatabase.typeMapping.read(
+        DriftSqlType.dateTime,
+        data['${effectivePrefix}updated_at'],
+      )!,
+      attemptCount: attachedDatabase.typeMapping.read(
+        DriftSqlType.int,
+        data['${effectivePrefix}attempt_count'],
+      )!,
+      lastFailure: attachedDatabase.typeMapping.read(
+        DriftSqlType.string,
+        data['${effectivePrefix}last_failure'],
+      ),
+    );
+  }
+
+  @override
+  $OfflineOutboxCleanupIntentsTable createAlias(String alias) {
+    return $OfflineOutboxCleanupIntentsTable(attachedDatabase, alias);
+  }
+}
+
+class OfflineOutboxCleanupIntent extends DataClass
+    implements Insertable<OfflineOutboxCleanupIntent> {
+  final String operationId;
+  final String accountId;
+  final int warehouseId;
+  final String? draftId;
+  final String attachmentRequestIds;
+  final DateTime createdAt;
+  final DateTime updatedAt;
+  final int attemptCount;
+  final String? lastFailure;
+  const OfflineOutboxCleanupIntent({
+    required this.operationId,
+    required this.accountId,
+    required this.warehouseId,
+    this.draftId,
+    required this.attachmentRequestIds,
+    required this.createdAt,
+    required this.updatedAt,
+    required this.attemptCount,
+    this.lastFailure,
+  });
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    map['operation_id'] = Variable<String>(operationId);
+    map['account_id'] = Variable<String>(accountId);
+    map['warehouse_id'] = Variable<int>(warehouseId);
+    if (!nullToAbsent || draftId != null) {
+      map['draft_id'] = Variable<String>(draftId);
+    }
+    map['attachment_request_ids'] = Variable<String>(attachmentRequestIds);
+    map['created_at'] = Variable<DateTime>(createdAt);
+    map['updated_at'] = Variable<DateTime>(updatedAt);
+    map['attempt_count'] = Variable<int>(attemptCount);
+    if (!nullToAbsent || lastFailure != null) {
+      map['last_failure'] = Variable<String>(lastFailure);
+    }
+    return map;
+  }
+
+  OfflineOutboxCleanupIntentsCompanion toCompanion(bool nullToAbsent) {
+    return OfflineOutboxCleanupIntentsCompanion(
+      operationId: Value(operationId),
+      accountId: Value(accountId),
+      warehouseId: Value(warehouseId),
+      draftId: draftId == null && nullToAbsent
+          ? const Value.absent()
+          : Value(draftId),
+      attachmentRequestIds: Value(attachmentRequestIds),
+      createdAt: Value(createdAt),
+      updatedAt: Value(updatedAt),
+      attemptCount: Value(attemptCount),
+      lastFailure: lastFailure == null && nullToAbsent
+          ? const Value.absent()
+          : Value(lastFailure),
+    );
+  }
+
+  factory OfflineOutboxCleanupIntent.fromJson(
+    Map<String, dynamic> json, {
+    ValueSerializer? serializer,
+  }) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return OfflineOutboxCleanupIntent(
+      operationId: serializer.fromJson<String>(json['operationId']),
+      accountId: serializer.fromJson<String>(json['accountId']),
+      warehouseId: serializer.fromJson<int>(json['warehouseId']),
+      draftId: serializer.fromJson<String?>(json['draftId']),
+      attachmentRequestIds: serializer.fromJson<String>(
+        json['attachmentRequestIds'],
+      ),
+      createdAt: serializer.fromJson<DateTime>(json['createdAt']),
+      updatedAt: serializer.fromJson<DateTime>(json['updatedAt']),
+      attemptCount: serializer.fromJson<int>(json['attemptCount']),
+      lastFailure: serializer.fromJson<String?>(json['lastFailure']),
+    );
+  }
+  @override
+  Map<String, dynamic> toJson({ValueSerializer? serializer}) {
+    serializer ??= driftRuntimeOptions.defaultSerializer;
+    return <String, dynamic>{
+      'operationId': serializer.toJson<String>(operationId),
+      'accountId': serializer.toJson<String>(accountId),
+      'warehouseId': serializer.toJson<int>(warehouseId),
+      'draftId': serializer.toJson<String?>(draftId),
+      'attachmentRequestIds': serializer.toJson<String>(attachmentRequestIds),
+      'createdAt': serializer.toJson<DateTime>(createdAt),
+      'updatedAt': serializer.toJson<DateTime>(updatedAt),
+      'attemptCount': serializer.toJson<int>(attemptCount),
+      'lastFailure': serializer.toJson<String?>(lastFailure),
+    };
+  }
+
+  OfflineOutboxCleanupIntent copyWith({
+    String? operationId,
+    String? accountId,
+    int? warehouseId,
+    Value<String?> draftId = const Value.absent(),
+    String? attachmentRequestIds,
+    DateTime? createdAt,
+    DateTime? updatedAt,
+    int? attemptCount,
+    Value<String?> lastFailure = const Value.absent(),
+  }) => OfflineOutboxCleanupIntent(
+    operationId: operationId ?? this.operationId,
+    accountId: accountId ?? this.accountId,
+    warehouseId: warehouseId ?? this.warehouseId,
+    draftId: draftId.present ? draftId.value : this.draftId,
+    attachmentRequestIds: attachmentRequestIds ?? this.attachmentRequestIds,
+    createdAt: createdAt ?? this.createdAt,
+    updatedAt: updatedAt ?? this.updatedAt,
+    attemptCount: attemptCount ?? this.attemptCount,
+    lastFailure: lastFailure.present ? lastFailure.value : this.lastFailure,
+  );
+  OfflineOutboxCleanupIntent copyWithCompanion(
+    OfflineOutboxCleanupIntentsCompanion data,
+  ) {
+    return OfflineOutboxCleanupIntent(
+      operationId: data.operationId.present
+          ? data.operationId.value
+          : this.operationId,
+      accountId: data.accountId.present ? data.accountId.value : this.accountId,
+      warehouseId: data.warehouseId.present
+          ? data.warehouseId.value
+          : this.warehouseId,
+      draftId: data.draftId.present ? data.draftId.value : this.draftId,
+      attachmentRequestIds: data.attachmentRequestIds.present
+          ? data.attachmentRequestIds.value
+          : this.attachmentRequestIds,
+      createdAt: data.createdAt.present ? data.createdAt.value : this.createdAt,
+      updatedAt: data.updatedAt.present ? data.updatedAt.value : this.updatedAt,
+      attemptCount: data.attemptCount.present
+          ? data.attemptCount.value
+          : this.attemptCount,
+      lastFailure: data.lastFailure.present
+          ? data.lastFailure.value
+          : this.lastFailure,
+    );
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('OfflineOutboxCleanupIntent(')
+          ..write('operationId: $operationId, ')
+          ..write('accountId: $accountId, ')
+          ..write('warehouseId: $warehouseId, ')
+          ..write('draftId: $draftId, ')
+          ..write('attachmentRequestIds: $attachmentRequestIds, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('attemptCount: $attemptCount, ')
+          ..write('lastFailure: $lastFailure')
+          ..write(')'))
+        .toString();
+  }
+
+  @override
+  int get hashCode => Object.hash(
+    operationId,
+    accountId,
+    warehouseId,
+    draftId,
+    attachmentRequestIds,
+    createdAt,
+    updatedAt,
+    attemptCount,
+    lastFailure,
+  );
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      (other is OfflineOutboxCleanupIntent &&
+          other.operationId == this.operationId &&
+          other.accountId == this.accountId &&
+          other.warehouseId == this.warehouseId &&
+          other.draftId == this.draftId &&
+          other.attachmentRequestIds == this.attachmentRequestIds &&
+          other.createdAt == this.createdAt &&
+          other.updatedAt == this.updatedAt &&
+          other.attemptCount == this.attemptCount &&
+          other.lastFailure == this.lastFailure);
+}
+
+class OfflineOutboxCleanupIntentsCompanion
+    extends UpdateCompanion<OfflineOutboxCleanupIntent> {
+  final Value<String> operationId;
+  final Value<String> accountId;
+  final Value<int> warehouseId;
+  final Value<String?> draftId;
+  final Value<String> attachmentRequestIds;
+  final Value<DateTime> createdAt;
+  final Value<DateTime> updatedAt;
+  final Value<int> attemptCount;
+  final Value<String?> lastFailure;
+  final Value<int> rowid;
+  const OfflineOutboxCleanupIntentsCompanion({
+    this.operationId = const Value.absent(),
+    this.accountId = const Value.absent(),
+    this.warehouseId = const Value.absent(),
+    this.draftId = const Value.absent(),
+    this.attachmentRequestIds = const Value.absent(),
+    this.createdAt = const Value.absent(),
+    this.updatedAt = const Value.absent(),
+    this.attemptCount = const Value.absent(),
+    this.lastFailure = const Value.absent(),
+    this.rowid = const Value.absent(),
+  });
+  OfflineOutboxCleanupIntentsCompanion.insert({
+    required String operationId,
+    required String accountId,
+    required int warehouseId,
+    this.draftId = const Value.absent(),
+    required String attachmentRequestIds,
+    required DateTime createdAt,
+    required DateTime updatedAt,
+    this.attemptCount = const Value.absent(),
+    this.lastFailure = const Value.absent(),
+    this.rowid = const Value.absent(),
+  }) : operationId = Value(operationId),
+       accountId = Value(accountId),
+       warehouseId = Value(warehouseId),
+       attachmentRequestIds = Value(attachmentRequestIds),
+       createdAt = Value(createdAt),
+       updatedAt = Value(updatedAt);
+  static Insertable<OfflineOutboxCleanupIntent> custom({
+    Expression<String>? operationId,
+    Expression<String>? accountId,
+    Expression<int>? warehouseId,
+    Expression<String>? draftId,
+    Expression<String>? attachmentRequestIds,
+    Expression<DateTime>? createdAt,
+    Expression<DateTime>? updatedAt,
+    Expression<int>? attemptCount,
+    Expression<String>? lastFailure,
+    Expression<int>? rowid,
+  }) {
+    return RawValuesInsertable({
+      if (operationId != null) 'operation_id': operationId,
+      if (accountId != null) 'account_id': accountId,
+      if (warehouseId != null) 'warehouse_id': warehouseId,
+      if (draftId != null) 'draft_id': draftId,
+      if (attachmentRequestIds != null)
+        'attachment_request_ids': attachmentRequestIds,
+      if (createdAt != null) 'created_at': createdAt,
+      if (updatedAt != null) 'updated_at': updatedAt,
+      if (attemptCount != null) 'attempt_count': attemptCount,
+      if (lastFailure != null) 'last_failure': lastFailure,
+      if (rowid != null) 'rowid': rowid,
+    });
+  }
+
+  OfflineOutboxCleanupIntentsCompanion copyWith({
+    Value<String>? operationId,
+    Value<String>? accountId,
+    Value<int>? warehouseId,
+    Value<String?>? draftId,
+    Value<String>? attachmentRequestIds,
+    Value<DateTime>? createdAt,
+    Value<DateTime>? updatedAt,
+    Value<int>? attemptCount,
+    Value<String?>? lastFailure,
+    Value<int>? rowid,
+  }) {
+    return OfflineOutboxCleanupIntentsCompanion(
+      operationId: operationId ?? this.operationId,
+      accountId: accountId ?? this.accountId,
+      warehouseId: warehouseId ?? this.warehouseId,
+      draftId: draftId ?? this.draftId,
+      attachmentRequestIds: attachmentRequestIds ?? this.attachmentRequestIds,
+      createdAt: createdAt ?? this.createdAt,
+      updatedAt: updatedAt ?? this.updatedAt,
+      attemptCount: attemptCount ?? this.attemptCount,
+      lastFailure: lastFailure ?? this.lastFailure,
+      rowid: rowid ?? this.rowid,
+    );
+  }
+
+  @override
+  Map<String, Expression> toColumns(bool nullToAbsent) {
+    final map = <String, Expression>{};
+    if (operationId.present) {
+      map['operation_id'] = Variable<String>(operationId.value);
+    }
+    if (accountId.present) {
+      map['account_id'] = Variable<String>(accountId.value);
+    }
+    if (warehouseId.present) {
+      map['warehouse_id'] = Variable<int>(warehouseId.value);
+    }
+    if (draftId.present) {
+      map['draft_id'] = Variable<String>(draftId.value);
+    }
+    if (attachmentRequestIds.present) {
+      map['attachment_request_ids'] = Variable<String>(
+        attachmentRequestIds.value,
+      );
+    }
+    if (createdAt.present) {
+      map['created_at'] = Variable<DateTime>(createdAt.value);
+    }
+    if (updatedAt.present) {
+      map['updated_at'] = Variable<DateTime>(updatedAt.value);
+    }
+    if (attemptCount.present) {
+      map['attempt_count'] = Variable<int>(attemptCount.value);
+    }
+    if (lastFailure.present) {
+      map['last_failure'] = Variable<String>(lastFailure.value);
+    }
+    if (rowid.present) {
+      map['rowid'] = Variable<int>(rowid.value);
+    }
+    return map;
+  }
+
+  @override
+  String toString() {
+    return (StringBuffer('OfflineOutboxCleanupIntentsCompanion(')
+          ..write('operationId: $operationId, ')
+          ..write('accountId: $accountId, ')
+          ..write('warehouseId: $warehouseId, ')
+          ..write('draftId: $draftId, ')
+          ..write('attachmentRequestIds: $attachmentRequestIds, ')
+          ..write('createdAt: $createdAt, ')
+          ..write('updatedAt: $updatedAt, ')
+          ..write('attemptCount: $attemptCount, ')
+          ..write('lastFailure: $lastFailure, ')
+          ..write('rowid: $rowid')
+          ..write(')'))
+        .toString();
+  }
+}
+
 abstract class _$OfflineDatabase extends GeneratedDatabase {
   _$OfflineDatabase(QueryExecutor e) : super(e);
   $OfflineDatabaseManager get managers => $OfflineDatabaseManager(this);
@@ -2736,6 +3392,8 @@ abstract class _$OfflineDatabase extends GeneratedDatabase {
       $OfflineOutboxDependenciesTable(this);
   late final $OfflineOutboxResolutionsTable offlineOutboxResolutions =
       $OfflineOutboxResolutionsTable(this);
+  late final $OfflineOutboxCleanupIntentsTable offlineOutboxCleanupIntents =
+      $OfflineOutboxCleanupIntentsTable(this);
   @override
   Iterable<TableInfo<Table, Object?>> get allTables =>
       allSchemaEntities.whereType<TableInfo<Table, Object?>>();
@@ -2746,6 +3404,7 @@ abstract class _$OfflineDatabase extends GeneratedDatabase {
     offlineOutboxOperations,
     offlineOutboxDependencies,
     offlineOutboxResolutions,
+    offlineOutboxCleanupIntents,
   ];
   @override
   StreamQueryUpdateRules get streamUpdateRules => const StreamQueryUpdateRules([
@@ -2762,6 +3421,13 @@ abstract class _$OfflineDatabase extends GeneratedDatabase {
         limitUpdateKind: UpdateKind.delete,
       ),
       result: [TableUpdate('outbox_dependencies', kind: UpdateKind.delete)],
+    ),
+    WritePropagation(
+      on: TableUpdateQuery.onTableName(
+        'outbox_operations',
+        limitUpdateKind: UpdateKind.delete,
+      ),
+      result: [TableUpdate('outbox_cleanup_intents', kind: UpdateKind.delete)],
     ),
   ]);
 }
@@ -3342,6 +4008,7 @@ typedef $$OfflineOutboxOperationsTableCreateCompanionBuilder =
       Value<String?> reviewStamp,
       Value<bool> requiresStatusProbe,
       Value<DateTime?> syncingStartedAt,
+      Value<String?> output,
       Value<int> rowid,
     });
 typedef $$OfflineOutboxOperationsTableUpdateCompanionBuilder =
@@ -3363,6 +4030,7 @@ typedef $$OfflineOutboxOperationsTableUpdateCompanionBuilder =
       Value<String?> reviewStamp,
       Value<bool> requiresStatusProbe,
       Value<DateTime?> syncingStartedAt,
+      Value<String?> output,
       Value<int> rowid,
     });
 
@@ -3432,6 +4100,38 @@ final class $$OfflineOutboxOperationsTableReferences
         );
 
     final cache = $_typedResult.readTableOrNull(_requiredOperationTable($_db));
+    return ProcessedTableManager(
+      manager.$state.copyWith(prefetchedData: cache),
+    );
+  }
+
+  static MultiTypedResultKey<
+    $OfflineOutboxCleanupIntentsTable,
+    List<OfflineOutboxCleanupIntent>
+  >
+  _offlineOutboxCleanupIntentsRefsTable(
+    _$OfflineDatabase db,
+  ) => MultiTypedResultKey.fromTable(
+    db.offlineOutboxCleanupIntents,
+    aliasName:
+        'outbox_operations__operation_id__outbox_cleanup_intents__operation_id',
+  );
+
+  $$OfflineOutboxCleanupIntentsTableProcessedTableManager
+  get offlineOutboxCleanupIntentsRefs {
+    final manager =
+        $$OfflineOutboxCleanupIntentsTableTableManager(
+          $_db,
+          $_db.offlineOutboxCleanupIntents,
+        ).filter(
+          (f) => f.operationId.operationId.sqlEquals(
+            $_itemColumn<String>('operation_id')!,
+          ),
+        );
+
+    final cache = $_typedResult.readTableOrNull(
+      _offlineOutboxCleanupIntentsRefsTable($_db),
+    );
     return ProcessedTableManager(
       manager.$state.copyWith(prefetchedData: cache),
     );
@@ -3532,6 +4232,11 @@ class $$OfflineOutboxOperationsTableFilterComposer
     builder: (column) => ColumnFilters(column),
   );
 
+  ColumnFilters<String> get output => $composableBuilder(
+    column: $table.output,
+    builder: (column) => ColumnFilters(column),
+  );
+
   Expression<bool> dependentOperation(
     Expression<bool> Function($$OfflineOutboxDependenciesTableFilterComposer f)
     f,
@@ -3577,6 +4282,35 @@ class $$OfflineOutboxOperationsTableFilterComposer
               }) => $$OfflineOutboxDependenciesTableFilterComposer(
                 $db: $db,
                 $table: $db.offlineOutboxDependencies,
+                $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+                joinBuilder: joinBuilder,
+                $removeJoinBuilderFromRootComposer:
+                    $removeJoinBuilderFromRootComposer,
+              ),
+        );
+    return f(composer);
+  }
+
+  Expression<bool> offlineOutboxCleanupIntentsRefs(
+    Expression<bool> Function(
+      $$OfflineOutboxCleanupIntentsTableFilterComposer f,
+    )
+    f,
+  ) {
+    final $$OfflineOutboxCleanupIntentsTableFilterComposer composer =
+        $composerBuilder(
+          composer: this,
+          getCurrentColumn: (t) => t.operationId,
+          referencedTable: $db.offlineOutboxCleanupIntents,
+          getReferencedColumn: (t) => t.operationId,
+          builder:
+              (
+                joinBuilder, {
+                $addJoinBuilderToRootComposer,
+                $removeJoinBuilderFromRootComposer,
+              }) => $$OfflineOutboxCleanupIntentsTableFilterComposer(
+                $db: $db,
+                $table: $db.offlineOutboxCleanupIntents,
                 $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
                 joinBuilder: joinBuilder,
                 $removeJoinBuilderFromRootComposer:
@@ -3680,6 +4414,11 @@ class $$OfflineOutboxOperationsTableOrderingComposer
     column: $table.syncingStartedAt,
     builder: (column) => ColumnOrderings(column),
   );
+
+  ColumnOrderings<String> get output => $composableBuilder(
+    column: $table.output,
+    builder: (column) => ColumnOrderings(column),
+  );
 }
 
 class $$OfflineOutboxOperationsTableAnnotationComposer
@@ -3768,6 +4507,9 @@ class $$OfflineOutboxOperationsTableAnnotationComposer
     builder: (column) => column,
   );
 
+  GeneratedColumn<String> get output =>
+      $composableBuilder(column: $table.output, builder: (column) => column);
+
   Expression<T> dependentOperation<T extends Object>(
     Expression<T> Function($$OfflineOutboxDependenciesTableAnnotationComposer a)
     f,
@@ -3821,6 +4563,35 @@ class $$OfflineOutboxOperationsTableAnnotationComposer
         );
     return f(composer);
   }
+
+  Expression<T> offlineOutboxCleanupIntentsRefs<T extends Object>(
+    Expression<T> Function(
+      $$OfflineOutboxCleanupIntentsTableAnnotationComposer a,
+    )
+    f,
+  ) {
+    final $$OfflineOutboxCleanupIntentsTableAnnotationComposer composer =
+        $composerBuilder(
+          composer: this,
+          getCurrentColumn: (t) => t.operationId,
+          referencedTable: $db.offlineOutboxCleanupIntents,
+          getReferencedColumn: (t) => t.operationId,
+          builder:
+              (
+                joinBuilder, {
+                $addJoinBuilderToRootComposer,
+                $removeJoinBuilderFromRootComposer,
+              }) => $$OfflineOutboxCleanupIntentsTableAnnotationComposer(
+                $db: $db,
+                $table: $db.offlineOutboxCleanupIntents,
+                $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+                joinBuilder: joinBuilder,
+                $removeJoinBuilderFromRootComposer:
+                    $removeJoinBuilderFromRootComposer,
+              ),
+        );
+    return f(composer);
+  }
 }
 
 class $$OfflineOutboxOperationsTableTableManager
@@ -3839,6 +4610,7 @@ class $$OfflineOutboxOperationsTableTableManager
           PrefetchHooks Function({
             bool dependentOperation,
             bool requiredOperation,
+            bool offlineOutboxCleanupIntentsRefs,
           })
         > {
   $$OfflineOutboxOperationsTableTableManager(
@@ -3882,6 +4654,7 @@ class $$OfflineOutboxOperationsTableTableManager
                 Value<String?> reviewStamp = const Value.absent(),
                 Value<bool> requiresStatusProbe = const Value.absent(),
                 Value<DateTime?> syncingStartedAt = const Value.absent(),
+                Value<String?> output = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => OfflineOutboxOperationsCompanion(
                 operationId: operationId,
@@ -3901,6 +4674,7 @@ class $$OfflineOutboxOperationsTableTableManager
                 reviewStamp: reviewStamp,
                 requiresStatusProbe: requiresStatusProbe,
                 syncingStartedAt: syncingStartedAt,
+                output: output,
                 rowid: rowid,
               ),
           createCompanionCallback:
@@ -3922,6 +4696,7 @@ class $$OfflineOutboxOperationsTableTableManager
                 Value<String?> reviewStamp = const Value.absent(),
                 Value<bool> requiresStatusProbe = const Value.absent(),
                 Value<DateTime?> syncingStartedAt = const Value.absent(),
+                Value<String?> output = const Value.absent(),
                 Value<int> rowid = const Value.absent(),
               }) => OfflineOutboxOperationsCompanion.insert(
                 operationId: operationId,
@@ -3941,6 +4716,7 @@ class $$OfflineOutboxOperationsTableTableManager
                 reviewStamp: reviewStamp,
                 requiresStatusProbe: requiresStatusProbe,
                 syncingStartedAt: syncingStartedAt,
+                output: output,
                 rowid: rowid,
               ),
           withReferenceMapper: (p0) => p0
@@ -3952,12 +4728,18 @@ class $$OfflineOutboxOperationsTableTableManager
               )
               .toList(),
           prefetchHooksCallback:
-              ({dependentOperation = false, requiredOperation = false}) {
+              ({
+                dependentOperation = false,
+                requiredOperation = false,
+                offlineOutboxCleanupIntentsRefs = false,
+              }) {
                 return PrefetchHooks(
                   db: db,
                   explicitlyWatchedTables: [
                     if (dependentOperation) db.offlineOutboxDependencies,
                     if (requiredOperation) db.offlineOutboxDependencies,
+                    if (offlineOutboxCleanupIntentsRefs)
+                      db.offlineOutboxCleanupIntents,
                   ],
                   addJoins: null,
                   getPrefetchedDataCallback: (items) async {
@@ -4006,6 +4788,28 @@ class $$OfflineOutboxOperationsTableTableManager
                               ),
                           typedResults: items,
                         ),
+                      if (offlineOutboxCleanupIntentsRefs)
+                        await $_getPrefetchedData<
+                          OfflineOutboxOperation,
+                          $OfflineOutboxOperationsTable,
+                          OfflineOutboxCleanupIntent
+                        >(
+                          currentTable: table,
+                          referencedTable:
+                              $$OfflineOutboxOperationsTableReferences
+                                  ._offlineOutboxCleanupIntentsRefsTable(db),
+                          managerFromTypedResult: (p0) =>
+                              $$OfflineOutboxOperationsTableReferences(
+                                db,
+                                table,
+                                p0,
+                              ).offlineOutboxCleanupIntentsRefs,
+                          referencedItemsForCurrentItem:
+                              (item, referencedItems) => referencedItems.where(
+                                (e) => e.operationId == item.operationId,
+                              ),
+                          typedResults: items,
+                        ),
                     ];
                   },
                 );
@@ -4026,7 +4830,11 @@ typedef $$OfflineOutboxOperationsTableProcessedTableManager =
       $$OfflineOutboxOperationsTableUpdateCompanionBuilder,
       (OfflineOutboxOperation, $$OfflineOutboxOperationsTableReferences),
       OfflineOutboxOperation,
-      PrefetchHooks Function({bool dependentOperation, bool requiredOperation})
+      PrefetchHooks Function({
+        bool dependentOperation,
+        bool requiredOperation,
+        bool offlineOutboxCleanupIntentsRefs,
+      })
     >;
 typedef $$OfflineOutboxDependenciesTableCreateCompanionBuilder =
     OfflineOutboxDependenciesCompanion Function({
@@ -4616,6 +5424,441 @@ typedef $$OfflineOutboxResolutionsTableProcessedTableManager =
       OfflineOutboxResolution,
       PrefetchHooks Function()
     >;
+typedef $$OfflineOutboxCleanupIntentsTableCreateCompanionBuilder =
+    OfflineOutboxCleanupIntentsCompanion Function({
+      required String operationId,
+      required String accountId,
+      required int warehouseId,
+      Value<String?> draftId,
+      required String attachmentRequestIds,
+      required DateTime createdAt,
+      required DateTime updatedAt,
+      Value<int> attemptCount,
+      Value<String?> lastFailure,
+      Value<int> rowid,
+    });
+typedef $$OfflineOutboxCleanupIntentsTableUpdateCompanionBuilder =
+    OfflineOutboxCleanupIntentsCompanion Function({
+      Value<String> operationId,
+      Value<String> accountId,
+      Value<int> warehouseId,
+      Value<String?> draftId,
+      Value<String> attachmentRequestIds,
+      Value<DateTime> createdAt,
+      Value<DateTime> updatedAt,
+      Value<int> attemptCount,
+      Value<String?> lastFailure,
+      Value<int> rowid,
+    });
+
+final class $$OfflineOutboxCleanupIntentsTableReferences
+    extends
+        BaseReferences<
+          _$OfflineDatabase,
+          $OfflineOutboxCleanupIntentsTable,
+          OfflineOutboxCleanupIntent
+        > {
+  $$OfflineOutboxCleanupIntentsTableReferences(
+    super.$_db,
+    super.$_table,
+    super.$_typedResult,
+  );
+
+  static $OfflineOutboxOperationsTable _operationIdTable(
+    _$OfflineDatabase db,
+  ) => db.offlineOutboxOperations.createAlias(
+    'outbox_cleanup_intents__operation_id__outbox_operations__operation_id',
+  );
+
+  $$OfflineOutboxOperationsTableProcessedTableManager get operationId {
+    final $_column = $_itemColumn<String>('operation_id')!;
+
+    final manager = $$OfflineOutboxOperationsTableTableManager(
+      $_db,
+      $_db.offlineOutboxOperations,
+    ).filter((f) => f.operationId.sqlEquals($_column));
+    final item = $_typedResult.readTableOrNull(_operationIdTable($_db));
+    if (item == null) return manager;
+    return ProcessedTableManager(
+      manager.$state.copyWith(prefetchedData: [item]),
+    );
+  }
+}
+
+class $$OfflineOutboxCleanupIntentsTableFilterComposer
+    extends Composer<_$OfflineDatabase, $OfflineOutboxCleanupIntentsTable> {
+  $$OfflineOutboxCleanupIntentsTableFilterComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnFilters<String> get accountId => $composableBuilder(
+    column: $table.accountId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get warehouseId => $composableBuilder(
+    column: $table.warehouseId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get draftId => $composableBuilder(
+    column: $table.draftId,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get attachmentRequestIds => $composableBuilder(
+    column: $table.attachmentRequestIds,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<DateTime> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<int> get attemptCount => $composableBuilder(
+    column: $table.attemptCount,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  ColumnFilters<String> get lastFailure => $composableBuilder(
+    column: $table.lastFailure,
+    builder: (column) => ColumnFilters(column),
+  );
+
+  $$OfflineOutboxOperationsTableFilterComposer get operationId {
+    final $$OfflineOutboxOperationsTableFilterComposer composer =
+        $composerBuilder(
+          composer: this,
+          getCurrentColumn: (t) => t.operationId,
+          referencedTable: $db.offlineOutboxOperations,
+          getReferencedColumn: (t) => t.operationId,
+          builder:
+              (
+                joinBuilder, {
+                $addJoinBuilderToRootComposer,
+                $removeJoinBuilderFromRootComposer,
+              }) => $$OfflineOutboxOperationsTableFilterComposer(
+                $db: $db,
+                $table: $db.offlineOutboxOperations,
+                $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+                joinBuilder: joinBuilder,
+                $removeJoinBuilderFromRootComposer:
+                    $removeJoinBuilderFromRootComposer,
+              ),
+        );
+    return composer;
+  }
+}
+
+class $$OfflineOutboxCleanupIntentsTableOrderingComposer
+    extends Composer<_$OfflineDatabase, $OfflineOutboxCleanupIntentsTable> {
+  $$OfflineOutboxCleanupIntentsTableOrderingComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  ColumnOrderings<String> get accountId => $composableBuilder(
+    column: $table.accountId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get warehouseId => $composableBuilder(
+    column: $table.warehouseId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get draftId => $composableBuilder(
+    column: $table.draftId,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get attachmentRequestIds => $composableBuilder(
+    column: $table.attachmentRequestIds,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get createdAt => $composableBuilder(
+    column: $table.createdAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<DateTime> get updatedAt => $composableBuilder(
+    column: $table.updatedAt,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<int> get attemptCount => $composableBuilder(
+    column: $table.attemptCount,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  ColumnOrderings<String> get lastFailure => $composableBuilder(
+    column: $table.lastFailure,
+    builder: (column) => ColumnOrderings(column),
+  );
+
+  $$OfflineOutboxOperationsTableOrderingComposer get operationId {
+    final $$OfflineOutboxOperationsTableOrderingComposer composer =
+        $composerBuilder(
+          composer: this,
+          getCurrentColumn: (t) => t.operationId,
+          referencedTable: $db.offlineOutboxOperations,
+          getReferencedColumn: (t) => t.operationId,
+          builder:
+              (
+                joinBuilder, {
+                $addJoinBuilderToRootComposer,
+                $removeJoinBuilderFromRootComposer,
+              }) => $$OfflineOutboxOperationsTableOrderingComposer(
+                $db: $db,
+                $table: $db.offlineOutboxOperations,
+                $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+                joinBuilder: joinBuilder,
+                $removeJoinBuilderFromRootComposer:
+                    $removeJoinBuilderFromRootComposer,
+              ),
+        );
+    return composer;
+  }
+}
+
+class $$OfflineOutboxCleanupIntentsTableAnnotationComposer
+    extends Composer<_$OfflineDatabase, $OfflineOutboxCleanupIntentsTable> {
+  $$OfflineOutboxCleanupIntentsTableAnnotationComposer({
+    required super.$db,
+    required super.$table,
+    super.joinBuilder,
+    super.$addJoinBuilderToRootComposer,
+    super.$removeJoinBuilderFromRootComposer,
+  });
+  GeneratedColumn<String> get accountId =>
+      $composableBuilder(column: $table.accountId, builder: (column) => column);
+
+  GeneratedColumn<int> get warehouseId => $composableBuilder(
+    column: $table.warehouseId,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get draftId =>
+      $composableBuilder(column: $table.draftId, builder: (column) => column);
+
+  GeneratedColumn<String> get attachmentRequestIds => $composableBuilder(
+    column: $table.attachmentRequestIds,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<DateTime> get createdAt =>
+      $composableBuilder(column: $table.createdAt, builder: (column) => column);
+
+  GeneratedColumn<DateTime> get updatedAt =>
+      $composableBuilder(column: $table.updatedAt, builder: (column) => column);
+
+  GeneratedColumn<int> get attemptCount => $composableBuilder(
+    column: $table.attemptCount,
+    builder: (column) => column,
+  );
+
+  GeneratedColumn<String> get lastFailure => $composableBuilder(
+    column: $table.lastFailure,
+    builder: (column) => column,
+  );
+
+  $$OfflineOutboxOperationsTableAnnotationComposer get operationId {
+    final $$OfflineOutboxOperationsTableAnnotationComposer composer =
+        $composerBuilder(
+          composer: this,
+          getCurrentColumn: (t) => t.operationId,
+          referencedTable: $db.offlineOutboxOperations,
+          getReferencedColumn: (t) => t.operationId,
+          builder:
+              (
+                joinBuilder, {
+                $addJoinBuilderToRootComposer,
+                $removeJoinBuilderFromRootComposer,
+              }) => $$OfflineOutboxOperationsTableAnnotationComposer(
+                $db: $db,
+                $table: $db.offlineOutboxOperations,
+                $addJoinBuilderToRootComposer: $addJoinBuilderToRootComposer,
+                joinBuilder: joinBuilder,
+                $removeJoinBuilderFromRootComposer:
+                    $removeJoinBuilderFromRootComposer,
+              ),
+        );
+    return composer;
+  }
+}
+
+class $$OfflineOutboxCleanupIntentsTableTableManager
+    extends
+        RootTableManager<
+          _$OfflineDatabase,
+          $OfflineOutboxCleanupIntentsTable,
+          OfflineOutboxCleanupIntent,
+          $$OfflineOutboxCleanupIntentsTableFilterComposer,
+          $$OfflineOutboxCleanupIntentsTableOrderingComposer,
+          $$OfflineOutboxCleanupIntentsTableAnnotationComposer,
+          $$OfflineOutboxCleanupIntentsTableCreateCompanionBuilder,
+          $$OfflineOutboxCleanupIntentsTableUpdateCompanionBuilder,
+          (
+            OfflineOutboxCleanupIntent,
+            $$OfflineOutboxCleanupIntentsTableReferences,
+          ),
+          OfflineOutboxCleanupIntent,
+          PrefetchHooks Function({bool operationId})
+        > {
+  $$OfflineOutboxCleanupIntentsTableTableManager(
+    _$OfflineDatabase db,
+    $OfflineOutboxCleanupIntentsTable table,
+  ) : super(
+        TableManagerState(
+          db: db,
+          table: table,
+          createFilteringComposer: () =>
+              $$OfflineOutboxCleanupIntentsTableFilterComposer(
+                $db: db,
+                $table: table,
+              ),
+          createOrderingComposer: () =>
+              $$OfflineOutboxCleanupIntentsTableOrderingComposer(
+                $db: db,
+                $table: table,
+              ),
+          createComputedFieldComposer: () =>
+              $$OfflineOutboxCleanupIntentsTableAnnotationComposer(
+                $db: db,
+                $table: table,
+              ),
+          updateCompanionCallback:
+              ({
+                Value<String> operationId = const Value.absent(),
+                Value<String> accountId = const Value.absent(),
+                Value<int> warehouseId = const Value.absent(),
+                Value<String?> draftId = const Value.absent(),
+                Value<String> attachmentRequestIds = const Value.absent(),
+                Value<DateTime> createdAt = const Value.absent(),
+                Value<DateTime> updatedAt = const Value.absent(),
+                Value<int> attemptCount = const Value.absent(),
+                Value<String?> lastFailure = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => OfflineOutboxCleanupIntentsCompanion(
+                operationId: operationId,
+                accountId: accountId,
+                warehouseId: warehouseId,
+                draftId: draftId,
+                attachmentRequestIds: attachmentRequestIds,
+                createdAt: createdAt,
+                updatedAt: updatedAt,
+                attemptCount: attemptCount,
+                lastFailure: lastFailure,
+                rowid: rowid,
+              ),
+          createCompanionCallback:
+              ({
+                required String operationId,
+                required String accountId,
+                required int warehouseId,
+                Value<String?> draftId = const Value.absent(),
+                required String attachmentRequestIds,
+                required DateTime createdAt,
+                required DateTime updatedAt,
+                Value<int> attemptCount = const Value.absent(),
+                Value<String?> lastFailure = const Value.absent(),
+                Value<int> rowid = const Value.absent(),
+              }) => OfflineOutboxCleanupIntentsCompanion.insert(
+                operationId: operationId,
+                accountId: accountId,
+                warehouseId: warehouseId,
+                draftId: draftId,
+                attachmentRequestIds: attachmentRequestIds,
+                createdAt: createdAt,
+                updatedAt: updatedAt,
+                attemptCount: attemptCount,
+                lastFailure: lastFailure,
+                rowid: rowid,
+              ),
+          withReferenceMapper: (p0) => p0
+              .map(
+                (e) => (
+                  e.readTable(table),
+                  $$OfflineOutboxCleanupIntentsTableReferences(db, table, e),
+                ),
+              )
+              .toList(),
+          prefetchHooksCallback: ({operationId = false}) {
+            return PrefetchHooks(
+              db: db,
+              explicitlyWatchedTables: [],
+              addJoins:
+                  <
+                    T extends TableManagerState<
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic,
+                      dynamic
+                    >
+                  >(state) {
+                    if (operationId) {
+                      state =
+                          state.withJoin(
+                                currentTable: table,
+                                currentColumn: table.operationId,
+                                referencedTable:
+                                    $$OfflineOutboxCleanupIntentsTableReferences
+                                        ._operationIdTable(db),
+                                referencedColumn:
+                                    $$OfflineOutboxCleanupIntentsTableReferences
+                                        ._operationIdTable(db)
+                                        .operationId,
+                              )
+                              as T;
+                    }
+
+                    return state;
+                  },
+              getPrefetchedDataCallback: (items) async {
+                return [];
+              },
+            );
+          },
+        ),
+      );
+}
+
+typedef $$OfflineOutboxCleanupIntentsTableProcessedTableManager =
+    ProcessedTableManager<
+      _$OfflineDatabase,
+      $OfflineOutboxCleanupIntentsTable,
+      OfflineOutboxCleanupIntent,
+      $$OfflineOutboxCleanupIntentsTableFilterComposer,
+      $$OfflineOutboxCleanupIntentsTableOrderingComposer,
+      $$OfflineOutboxCleanupIntentsTableAnnotationComposer,
+      $$OfflineOutboxCleanupIntentsTableCreateCompanionBuilder,
+      $$OfflineOutboxCleanupIntentsTableUpdateCompanionBuilder,
+      (
+        OfflineOutboxCleanupIntent,
+        $$OfflineOutboxCleanupIntentsTableReferences,
+      ),
+      OfflineOutboxCleanupIntent,
+      PrefetchHooks Function({bool operationId})
+    >;
 
 class $OfflineDatabaseManager {
   final _$OfflineDatabase _db;
@@ -4638,5 +5881,11 @@ class $OfflineDatabaseManager {
       $$OfflineOutboxResolutionsTableTableManager(
         _db,
         _db.offlineOutboxResolutions,
+      );
+  $$OfflineOutboxCleanupIntentsTableTableManager
+  get offlineOutboxCleanupIntents =>
+      $$OfflineOutboxCleanupIntentsTableTableManager(
+        _db,
+        _db.offlineOutboxCleanupIntents,
       );
 }

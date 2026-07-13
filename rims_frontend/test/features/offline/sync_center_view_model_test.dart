@@ -9,6 +9,8 @@ import 'package:rims_frontend/features/auth/domain/entities/app_user.dart';
 import 'package:rims_frontend/features/offline/data/repositories/memory_outbox_repository.dart';
 import 'package:rims_frontend/features/offline/data/repositories/memory_offline_store.dart';
 import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.dart';
+import 'package:rims_frontend/features/offline/domain/entities/outbox_graph.dart';
+import 'package:rims_frontend/features/offline/domain/entities/outbox_cleanup_intent.dart';
 import 'package:rims_frontend/features/offline/domain/repositories/outbox_repository.dart';
 import 'package:rims_frontend/features/offline/domain/services/outbox_executor.dart';
 import 'package:rims_frontend/features/offline/domain/services/outbox_permission_policy.dart';
@@ -54,6 +56,9 @@ void main() {
     await repository.enqueue(_operation('attention'));
     await transition('attention', OutboxState.syncing);
     await transition('attention', OutboxState.conflict);
+    await repository.enqueue(_operation('unsupported'));
+    await transition('unsupported', OutboxState.syncing);
+    await transition('unsupported', OutboxState.permanentFailure);
     await repository.enqueue(_operation('completed'));
     await transition('completed', OutboxState.syncing);
     await transition('completed', OutboxState.succeeded);
@@ -61,7 +66,10 @@ void main() {
     await viewModel.load();
 
     expect(viewModel.waiting.map((item) => item.operationId), ['waiting']);
-    expect(viewModel.attention.map((item) => item.operationId), ['attention']);
+    expect(viewModel.attention.map((item) => item.operationId), [
+      'attention',
+      'unsupported',
+    ]);
     expect(viewModel.completed.map((item) => item.operationId), ['completed']);
   });
 
@@ -460,6 +468,57 @@ final class _DeferredRepository implements OutboxRepository {
   final Queue<Completer<Result<List<OutboxOperation>>>> listResults = Queue();
   Completer<Result<OutboxOperation>>? confirmResult;
   Completer<Result<OutboxOperation>>? cancelResult;
+
+  @override
+  Future<Result<List<OutboxOperation>>> enqueueGraph(OutboxGraph graph) =>
+      delegate.enqueueGraph(graph);
+
+  @override
+  Future<Result<OutboxOperation>> completeSuccess({
+    required String accountId,
+    required String operationId,
+    required OutboxOperationOutput output,
+    OutboxCleanupRequest? cleanup,
+  }) => delegate.completeSuccess(
+    accountId: accountId,
+    operationId: operationId,
+    output: output,
+    cleanup: cleanup,
+  );
+
+  @override
+  Future<Result<Map<String, OutboxOperationOutput>>> loadDependencyOutputs({
+    required String accountId,
+    required String operationId,
+  }) => delegate.loadDependencyOutputs(
+    accountId: accountId,
+    operationId: operationId,
+  );
+
+  @override
+  Future<Result<List<OutboxCleanupIntent>>> listCleanupIntents(
+    String accountId,
+  ) => delegate.listCleanupIntents(accountId);
+
+  @override
+  Future<Result<void>> recordCleanupFailure({
+    required String accountId,
+    required String operationId,
+    required String failure,
+  }) => delegate.recordCleanupFailure(
+    accountId: accountId,
+    operationId: operationId,
+    failure: failure,
+  );
+
+  @override
+  Future<Result<void>> completeCleanupIntent({
+    required String accountId,
+    required String operationId,
+  }) => delegate.completeCleanupIntent(
+    accountId: accountId,
+    operationId: operationId,
+  );
 
   @override
   Future<Result<List<OutboxOperation>>> list(String accountId) =>

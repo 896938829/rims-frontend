@@ -14,6 +14,11 @@ final class OutboxPermissionPolicy {
   const OutboxPermissionPolicy();
 
   static const Map<OutboxOperationKind, Set<String>> _requiredCodes = {
+    OutboxOperationKind.documentReference: {
+      OutboxPermissionCodes.documentComplete,
+      OutboxPermissionCodes.stocktakeConfirm,
+      OutboxPermissionCodes.stocktakeSettle,
+    },
     OutboxOperationKind.attachmentUpload: {OutboxPermissionCodes.fileUpload},
     OutboxOperationKind.documentCreate: {OutboxPermissionCodes.documentCreate},
     OutboxOperationKind.documentComplete: {

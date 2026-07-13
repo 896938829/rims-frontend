@@ -56,6 +56,7 @@ class OfflineOutboxOperations extends Table {
   BoolColumn get requiresStatusProbe =>
       boolean().withDefault(const Constant(false))();
   DateTimeColumn get syncingStartedAt => dateTime().nullable()();
+  TextColumn get output => text().nullable()();
 
   @override
   Set<Column<Object>> get primaryKey => {operationId};
@@ -65,6 +66,28 @@ class OfflineOutboxOperations extends Table {
     {accountId, idempotencyKey},
     {operationId, accountId},
   ];
+}
+
+class OfflineOutboxCleanupIntents extends Table {
+  @override
+  String get tableName => 'outbox_cleanup_intents';
+
+  TextColumn get operationId => text().references(
+    OfflineOutboxOperations,
+    #operationId,
+    onDelete: KeyAction.cascade,
+  )();
+  TextColumn get accountId => text()();
+  IntColumn get warehouseId => integer()();
+  TextColumn get draftId => text().nullable()();
+  TextColumn get attachmentRequestIds => text()();
+  DateTimeColumn get createdAt => dateTime()();
+  DateTimeColumn get updatedAt => dateTime()();
+  IntColumn get attemptCount => integer().withDefault(const Constant(0))();
+  TextColumn get lastFailure => text().nullable()();
+
+  @override
+  Set<Column<Object>> get primaryKey => {operationId};
 }
 
 class OfflineOutboxDependencies extends Table {

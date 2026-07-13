@@ -9,6 +9,7 @@ import 'package:rims_frontend/features/attachments/data/services/file_attachment
 import 'package:rims_frontend/features/attachments/domain/entities/attachment.dart';
 import 'package:rims_frontend/features/attachments/domain/services/attachment_picker.dart';
 import 'package:rims_frontend/core/result/failure.dart';
+import 'package:rims_frontend/core/result/result.dart';
 
 void main() {
   late Directory root;
@@ -269,7 +270,7 @@ void main() {
     expect(externalThumbnail.existsSync(), isTrue);
 
     await writeMaliciousManifest();
-    await staging.cleanupStale(maxAge: const Duration(days: 1));
+    await staging.cleanupStale(userId: '42', maxAge: const Duration(days: 1));
     expect(externalFile.existsSync(), isTrue);
     expect(externalThumbnail.existsSync(), isTrue);
   });
@@ -726,14 +727,18 @@ void main() {
     await File(oldDownloadPath).setLastModified(DateTime.utc(2026, 7, 1));
 
     final cleaner = store(now: DateTime.utc(2026, 7, 13));
-    await cleaner.cleanupStale(maxAge: const Duration(days: 7));
-    expect(File(oldDownloadPath).existsSync(), isFalse);
-    for (final userId in ['42', '99']) {
-      (await cleaner.recoverForUser(userId)).when(
-        success: (items) => expect(items, isEmpty),
-        failure: (failure) => fail(failure.message),
-      );
-    }
+    await cleaner.cleanupStale(
+      userId: '42',
+      maxAge: const Duration(days: 7),
+      protectedRequestIds: const {'request-1'},
+    );
+    expect(File(oldDownloadPath).existsSync(), isTrue);
+    expect((await cleaner.recoverForUser('42')).successData, hasLength(1));
+    expect((await cleaner.recoverForUser('99')).successData, hasLength(1));
+
+    await cleaner.cleanupStale(userId: '42', maxAge: const Duration(days: 7));
+    expect((await cleaner.recoverForUser('42')).successData, isEmpty);
+    expect((await cleaner.recoverForUser('99')).successData, hasLength(1));
 
     await cleaner.saveDownload(
       userId: '99',
@@ -790,6 +795,10 @@ void main() {
     frame.image.dispose();
     codec.dispose();
   });
+}
+
+extension<T> on Result<T> {
+  T get successData => (this as Success<T>).data;
 }
 
 const _orientationSixJpeg =

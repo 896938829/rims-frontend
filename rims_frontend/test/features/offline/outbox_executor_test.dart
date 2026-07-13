@@ -8,6 +8,7 @@ import 'package:rims_frontend/features/offline/data/datasources/operation_status
 import 'package:rims_frontend/features/offline/data/repositories/memory_outbox_repository.dart';
 import 'package:rims_frontend/features/offline/domain/entities/network_reachability.dart';
 import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.dart';
+import 'package:rims_frontend/features/offline/domain/entities/outbox_graph.dart';
 import 'package:rims_frontend/features/offline/domain/services/network_status_service.dart';
 import 'package:rims_frontend/features/offline/domain/services/outbox_executor.dart';
 import 'package:rims_frontend/features/offline/domain/services/outbox_permission_policy.dart';
@@ -59,6 +60,7 @@ void main() {
       final revokedContext = policy.contextFor(user: revoked, warehouseId: 11);
 
       expect(context.allowedKinds, {
+        OutboxOperationKind.documentReference,
         OutboxOperationKind.attachmentUpload,
         OutboxOperationKind.documentCreate,
         OutboxOperationKind.stocktakeConfirm,
@@ -164,6 +166,27 @@ void main() {
       probeBackoff: (attempt) => Duration(seconds: attempt),
       maxStatusProbes: 3,
     );
+  });
+
+  test('unavailable handler becomes unsupported attention state', () async {
+    await repository.enqueue(_operation('unsupported'));
+    final withoutHandler = OutboxExecutor(
+      repository: repository,
+      networkStatusService: network,
+      statusDataSource: status,
+      handlers: const [],
+      contextReader: () => context,
+    );
+
+    final report = await withoutHandler.execute(review({'unsupported'}));
+
+    expect(
+      report.skippedOperationReasons['unsupported'],
+      'unsupported_operation',
+    );
+    final unsupported = await stored('unsupported');
+    expect(unsupported.state, OutboxState.permanentFailure);
+    expect(unsupported.lastFailureCode, 'unsupported_operation');
   });
 
   test(
@@ -586,7 +609,10 @@ final class _Handler implements OutboxOperationHandler {
   int maxConcurrentCalls = 0;
 
   @override
-  Future<Result<Object?>> execute(OutboxOperation operation) async {
+  Future<Result<OutboxHandlerSuccess>> execute(
+    OutboxOperation operation, {
+    Map<String, OutboxOperationOutput> dependencyOutputs = const {},
+  }) async {
     calls.add(operation.operationId);
     seenKeys.add(operation.idempotencyKey);
     concurrentCalls += 1;
@@ -596,8 +622,19 @@ final class _Handler implements OutboxOperationHandler {
     if (!called.isCompleted) called.complete();
     try {
       final callback = onCall;
-      if (callback != null) return await callback(operation);
-      return results.isEmpty ? const Success(null) : results.removeAt(0);
+      final result = callback != null
+          ? await callback(operation)
+          : results.isEmpty
+          ? const Success<Object?>(null)
+          : results.removeAt(0);
+      return result.when(
+        success: (_) => const Success(
+          OutboxHandlerSuccess(
+            output: OutboxOperationOutput(version: 1, data: {}),
+          ),
+        ),
+        failure: FailureResult.new,
+      );
     } finally {
       concurrentCalls -= 1;
     }

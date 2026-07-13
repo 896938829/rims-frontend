@@ -9,6 +9,8 @@ import 'package:rims_frontend/features/offline/data/datasources/operation_status
 import 'package:rims_frontend/features/offline/data/repositories/drift_outbox_repository.dart';
 import 'package:rims_frontend/features/offline/domain/entities/network_reachability.dart';
 import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.dart';
+import 'package:rims_frontend/features/offline/domain/entities/outbox_graph.dart';
+import 'package:rims_frontend/features/offline/domain/entities/outbox_cleanup_intent.dart';
 import 'package:rims_frontend/features/offline/domain/services/network_status_service.dart';
 import 'package:rims_frontend/features/offline/domain/services/outbox_executor.dart';
 import 'package:rims_frontend/features/offline/domain/services/outbox_state_machine.dart';
@@ -46,7 +48,7 @@ void main() {
         .customSelect('PRAGMA foreign_keys')
         .getSingle();
 
-    expect(version.read<int>('user_version'), 5);
+    expect(version.read<int>('user_version'), 6);
     expect(migratedRows, hasLength(3));
     expect(
       migratedRows.every(
@@ -148,7 +150,7 @@ void main() {
       replacement: replacement,
     );
 
-    expect(version.read<int>('user_version'), 5);
+    expect(version.read<int>('user_version'), 6);
     expect(
       columns.map((row) => row.read<String>('name')),
       contains('replacement_of'),
@@ -211,7 +213,7 @@ void main() {
         dependencies: const {'dep-a'},
       );
 
-      expect(version.read<int>('user_version'), 5);
+      expect(version.read<int>('user_version'), 6);
       expect(resolution.read<String>('original_operation_id'), 'conflict');
       expect(
         resolution.read<String>('replacement_operation_id'),
@@ -259,7 +261,7 @@ void main() {
         )
         .getSingle();
 
-    expect(version.read<int>('user_version'), 5);
+    expect(version.read<int>('user_version'), 6);
     expect(
       columns.map((row) => row.read<String>('name')),
       containsAll([
@@ -279,6 +281,64 @@ void main() {
     );
     await _expectLegacySyncingProbeFirst(repository, createdAt);
   });
+
+  test(
+    'real v5 file persists v6 output and cleanup across recreation',
+    () async {
+      final directory = await Directory.systemTemp.createTemp('rims-v5-db-');
+      addTearDown(() => directory.delete(recursive: true));
+      final file = File('${directory.path}${Platform.pathSeparator}offline.db');
+      final createdAt = DateTime.utc(2026, 7, 1);
+      _createV5Fixture(file.path, createdAt);
+
+      var database = OfflineDatabase.forTesting(NativeDatabase(file));
+      var repository = DriftOutboxRepository(
+        database: database,
+        stateMachine: OutboxStateMachine(now: () => createdAt),
+        now: () => createdAt,
+      );
+      final operation = _operation('v6-output', createdAt);
+      await repository.enqueueGraph(OutboxGraph(operations: [operation]));
+      await repository.transition(
+        accountId: '7',
+        operationId: operation.operationId,
+        next: OutboxState.syncing,
+      );
+      await repository.completeSuccess(
+        accountId: '7',
+        operationId: operation.operationId,
+        output: const OutboxOperationOutput(
+          version: 1,
+          data: {'documentId': 91},
+        ),
+        cleanup: const OutboxCleanupRequest(
+          draftId: 'draft-v6',
+          attachmentRequestIds: ['file-v6'],
+        ),
+      );
+      await database.close();
+
+      database = OfflineDatabase.forTesting(NativeDatabase(file));
+      addTearDown(database.close);
+      repository = DriftOutboxRepository(
+        database: database,
+        stateMachine: OutboxStateMachine(now: () => createdAt),
+        now: () => createdAt,
+      );
+
+      final version = await database
+          .customSelect('PRAGMA user_version')
+          .getSingle();
+      final restored = (await repository.list('7')).successData.singleWhere(
+        (item) => item.operationId == operation.operationId,
+      );
+      final intents = (await repository.listCleanupIntents('7')).successData;
+      expect(version.read<int>('user_version'), 6);
+      expect(restored.output?.data['documentId'], 91);
+      expect(intents.single.draftId, 'draft-v6');
+      expect(intents.single.attachmentRequestIds, ['file-v6']);
+    },
+  );
 }
 
 extension<T> on Result<T> {
@@ -540,6 +600,26 @@ INSERT INTO outbox_resolutions (
   }
 }
 
+void _createV5Fixture(String path, DateTime createdAt) {
+  _createV4Fixture(path, createdAt);
+  final database = sqlite.sqlite3.open(path);
+  try {
+    database.execute(
+      'ALTER TABLE outbox_operations ADD COLUMN review_stamp TEXT NULL',
+    );
+    database.execute(
+      'ALTER TABLE outbox_operations ADD COLUMN requires_status_probe '
+      'INTEGER NOT NULL DEFAULT 0 CHECK (requires_status_probe IN (0, 1))',
+    );
+    database.execute(
+      'ALTER TABLE outbox_operations ADD COLUMN syncing_started_at INTEGER NULL',
+    );
+    database.execute('PRAGMA user_version = 5');
+  } finally {
+    database.close();
+  }
+}
+
 Future<void> _expectLegacySyncingProbeFirst(
   DriftOutboxRepository repository,
   DateTime now,
@@ -613,9 +693,14 @@ final class _RecordingHandler implements OutboxOperationHandler {
   String get statusScope => 'POST /api/v1/documents';
 
   @override
-  Future<Result<Object?>> execute(OutboxOperation operation) async {
+  Future<Result<OutboxHandlerSuccess>> execute(
+    OutboxOperation operation, {
+    Map<String, OutboxOperationOutput> dependencyOutputs = const {},
+  }) async {
     events.add('handler');
-    return const Success(null);
+    return const Success(
+      OutboxHandlerSuccess(output: OutboxOperationOutput(version: 1, data: {})),
+    );
   }
 }
 

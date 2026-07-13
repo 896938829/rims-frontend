@@ -28,7 +28,11 @@ abstract interface class AttachmentStagingStore {
 
   Future<Result<List<StagedAttachment>>> recoverForUser(String userId);
   Future<Result<void>> remove(String userId, String requestId);
-  Future<Result<void>> cleanupStale({required Duration maxAge});
+  Future<Result<void>> cleanupStale({
+    required String userId,
+    required Duration maxAge,
+    Set<String> protectedRequestIds = const {},
+  });
   Future<Result<void>> clearForUser(String userId);
   Future<Result<String>> saveDownload({
     required String userId,

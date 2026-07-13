@@ -50,6 +50,13 @@ final class NetworkFailure extends Failure {
   });
 }
 
+final class TransportUnknownFailure extends Failure {
+  const TransportUnknownFailure({
+    super.message = 'Transport result is unknown',
+    super.cause,
+  });
+}
+
 final class CancellationFailure extends Failure {
   const CancellationFailure({
     super.message = 'Operation cancelled',
@@ -135,6 +142,13 @@ final class StateFailure extends Failure {
     super.statusCode,
     super.businessCode,
     super.traceId,
+    super.cause,
+  });
+}
+
+final class UnsupportedOperationFailure extends Failure {
+  const UnsupportedOperationFailure({
+    super.message = 'Operation is not supported by this app',
     super.cause,
   });
 }

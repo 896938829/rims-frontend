@@ -44,6 +44,7 @@ void main() {
       'cancelled',
     ]);
     expect(OutboxOperationKind.values.map((value) => value.wireValue), [
+      'document_reference',
       'attachment_upload',
       'document_create',
       'document_complete',

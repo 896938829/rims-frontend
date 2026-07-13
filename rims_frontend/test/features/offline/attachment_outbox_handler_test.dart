@@ -13,6 +13,8 @@ import 'package:rims_frontend/features/attachments/domain/services/attachment_st
 import 'package:rims_frontend/features/offline/data/services/attachment_outbox_handler.dart';
 import 'package:rims_frontend/features/offline/domain/entities/document_draft.dart';
 import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.dart';
+import 'package:rims_frontend/features/offline/domain/entities/outbox_graph.dart';
+import 'package:rims_frontend/features/offline/domain/services/outbox_executor.dart';
 import 'package:rims_frontend/features/offline/domain/repositories/document_draft_repository.dart';
 
 void main() {
@@ -77,7 +79,15 @@ void main() {
         eventBus,
       );
 
-      final result = await handler.execute(_operation());
+      final result = await handler.execute(
+        _operation(),
+        dependencyOutputs: const {
+          'create-document-request-1': OutboxOperationOutput(
+            version: 1,
+            data: {'documentId': 91},
+          ),
+        },
+      );
 
       expect(result, isA<Success<Object?>>());
       expect(stagingStore.loadCalls, [
@@ -85,6 +95,7 @@ void main() {
       ]);
       expect(dataSource.uploads.single.requestId, 'attachment-request-1');
       expect(dataSource.uploads.single.binding, AttachmentBinding.document(91));
+      expect(stagingStore.rebindCalls, hasLength(1));
     },
   );
 
@@ -101,7 +112,15 @@ void main() {
         eventBus,
       );
 
-      final result = await handler.execute(_operation());
+      final result = await handler.execute(
+        _operation(),
+        dependencyOutputs: const {
+          'create-document-request-1': OutboxOperationOutput(
+            version: 1,
+            data: {'documentId': 91},
+          ),
+        },
+      );
 
       expect(result.failureOrNull, isA<ValidationFailure>());
       expect(dataSource.uploads, isEmpty);
@@ -159,6 +178,12 @@ void main() {
 
       final result = await handler.execute(
         _operation(requiresStatusProbe: true),
+        dependencyOutputs: const {
+          'create-document-request-1': OutboxOperationOutput(
+            version: 1,
+            data: {'documentId': 91},
+          ),
+        },
       );
 
       expect(result.failureOrNull, isA<UnknownFailure>());
@@ -191,15 +216,25 @@ void main() {
             },
           },
         ),
+        dependencyOutputs: const {
+          'create-document-request-1': OutboxOperationOutput(
+            version: 1,
+            data: {'documentId': 91},
+          ),
+        },
       );
 
-      expect(result, isA<Success<Object?>>());
-      expect(stagingStore.removeCalls, [
-        const ['attachment-request-1', 'attachment-request-2'],
+      expect(result, isA<Success<OutboxHandlerSuccess>>());
+      final success = (result as Success<OutboxHandlerSuccess>).data;
+      expect(success.output.data, {'attachmentId': 5, 'documentId': 91});
+      expect(success.cleanup?.attachmentRequestIds, [
+        'attachment-request-1',
+        'attachment-request-2',
       ]);
-      expect(draftRepository.deletedDraftIds, ['draft-1']);
+      expect(stagingStore.removeCalls, isEmpty);
+      expect(draftRepository.deletedDraftIds, isEmpty);
       await Future<void>.delayed(Duration.zero);
-      expect(events.whereType<GlobalRefreshRequestedEvent>(), hasLength(1));
+      expect(events.whereType<GlobalRefreshRequestedEvent>(), isEmpty);
     },
   );
 }
@@ -262,6 +297,7 @@ final class _SubmissionStagingStore implements OutboxAttachmentStagingStore {
   Result<StagedAttachment>? loadResult;
   final List<_LoadCall> loadCalls = [];
   final List<List<String>> removeCalls = [];
+  final List<_RebindCall> rebindCalls = [];
 
   @override
   Future<Result<StagedAttachment>> loadStaged({
@@ -278,7 +314,30 @@ final class _SubmissionStagingStore implements OutboxAttachmentStagingStore {
     required String localAggregateId,
     required int documentId,
     required List<String> requestIds,
-  }) => throw UnimplementedError();
+  }) async {
+    rebindCalls.add(
+      _RebindCall(
+        userId: userId,
+        localAggregateId: localAggregateId,
+        documentId: documentId,
+        requestIds: List.unmodifiable(requestIds),
+      ),
+    );
+    staged = StagedAttachment(
+      pending: PendingAttachment(
+        requestId: staged.pending.requestId,
+        binding: AttachmentBinding.document(documentId),
+        stagedPath: staged.pending.stagedPath,
+        originalName: staged.pending.originalName,
+        mimeType: staged.pending.mimeType,
+        fileSize: staged.pending.fileSize,
+      ),
+      thumbnailPath: staged.thumbnailPath,
+      createdAt: staged.createdAt,
+      sha256: staged.sha256,
+    );
+    return const Success(null);
+  }
 
   @override
   Future<Result<void>> removeStagedAttachments({
@@ -288,6 +347,20 @@ final class _SubmissionStagingStore implements OutboxAttachmentStagingStore {
     removeCalls.add(List.unmodifiable(requestIds));
     return const Success(null);
   }
+}
+
+final class _RebindCall {
+  const _RebindCall({
+    required this.userId,
+    required this.localAggregateId,
+    required this.documentId,
+    required this.requestIds,
+  });
+
+  final String userId;
+  final String localAggregateId;
+  final int documentId;
+  final List<String> requestIds;
 }
 
 final class _LoadCall {
@@ -391,7 +464,7 @@ final class _DraftRepository implements DocumentDraftRepository {
   }) => throw UnimplementedError();
 }
 
-extension on Result<Object?> {
+extension on Result<dynamic> {
   Failure? get failureOrNull => switch (this) {
     FailureResult<Object?>(:final failure) => failure,
     _ => null,

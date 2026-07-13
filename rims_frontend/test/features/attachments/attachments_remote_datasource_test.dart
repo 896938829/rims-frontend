@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rims_frontend/core/network/api_client.dart';
+import 'package:rims_frontend/core/result/failure.dart';
 import 'package:rims_frontend/features/attachments/data/datasources/attachments_remote_datasource.dart';
 import 'package:rims_frontend/features/attachments/domain/entities/attachment.dart';
 
@@ -20,6 +21,24 @@ void main() {
   });
 
   tearDown(() => temp.delete(recursive: true));
+
+  test('maps a business authorization envelope before presentation', () async {
+    final adapter = _AttachmentAdapter(
+      jsonBody: '{"code":10002,"message":"warehouse denied","data":null}',
+    );
+
+    final result = await _dataSource(
+      adapter,
+    ).list(binding: AttachmentBinding.document(42));
+
+    result.when(
+      success: (_) => fail('authorization envelope must fail'),
+      failure: (failure) {
+        expect(failure, isA<AuthorizationFailure>());
+        expect(failure.businessCode, 10002);
+      },
+    );
+  });
 
   test('lists a bound page with strict paging fields', () async {
     final adapter = _AttachmentAdapter(jsonBody: _pageBody);

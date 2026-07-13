@@ -594,11 +594,11 @@ final class AttachmentsViewModel extends ChangeNotifier {
             ? AttachmentTransferState.interrupted
             : AttachmentTransferState.failed;
         _queue[index] = item.copyWith(state: state, failure: failure);
-        if ((failure is NetworkFailure || failure is UnknownFailure) &&
+        if ((failure is NetworkFailure || failure is TransportUnknownFailure) &&
             outboxRepository != null &&
             warehouseId != null &&
             stagingStore is OutboxAttachmentStagingStore) {
-          _offlineUploadUnknown[requestId] = failure is UnknownFailure;
+          _offlineUploadUnknown[requestId] = failure is TransportUnknownFailure;
         } else {
           _offlineUploadUnknown.remove(requestId);
         }

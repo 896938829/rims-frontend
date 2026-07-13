@@ -132,8 +132,11 @@ final class _NoopStaging implements AttachmentStagingStore {
   Future<Result<void>> remove(String userId, String requestId) async =>
       const Success(null);
   @override
-  Future<Result<void>> cleanupStale({required Duration maxAge}) async =>
-      const Success(null);
+  Future<Result<void>> cleanupStale({
+    required String userId,
+    required Duration maxAge,
+    Set<String> protectedRequestIds = const {},
+  }) async => const Success(null);
   @override
   Future<Result<void>> clearForUser(String userId) async => const Success(null);
   @override

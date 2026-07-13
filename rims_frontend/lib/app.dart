@@ -12,6 +12,7 @@ import 'core/events/app_event_bus.dart';
 import 'core/network/api_client.dart';
 import 'core/network/api_endpoints.dart';
 import 'core/result/failure.dart';
+import 'core/result/result.dart';
 import 'core/storage/app_secure_storage.dart';
 import 'core/theme/app_theme.dart';
 import 'features/admin/data/datasources/admin_remote_datasource.dart';
@@ -41,6 +42,7 @@ import 'features/offline/data/repositories/memory_outbox_repository.dart';
 import 'features/offline/data/services/connectivity_network_status_service.dart';
 import 'features/offline/data/services/attachment_outbox_handler.dart';
 import 'features/offline/data/services/document_outbox_handler.dart';
+import 'features/offline/data/services/outbox_cleanup_coordinator.dart';
 import 'features/offline/data/repositories/cached_auth_repository.dart';
 import 'features/offline/data/repositories/cached_inventory_repository.dart';
 import 'features/offline/data/repositories/cached_documents_repository.dart';
@@ -49,6 +51,7 @@ import 'features/offline/data/repositories/drift_document_draft_repository.dart'
 import 'features/offline/domain/repositories/document_draft_repository.dart';
 import 'features/offline/domain/repositories/outbox_repository.dart';
 import 'features/offline/domain/entities/outbox_operation.dart';
+import 'features/offline/domain/entities/outbox_cleanup_intent.dart';
 import 'features/offline/domain/services/network_status_service.dart';
 import 'features/offline/domain/services/outbox_executor.dart';
 import 'features/offline/domain/services/outbox_permission_policy.dart';
@@ -103,6 +106,7 @@ final class _MainAppState extends State<MainApp> {
   late final OutboxRepository _outboxRepository;
   late final OperationStatusRemoteDataSource _operationStatusDataSource;
   late final OutboxExecutor _outboxExecutor;
+  late final OutboxCleanupCoordinator _outboxCleanupCoordinator;
   late final AdminRepositoryImpl _adminRepository;
   late final GoRouter _router;
   late final NetworkStatusService _networkStatusService;
@@ -130,9 +134,6 @@ final class _MainAppState extends State<MainApp> {
     );
     _attachmentShareService = PlatformAttachmentShareService();
     unawaited(_attachmentPicker.recoverLostData());
-    unawaited(
-      _attachmentStagingStore.cleanupStale(maxAge: const Duration(days: 7)),
-    );
     _apiClient = ApiClient(
       tokenReader: () async =>
           _sessionController.accessToken ??
@@ -222,6 +223,7 @@ final class _MainAppState extends State<MainApp> {
         eventBus: _eventBus,
       ),
       for (final kind in const [
+        OutboxOperationKind.documentReference,
         OutboxOperationKind.documentCreate,
         OutboxOperationKind.documentComplete,
         OutboxOperationKind.stocktakeConfirm,
@@ -236,12 +238,19 @@ final class _MainAppState extends State<MainApp> {
         ),
       for (final handler in widget.outboxHandlers) handler.kind: handler,
     };
+    _outboxCleanupCoordinator = OutboxCleanupCoordinator(
+      repository: _outboxRepository,
+      stagingStore: _attachmentStagingStore,
+      draftRepository: _documentDraftRepository,
+      eventBus: _eventBus,
+    );
     _outboxExecutor = OutboxExecutor(
       repository: _outboxRepository,
       networkStatusService: _networkStatusService,
       statusDataSource: _operationStatusDataSource,
       handlers: handlers.values,
       contextReader: _outboxExecutionContext,
+      onSuccessPersisted: _outboxCleanupCoordinator.run,
     );
     _adminRepository = AdminRepositoryImpl(
       remoteDataSource: ApiAdminRemoteDataSource(_apiClient),
@@ -347,12 +356,47 @@ final class _MainAppState extends State<MainApp> {
     final nextUserId = _sessionController.session?.user.id.toString();
     final previousUserId = _activeUserId;
     _activeUserId = nextUserId;
+    if (nextUserId != null) {
+      unawaited(_maintainOfflineFiles(nextUserId));
+    }
     if (previousUserId == null || previousUserId == nextUserId) {
       return;
     }
     unawaited(_scanLookupCache.clearForUser(previousUserId));
     unawaited(_scanSessionStore.clearForUser(previousUserId));
     unawaited(_attachmentStagingStore.clearForUser(previousUserId));
+  }
+
+  Future<void> _maintainOfflineFiles(String accountId) async {
+    await _outboxCleanupCoordinator.run(accountId);
+    final protected = <String>{};
+    try {
+      final drafts = await _documentDraftRepository.list(accountId);
+      for (final draft in drafts) {
+        protected.addAll(draft.attachmentStagingIds);
+      }
+    } on Object {
+      return;
+    }
+    final listed = await _outboxRepository.list(accountId);
+    if (listed case FailureResult<List<OutboxOperation>>()) return;
+    for (final operation in (listed as Success<List<OutboxOperation>>).data) {
+      if (operation.state == OutboxState.queued ||
+          operation.state == OutboxState.syncing ||
+          operation.state == OutboxState.retryableFailure) {
+        _collectAttachmentRequestIds(operation.payload, protected);
+      }
+    }
+    final intents = await _outboxRepository.listCleanupIntents(accountId);
+    if (intents case FailureResult<List<OutboxCleanupIntent>>()) return;
+    for (final intent in (intents as Success<List<OutboxCleanupIntent>>).data) {
+      protected.addAll(intent.attachmentRequestIds);
+    }
+    await _attachmentStagingStore.cleanupStale(
+      userId: accountId,
+      maxAge: const Duration(days: 7),
+      protectedRequestIds: protected,
+    );
   }
 
   @override
@@ -376,4 +420,21 @@ OutboxRepository outboxRepositoryForOfflineStore(OfflineStore store) {
     );
   }
   return MemoryOutboxRepository(stateMachine: OutboxStateMachine());
+}
+
+void _collectAttachmentRequestIds(
+  Map<String, Object?> payload,
+  Set<String> target,
+) {
+  final requestId = payload['requestId'];
+  if (requestId is String && requestId.isNotEmpty) target.add(requestId);
+  for (final key in const ['attachmentRequestIds']) {
+    final values = payload[key];
+    if (values is List) target.addAll(values.whereType<String>());
+  }
+  final cleanup = payload['cleanup'];
+  if (cleanup is Map) {
+    final values = cleanup['attachmentRequestIds'];
+    if (values is List) target.addAll(values.whereType<String>());
+  }
 }

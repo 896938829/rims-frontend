@@ -3,10 +3,54 @@ import 'dart:typed_data';
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rims_frontend/core/network/api_client.dart';
+import 'package:rims_frontend/core/result/failure.dart';
 import 'package:rims_frontend/features/documents/data/datasources/documents_remote_datasource.dart';
 import 'package:rims_frontend/features/documents/domain/entities/document_data.dart';
 
 void main() {
+  test(
+    'maps business failure envelopes through the shared failure taxonomy',
+    () async {
+      const cases = <(int, Type)>[
+        (10001, AuthenticationFailure),
+        (10002, AuthorizationFailure),
+        (10003, ValidationFailure),
+        (10005, ConflictFailure),
+        (20001, InventoryFailure),
+      ];
+
+      for (final (code, expectedType) in cases) {
+        final adapter = _CapturingAdapter(
+          body: '{"code":$code,"message":"rejected","data":null}',
+        );
+        final dataSource = ApiDocumentsRemoteDataSource(
+          ApiClient(
+            dio: Dio()..httpClientAdapter = adapter,
+            enableLogging: false,
+          ),
+        );
+
+        final result = await dataSource.createDocument(
+          const CreateDocumentRequest(
+            docType: 1,
+            typeLabel: '采购入库',
+            productId: 7,
+            productName: 'Widget',
+            quantity: 1,
+          ),
+        );
+
+        result.when(
+          success: (_) => fail('business code $code must fail'),
+          failure: (failure) {
+            expect(failure.runtimeType, expectedType, reason: 'code $code');
+            expect(failure.businessCode, code);
+          },
+        );
+      }
+    },
+  );
+
   test('getDocument loads authoritative header and all lines', () async {
     final adapter = _CapturingAdapter(
       body:

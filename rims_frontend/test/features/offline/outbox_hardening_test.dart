@@ -7,6 +7,7 @@ import 'package:rims_frontend/features/offline/data/datasources/operation_status
 import 'package:rims_frontend/features/offline/data/repositories/memory_outbox_repository.dart';
 import 'package:rims_frontend/features/offline/domain/entities/network_reachability.dart';
 import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.dart';
+import 'package:rims_frontend/features/offline/domain/entities/outbox_graph.dart';
 import 'package:rims_frontend/features/offline/domain/services/network_status_service.dart';
 import 'package:rims_frontend/features/offline/domain/services/outbox_executor.dart';
 import 'package:rims_frontend/features/offline/domain/services/outbox_state_machine.dart';
@@ -384,9 +385,14 @@ final class _Handler implements OutboxOperationHandler {
   @override
   String get statusScope => 'documents';
   @override
-  Future<Result<Object?>> execute(OutboxOperation operation) async {
+  Future<Result<OutboxHandlerSuccess>> execute(
+    OutboxOperation operation, {
+    Map<String, OutboxOperationOutput> dependencyOutputs = const {},
+  }) async {
     calls += 1;
-    return const Success(null);
+    return const Success(
+      OutboxHandlerSuccess(output: OutboxOperationOutput(version: 1, data: {})),
+    );
   }
 }
 

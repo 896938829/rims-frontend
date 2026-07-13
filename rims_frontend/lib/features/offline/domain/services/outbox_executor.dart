@@ -3,18 +3,31 @@ import '../../../../core/result/result.dart';
 import '../../data/datasources/operation_status_remote_datasource.dart';
 import '../entities/network_reachability.dart';
 import '../entities/outbox_operation.dart';
+import '../entities/outbox_graph.dart';
+import '../entities/outbox_cleanup_intent.dart';
 import '../repositories/outbox_repository.dart';
 import 'network_status_service.dart';
 
 typedef OutboxDelay = Future<void> Function(Duration duration);
 typedef ProbeBackoff = Duration Function(int attempt);
+typedef OutboxSuccessObserver = Future<void> Function(String accountId);
 
 abstract interface class OutboxOperationHandler {
   OutboxOperationKind get kind;
 
   String get statusScope;
 
-  Future<Result<Object?>> execute(OutboxOperation operation);
+  Future<Result<OutboxHandlerSuccess>> execute(
+    OutboxOperation operation, {
+    Map<String, OutboxOperationOutput> dependencyOutputs = const {},
+  });
+}
+
+final class OutboxHandlerSuccess {
+  const OutboxHandlerSuccess({required this.output, this.cleanup});
+
+  final OutboxOperationOutput output;
+  final OutboxCleanupRequest? cleanup;
 }
 
 final class OutboxExecutionContext {
@@ -81,6 +94,7 @@ final class OutboxExecutor implements OutboxExecutorPort {
     DateTime Function()? now,
     this.minimumReplayWindow = const Duration(seconds: 15),
     this.staleSyncingThreshold = const Duration(minutes: 5),
+    this.onSuccessPersisted,
   }) : handlers = Map.unmodifiable({
          for (final handler in handlers) handler.kind: handler,
        }),
@@ -103,6 +117,7 @@ final class OutboxExecutor implements OutboxExecutorPort {
   final DateTime Function() now;
   final Duration minimumReplayWindow;
   final Duration staleSyncingThreshold;
+  final OutboxSuccessObserver? onSuccessPersisted;
   bool _isExecuting = false;
 
   @override
@@ -236,10 +251,39 @@ final class OutboxExecutor implements OutboxExecutorPort {
         }
         if (!handlers.containsKey(operation.kind)) {
           processed.add(operation.operationId);
-          skipped[operation.operationId] = 'handler_unavailable';
-          lastFailure = const StateFailure(
-            message: 'No handler for offline operation.',
+          skipped[operation.operationId] = 'unsupported_operation';
+          const unsupported = UnsupportedOperationFailure(
+            message: 'This offline operation is not supported by this app.',
           );
+          final syncing = await repository.transition(
+            accountId: operation.accountId,
+            operationId: operation.operationId,
+            next: OutboxState.syncing,
+          );
+          if (syncing case Success<OutboxOperation>()) {
+            final terminal = await repository.transition(
+              accountId: operation.accountId,
+              operationId: operation.operationId,
+              next: OutboxState.permanentFailure,
+              failure: unsupported,
+            );
+            if (terminal case FailureResult<OutboxOperation>(:final failure)) {
+              return OutboxExecutionReport(
+                succeededOperationIds: List.unmodifiable(succeeded),
+                skippedOperationReasons: Map.unmodifiable(skipped),
+                failure: failure,
+              );
+            }
+          } else if (syncing case FailureResult<OutboxOperation>(
+            :final failure,
+          )) {
+            return OutboxExecutionReport(
+              succeededOperationIds: List.unmodifiable(succeeded),
+              skippedOperationReasons: Map.unmodifiable(skipped),
+              failure: failure,
+            );
+          }
+          lastFailure = unsupported;
           continue;
         }
 
@@ -397,14 +441,12 @@ final class OutboxExecutor implements OutboxExecutorPort {
     }
     final syncingOperation = (syncing as Success<OutboxOperation>).data;
 
-    if (hadUnknownResult) {
+    if (hadUnknownResult &&
+        operation.kind != OutboxOperationKind.documentReference) {
       final probeOutcome = await _probeUnknown(syncingOperation, handler);
       if (probeOutcome != null) return probeOutcome;
     }
-    return _handleResult(
-      syncingOperation,
-      await handler.execute(syncingOperation),
-    );
+    return _executeHandler(syncingOperation, handler);
   }
 
   Future<_OperationOutcome?> _probeUnknown(
@@ -438,7 +480,7 @@ final class OutboxExecutor implements OutboxExecutorPort {
                 _OperationOutcome(failure: transitionFailure),
           );
         }
-        return _handleResult(operation, await handler.execute(operation));
+        return _executeHandler(operation, handler);
       }
       if (probe < maxStatusProbes) {
         await delay(probeBackoff(probe));
@@ -453,22 +495,49 @@ final class OutboxExecutor implements OutboxExecutorPort {
   String _reviewStamp(OutboxReview review) =>
       '${review.accountId}\u0000${review.warehouseId}\u0000${review.permissionStamp}';
 
-  Future<_OperationOutcome> _handleResult(
+  Future<_OperationOutcome> _executeHandler(
     OutboxOperation operation,
-    Result<Object?> result,
+    OutboxOperationHandler handler,
   ) async {
-    if (result case FailureResult<Object?>(:final failure)) {
-      return _finishFailure(operation, failure);
-    }
-    final transitioned = await repository.transition(
+    final dependencyResult = await repository.loadDependencyOutputs(
       accountId: operation.accountId,
       operationId: operation.operationId,
-      next: OutboxState.succeeded,
     );
-    return transitioned.when(
-      success: (_) => const _OperationOutcome(succeeded: true),
-      failure: (failure) => _OperationOutcome(failure: failure),
+    if (dependencyResult case FailureResult<Map<String, OutboxOperationOutput>>(
+      :final failure,
+    )) {
+      return _finishFailure(operation, failure);
+    }
+    return _handleResult(
+      operation,
+      await handler.execute(
+        operation,
+        dependencyOutputs:
+            (dependencyResult as Success<Map<String, OutboxOperationOutput>>)
+                .data,
+      ),
     );
+  }
+
+  Future<_OperationOutcome> _handleResult(
+    OutboxOperation operation,
+    Result<OutboxHandlerSuccess> result,
+  ) async {
+    if (result case FailureResult<OutboxHandlerSuccess>(:final failure)) {
+      return _finishFailure(operation, failure);
+    }
+    final success = (result as Success<OutboxHandlerSuccess>).data;
+    final transitioned = await repository.completeSuccess(
+      accountId: operation.accountId,
+      operationId: operation.operationId,
+      output: success.output,
+      cleanup: success.cleanup,
+    );
+    if (transitioned case FailureResult<OutboxOperation>(:final failure)) {
+      return _OperationOutcome(failure: failure);
+    }
+    await onSuccessPersisted?.call(operation.accountId);
+    return const _OperationOutcome(succeeded: true);
   }
 
   Future<_OperationOutcome> _finishFailure(
@@ -479,7 +548,10 @@ final class OutboxExecutor implements OutboxExecutorPort {
       AuthenticationFailure() => OutboxState.retryableFailure,
       AuthorizationFailure() => OutboxState.permanentFailure,
       ConflictFailure() => OutboxState.conflict,
-      ValidationFailure() || NotFoundFailure() => OutboxState.permanentFailure,
+      ValidationFailure() ||
+      NotFoundFailure() ||
+      InventoryFailure() ||
+      UnknownFailure() => OutboxState.permanentFailure,
       _ => OutboxState.retryableFailure,
     };
     final transitioned = await repository.transition(

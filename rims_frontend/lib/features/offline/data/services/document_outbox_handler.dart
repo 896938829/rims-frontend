@@ -1,4 +1,3 @@
-import '../../../../core/events/app_event.dart';
 import '../../../../core/events/app_event_bus.dart';
 import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
@@ -6,6 +5,8 @@ import '../../../attachments/domain/services/attachment_staging_store.dart';
 import '../../../documents/data/datasources/documents_remote_datasource.dart';
 import '../../../documents/domain/entities/document_data.dart';
 import '../../domain/entities/outbox_operation.dart';
+import '../../domain/entities/outbox_graph.dart';
+import '../../domain/entities/outbox_cleanup_intent.dart';
 import '../../domain/repositories/document_draft_repository.dart';
 import '../../domain/services/outbox_executor.dart';
 
@@ -17,7 +18,8 @@ final class DocumentOutboxHandler implements OutboxOperationHandler {
     required this.draftRepository,
     required this.eventBus,
   }) : assert(
-         kind == OutboxOperationKind.documentCreate ||
+         kind == OutboxOperationKind.documentReference ||
+             kind == OutboxOperationKind.documentCreate ||
              kind == OutboxOperationKind.documentComplete ||
              kind == OutboxOperationKind.stocktakeConfirm ||
              kind == OutboxOperationKind.stocktakeSettle,
@@ -32,6 +34,7 @@ final class DocumentOutboxHandler implements OutboxOperationHandler {
 
   @override
   String get statusScope => switch (kind) {
+    OutboxOperationKind.documentReference => 'LOCAL document reference',
     OutboxOperationKind.documentCreate => 'POST /api/v1/documents',
     OutboxOperationKind.documentComplete =>
       'POST /api/v1/documents/:id/complete',
@@ -42,16 +45,21 @@ final class DocumentOutboxHandler implements OutboxOperationHandler {
   };
 
   @override
-  Future<Result<Object?>> execute(OutboxOperation operation) async {
+  Future<Result<OutboxHandlerSuccess>> execute(
+    OutboxOperation operation, {
+    Map<String, OutboxOperationOutput> dependencyOutputs = const {},
+  }) async {
     if (operation.kind != kind) {
       return const FailureResult(
         ValidationFailure(message: 'Document outbox handler kind mismatch.'),
       );
     }
     try {
-      return kind == OutboxOperationKind.documentCreate
-          ? await _executeCreate(operation)
-          : await _executeLifecycle(operation);
+      return switch (kind) {
+        OutboxOperationKind.documentReference => _executeReference(operation),
+        OutboxOperationKind.documentCreate => await _executeCreate(operation),
+        _ => await _executeLifecycle(operation, dependencyOutputs),
+      };
     } on FormatException catch (error) {
       return FailureResult(
         ValidationFailure(message: error.message, cause: error),
@@ -59,7 +67,23 @@ final class DocumentOutboxHandler implements OutboxOperationHandler {
     }
   }
 
-  Future<Result<Object?>> _executeCreate(OutboxOperation operation) async {
+  Result<OutboxHandlerSuccess> _executeReference(OutboxOperation operation) {
+    _expectKeys(operation.payload, const {'version', 'documentId'});
+    _expectVersion(operation.payload);
+    final documentId = _positiveInt(operation.payload, 'documentId');
+    return Success(
+      OutboxHandlerSuccess(
+        output: OutboxOperationOutput(
+          version: 1,
+          data: {'documentId': documentId},
+        ),
+      ),
+    );
+  }
+
+  Future<Result<OutboxHandlerSuccess>> _executeCreate(
+    OutboxOperation operation,
+  ) async {
     final payload = _DocumentCreatePayload.fromJson(
       operation.payload,
       expectedRequestId: operation.idempotencyKey,
@@ -74,47 +98,35 @@ final class DocumentOutboxHandler implements OutboxOperationHandler {
         UnknownFailure(message: 'Document create returned an invalid ID.'),
       );
     }
-    if (payload.attachmentRequestIds.isNotEmpty) {
-      final rebound = await stagingStore.rebindDocumentDraft(
-        userId: operation.accountId,
-        localAggregateId: payload.localAggregateId,
-        documentId: model.id,
-        requestIds: payload.attachmentRequestIds,
-      );
-      if (rebound case FailureResult<void>(:final failure)) {
-        return FailureResult(failure);
-      }
-    }
-    final cleanup = payload.cleanup;
-    if (cleanup != null) {
-      final cleaned = await _cleanup(operation.accountId, cleanup);
-      if (cleaned case FailureResult<void>(:final failure)) {
-        return FailureResult(failure);
-      }
-      eventBus.publish(const GlobalRefreshRequestedEvent());
-    }
-    return Success<Object?>(model);
+    return Success(
+      OutboxHandlerSuccess(
+        output: OutboxOperationOutput(
+          version: 1,
+          data: {'documentId': model.id},
+        ),
+        cleanup: payload.cleanup?.toRequest(),
+      ),
+    );
   }
 
-  Future<Result<Object?>> _executeLifecycle(OutboxOperation operation) async {
+  Future<Result<OutboxHandlerSuccess>> _executeLifecycle(
+    OutboxOperation operation,
+    Map<String, OutboxOperationOutput> dependencyOutputs,
+  ) async {
     final payload = _DocumentLifecyclePayload.fromJson(operation.payload);
-    late final int documentId;
-    if (payload.documentId case final int authoritativeId) {
-      documentId = authoritativeId;
-    } else {
-      final replay = await remoteDataSource.createDocument(
-        payload.createRequest!,
+    final documentIds = dependencyOutputs.values
+        .map((output) => output.data['documentId'])
+        .whereType<int>()
+        .where((id) => id > 0)
+        .toSet();
+    if (documentIds.length != 1) {
+      return const FailureResult(
+        ValidationFailure(
+          message: 'Lifecycle requires one authoritative dependency output.',
+        ),
       );
-      if (replay case FailureResult(:final failure)) {
-        return FailureResult(failure);
-      }
-      documentId = (replay as Success).data.id;
-      if (documentId <= 0) {
-        return const FailureResult(
-          UnknownFailure(message: 'Document replay returned an invalid ID.'),
-        );
-      }
     }
+    final documentId = documentIds.single;
     final Result<void> result = switch (kind) {
       OutboxOperationKind.documentComplete =>
         await remoteDataSource.completeDocument(
@@ -136,42 +148,15 @@ final class DocumentOutboxHandler implements OutboxOperationHandler {
     if (result case FailureResult<void>(:final failure)) {
       return FailureResult(failure);
     }
-    final cleanup = payload.cleanup;
-    if (cleanup != null) {
-      final cleaned = await _cleanup(operation.accountId, cleanup);
-      if (cleaned case FailureResult<void>(:final failure)) {
-        return FailureResult(failure);
-      }
-    }
-    eventBus.publish(const GlobalRefreshRequestedEvent());
-    return const Success<Object?>(null);
-  }
-
-  Future<Result<void>> _cleanup(
-    String accountId,
-    _OutboxCleanup cleanup,
-  ) async {
-    final staged = await stagingStore.removeStagedAttachments(
-      userId: accountId,
-      requestIds: cleanup.attachmentRequestIds,
-    );
-    if (staged case FailureResult<void>(:final failure)) {
-      return FailureResult(failure);
-    }
-    try {
-      await draftRepository.delete(
-        accountId: accountId,
-        draftId: cleanup.draftId,
-      );
-      return const Success(null);
-    } on Object catch (error) {
-      return FailureResult(
-        LocalStorageFailure(
-          message: 'Unable to clean submitted document draft.',
-          cause: error,
+    return Success(
+      OutboxHandlerSuccess(
+        output: OutboxOperationOutput(
+          version: 1,
+          data: {'documentId': documentId, 'lifecycle': kind.wireValue},
         ),
-      );
-    }
+        cleanup: payload.cleanup?.toRequest() ?? const OutboxCleanupRequest(),
+      ),
+    );
   }
 }
 
@@ -221,38 +206,22 @@ final class _DocumentCreatePayload {
 }
 
 final class _DocumentLifecyclePayload {
-  const _DocumentLifecyclePayload({
-    required this.documentId,
-    required this.createRequest,
-    required this.cleanup,
-  });
+  const _DocumentLifecyclePayload({required this.cleanup});
 
   factory _DocumentLifecyclePayload.fromJson(Map<String, Object?> json) {
     _expectKeys(
       json,
-      const {'version', 'documentId', 'createRequest', 'cleanup'},
-      optional: const {'documentId', 'createRequest', 'cleanup'},
+      const {'version', 'cleanup'},
+      optional: const {'cleanup'},
     );
     _expectVersion(json);
-    final hasId = json['documentId'] != null;
-    final hasCreate = json['createRequest'] != null;
-    if (hasId == hasCreate) {
-      throw const FormatException(
-        'Lifecycle payload must have one authoritative document source.',
-      );
-    }
-    final id = hasId ? _positiveInt(json, 'documentId') : null;
     return _DocumentLifecyclePayload(
-      documentId: id,
-      createRequest: hasCreate ? _request(_map(json, 'createRequest')) : null,
       cleanup: json['cleanup'] == null
           ? null
           : _OutboxCleanup.fromJson(_map(json, 'cleanup')),
     );
   }
 
-  final int? documentId;
-  final CreateDocumentRequest? createRequest;
   final _OutboxCleanup? cleanup;
 }
 
@@ -272,6 +241,11 @@ final class _OutboxCleanup {
 
   final String draftId;
   final List<String> attachmentRequestIds;
+
+  OutboxCleanupRequest toRequest() => OutboxCleanupRequest(
+    draftId: draftId,
+    attachmentRequestIds: attachmentRequestIds,
+  );
 }
 
 CreateDocumentRequest _request(

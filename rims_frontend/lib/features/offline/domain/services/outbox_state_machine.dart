@@ -28,7 +28,11 @@ final class OutboxStateMachine {
     }
 
     final transitionedAt = now().toUtc();
-    final failureCode = failure?.runtimeType.toString();
+    final failureCode = switch (failure) {
+      UnsupportedOperationFailure() => 'unsupported_operation',
+      final Failure value => value.runtimeType.toString(),
+      null => null,
+    };
     if (next == OutboxState.retryableFailure) {
       final attemptCount = operation.attemptCount + 1;
       return Success(

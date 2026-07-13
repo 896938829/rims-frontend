@@ -538,34 +538,36 @@ final class FileAttachmentStagingStore
   }
 
   @override
-  Future<Result<void>> cleanupStale({required Duration maxAge}) async {
+  Future<Result<void>> cleanupStale({
+    required String userId,
+    required Duration maxAge,
+    Set<String> protectedRequestIds = const {},
+  }) async {
     try {
-      final root = await _attachmentRoot(create: false);
-      if (!await root.exists()) return const Success(null);
+      final directory = await _userDirectory(userId, create: false);
+      if (!await directory.exists()) return const Success(null);
       final cutoff = _clock().toUtc().subtract(maxAge);
-      await for (final entity in root.list()) {
-        if (entity is! Directory) continue;
-        await _accountOperations.run(entity.absolute.path, () async {
-          if (!await entity.exists()) return;
-          await _completePendingCleanup(entity);
-          final items = await _readManifest(entity);
-          final retained = <StagedAttachment>[];
-          for (final item in items) {
-            if (item.createdAt.isBefore(cutoff)) {
-              await _deleteIfExists(File(item.pending.stagedPath));
-              final thumbnail = item.thumbnailPath;
-              if (thumbnail != null) await _deleteIfExists(File(thumbnail));
-            } else {
-              retained.add(item);
-            }
+      await _accountOperations.run(directory.absolute.path, () async {
+        if (!await directory.exists()) return;
+        await _completePendingCleanup(directory);
+        final items = await _readManifest(directory);
+        final retained = <StagedAttachment>[];
+        for (final item in items) {
+          if (item.createdAt.isBefore(cutoff) &&
+              !protectedRequestIds.contains(item.pending.requestId)) {
+            await _deleteIfExists(File(item.pending.stagedPath));
+            final thumbnail = item.thumbnailPath;
+            if (thumbnail != null) await _deleteIfExists(File(thumbnail));
+          } else {
+            retained.add(item);
           }
-          await _writeManifest(entity, retained);
-          await _deleteFilesOlderThan(
-            Directory('${entity.path}${Platform.pathSeparator}downloads'),
-            cutoff,
-          );
-        });
-      }
+        }
+        await _writeManifest(directory, retained);
+        await _deleteFilesOlderThan(
+          Directory('${directory.path}${Platform.pathSeparator}downloads'),
+          cutoff,
+        );
+      });
       return const Success(null);
     } catch (error) {
       return FailureResult(

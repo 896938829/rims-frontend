@@ -21,6 +21,7 @@ part 'offline_database.g.dart';
     OfflineOutboxOperations,
     OfflineOutboxDependencies,
     OfflineOutboxResolutions,
+    OfflineOutboxCleanupIntents,
   ],
 )
 final class OfflineDatabase extends _$OfflineDatabase implements OfflineStore {
@@ -44,7 +45,7 @@ final class OfflineDatabase extends _$OfflineDatabase implements OfflineStore {
        );
 
   @override
-  int get schemaVersion => 5;
+  int get schemaVersion => 6;
 
   @override
   MigrationStrategy get migration => MigrationStrategy(
@@ -137,6 +138,13 @@ WHERE operation_state = 'syncing'
           'UPDATE outbox_operations SET confirmed_at = NULL '
           'WHERE review_stamp IS NULL',
         );
+      }
+      if (from < 6) {
+        await migrator.addColumn(
+          offlineOutboxOperations,
+          offlineOutboxOperations.output,
+        );
+        await migrator.createTable(offlineOutboxCleanupIntents);
       }
     },
     beforeOpen: (details) async {

@@ -2,6 +2,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:rims_frontend/core/result/failure.dart';
 import 'package:rims_frontend/core/result/result.dart';
 import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.dart';
+import 'package:rims_frontend/features/offline/domain/entities/outbox_graph.dart';
+import 'package:rims_frontend/features/offline/domain/entities/outbox_cleanup_intent.dart';
 import 'package:rims_frontend/features/offline/domain/repositories/outbox_repository.dart';
 
 final class OutboxTestClock {
@@ -39,6 +41,205 @@ void runOutboxRepositoryContract(String name, OutboxHarnessFactory create) {
     });
 
     tearDown(() => harness.close());
+
+    test('enqueueGraph is atomic and exact replay is idempotent', () async {
+      final create = _operation('graph-create', clock.value);
+      final attachment = _operation(
+        'graph-attachment',
+        clock.value,
+        kind: OutboxOperationKind.attachmentUpload,
+      );
+      final graph = OutboxGraph(
+        operations: [create, attachment],
+        dependencies: const {
+          'graph-attachment': {'graph-create'},
+        },
+      );
+
+      expect(
+        await repository.enqueueGraph(graph),
+        isA<Success<List<OutboxOperation>>>(),
+      );
+      expect(
+        await repository.enqueueGraph(graph),
+        isA<Success<List<OutboxOperation>>>(),
+      );
+      expect((await repository.list('7')).successData, hasLength(2));
+
+      final invalid = OutboxGraph(
+        operations: [
+          _operation('invalid-a', clock.value),
+          _operation(
+            'invalid-b',
+            clock.value,
+            idempotencyKey: 'key-invalid-a',
+            kind: OutboxOperationKind.attachmentUpload,
+          ),
+        ],
+      );
+      expect(
+        await repository.enqueueGraph(invalid),
+        isA<FailureResult<List<OutboxOperation>>>(),
+      );
+      expect(
+        (await repository.list('7')).successData.where(
+          (operation) => operation.operationId.startsWith('invalid-'),
+        ),
+        isEmpty,
+      );
+    });
+
+    test('success atomically persists output and cleanup intent', () async {
+      final operation = _operation('output-create', clock.value);
+      await repository.enqueueGraph(OutboxGraph(operations: [operation]));
+      await repository.transition(
+        accountId: '7',
+        operationId: operation.operationId,
+        next: OutboxState.syncing,
+      );
+
+      final completed = await repository.completeSuccess(
+        accountId: '7',
+        operationId: operation.operationId,
+        output: const OutboxOperationOutput(
+          version: 1,
+          data: {'documentId': 91},
+        ),
+        cleanup: const OutboxCleanupRequest(
+          draftId: 'draft-output',
+          attachmentRequestIds: ['file-output'],
+        ),
+      );
+
+      expect(completed.successData.state, OutboxState.succeeded);
+      expect(completed.successData.output?.data, {'documentId': 91});
+      final intents = (await repository.listCleanupIntents('7')).successData;
+      expect(intents, hasLength(1));
+      expect(intents.single.operationId, operation.operationId);
+      expect(intents.single.draftId, 'draft-output');
+      expect(intents.single.attachmentRequestIds, ['file-output']);
+    });
+
+    test('direct dependency outputs survive repository reads', () async {
+      final parent = _operation('output-parent', clock.value);
+      final child = _operation(
+        'output-child',
+        clock.value,
+        kind: OutboxOperationKind.documentComplete,
+      );
+      await repository.enqueueGraph(
+        OutboxGraph(
+          operations: [parent, child],
+          dependencies: const {
+            'output-child': {'output-parent'},
+          },
+        ),
+      );
+      await repository.transition(
+        accountId: '7',
+        operationId: parent.operationId,
+        next: OutboxState.syncing,
+      );
+      await repository.completeSuccess(
+        accountId: '7',
+        operationId: parent.operationId,
+        output: const OutboxOperationOutput(
+          version: 1,
+          data: {'documentId': 91},
+        ),
+      );
+
+      final outputs = await repository.loadDependencyOutputs(
+        accountId: '7',
+        operationId: child.operationId,
+      );
+
+      expect(outputs.successData.keys, {'output-parent'});
+      expect(outputs.successData['output-parent']?.data['documentId'], 91);
+    });
+
+    test(
+      'cleanup failure survives and completed cleanup is idempotent',
+      () async {
+        final operation = _operation('cleanup-retry', clock.value);
+        await repository.enqueueGraph(OutboxGraph(operations: [operation]));
+        await repository.transition(
+          accountId: '7',
+          operationId: operation.operationId,
+          next: OutboxState.syncing,
+        );
+        await repository.completeSuccess(
+          accountId: '7',
+          operationId: operation.operationId,
+          output: const OutboxOperationOutput(version: 1, data: {}),
+          cleanup: const OutboxCleanupRequest(
+            attachmentRequestIds: ['cleanup-file'],
+          ),
+        );
+
+        await repository.recordCleanupFailure(
+          accountId: '7',
+          operationId: operation.operationId,
+          failure: 'disk busy',
+        );
+        final failed = (await repository.listCleanupIntents(
+          '7',
+        )).successData.single;
+        expect(failed.attemptCount, 1);
+        expect(failed.lastFailure, 'disk busy');
+        expect(
+          (await repository.list('7')).successData.single.state,
+          OutboxState.succeeded,
+        );
+
+        expect(
+          await repository.completeCleanupIntent(
+            accountId: '7',
+            operationId: operation.operationId,
+          ),
+          isA<Success<void>>(),
+        );
+        expect(
+          await repository.completeCleanupIntent(
+            accountId: '7',
+            operationId: operation.operationId,
+          ),
+          isA<Success<void>>(),
+        );
+        expect((await repository.listCleanupIntents('7')).successData, isEmpty);
+      },
+    );
+
+    test(
+      'pending cleanup intent protects succeeded operation from prune',
+      () async {
+        final old = initialTime.subtract(const Duration(days: 31));
+        clock.value = old;
+        final operation = _operation('cleanup-protected', old);
+        await repository.enqueueGraph(OutboxGraph(operations: [operation]));
+        await repository.transition(
+          accountId: '7',
+          operationId: operation.operationId,
+          next: OutboxState.syncing,
+        );
+        await repository.completeSuccess(
+          accountId: '7',
+          operationId: operation.operationId,
+          output: const OutboxOperationOutput(version: 1, data: {}),
+          cleanup: const OutboxCleanupRequest(
+            attachmentRequestIds: ['still-needed'],
+          ),
+        );
+        clock.value = initialTime;
+
+        expect((await repository.prune(accountId: '7')).successData, 0);
+        expect((await repository.list('7')).successData, hasLength(1));
+        expect(
+          (await repository.listCleanupIntents('7')).successData,
+          hasLength(1),
+        );
+      },
+    );
 
     test('persists exact review context and rejects stale CAS', () async {
       await repository.enqueue(_operation('review-context', clock.value));
@@ -798,13 +999,19 @@ extension<T> on Result<T> {
   T get successData => (this as Success<T>).data;
 }
 
-OutboxOperation _operation(String id, DateTime now, {String accountId = '7'}) {
+OutboxOperation _operation(
+  String id,
+  DateTime now, {
+  String accountId = '7',
+  String? idempotencyKey,
+  OutboxOperationKind kind = OutboxOperationKind.documentCreate,
+}) {
   return OutboxOperation(
     operationId: id,
-    idempotencyKey: 'key-$id',
+    idempotencyKey: idempotencyKey ?? 'key-$id',
     accountId: accountId,
     warehouseId: 11,
-    kind: OutboxOperationKind.documentCreate,
+    kind: kind,
     payload: const {},
     state: OutboxState.queued,
     createdAt: now,

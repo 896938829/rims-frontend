@@ -15,6 +15,7 @@ import '../../../inventory/domain/entities/non_standard_inventory_item.dart';
 import '../../../inventory/domain/repositories/inventory_repository.dart';
 import '../../../offline/domain/entities/document_draft.dart';
 import '../../../offline/domain/entities/outbox_operation.dart';
+import '../../../offline/domain/entities/outbox_graph.dart';
 import '../../../offline/domain/repositories/document_draft_repository.dart';
 import '../../../offline/domain/repositories/outbox_repository.dart';
 
@@ -1442,7 +1443,7 @@ final class DocumentsViewModel extends ChangeNotifier {
           warehouseId: currentWarehouse!.id,
           localAggregateId: submittedDraftId,
           attachmentRequestIds: List.unmodifiable(_attachmentStagingIds),
-          requiresStatusProbe: failure is UnknownFailure,
+          requiresStatusProbe: failure is TransportUnknownFailure,
           review: OfflineSubmissionReview(
             warehouseName: currentWarehouse!.name,
             documentType: request.typeLabel,
@@ -1557,12 +1558,8 @@ final class DocumentsViewModel extends ChangeNotifier {
       createdAt: createdAt,
       requiresStatusProbe: pending.requiresStatusProbe,
     );
-    final createResult = await outbox.enqueue(createOperation);
-    if (createResult case FailureResult<OutboxOperation>(:final failure)) {
-      _formError = failure.message;
-      return false;
-    }
-
+    final operations = <OutboxOperation>[createOperation];
+    final dependencies = <String, Set<String>>{};
     var dependencyId = createOperationId;
     for (var index = 0; index < staged.length; index += 1) {
       final attachment = staged[index];
@@ -1585,19 +1582,17 @@ final class DocumentsViewModel extends ChangeNotifier {
         createdAt: createdAt.add(Duration(microseconds: index + 1)),
         requiresStatusProbe: pending.requiresStatusProbe,
       );
-      final result = await outbox.enqueue(
-        operation,
-        dependencies: {dependencyId},
-      );
-      if (result case FailureResult<OutboxOperation>(:final failure)) {
-        await outbox.cancel(
-          accountId: pending.accountId,
-          operationId: createOperationId,
-        );
-        _formError = failure.message;
-        return false;
-      }
+      operations.add(operation);
+      dependencies[operation.operationId] = {dependencyId};
       dependencyId = operation.operationId;
+    }
+
+    final result = await outbox.enqueueGraph(
+      OutboxGraph(operations: operations, dependencies: dependencies),
+    );
+    if (result case FailureResult<List<OutboxOperation>>(:final failure)) {
+      _formError = failure.message;
+      return false;
     }
 
     _pendingOfflineSubmission = null;
@@ -1609,19 +1604,37 @@ final class DocumentsViewModel extends ChangeNotifier {
     _PendingLifecycleSubmission pending,
     OutboxRepository outbox,
   ) async {
+    final createdAt = now().toUtc();
+    final referenceOperation = OutboxOperation(
+      operationId: 'document-reference-${pending.requestId}',
+      idempotencyKey: 'document-reference:${pending.requestId}',
+      accountId: pending.accountId,
+      warehouseId: pending.warehouseId,
+      kind: OutboxOperationKind.documentReference,
+      payload: {'version': 1, 'documentId': pending.documentId},
+      state: OutboxState.queued,
+      createdAt: createdAt,
+    );
     final operation = OutboxOperation(
       operationId: '${pending.kind.wireValue}-${pending.requestId}',
       idempotencyKey: pending.requestId,
       accountId: pending.accountId,
       warehouseId: pending.warehouseId,
       kind: pending.kind,
-      payload: {'version': 1, 'documentId': pending.documentId},
+      payload: const {'version': 1},
       state: OutboxState.queued,
-      createdAt: now().toUtc(),
+      createdAt: createdAt.add(const Duration(microseconds: 1)),
       requiresStatusProbe: pending.requiresStatusProbe,
     );
-    final result = await outbox.enqueue(operation);
-    if (result case FailureResult<OutboxOperation>(:final failure)) {
+    final result = await outbox.enqueueGraph(
+      OutboxGraph(
+        operations: [referenceOperation, operation],
+        dependencies: {
+          operation.operationId: {referenceOperation.operationId},
+        },
+      ),
+    );
+    if (result case FailureResult<List<OutboxOperation>>(:final failure)) {
       _documentActionError = failure.message;
       return false;
     }
@@ -1656,7 +1669,7 @@ final class DocumentsViewModel extends ChangeNotifier {
   };
 
   bool _canOfferOfflineQueue(Failure failure) =>
-      failure is NetworkFailure || failure is UnknownFailure;
+      failure is NetworkFailure || failure is TransportUnknownFailure;
 
   Future<NonStandardInventoryItem?> _revalidateNonStandardSource() async {
     final sourceId = _nonStandardSourceId;
@@ -1832,7 +1845,7 @@ final class DocumentsViewModel extends ChangeNotifier {
             documentId: document.id,
             accountId: currentAccountId,
             warehouseId: warehouse.id,
-            requiresStatusProbe: failure is UnknownFailure,
+            requiresStatusProbe: failure is TransportUnknownFailure,
             review: OfflineSubmissionReview(
               warehouseName: warehouse.name,
               documentType: document.title,

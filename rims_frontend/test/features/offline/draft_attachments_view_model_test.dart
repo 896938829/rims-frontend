@@ -468,8 +468,11 @@ final class _DraftStaging implements AttachmentStagingStore {
   }
 
   @override
-  Future<Result<void>> cleanupStale({required Duration maxAge}) async =>
-      const Success(null);
+  Future<Result<void>> cleanupStale({
+    required String userId,
+    required Duration maxAge,
+    Set<String> protectedRequestIds = const {},
+  }) async => const Success(null);
 
   @override
   Future<Result<void>> clearForUser(String userId) async => const Success(null);

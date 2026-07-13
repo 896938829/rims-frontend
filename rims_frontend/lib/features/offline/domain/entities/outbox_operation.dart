@@ -1,3 +1,5 @@
+import 'outbox_operation_output.dart';
+
 enum OutboxState {
   queued('queued'),
   syncing('syncing'),
@@ -13,6 +15,7 @@ enum OutboxState {
 }
 
 enum OutboxOperationKind {
+  documentReference('document_reference'),
   attachmentUpload('attachment_upload'),
   documentCreate('document_create'),
   documentComplete('document_complete'),
@@ -62,6 +65,7 @@ final class OutboxOperation {
     this.reviewStamp,
     this.requiresStatusProbe = false,
     this.syncingStartedAt,
+    this.output,
   }) : payload = _freezeMap(payload),
        updatedAt = updatedAt ?? createdAt;
 
@@ -82,6 +86,7 @@ final class OutboxOperation {
   final String? reviewStamp;
   final bool requiresStatusProbe;
   final DateTime? syncingStartedAt;
+  final OutboxOperationOutput? output;
 
   bool get isConfirmed => confirmedAt != null;
 
@@ -99,6 +104,7 @@ final class OutboxOperation {
     bool? requiresStatusProbe,
     DateTime? syncingStartedAt,
     bool clearSyncingStartedAt = false,
+    OutboxOperationOutput? output,
   }) {
     return OutboxOperation(
       operationId: operationId,
@@ -122,6 +128,7 @@ final class OutboxOperation {
       syncingStartedAt: clearSyncingStartedAt
           ? null
           : syncingStartedAt ?? this.syncingStartedAt,
+      output: output ?? this.output,
     );
   }
 }

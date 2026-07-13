@@ -3,6 +3,8 @@ import 'dart:convert';
 import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
 import '../../domain/entities/outbox_operation.dart';
+import '../../domain/entities/outbox_graph.dart';
+import '../../domain/entities/outbox_cleanup_intent.dart';
 import '../../domain/repositories/outbox_repository.dart';
 import '../../domain/services/outbox_state_machine.dart';
 import '../models/cache_record_model.dart';
@@ -25,6 +27,127 @@ final class MemoryOutboxRepository implements OutboxRepository {
   final Map<String, Set<String>> _dependencies = {};
   final Map<String, String> _replacementByOriginal = {};
   final Map<String, String> _payloadFingerprintByOperation = {};
+  final Map<String, OutboxCleanupIntent> _cleanupIntents = {};
+
+  @override
+  Future<Result<List<OutboxOperation>>> enqueueGraph(OutboxGraph graph) async {
+    if (graph.operations.isEmpty) {
+      return const FailureResult(
+        ValidationFailure(message: 'An outbox graph cannot be empty.'),
+      );
+    }
+
+    final requestedById = <String, OutboxOperation>{};
+    final requestedKeys = <String>{};
+    final payloads = <String, String>{};
+    final accountId = graph.operations.first.accountId;
+    final warehouseId = graph.operations.first.warehouseId;
+    for (final operation in graph.operations) {
+      if (operation.accountId != accountId ||
+          operation.warehouseId != warehouseId ||
+          operation.state != OutboxState.queued ||
+          operation.replacementOf != null ||
+          operation.operationId.isEmpty ||
+          operation.idempotencyKey.isEmpty ||
+          requestedById.containsKey(operation.operationId) ||
+          !requestedKeys.add(operation.idempotencyKey)) {
+        return const FailureResult(
+          ValidationFailure(message: 'The outbox graph is invalid.'),
+        );
+      }
+      requestedById[operation.operationId] = operation;
+      payloads[operation.operationId] = _serializePayload(operation.payload);
+    }
+    if (graph.dependencies.keys.any((id) => !requestedById.containsKey(id)) ||
+        graph.dependencies.entries.any(
+          (entry) => entry.value.contains(entry.key),
+        )) {
+      return const FailureResult(
+        ValidationFailure(message: 'The outbox dependency graph is invalid.'),
+      );
+    }
+
+    final existing = graph.operations
+        .map((operation) => _operations[operation.operationId])
+        .whereType<OutboxOperation>()
+        .toList(growable: false);
+    if (existing.isNotEmpty) {
+      if (existing.length != graph.operations.length ||
+          !_isExactGraphReplay(graph, payloads)) {
+        return const FailureResult(
+          ConflictFailure(message: 'The outbox graph already exists.'),
+        );
+      }
+      return Success(List.unmodifiable(existing));
+    }
+
+    final activeCount = _operations.values
+        .where(
+          (operation) =>
+              operation.accountId == accountId && _isActive(operation.state),
+        )
+        .length;
+    if (activeCount + graph.operations.length > maxOperationsPerAccount) {
+      return const FailureResult(
+        StateFailure(message: 'The offline outbox limit is 500 operations.'),
+      );
+    }
+    if (_operations.values.any(
+      (stored) =>
+          stored.accountId == accountId &&
+          requestedKeys.contains(stored.idempotencyKey),
+    )) {
+      return const FailureResult(
+        ConflictFailure(message: 'An idempotency key already exists.'),
+      );
+    }
+    for (final entry in graph.dependencies.entries) {
+      for (final dependencyId in entry.value) {
+        final dependency =
+            requestedById[dependencyId] ?? _operations[dependencyId];
+        if (dependency == null || dependency.accountId != accountId) {
+          return const FailureResult(
+            ValidationFailure(
+              message: 'Dependencies must exist in the same account.',
+            ),
+          );
+        }
+      }
+    }
+    if (_graphHasCycle(graph, requestedById.keys.toSet())) {
+      return const FailureResult(
+        ValidationFailure(
+          message: 'The dependency graph cannot contain a cycle.',
+        ),
+      );
+    }
+
+    final nextOperations = Map<String, OutboxOperation>.of(_operations);
+    final nextDependencies = <String, Set<String>>{
+      for (final entry in _dependencies.entries) entry.key: entry.value,
+    };
+    final nextFingerprints = Map<String, String>.of(
+      _payloadFingerprintByOperation,
+    );
+    for (final operation in graph.operations) {
+      nextOperations[operation.operationId] = operation;
+      nextDependencies[operation.operationId] = Set.unmodifiable(
+        graph.dependencies[operation.operationId] ?? const <String>{},
+      );
+      nextFingerprints[operation.operationId] =
+          payloads[operation.operationId]!;
+    }
+    _operations
+      ..clear()
+      ..addAll(nextOperations);
+    _dependencies
+      ..clear()
+      ..addAll(nextDependencies);
+    _payloadFingerprintByOperation
+      ..clear()
+      ..addAll(nextFingerprints);
+    return Success(List.unmodifiable(graph.operations));
+  }
 
   @override
   Future<Result<OutboxOperation>> enqueue(
@@ -202,6 +325,125 @@ final class MemoryOutboxRepository implements OutboxRepository {
   }
 
   @override
+  Future<Result<OutboxOperation>> completeSuccess({
+    required String accountId,
+    required String operationId,
+    required OutboxOperationOutput output,
+    OutboxCleanupRequest? cleanup,
+  }) async {
+    final current = _operations[operationId];
+    if (current == null || current.accountId != accountId) {
+      return const FailureResult(
+        NotFoundFailure(message: 'Offline operation not found.'),
+      );
+    }
+    if (current.state != OutboxState.syncing || output.version <= 0) {
+      return const FailureResult(
+        StateFailure(message: 'Only syncing work can complete successfully.'),
+      );
+    }
+    _serializePayload(output.data);
+    final transition = stateMachine.transition(current, OutboxState.succeeded);
+    if (transition case FailureResult<OutboxOperation>()) return transition;
+    final completed = (transition as Success<OutboxOperation>).data.copyWith(
+      output: OutboxOperationOutput(
+        version: output.version,
+        data: Map.unmodifiable(output.data),
+      ),
+    );
+    final timestamp = completed.updatedAt;
+    OutboxCleanupIntent? intent;
+    if (cleanup != null) {
+      intent = OutboxCleanupIntent(
+        operationId: operationId,
+        accountId: accountId,
+        warehouseId: current.warehouseId,
+        draftId: cleanup.draftId,
+        attachmentRequestIds: cleanup.attachmentRequestIds,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      );
+    }
+    _operations[operationId] = completed;
+    if (intent != null) _cleanupIntents[operationId] = intent;
+    return Success(completed);
+  }
+
+  @override
+  Future<Result<Map<String, OutboxOperationOutput>>> loadDependencyOutputs({
+    required String accountId,
+    required String operationId,
+  }) async {
+    final operation = _operations[operationId];
+    if (operation == null || operation.accountId != accountId) {
+      return const FailureResult(
+        NotFoundFailure(message: 'Offline operation not found.'),
+      );
+    }
+    final outputs = <String, OutboxOperationOutput>{};
+    for (final dependencyId in _dependencies[operationId] ?? const <String>{}) {
+      final dependency = _operations[dependencyId];
+      if (dependency?.output case final output?) outputs[dependencyId] = output;
+    }
+    return Success(Map.unmodifiable(outputs));
+  }
+
+  @override
+  Future<Result<List<OutboxCleanupIntent>>> listCleanupIntents(
+    String accountId,
+  ) async {
+    final intents =
+        _cleanupIntents.values
+            .where((intent) => intent.accountId == accountId)
+            .toList()
+          ..sort((left, right) => left.createdAt.compareTo(right.createdAt));
+    return Success(List.unmodifiable(intents));
+  }
+
+  @override
+  Future<Result<void>> recordCleanupFailure({
+    required String accountId,
+    required String operationId,
+    required String failure,
+  }) async {
+    final current = _cleanupIntents[operationId];
+    if (current == null || current.accountId != accountId) {
+      return const FailureResult(
+        NotFoundFailure(message: 'Cleanup intent not found.'),
+      );
+    }
+    _cleanupIntents[operationId] = OutboxCleanupIntent(
+      operationId: current.operationId,
+      accountId: current.accountId,
+      warehouseId: current.warehouseId,
+      draftId: current.draftId,
+      attachmentRequestIds: current.attachmentRequestIds,
+      createdAt: current.createdAt,
+      updatedAt: now().toUtc(),
+      attemptCount: current.attemptCount + 1,
+      lastFailure: failure,
+    );
+    return const Success(null);
+  }
+
+  @override
+  Future<Result<void>> completeCleanupIntent({
+    required String accountId,
+    required String operationId,
+  }) async {
+    final current = _cleanupIntents[operationId];
+    if (current != null && current.accountId != accountId) {
+      return const FailureResult(
+        AuthorizationFailure(
+          message: 'Cleanup intent belongs to another account.',
+        ),
+      );
+    }
+    _cleanupIntents.remove(operationId);
+    return const Success(null);
+  }
+
+  @override
   Future<Result<OutboxOperation>> cancel({
     required String accountId,
     required String operationId,
@@ -338,6 +580,7 @@ final class MemoryOutboxRepository implements OutboxRepository {
           operationIds.contains(operationId) ||
           parents.any(operationIds.contains),
     );
+    _cleanupIntents.removeWhere((_, intent) => intent.accountId == accountId);
     return const Success<void>(null);
   }
 
@@ -361,6 +604,7 @@ final class MemoryOutboxRepository implements OutboxRepository {
     }
     final expiredIds = <String>{};
     for (final operation in accountOperations.values) {
+      if (_cleanupIntents.containsKey(operation.operationId)) continue;
       if (!_isExpiredTerminal(operation, currentTime)) continue;
       if (operation.state != OutboxState.succeeded &&
           _hasActiveDescendant(operation.operationId, children)) {
@@ -453,6 +697,46 @@ final class MemoryOutboxRepository implements OutboxRepository {
       }
     }
     return null;
+  }
+
+  bool _isExactGraphReplay(OutboxGraph graph, Map<String, String> payloads) {
+    for (final requested in graph.operations) {
+      final stored = _operations[requested.operationId];
+      if (stored == null ||
+          stored.accountId != requested.accountId ||
+          stored.warehouseId != requested.warehouseId ||
+          stored.kind != requested.kind ||
+          stored.idempotencyKey != requested.idempotencyKey ||
+          _payloadFingerprintByOperation[requested.operationId] !=
+              payloads[requested.operationId] ||
+          _dependencyFingerprint(
+                _dependencies[requested.operationId] ?? const <String>{},
+              ) !=
+              _dependencyFingerprint(
+                graph.dependencies[requested.operationId] ?? const <String>{},
+              )) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  bool _graphHasCycle(OutboxGraph graph, Set<String> graphIds) {
+    final visiting = <String>{};
+    final visited = <String>{};
+    bool visit(String id) {
+      if (visiting.contains(id)) return true;
+      if (!graphIds.contains(id) || visited.contains(id)) return false;
+      visiting.add(id);
+      for (final dependency in graph.dependencies[id] ?? const <String>{}) {
+        if (visit(dependency)) return true;
+      }
+      visiting.remove(id);
+      visited.add(id);
+      return false;
+    }
+
+    return graphIds.any(visit);
   }
 
   bool _hasAncestor(String operationId, String target) {

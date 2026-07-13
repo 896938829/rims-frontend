@@ -534,6 +534,7 @@ final class _ConflictResolutionDialogState
 }
 
 String _kindLabel(OutboxOperationKind kind) => switch (kind) {
+  OutboxOperationKind.documentReference => '单据引用',
   OutboxOperationKind.attachmentUpload => '附件上传',
   OutboxOperationKind.documentCreate => '创建单据',
   OutboxOperationKind.documentComplete => '完成单据',

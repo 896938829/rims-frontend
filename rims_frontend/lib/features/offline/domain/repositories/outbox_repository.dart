@@ -1,8 +1,12 @@
 import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
 import '../entities/outbox_operation.dart';
+import '../entities/outbox_graph.dart';
+import '../entities/outbox_cleanup_intent.dart';
 
 abstract interface class OutboxRepository {
+  Future<Result<List<OutboxOperation>>> enqueueGraph(OutboxGraph graph);
+
   Future<Result<OutboxOperation>> enqueue(
     OutboxOperation operation, {
     Set<String> dependencies = const {},
@@ -38,6 +42,33 @@ abstract interface class OutboxRepository {
     required String operationId,
     required OutboxState next,
     Failure? failure,
+  });
+
+  Future<Result<OutboxOperation>> completeSuccess({
+    required String accountId,
+    required String operationId,
+    required OutboxOperationOutput output,
+    OutboxCleanupRequest? cleanup,
+  });
+
+  Future<Result<Map<String, OutboxOperationOutput>>> loadDependencyOutputs({
+    required String accountId,
+    required String operationId,
+  });
+
+  Future<Result<List<OutboxCleanupIntent>>> listCleanupIntents(
+    String accountId,
+  );
+
+  Future<Result<void>> recordCleanupFailure({
+    required String accountId,
+    required String operationId,
+    required String failure,
+  });
+
+  Future<Result<void>> completeCleanupIntent({
+    required String accountId,
+    required String operationId,
   });
 
   Future<Result<OutboxOperation>> cancel({

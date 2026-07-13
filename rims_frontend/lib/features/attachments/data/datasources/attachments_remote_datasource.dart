@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'package:dio/dio.dart';
 
 import '../../../../core/network/api_client.dart';
+import '../../../../core/network/api_business_failure_mapper.dart';
 import '../../../../core/network/api_endpoints.dart';
 import '../../../../core/network/api_envelope.dart';
 import '../../../../core/network/api_page_parser.dart';
@@ -206,10 +207,10 @@ final class ApiAttachmentsRemoteDataSource
         final envelope = ApiEnvelope.fromJson(body);
         if (!envelope.isSuccess) {
           return FailureResult<T>(
-            UnknownFailure(
+            const ApiBusinessFailureMapper().map(
+              businessCode: envelope.code,
               message: envelope.message,
               statusCode: response.statusCode,
-              businessCode: envelope.code,
               traceId: envelope.traceId,
             ),
           );

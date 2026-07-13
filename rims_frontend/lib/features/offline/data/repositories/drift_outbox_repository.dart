@@ -6,6 +6,8 @@ import 'package:drift/native.dart';
 import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
 import '../../domain/entities/outbox_operation.dart';
+import '../../domain/entities/outbox_graph.dart';
+import '../../domain/entities/outbox_cleanup_intent.dart';
 import '../../domain/repositories/outbox_repository.dart';
 import '../../domain/services/outbox_state_machine.dart';
 import '../database/offline_database.dart';
@@ -27,6 +29,160 @@ final class DriftOutboxRepository implements OutboxRepository {
   final DateTime Function() now;
   final Duration succeededRetention;
   final Duration failedRetention;
+
+  @override
+  Future<Result<List<OutboxOperation>>> enqueueGraph(OutboxGraph graph) async {
+    if (graph.operations.isEmpty) {
+      return const FailureResult(
+        ValidationFailure(message: 'An outbox graph cannot be empty.'),
+      );
+    }
+    final byId = <String, OutboxOperation>{};
+    final keys = <String>{};
+    final payloads = <String, String>{};
+    final accountId = graph.operations.first.accountId;
+    final warehouseId = graph.operations.first.warehouseId;
+    for (final operation in graph.operations) {
+      if (operation.accountId != accountId ||
+          operation.warehouseId != warehouseId ||
+          operation.state != OutboxState.queued ||
+          operation.replacementOf != null ||
+          operation.operationId.isEmpty ||
+          operation.idempotencyKey.isEmpty ||
+          byId.containsKey(operation.operationId) ||
+          !keys.add(operation.idempotencyKey)) {
+        return const FailureResult(
+          ValidationFailure(message: 'The outbox graph is invalid.'),
+        );
+      }
+      byId[operation.operationId] = operation;
+      payloads[operation.operationId] = _serializePayload(operation.payload);
+    }
+    if (graph.dependencies.keys.any((id) => !byId.containsKey(id)) ||
+        graph.dependencies.entries.any(
+          (entry) => entry.value.contains(entry.key),
+        ) ||
+        _graphHasCycle(graph, byId.keys.toSet())) {
+      return const FailureResult(
+        ValidationFailure(message: 'The outbox dependency graph is invalid.'),
+      );
+    }
+
+    try {
+      final stored = await database.transaction(() async {
+        final existing = await (database.select(
+          database.offlineOutboxOperations,
+        )..where((row) => row.operationId.isIn(byId.keys))).get();
+        if (existing.isNotEmpty) {
+          if (existing.length != graph.operations.length ||
+              !await _isExactGraphReplay(graph, payloads, existing)) {
+            throw const _OutboxConflictException(
+              'The outbox graph already exists.',
+            );
+          }
+          return existing.map(_toDomainOperation).toList(growable: false);
+        }
+
+        final activeCount = database.offlineOutboxOperations.operationId
+            .count();
+        final activeRow =
+            await (database.selectOnly(database.offlineOutboxOperations)
+                  ..addColumns([activeCount])
+                  ..where(
+                    database.offlineOutboxOperations.accountId.equals(
+                          accountId,
+                        ) &
+                        database.offlineOutboxOperations.operationState.isIn([
+                          OutboxState.queued.wireValue,
+                          OutboxState.syncing.wireValue,
+                          OutboxState.retryableFailure.wireValue,
+                        ]),
+                  ))
+                .getSingle();
+        if ((activeRow.read(activeCount) ?? 0) + graph.operations.length >
+            maxOperationsPerAccount) {
+          throw const _OutboxCapacityException(
+            'The offline outbox limit is 500 operations.',
+          );
+        }
+        final keyCollision =
+            await (database.select(database.offlineOutboxOperations)
+                  ..where(
+                    (row) =>
+                        row.accountId.equals(accountId) &
+                        row.idempotencyKey.isIn(keys),
+                  )
+                  ..limit(1))
+                .getSingleOrNull();
+        if (keyCollision != null) {
+          throw const _OutboxConflictException(
+            'An idempotency key already exists.',
+          );
+        }
+
+        final dependencyIds = graph.dependencies.values
+            .expand((ids) => ids)
+            .where((id) => !byId.containsKey(id))
+            .toSet();
+        if (dependencyIds.isNotEmpty) {
+          final dependencies = await (database.select(
+            database.offlineOutboxOperations,
+          )..where((row) => row.operationId.isIn(dependencyIds))).get();
+          if (dependencies.length != dependencyIds.length ||
+              dependencies.any(
+                (operation) => operation.accountId != accountId,
+              )) {
+            throw const _OutboxValidationException(
+              'Dependencies must exist in the same account.',
+            );
+          }
+        }
+
+        for (final operation in graph.operations) {
+          await _insertOperation(
+            operation,
+            const {},
+            payloads[operation.operationId]!,
+          );
+        }
+        for (final entry in graph.dependencies.entries) {
+          for (final dependency in entry.value) {
+            await database
+                .into(database.offlineOutboxDependencies)
+                .insert(
+                  OfflineOutboxDependenciesCompanion.insert(
+                    operationId: entry.key,
+                    dependencyId: dependency,
+                  ),
+                );
+          }
+        }
+        return graph.operations;
+      });
+      return Success(List.unmodifiable(stored));
+    } on _OutboxValidationException catch (error) {
+      return FailureResult(ValidationFailure(message: error.message));
+    } on _OutboxConflictException catch (error) {
+      return FailureResult(ConflictFailure(message: error.message));
+    } on _OutboxCapacityException catch (error) {
+      return FailureResult(StateFailure(message: error.message));
+    } on StateError catch (error) {
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to enqueue outbox graph.',
+          cause: error,
+        ),
+      );
+    } on Exception catch (error) {
+      if (!_isStorageException(error)) rethrow;
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to enqueue outbox graph.',
+          cause: error,
+        ),
+      );
+    }
+  }
 
   @override
   Future<Result<OutboxOperation>> enqueue(
@@ -485,6 +641,220 @@ WHERE account_id = ? AND operation_state = ?
   }
 
   @override
+  Future<Result<OutboxOperation>> completeSuccess({
+    required String accountId,
+    required String operationId,
+    required OutboxOperationOutput output,
+    OutboxCleanupRequest? cleanup,
+  }) async {
+    final existing = await _findResult(accountId, operationId);
+    if (existing case FailureResult<OutboxOperation>()) return existing;
+    final current = (existing as Success<OutboxOperation>).data;
+    if (current.state != OutboxState.syncing || output.version <= 0) {
+      return const FailureResult(
+        StateFailure(message: 'Only syncing work can complete successfully.'),
+      );
+    }
+    final outputJson = _serializePayload({
+      'version': output.version,
+      'data': output.data,
+    });
+    final transitioned = stateMachine.transition(
+      current,
+      OutboxState.succeeded,
+    );
+    if (transitioned case FailureResult<OutboxOperation>()) return transitioned;
+    final completed = (transitioned as Success<OutboxOperation>).data.copyWith(
+      output: output,
+    );
+    try {
+      await database.transaction(() async {
+        final changed = await database.customUpdate(
+          '''
+UPDATE outbox_operations
+SET operation_state = ?, updated_at = ?, next_attempt_at = NULL,
+    last_failure_code = NULL, requires_status_probe = 0,
+    syncing_started_at = NULL, output = ?
+WHERE account_id = ? AND operation_id = ? AND operation_state = ?
+''',
+          variables: [
+            Variable(completed.state.wireValue),
+            Variable(completed.updatedAt.toUtc()),
+            Variable(outputJson),
+            Variable(accountId),
+            Variable(operationId),
+            Variable(OutboxState.syncing.wireValue),
+          ],
+          updates: {database.offlineOutboxOperations},
+        );
+        if (changed != 1) {
+          throw const _OutboxConflictException(
+            'Offline operation state changed concurrently.',
+          );
+        }
+        if (cleanup != null) {
+          await database
+              .into(database.offlineOutboxCleanupIntents)
+              .insert(
+                OfflineOutboxCleanupIntentsCompanion.insert(
+                  operationId: operationId,
+                  accountId: accountId,
+                  warehouseId: current.warehouseId,
+                  draftId: Value(cleanup.draftId),
+                  attachmentRequestIds: jsonEncode(
+                    cleanup.attachmentRequestIds,
+                  ),
+                  createdAt: completed.updatedAt.toUtc(),
+                  updatedAt: completed.updatedAt.toUtc(),
+                ),
+              );
+        }
+      });
+      return Success(completed);
+    } on _OutboxConflictException catch (error) {
+      return FailureResult(ConflictFailure(message: error.message));
+    } on Exception catch (error) {
+      if (!_isStorageException(error)) rethrow;
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to complete offline operation.',
+          cause: error,
+        ),
+      );
+    }
+  }
+
+  @override
+  Future<Result<Map<String, OutboxOperationOutput>>> loadDependencyOutputs({
+    required String accountId,
+    required String operationId,
+  }) async {
+    final owned = await _find(accountId, operationId);
+    if (owned == null) {
+      return const FailureResult(
+        NotFoundFailure(message: 'Offline operation not found.'),
+      );
+    }
+    try {
+      final rows = await database
+          .customSelect(
+            '''
+SELECT parent.operation_id, parent.output
+FROM outbox_dependencies AS edge
+JOIN outbox_operations AS parent
+  ON parent.operation_id = edge.dependency_id
+WHERE edge.operation_id = ? AND parent.account_id = ?
+''',
+            variables: [Variable(operationId), Variable(accountId)],
+            readsFrom: {
+              database.offlineOutboxDependencies,
+              database.offlineOutboxOperations,
+            },
+          )
+          .get();
+      final outputs = <String, OutboxOperationOutput>{};
+      for (final row in rows) {
+        final encoded = row.read<String?>('output');
+        if (encoded != null) {
+          outputs[row.read<String>('operation_id')] = _decodeOutput(encoded);
+        }
+      }
+      return Success(Map.unmodifiable(outputs));
+    } on Exception catch (error) {
+      if (!_isStorageException(error)) rethrow;
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to read dependency outputs.',
+          cause: error,
+        ),
+      );
+    }
+  }
+
+  @override
+  Future<Result<List<OutboxCleanupIntent>>> listCleanupIntents(
+    String accountId,
+  ) async {
+    try {
+      final query = database.select(database.offlineOutboxCleanupIntents)
+        ..where((row) => row.accountId.equals(accountId))
+        ..orderBy([(row) => OrderingTerm.asc(row.createdAt)]);
+      final rows = await query.get();
+      return Success(List.unmodifiable(rows.map(_toCleanupIntent)));
+    } on Exception catch (error) {
+      if (!_isStorageException(error)) rethrow;
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to read cleanup intents.',
+          cause: error,
+        ),
+      );
+    }
+  }
+
+  @override
+  Future<Result<void>> recordCleanupFailure({
+    required String accountId,
+    required String operationId,
+    required String failure,
+  }) async {
+    try {
+      final changed = await database.customUpdate(
+        '''
+UPDATE outbox_cleanup_intents
+SET attempt_count = attempt_count + 1, last_failure = ?, updated_at = ?
+WHERE account_id = ? AND operation_id = ?
+''',
+        variables: [
+          Variable(failure),
+          Variable(now().toUtc()),
+          Variable(accountId),
+          Variable(operationId),
+        ],
+        updates: {database.offlineOutboxCleanupIntents},
+      );
+      if (changed != 1) {
+        return const FailureResult(
+          NotFoundFailure(message: 'Cleanup intent not found.'),
+        );
+      }
+      return const Success(null);
+    } on Exception catch (error) {
+      if (!_isStorageException(error)) rethrow;
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to retain cleanup failure.',
+          cause: error,
+        ),
+      );
+    }
+  }
+
+  @override
+  Future<Result<void>> completeCleanupIntent({
+    required String accountId,
+    required String operationId,
+  }) async {
+    try {
+      await (database.delete(database.offlineOutboxCleanupIntents)..where(
+            (row) =>
+                row.accountId.equals(accountId) &
+                row.operationId.equals(operationId),
+          ))
+          .go();
+      return const Success(null);
+    } on Exception catch (error) {
+      if (!_isStorageException(error)) rethrow;
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to complete cleanup intent.',
+          cause: error,
+        ),
+      );
+    }
+  }
+
+  @override
   Future<Result<OutboxOperation>> cancel({
     required String accountId,
     required String operationId,
@@ -731,8 +1101,25 @@ LIMIT 1
         for (final edge in edges) {
           children[edge.dependencyId]!.add(edge.operationId);
         }
+        final cleanupOperationIds =
+            await (database.selectOnly(database.offlineOutboxCleanupIntents)
+                  ..addColumns([
+                    database.offlineOutboxCleanupIntents.operationId,
+                  ])
+                  ..where(
+                    database.offlineOutboxCleanupIntents.accountId.equals(
+                      accountId,
+                    ),
+                  ))
+                .map(
+                  (row) => row.read(
+                    database.offlineOutboxCleanupIntents.operationId,
+                  )!,
+                )
+                .get();
         final expiredIds = <String>{};
         for (final operation in operations) {
+          if (cleanupOperationIds.contains(operation.operationId)) continue;
           if (!_isExpiredTerminal(operation, currentTime)) continue;
           final state = OutboxState.values.singleWhere(
             (candidate) => candidate.wireValue == operation.operationState,
@@ -1158,7 +1545,58 @@ WHERE account_id = ?
       reviewStamp: row.reviewStamp,
       requiresStatusProbe: row.requiresStatusProbe,
       syncingStartedAt: row.syncingStartedAt,
+      output: row.output == null ? null : _decodeOutput(row.output!),
     );
+  }
+
+  OutboxCleanupIntent _toCleanupIntent(OfflineOutboxCleanupIntent row) {
+    return OutboxCleanupIntent(
+      operationId: row.operationId,
+      accountId: row.accountId,
+      warehouseId: row.warehouseId,
+      draftId: row.draftId,
+      attachmentRequestIds: (jsonDecode(row.attachmentRequestIds) as List)
+          .cast<String>(),
+      createdAt: row.createdAt,
+      updatedAt: row.updatedAt,
+      attemptCount: row.attemptCount,
+      lastFailure: row.lastFailure,
+    );
+  }
+
+  Future<bool> _isExactGraphReplay(
+    OutboxGraph graph,
+    Map<String, String> payloads,
+    List<OfflineOutboxOperation> existing,
+  ) async {
+    final storedById = {for (final row in existing) row.operationId: row};
+    final edges = await (database.select(
+      database.offlineOutboxDependencies,
+    )..where((edge) => edge.operationId.isIn(storedById.keys))).get();
+    final dependencies = <String, Set<String>>{};
+    for (final edge in edges) {
+      dependencies
+          .putIfAbsent(edge.operationId, () => <String>{})
+          .add(edge.dependencyId);
+    }
+    for (final requested in graph.operations) {
+      final stored = storedById[requested.operationId];
+      if (stored == null ||
+          stored.accountId != requested.accountId ||
+          stored.warehouseId != requested.warehouseId ||
+          stored.operationKind != requested.kind.wireValue ||
+          stored.idempotencyKey != requested.idempotencyKey ||
+          stored.payload != payloads[requested.operationId] ||
+          _dependencyFingerprint(
+                dependencies[requested.operationId] ?? const {},
+              ) !=
+              _dependencyFingerprint(
+                graph.dependencies[requested.operationId] ?? const {},
+              )) {
+        return false;
+      }
+    }
+    return true;
   }
 }
 
@@ -1172,6 +1610,43 @@ final class _OutboxCapacityException implements Exception {
   const _OutboxCapacityException(this.message);
 
   final String message;
+}
+
+final class _OutboxConflictException implements Exception {
+  const _OutboxConflictException(this.message);
+
+  final String message;
+}
+
+OutboxOperationOutput _decodeOutput(String encoded) {
+  final envelope = jsonDecode(encoded);
+  if (envelope is! Map ||
+      envelope['version'] is! int ||
+      envelope['data'] is! Map) {
+    throw const FormatException('Invalid outbox operation output.');
+  }
+  return OutboxOperationOutput(
+    version: envelope['version'] as int,
+    data: Map<String, Object?>.from(envelope['data'] as Map),
+  );
+}
+
+bool _graphHasCycle(OutboxGraph graph, Set<String> graphIds) {
+  final visiting = <String>{};
+  final visited = <String>{};
+  bool visit(String id) {
+    if (visiting.contains(id)) return true;
+    if (!graphIds.contains(id) || visited.contains(id)) return false;
+    visiting.add(id);
+    for (final dependency in graph.dependencies[id] ?? const <String>{}) {
+      if (visit(dependency)) return true;
+    }
+    visiting.remove(id);
+    visited.add(id);
+    return false;
+  }
+
+  return graphIds.any(visit);
 }
 
 bool _isStorageException(Exception error) =>

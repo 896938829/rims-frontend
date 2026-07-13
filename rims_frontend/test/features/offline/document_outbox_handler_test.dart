@@ -11,6 +11,8 @@ import 'package:rims_frontend/features/documents/domain/entities/document_data.d
 import 'package:rims_frontend/features/offline/data/services/document_outbox_handler.dart';
 import 'package:rims_frontend/features/offline/domain/entities/document_draft.dart';
 import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.dart';
+import 'package:rims_frontend/features/offline/domain/entities/outbox_graph.dart';
+import 'package:rims_frontend/features/offline/domain/services/outbox_executor.dart';
 import 'package:rims_frontend/features/offline/domain/repositories/document_draft_repository.dart';
 
 void main() {
@@ -68,14 +70,9 @@ void main() {
         dataSource.createRequests.single.effectiveLines.single.productId,
         7,
       );
-      expect(stagingStore.rebindCalls, [
-        const _RebindCall(
-          userId: '42',
-          localAggregateId: 'draft-1',
-          documentId: 91,
-          requestIds: ['attachment-request-1'],
-        ),
-      ]);
+      final success = (result as Success<OutboxHandlerSuccess>).data;
+      expect(success.output.data, {'documentId': 91});
+      expect(stagingStore.rebindCalls, isEmpty);
       expect(draftRepository.deletedDraftIds, isEmpty);
       expect(events, isEmpty);
     },
@@ -150,13 +147,15 @@ void main() {
     );
 
     expect(result, isA<Success<Object?>>());
-    expect(draftRepository.deletedDraftIds, ['draft-1']);
+    final success = (result as Success<OutboxHandlerSuccess>).data;
+    expect(success.cleanup?.draftId, 'draft-1');
+    expect(draftRepository.deletedDraftIds, isEmpty);
     await Future<void>.delayed(Duration.zero);
-    expect(events.whereType<GlobalRefreshRequestedEvent>(), hasLength(1));
+    expect(events.whereType<GlobalRefreshRequestedEvent>(), isEmpty);
   });
 
   test(
-    'lifecycle replays create dependency before completing authoritative id',
+    'lifecycle reads authoritative id only from explicit dependency output',
     () async {
       final handler = DocumentOutboxHandler(
         kind: OutboxOperationKind.documentComplete,
@@ -169,20 +168,46 @@ void main() {
         kind: OutboxOperationKind.documentComplete,
         operationId: 'complete-document-request-1',
         idempotencyKey: 'complete-request-1',
-        payload: {
-          'version': 1,
-          'createRequest':
-              (_createPayload()['request']! as Map<String, Object?>),
+        payload: const {'version': 1},
+      );
+
+      final result = await handler.execute(
+        operation,
+        dependencyOutputs: const {
+          'create-document-request-1': OutboxOperationOutput(
+            version: 1,
+            data: {'documentId': 91},
+          ),
         },
       );
 
-      final result = await handler.execute(operation);
-
-      expect(result, isA<Success<Object?>>());
-      expect(dataSource.events, ['create:document-request-1', 'complete:91']);
+      expect(result, isA<Success<OutboxHandlerSuccess>>());
+      expect(dataSource.events, ['complete:91']);
       expect(dataSource.lifecycleRequestIds, ['complete-request-1']);
     },
   );
+
+  test('lifecycle rejects missing authoritative dependency output', () async {
+    final handler = DocumentOutboxHandler(
+      kind: OutboxOperationKind.documentComplete,
+      remoteDataSource: dataSource,
+      stagingStore: stagingStore,
+      draftRepository: draftRepository,
+      eventBus: eventBus,
+    );
+
+    final result = await handler.execute(
+      _operation(
+        kind: OutboxOperationKind.documentComplete,
+        operationId: 'complete-document-request-1',
+        idempotencyKey: 'complete-request-1',
+        payload: const {'version': 1},
+      ),
+    );
+
+    expect(result.failureOrNull, isA<ValidationFailure>());
+    expect(dataSource.events, isEmpty);
+  });
 }
 
 Map<String, Object?> _createPayload() => {
@@ -390,7 +415,7 @@ final class _DraftRepository implements DocumentDraftRepository {
   Future<void> prune() => throw UnimplementedError();
 }
 
-extension on Result<Object?> {
+extension on Result<dynamic> {
   Failure? get failureOrNull => switch (this) {
     FailureResult<Object?>(:final failure) => failure,
     _ => null,
