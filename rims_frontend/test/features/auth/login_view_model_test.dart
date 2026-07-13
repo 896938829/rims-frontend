@@ -929,10 +929,10 @@ final class _EmptyOwnedScans implements OfflineOwnedScanStore {
   const _EmptyOwnedScans();
 
   @override
-  Future<void> clearAll() async {}
+  Future<void> clearAllSessions() async {}
 
   @override
-  Future<void> clearForAccount(String accountId) async {}
+  Future<void> clearSessionsForAccount(String accountId) async {}
 
   @override
   Future<int> countForAccount(String accountId) async => 0;

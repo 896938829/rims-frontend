@@ -21,14 +21,16 @@ final class OfflineScanOwnershipAdapter
   }
 
   @override
-  Future<Set<String>> contentIdentitiesForAccount(String accountId) async => {
-    ...await sessions.contentIdentitiesForAccount(accountId),
-    ...await lookupCache.legacyContentIdentitiesForUser(accountId),
-  };
+  Future<Set<String>> sessionContentIdentitiesForAccount(String accountId) =>
+      sessions.sessionContentIdentitiesForAccount(accountId);
 
   @override
   Future<int> countLookupCacheForAccount(String accountId) =>
       lookupCache.legacyCountForUser(accountId);
+
+  @override
+  Future<Set<String>> lookupContentIdentitiesForAccount(String accountId) =>
+      lookupCache.legacyContentIdentitiesForUser(accountId);
 
   @override
   Future<void> clearLookupCacheForAccount(String accountId) =>
@@ -41,14 +43,12 @@ final class OfflineScanOwnershipAdapter
   ) => lookupCache.clearForWarehouse(accountId, warehouseId);
 
   @override
-  Future<void> clearForAccount(String accountId) async {
-    await sessions.clearForAccount(accountId);
-    await lookupCache.clearForUser(accountId);
-  }
+  Future<void> clearSessionsForAccount(String accountId) =>
+      sessions.clearSessionsForAccount(accountId);
 
   @override
-  Future<void> clearAll() async {
-    await sessions.clearAll();
-    await lookupCache.clearAllLegacy();
-  }
+  Future<void> clearAllSessions() => sessions.clearAllSessions();
+
+  @override
+  Future<void> clearAllLookupCaches() => lookupCache.clearAllLegacy();
 }

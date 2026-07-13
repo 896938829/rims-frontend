@@ -12,7 +12,8 @@ final class ScanSessionSnapshot {
   final List<ScanLine> lines;
 }
 
-final class ScanSessionStore implements OfflineOwnedScanStore {
+final class ScanSessionStore
+    implements OfflineOwnedScanStore, OfflineScanOwnershipInspector {
   ScanSessionStore({AsyncScanStorage? storage, this.writeBarrier})
     : storage = storage ?? SharedPreferencesAsyncScanStorage();
 
@@ -122,7 +123,10 @@ final class ScanSessionStore implements OfflineOwnedScanStore {
     return (await storage.keys(prefix: prefix)).length;
   }
 
-  Future<Set<String>> contentIdentitiesForAccount(String accountId) async {
+  @override
+  Future<Set<String>> sessionContentIdentitiesForAccount(
+    String accountId,
+  ) async {
     final prefix = '$_keyPrefix${Uri.encodeComponent(accountId)}.';
     final keys = await storage.keys(prefix: prefix);
     final identities = <String>{};
@@ -133,10 +137,11 @@ final class ScanSessionStore implements OfflineOwnedScanStore {
   }
 
   @override
-  Future<void> clearForAccount(String accountId) => _clearForUser(accountId);
+  Future<void> clearSessionsForAccount(String accountId) =>
+      _clearForUser(accountId);
 
   @override
-  Future<void> clearAll() async {
+  Future<void> clearAllSessions() async {
     final matchingKeys = await storage.keys(prefix: _keyPrefix);
     await Future.wait(matchingKeys.map(storage.delete));
   }

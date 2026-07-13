@@ -369,10 +369,10 @@ void main() {
         final ownership = sessions as OfflineOwnedScanStore;
 
         expect(await ownership.countForAccount('alice'), 2);
-        await ownership.clearForAccount('alice');
+        await ownership.clearSessionsForAccount('alice');
         expect(await ownership.countForAccount('alice'), 0);
         expect(await ownership.countForAccount('bob'), 1);
-        await ownership.clearAll();
+        await ownership.clearAllSessions();
         expect(await ownership.countForAccount('bob'), 0);
       },
     );
@@ -414,7 +414,7 @@ void main() {
     });
 
     test(
-      'ownership adapter clears scan lookup and session legacy scopes together',
+      'ownership adapter clears scan sessions and lookup cache independently',
       () async {
         final storage = MemoryScanStorage();
         final cache = ScanLookupCache(storage: storage);
@@ -438,9 +438,25 @@ void main() {
           lookupCache: cache,
         );
 
-        await ownership.clearForAccount('alice');
+        await ownership.clearSessionsForAccount('alice');
 
         expect(await ownership.countForAccount('alice'), 0);
+        expect(
+          await cache.get(userId: 'alice', warehouseId: 1, barcode: 'A'),
+          isNotNull,
+        );
+
+        await sessions.save(
+          userId: 'alice',
+          warehouseId: 1,
+          session: ScanSessionSnapshot(
+            mode: ScanMode.batch,
+            lines: [ScanLine(item: _item(productId: 2), quantity: 1)],
+          ),
+        );
+        await ownership.clearLookupCacheForAccount('alice');
+
+        expect(await ownership.countForAccount('alice'), 1);
         expect(
           await cache.get(userId: 'alice', warehouseId: 1, barcode: 'A'),
           isNull,

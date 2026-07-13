@@ -1161,10 +1161,10 @@ final class _NoopOwnedScans implements OfflineOwnedScanStore {
   Future<int> countForAccount(String accountId) async => 0;
 
   @override
-  Future<void> clearForAccount(String accountId) async {}
+  Future<void> clearSessionsForAccount(String accountId) async {}
 
   @override
-  Future<void> clearAll() async {}
+  Future<void> clearAllSessions() async {}
 }
 
 final class _NoopReviewInvalidator implements OfflineReviewInvalidator {

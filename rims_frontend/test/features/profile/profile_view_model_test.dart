@@ -358,7 +358,7 @@ void main() {
       await tester.tap(find.byKey(const Key('profile-clear-cache-command')));
       await tester.pumpAndSettle();
 
-      expect(find.text('缓存记录：4 项'), findsOneWidget);
+      expect(find.text('缓存记录（含扫码查询缓存）：4 项'), findsOneWidget);
       expect(find.text('已下载文件：6 项'), findsOneWidget);
       expect(find.text('不会删除草稿或同步操作记录'), findsOneWidget);
       await tester.tap(find.byKey(const Key('offline-clear-cancel')));
@@ -420,6 +420,7 @@ void main() {
       expect(find.text('同步操作记录（含待处理、失败和已完成证据）：3 项'), findsOneWidget);
       expect(find.text('暂存附件：5 项'), findsOneWidget);
       expect(find.text('扫码会话：7 项'), findsOneWidget);
+      expect(find.text('缓存记录和已下载文件将保留'), findsOneWidget);
       await tester.tap(find.byKey(const Key('offline-clear-confirm')));
       await tester.pumpAndSettle();
       expect(find.text('离线工作已清除'), findsOneWidget);

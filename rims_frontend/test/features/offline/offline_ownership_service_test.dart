@@ -2,14 +2,21 @@ import 'dart:async';
 
 import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:rims_frontend/features/inventory/domain/entities/inventory_item.dart';
 import 'package:rims_frontend/features/offline/data/database/offline_database.dart';
 import 'package:rims_frontend/features/offline/data/repositories/memory_offline_store.dart';
+import 'package:rims_frontend/features/offline/data/services/offline_scan_ownership_adapter.dart';
 import 'package:rims_frontend/features/offline/data/services/outbox_review_invalidator.dart';
 import 'package:rims_frontend/features/offline/domain/entities/cache_snapshot.dart';
 import 'package:rims_frontend/features/offline/domain/entities/document_draft.dart';
 import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.dart';
 import 'package:rims_frontend/features/offline/domain/services/offline_store.dart';
 import 'package:rims_frontend/features/offline/domain/services/offline_ownership_service.dart';
+import 'package:rims_frontend/features/scanner/domain/entities/scan_data.dart';
+import 'package:rims_frontend/features/scanner/domain/services/scan_lookup_cache.dart';
+import 'package:rims_frontend/features/scanner/domain/services/scan_session_store.dart';
+import 'package:shared_preferences_platform_interface/in_memory_shared_preferences_async.dart';
+import 'package:shared_preferences_platform_interface/shared_preferences_async_platform_interface.dart';
 
 void main() {
   group('OfflineOwnershipService', () {
@@ -25,6 +32,7 @@ void main() {
       expect(fixture.files.clearAccountCalls.single.$1, '7');
       expect(fixture.files.clearAccountCalls.single.$2, isEmpty);
       expect(fixture.scans.clearedAccounts, ['7']);
+      expect(fixture.scans.clearedLookupAccounts, ['7']);
       expect(fixture.service.canSync('7'), isFalse);
     });
 
@@ -124,6 +132,8 @@ void main() {
 
         expect(report.completed, isTrue);
         expect(fixture.store.clearAccountCalls, [('7', false)]);
+        expect(fixture.scans.clearedAccounts, ['7']);
+        expect(fixture.scans.clearedLookupAccounts, ['7']);
         expect(
           fixture.store.clearAccountCalls.where((call) => call.$1 == '8'),
           isEmpty,
@@ -157,6 +167,7 @@ void main() {
         expect(fixture.store.invalidatedWarehouses, [('7', 11)]);
         expect(fixture.reviews.calls, [('7', 11)]);
         expect(fixture.scans.clearedLookupWarehouses, [('7', 11)]);
+        expect(fixture.scans.clearedAccounts, isEmpty);
         expect(fixture.store.clearAccountCalls, isEmpty);
       },
     );
@@ -174,6 +185,7 @@ void main() {
         expect(fixture.store.permissionInvalidations, ['7']);
         expect(fixture.reviews.calls, [('7', null)]);
         expect(fixture.scans.clearedLookupAccounts, ['7']);
+        expect(fixture.scans.clearedAccounts, isEmpty);
         expect(fixture.store.clearAccountCalls, isEmpty);
         expect(fixture.files.clearAccountCalls, isEmpty);
       },
@@ -234,7 +246,8 @@ void main() {
         expect(fixture.order, [
           'store.clearAll',
           'files.clearAll',
-          'scans.clearAll',
+          'scans.clearAllSessions',
+          'scans.clearAllLookups',
           'keys.rotate',
         ]);
         expect(fixture.service.canAccessOfflineData('7'), isFalse);
@@ -319,6 +332,8 @@ void main() {
         expect(confirmed.completed, isTrue);
         expect(store.clearCacheCalls, ['7']);
         expect(files.clearedDownloads, ['7']);
+        expect(scans.clearedLookupAccounts, ['7']);
+        expect(scans.clearedAccounts, isEmpty);
       },
     );
 
@@ -337,6 +352,7 @@ void main() {
         expect(fixture.store.clearOfflineWorkCalls, ['7']);
         expect(fixture.files.clearedStagedTransfers, ['7']);
         expect(fixture.scans.clearedAccounts, ['7']);
+        expect(fixture.scans.clearedLookupAccounts, isEmpty);
         expect(fixture.store.clearCacheCalls, isEmpty);
         expect(fixture.files.clearedDownloads, isEmpty);
       },
@@ -538,6 +554,252 @@ void main() {
     });
   });
 
+  for (final useDrift in [false, true]) {
+    final storeName = useDrift ? 'Drift' : 'Memory';
+
+    test(
+      '$storeName clear-offline-work preserves current and legacy lookup cache',
+      () async {
+        final fixture = await _RealScanOwnershipFixture.create(
+          useDrift: useDrift,
+        );
+        await fixture.seed();
+        final preview = await fixture.service.preview(
+          accountId: '7',
+          command: OfflineClearCommand.offlineWork,
+        );
+        expect(preview.counts.cacheEntries, 3);
+        expect(preview.counts.scanSessions, 1);
+        await fixture.lookupCache.put(
+          userId: '7',
+          warehouseId: 11,
+          barcode: 'CURRENT',
+          item: _scanItem(productId: 2),
+        );
+
+        final report = await fixture.service.executeClear(preview);
+
+        expect(report.completed, isTrue);
+        expect(report.requiresReconfirmation, isFalse);
+        expect(
+          await fixture.sessions.restore(userId: '7', warehouseId: 11),
+          isNull,
+        );
+        expect(
+          (await fixture.lookupCache.get(
+            userId: '7',
+            warehouseId: 11,
+            barcode: 'CURRENT',
+          ))?.identity.productId,
+          2,
+        );
+        expect(
+          await fixture.legacyLookupCache.get(
+            userId: '7',
+            warehouseId: 12,
+            barcode: 'LEGACY',
+          ),
+          isNotNull,
+        );
+        expect(
+          await fixture.store.readCache(
+            const CacheKey(
+              accountId: '7',
+              warehouseId: 11,
+              namespace: 'inventory',
+              entityKey: 'page-1',
+            ),
+          ),
+          isNotNull,
+        );
+        expect(fixture.files.clearedDownloads, isEmpty);
+        final remaining = await fixture.ownershipStore.inspectAccount('7');
+        expect(remaining.drafts, 0);
+        expect(remaining.outboxOperations, 0);
+      },
+    );
+
+    test(
+      '$storeName clear-cache tracks lookup revision and preserves offline work',
+      () async {
+        final fixture = await _RealScanOwnershipFixture.create(
+          useDrift: useDrift,
+        );
+        await fixture.seed();
+        final preview = await fixture.service.preview(
+          accountId: '7',
+          command: OfflineClearCommand.cache,
+        );
+        expect(preview.counts.cacheEntries, 3);
+        expect(preview.counts.scanSessions, 1);
+        await fixture.lookupCache.put(
+          userId: '7',
+          warehouseId: 11,
+          barcode: 'CURRENT',
+          item: _scanItem(productId: 2),
+        );
+
+        final changed = await fixture.service.executeClear(preview);
+
+        expect(changed.requiresReconfirmation, isTrue);
+        expect(
+          await fixture.lookupCache.get(
+            userId: '7',
+            warehouseId: 11,
+            barcode: 'CURRENT',
+          ),
+          isNotNull,
+        );
+        await fixture.sessions.save(
+          userId: '7',
+          warehouseId: 11,
+          session: ScanSessionSnapshot(
+            mode: ScanMode.batch,
+            lines: [ScanLine(item: _scanItem(productId: 3), quantity: 2)],
+          ),
+        );
+
+        final confirmed = await fixture.service.executeClear(
+          changed.currentPreview!,
+        );
+
+        expect(confirmed.completed, isTrue);
+        expect(confirmed.requiresReconfirmation, isFalse);
+        expect(
+          await fixture.lookupCache.get(
+            userId: '7',
+            warehouseId: 11,
+            barcode: 'CURRENT',
+          ),
+          isNull,
+        );
+        expect(
+          await fixture.legacyLookupCache.get(
+            userId: '7',
+            warehouseId: 12,
+            barcode: 'LEGACY',
+          ),
+          isNull,
+        );
+        expect(
+          await fixture.sessions.restore(userId: '7', warehouseId: 11),
+          isNotNull,
+        );
+        final remaining = await fixture.ownershipStore.inspectAccount('7');
+        expect(remaining.drafts, 1);
+        expect(remaining.outboxOperations, 1);
+        expect(fixture.files.clearedStagedTransfers, isEmpty);
+        expect(fixture.files.clearedDownloads, ['7']);
+      },
+    );
+
+    test(
+      '$storeName destructive ownership clears scan sessions and lookup caches',
+      () async {
+        final intents = <OfflineOwnershipIntent>[
+          const OfflineOwnershipIntent.logout(accountId: '7'),
+          const OfflineOwnershipIntent.accountSwitch(
+            previousAccountId: '7',
+            currentAccountId: '8',
+          ),
+          const OfflineOwnershipIntent.revocation(accountId: '7'),
+        ];
+        for (final intent in intents) {
+          final fixture = await _RealScanOwnershipFixture.create(
+            useDrift: useDrift,
+          );
+          await fixture.seed();
+
+          final report = await fixture.service.apply(intent);
+
+          expect(report.completed, isTrue, reason: intent.reason.name);
+          expect(
+            await fixture.sessions.restore(userId: '7', warehouseId: 11),
+            isNull,
+            reason: intent.reason.name,
+          );
+          expect(
+            await fixture.lookupCache.get(
+              userId: '7',
+              warehouseId: 11,
+              barcode: 'CURRENT',
+            ),
+            isNull,
+            reason: intent.reason.name,
+          );
+          expect(
+            await fixture.legacyLookupCache.get(
+              userId: '7',
+              warehouseId: 12,
+              barcode: 'LEGACY',
+            ),
+            isNull,
+            reason: intent.reason.name,
+          );
+          await fixture.dispose();
+        }
+      },
+    );
+
+    test(
+      '$storeName warehouse and permission invalidation preserve scan sessions',
+      () async {
+        final fixture = await _RealScanOwnershipFixture.create(
+          useDrift: useDrift,
+        );
+        await fixture.seed();
+
+        final warehouse = await fixture.service.apply(
+          const OfflineOwnershipIntent.warehouseSwitch(
+            accountId: '7',
+            previousWarehouseId: 11,
+            currentWarehouseId: 13,
+          ),
+        );
+
+        expect(warehouse.completed, isTrue);
+        expect(
+          await fixture.sessions.restore(userId: '7', warehouseId: 11),
+          isNotNull,
+        );
+        expect(
+          await fixture.lookupCache.get(
+            userId: '7',
+            warehouseId: 11,
+            barcode: 'CURRENT',
+          ),
+          isNull,
+        );
+        expect(
+          await fixture.legacyLookupCache.get(
+            userId: '7',
+            warehouseId: 12,
+            barcode: 'LEGACY',
+          ),
+          isNotNull,
+        );
+
+        final permission = await fixture.service.apply(
+          const OfflineOwnershipIntent.permissionRefresh(accountId: '7'),
+        );
+
+        expect(permission.completed, isTrue);
+        expect(
+          await fixture.sessions.restore(userId: '7', warehouseId: 11),
+          isNotNull,
+        );
+        expect(
+          await fixture.legacyLookupCache.get(
+            userId: '7',
+            warehouseId: 12,
+            barcode: 'LEGACY',
+          ),
+          isNull,
+        );
+      },
+    );
+  }
+
   test('review invalidation is account and warehouse scoped', () async {
     final store = MemoryOfflineStore();
     final now = DateTime.utc(2026, 7, 13, 12);
@@ -579,6 +841,179 @@ void main() {
     expect(currentWarehouse.reviewStamp, 'review-12');
   });
 }
+
+final class _RealScanOwnershipFixture {
+  _RealScanOwnershipFixture._({
+    required this.store,
+    required this.ownershipStore,
+    required this.sessions,
+    required this.lookupCache,
+    required this.legacyLookupCache,
+    required this.files,
+    required this.service,
+    required this._previousPreferencesPlatform,
+    required this._preferencesPlatform,
+    this._database,
+  });
+
+  static Future<_RealScanOwnershipFixture> create({
+    required bool useDrift,
+  }) async {
+    final previousPlatform = SharedPreferencesAsyncPlatform.instance;
+    final preferencesPlatform = InMemorySharedPreferencesAsync.empty();
+    SharedPreferencesAsyncPlatform.instance = preferencesPlatform;
+
+    late final OfflineStore store;
+    late final OfflineOwnershipStore ownershipStore;
+    OfflineDatabase? database;
+    if (useDrift) {
+      database = OfflineDatabase.forTesting(NativeDatabase.memory());
+      store = database;
+      ownershipStore = database;
+    } else {
+      final memory = MemoryOfflineStore();
+      store = memory;
+      ownershipStore = memory;
+    }
+    final legacyStorage = SharedPreferencesAsyncScanStorage();
+    final sessions = ScanSessionStore(storage: legacyStorage);
+    final lookupCache = ScanLookupCache(
+      storage: legacyStorage,
+      offlineStore: store,
+    );
+    final legacyLookupCache = ScanLookupCache(storage: legacyStorage);
+    final scans = OfflineScanOwnershipAdapter(
+      sessions: sessions,
+      lookupCache: lookupCache,
+    );
+    final files = _FakeOwnedFiles(
+      snapshots: {
+        '7': const OfflineFileOwnershipSnapshot(
+          stagedTransfers: 1,
+          downloads: 1,
+        ),
+      },
+    );
+    final order = <String>[];
+    final service = OfflineOwnershipService(
+      store: ownershipStore,
+      files: files,
+      scans: scans,
+      reviews: _FakeReviews(),
+      databaseKeys: _FakeKeys(order: order, fails: false),
+    );
+    final fixture = _RealScanOwnershipFixture._(
+      store: store,
+      ownershipStore: ownershipStore,
+      sessions: sessions,
+      lookupCache: lookupCache,
+      legacyLookupCache: legacyLookupCache,
+      files: files,
+      service: service,
+      previousPreferencesPlatform: previousPlatform,
+      preferencesPlatform: preferencesPlatform,
+      database: database,
+    );
+    addTearDown(fixture.dispose);
+    return fixture;
+  }
+
+  final OfflineStore store;
+  final OfflineOwnershipStore ownershipStore;
+  final ScanSessionStore sessions;
+  final ScanLookupCache lookupCache;
+  final ScanLookupCache legacyLookupCache;
+  final _FakeOwnedFiles files;
+  final OfflineOwnershipService service;
+  final SharedPreferencesAsyncPlatform? _previousPreferencesPlatform;
+  final SharedPreferencesAsyncPlatform _preferencesPlatform;
+  final OfflineDatabase? _database;
+  bool _disposed = false;
+
+  Future<void> dispose() async {
+    if (_disposed) return;
+    _disposed = true;
+    await _database?.close();
+    if (identical(
+      SharedPreferencesAsyncPlatform.instance,
+      _preferencesPlatform,
+    )) {
+      SharedPreferencesAsyncPlatform.instance = _previousPreferencesPlatform;
+    }
+  }
+
+  Future<void> seed() async {
+    final now = DateTime.utc(2026, 7, 14, 9);
+    await store.writeCache(
+      CacheRecord(
+        key: const CacheKey(
+          accountId: '7',
+          warehouseId: 11,
+          namespace: 'inventory',
+          entityKey: 'page-1',
+        ),
+        payload: const {'value': 1},
+        schemaVersion: 1,
+        fetchedAt: now,
+        expiresAt: now.add(const Duration(days: 1)),
+      ),
+    );
+    await lookupCache.put(
+      userId: '7',
+      warehouseId: 11,
+      barcode: 'CURRENT',
+      item: _scanItem(productId: 1),
+    );
+    await legacyLookupCache.put(
+      userId: '7',
+      warehouseId: 12,
+      barcode: 'LEGACY',
+      item: _scanItem(productId: 12),
+    );
+    await sessions.save(
+      userId: '7',
+      warehouseId: 11,
+      session: ScanSessionSnapshot(
+        mode: ScanMode.batch,
+        lines: [ScanLine(item: _scanItem(productId: 1), quantity: 1)],
+      ),
+    );
+    await store.saveDraft(
+      DocumentDraft(
+        id: 'draft-7',
+        accountId: '7',
+        warehouseId: 11,
+        payload: const {},
+        createdAt: now,
+        updatedAt: now,
+      ),
+    );
+    await store.enqueue(
+      OutboxOperation(
+        operationId: 'operation-7',
+        idempotencyKey: 'key-7',
+        accountId: '7',
+        warehouseId: 11,
+        kind: OutboxOperationKind.documentCreate,
+        payload: const {},
+        state: OutboxState.queued,
+        createdAt: now,
+      ),
+      const {},
+    );
+  }
+}
+
+InventoryItem _scanItem({required int productId}) => InventoryItem(
+  id: productId + 1000,
+  productId: productId,
+  productName: 'Product $productId',
+  sku: 'SKU-$productId',
+  availableQuantity: 5,
+  stockQuantity: 6,
+  statusLabel: 'Enabled',
+  imageUrl: '/products/$productId.png',
+);
 
 Future<void> _exerciseOwnershipStore(
   OfflineStore store,
@@ -903,6 +1338,11 @@ final class _FakeOwnedScans
   Future<int> countLookupCacheForAccount(String accountId) async => 0;
 
   @override
+  Future<Set<String>> lookupContentIdentitiesForAccount(
+    String accountId,
+  ) async => const {};
+
+  @override
   Future<void> clearLookupCacheForAccount(String accountId) async {
     clearedLookupAccounts.add(accountId);
   }
@@ -916,16 +1356,21 @@ final class _FakeOwnedScans
   }
 
   @override
+  Future<void> clearAllLookupCaches() async {
+    order?.add('scans.clearAllLookups');
+  }
+
+  @override
   Future<int> countForAccount(String accountId) async => counts[accountId] ?? 0;
 
   @override
-  Future<void> clearForAccount(String accountId) async {
+  Future<void> clearSessionsForAccount(String accountId) async {
     clearedAccounts.add(accountId);
   }
 
   @override
-  Future<void> clearAll() async {
-    order?.add('scans.clearAll');
+  Future<void> clearAllSessions() async {
+    order?.add('scans.clearAllSessions');
   }
 }
 

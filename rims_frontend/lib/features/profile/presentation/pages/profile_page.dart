@@ -346,7 +346,7 @@ final class _OfflineClearPreviewContent extends StatelessWidget {
     final counts = preview.counts;
     final lines = preview.command == OfflineClearCommand.cache
         ? [
-            '缓存记录：${counts.cacheEntries} 项',
+            '缓存记录（含扫码查询缓存）：${counts.cacheEntries} 项',
             '已下载文件：${counts.downloads} 项',
             '不会删除草稿或同步操作记录',
           ]

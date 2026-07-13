@@ -2492,10 +2492,10 @@ final class _NoopScans implements OfflineOwnedScanStore {
   const _NoopScans();
 
   @override
-  Future<void> clearAll() async {}
+  Future<void> clearAllSessions() async {}
 
   @override
-  Future<void> clearForAccount(String accountId) async {}
+  Future<void> clearSessionsForAccount(String accountId) async {}
 
   @override
   Future<int> countForAccount(String accountId) async => 0;

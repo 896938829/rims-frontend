@@ -260,21 +260,25 @@ abstract interface class OfflineOwnedFileStore {
 abstract interface class OfflineOwnedScanStore {
   Future<int> countForAccount(String accountId);
 
-  Future<void> clearForAccount(String accountId);
+  Future<void> clearSessionsForAccount(String accountId);
 
-  Future<void> clearAll();
+  Future<void> clearAllSessions();
 }
 
 abstract interface class OfflineScanOwnershipInspector {
-  Future<Set<String>> contentIdentitiesForAccount(String accountId);
+  Future<Set<String>> sessionContentIdentitiesForAccount(String accountId);
 }
 
 abstract interface class OfflineLookupOwnershipStore {
   Future<int> countLookupCacheForAccount(String accountId);
 
+  Future<Set<String>> lookupContentIdentitiesForAccount(String accountId);
+
   Future<void> clearLookupCacheForAccount(String accountId);
 
   Future<void> clearLookupCacheForWarehouse(String accountId, int warehouseId);
+
+  Future<void> clearAllLookupCaches();
 }
 
 abstract interface class OfflineReviewInvalidator {
@@ -594,7 +598,7 @@ final class OfflineOwnershipService
             await _step(
               OfflineOwnershipStep.scanSessions,
               'Unable to clear scan sessions.',
-              () => scans.clearForAccount(preview.accountId),
+              () => scans.clearSessionsForAccount(preview.accountId),
               failures,
             );
           }
@@ -836,9 +840,17 @@ final class OfflineOwnershipService
           await _step(
             OfflineOwnershipStep.scanSessions,
             'Unable to clear all scan sessions.',
-            scans.clearAll,
+            scans.clearAllSessions,
             failures,
           );
+          if (scans case final OfflineLookupOwnershipStore lookups) {
+            await _step(
+              OfflineOwnershipStep.scanSessions,
+              'Unable to clear all scanner lookup caches.',
+              lookups.clearAllLookupCaches,
+              failures,
+            );
+          }
         }
         if (failures.isEmpty) {
           await _step(
@@ -1539,9 +1551,17 @@ final class OfflineOwnershipService
       await _step(
         OfflineOwnershipStep.scanSessions,
         'Unable to clear account scan sessions.',
-        () => scans.clearForAccount(accountId),
+        () => scans.clearSessionsForAccount(accountId),
         failures,
       );
+      if (scans case final OfflineLookupOwnershipStore lookups) {
+        await _step(
+          OfflineOwnershipStep.scanSessions,
+          'Unable to clear account scanner lookup cache.',
+          () => lookups.clearLookupCacheForAccount(accountId),
+          failures,
+        );
+      }
     }
   }
 
@@ -1575,7 +1595,7 @@ final class OfflineOwnershipService
       files.inspectAccount(accountId),
       scans.countForAccount(accountId),
       if (scans case final OfflineScanOwnershipInspector inspector)
-        inspector.contentIdentitiesForAccount(accountId),
+        inspector.sessionContentIdentitiesForAccount(accountId),
     ]);
     final stored = values[0] as OfflineStoreOwnershipSnapshot;
     final ownedFiles = values[1] as OfflineFileOwnershipSnapshot;
@@ -1585,6 +1605,9 @@ final class OfflineOwnershipService
     final legacyLookupCount = lookupStore == null
         ? 0
         : await lookupStore.countLookupCacheForAccount(accountId);
+    final lookupIdentities = lookupStore == null
+        ? const <String>{}
+        : await lookupStore.lookupContentIdentitiesForAccount(accountId);
     final counts = OfflineOwnershipCounts(
       cacheEntries: stored.cacheEntries + legacyLookupCount,
       drafts: stored.drafts,
@@ -1597,9 +1620,10 @@ final class OfflineOwnershipService
       counts: counts,
       storeIdentities: stored.contentIdentities,
       fileIdentities: ownedFiles.contentIdentities,
-      scanIdentities: values.length > 3
+      sessionIdentities: values.length > 3
           ? values[3] as Set<String>
           : {'scan-count:${counts.scanSessions}'},
+      lookupIdentities: lookupIdentities,
     );
   }
 
@@ -1860,13 +1884,15 @@ final class _OwnershipSnapshot {
     required this.counts,
     this.storeIdentities = const {},
     this.fileIdentities = const {},
-    this.scanIdentities = const {},
+    this.sessionIdentities = const {},
+    this.lookupIdentities = const {},
   });
 
   final OfflineOwnershipCounts counts;
   final Set<String> storeIdentities;
   final Set<String> fileIdentities;
-  final Set<String> scanIdentities;
+  final Set<String> sessionIdentities;
+  final Set<String> lookupIdentities;
 
   String revisionFor(OfflineClearCommand command) {
     final prefixes = switch (command) {
@@ -1878,11 +1904,23 @@ final class _OwnershipSnapshot {
         'scan-session:',
       ],
     };
-    final identities = <String>{
-      ...storeIdentities,
-      ...fileIdentities,
-      ...scanIdentities,
-    }.where((identity) => prefixes.any(identity.startsWith)).toList()..sort();
+    final candidates = switch (command) {
+      OfflineClearCommand.cache => <String>{
+        ...storeIdentities,
+        ...fileIdentities,
+        ...lookupIdentities,
+      },
+      OfflineClearCommand.offlineWork => <String>{
+        ...storeIdentities,
+        ...fileIdentities,
+        ...sessionIdentities,
+      },
+    };
+    final identities =
+        candidates
+            .where((identity) => prefixes.any(identity.startsWith))
+            .toList()
+          ..sort();
     return _stableRevision(identities);
   }
 }
