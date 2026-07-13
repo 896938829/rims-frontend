@@ -84,6 +84,11 @@ final class ApiOperationStatusRemoteDataSource
     required String key,
     required String scope,
   }) async {
+    if (!_isValidIdempotencyKey(key)) {
+      return const FailureResult<OperationStatus>(
+        ValidationFailure(message: 'Invalid idempotency key'),
+      );
+    }
     final response = await _apiClient.get<dynamic>(
       ApiEndpoints.idempotencyOperation(key),
       queryParameters: {'scope': scope},
@@ -143,4 +148,11 @@ final class ApiOperationStatusRemoteDataSource
       ),
     );
   }
+}
+
+bool _isValidIdempotencyKey(String key) {
+  if (key.isEmpty || key.length > 255) {
+    return false;
+  }
+  return RegExp(r'^[A-Za-z0-9._~-]+$').hasMatch(key);
 }
