@@ -323,17 +323,22 @@ final class OfflineMutationAcquisitionException extends StateError {
   OfflineMutationAcquisitionException._({
     required this.acquisitionCause,
     required this.releaseFailures,
-    required this._unreleasedBlocks,
   }) : super('Unable to acquire every offline mutation block.');
 
   final Object acquisitionCause;
   final List<Object> releaseFailures;
-  final List<_ParticipantBlock> _unreleasedBlocks;
 }
 
 final class OfflineMutationReleaseException extends StateError {
   OfflineMutationReleaseException(this.failures)
     : super('Unable to release every offline mutation block.');
+
+  final List<Object> failures;
+}
+
+final class OfflineMutationRecoveryException extends StateError {
+  OfflineMutationRecoveryException({required this.failures})
+    : super('Unable to recover previously retained offline mutation blocks.');
 
   final List<Object> failures;
 }
@@ -410,7 +415,8 @@ final class OfflineOwnershipService
   final Map<String, List<_ParticipantBlock>> _retainedCommandBlocks = {};
   final Map<String, List<_ParticipantBlock>> _reauthenticationFallbackBlocks =
       {};
-  final Map<int, _FailedAcquisitionRollback> _failedAcquisitionRollbacks = {};
+  final Map<_PhysicalMutationBlockKey, _ParticipantBlock>
+  _orphanedMutationBlocks = {};
   Future<void> _tail = Future<void>.value();
   int _previewSequence = 0;
   int _attemptGeneration = 0;
@@ -429,6 +435,8 @@ final class OfflineOwnershipService
 
   @override
   bool canAccessOfflineData(String accountId) => !_isBlocked(accountId);
+
+  int get debugOrphanedMutationBlockCount => _orphanedMutationBlocks.length;
 
   int get debugGenerationMetadataEntryCount {
     int countNested(Map<String, Map<_OwnershipBlockKey, int>> values) =>
@@ -449,7 +457,7 @@ final class OfflineOwnershipService
         countNested(_successfulAttemptGenerations) +
         retained +
         blocked +
-        _failedAcquisitionRollbacks.length;
+        _orphanedMutationBlocks.length;
   }
 
   Future<OfflineClearPreview> preview({
@@ -616,32 +624,43 @@ final class OfflineOwnershipService
 
   @override
   Future<OfflineOwnershipReport> apply(OfflineOwnershipIntent intent) {
-    try {
-      _retryFailedAcquisitionRollbacks(intent);
-    } on Object catch (error, stackTrace) {
-      return Future<OfflineOwnershipReport>.error(error, stackTrace);
+    if (intent.reason == OfflineOwnershipReason.reauthenticated) {
+      try {
+        _recoverOverlappingOrphans([
+          OfflineMutationScope.account(intent.accountId),
+        ]);
+      } on Object catch (error, stackTrace) {
+        return Future<OfflineOwnershipReport>.error(error, stackTrace);
+      }
     }
     final attempt = _startAttempt(intent);
     late final List<_ParticipantBlock> mutationBlocks;
     try {
       mutationBlocks = _beginMutationBlocks(_mutationScopesFor(intent));
-      if (attempt != null) _activateAttempt(attempt);
+      if (attempt != null) _activateAttempt(attempt, mutationBlocks);
     } on OfflineMutationAcquisitionException catch (error, stackTrace) {
-      if (attempt != null && error._unreleasedBlocks.isNotEmpty) {
-        for (final entry in error._unreleasedBlocks) {
-          entry.retained = true;
-        }
-        _failedAcquisitionRollbacks[attempt.generation] =
-            _FailedAcquisitionRollback(
-              attempt: attempt,
-              blocks: error._unreleasedBlocks,
-            );
-      } else if (attempt != null) {
-        _discardAttempt(attempt);
-      }
-      return Future<OfflineOwnershipReport>.error(error, stackTrace);
-    } on Object catch (error, stackTrace) {
       if (attempt != null) _discardAttempt(attempt);
+      return Future<OfflineOwnershipReport>.error(error, stackTrace);
+    } on OfflineMutationRecoveryException catch (error, stackTrace) {
+      if (attempt != null) _discardAttempt(attempt);
+      return Future<OfflineOwnershipReport>.error(error, stackTrace);
+    } on OfflineMutationReleaseException catch (error, stackTrace) {
+      final released = _releasePhysicalMutationBlocks(mutationBlocks);
+      if (attempt != null) _discardAttempt(attempt);
+      final failures = [...error.failures, ...released.failures];
+      return Future<OfflineOwnershipReport>.error(
+        OfflineMutationReleaseException(failures),
+        stackTrace,
+      );
+    } on Object catch (error, stackTrace) {
+      final released = _releasePhysicalMutationBlocks(mutationBlocks);
+      if (attempt != null) _discardAttempt(attempt);
+      if (released.failures.isNotEmpty) {
+        return Future<OfflineOwnershipReport>.error(
+          OfflineMutationReleaseException([error, ...released.failures]),
+          stackTrace,
+        );
+      }
       return Future<OfflineOwnershipReport>.error(error, stackTrace);
     }
     return _serialized(() async {
@@ -870,9 +889,11 @@ final class OfflineOwnershipService
   List<_ParticipantBlock> _beginMutationBlocks(
     Iterable<OfflineMutationScope> scopes,
   ) {
+    final requestedScopes = scopes.toList(growable: false);
+    _recoverOverlappingOrphans(requestedScopes);
     final blocks = <_ParticipantBlock>[];
     try {
-      for (final scope in scopes) {
+      for (final scope in requestedScopes) {
         for (final participant in _mutationParticipants) {
           blocks.add(
             _ParticipantBlock(
@@ -885,52 +906,32 @@ final class OfflineOwnershipService
       }
       return blocks;
     } on Object catch (error) {
-      final rollback = _tryReleaseMutationBlocks(blocks);
+      final rollback = _releasePhysicalMutationBlocks(blocks);
       throw OfflineMutationAcquisitionException._(
         acquisitionCause: error,
         releaseFailures: rollback.failures,
-        unreleasedBlocks: rollback.unreleased,
       );
     }
   }
 
-  void _retryFailedAcquisitionRollbacks(OfflineOwnershipIntent intent) {
-    final requestedTargets = _attemptTargetsFor(intent);
-    final matching = _failedAcquisitionRollbacks.entries
+  void _recoverOverlappingOrphans(
+    Iterable<OfflineMutationScope> requestedScopes,
+  ) {
+    final scopes = requestedScopes.toList(growable: false);
+    if (scopes.isEmpty || _orphanedMutationBlocks.isEmpty) return;
+    final matching = _orphanedMutationBlocks.values
         .where(
-          (entry) => entry.value.attempt.targets.any(
-            (failed) => requestedTargets.any(
-              (requested) =>
-                  requested.accountId == failed.accountId &&
-                  requested.key == failed.key,
-            ),
-          ),
+          (entry) =>
+              scopes.any((scope) => _mutationScopesOverlap(scope, entry.scope)),
         )
         .toList(growable: false);
-    final failures = <Object>[];
-    final unreleased = <_ParticipantBlock>[];
-    for (final entry in matching) {
-      final rollback = _tryReleaseMutationBlocks(
-        entry.value.blocks,
-        includeRetained: true,
-      );
-      failures.addAll(rollback.failures);
-      if (rollback.unreleased.isEmpty) {
-        _failedAcquisitionRollbacks.remove(entry.key);
-        _discardAttempt(entry.value.attempt);
-      } else {
-        entry.value.blocks = rollback.unreleased;
-        unreleased.addAll(rollback.unreleased);
-      }
-    }
-    if (failures.isNotEmpty) {
-      throw OfflineMutationAcquisitionException._(
-        acquisitionCause: StateError(
-          'A previous mutation-block acquisition is still retained.',
-        ),
-        releaseFailures: failures,
-        unreleasedBlocks: unreleased,
-      );
+    if (matching.isEmpty) return;
+    final recovered = _releasePhysicalMutationBlocks(
+      matching,
+      includeRetained: true,
+    );
+    if (recovered.failures.isNotEmpty) {
+      throw OfflineMutationRecoveryException(failures: recovered.failures);
     }
   }
 
@@ -1084,7 +1085,42 @@ final class OfflineOwnershipService
     return _OwnershipAttempt(generation: generation, targets: targets);
   }
 
-  void _activateAttempt(_OwnershipAttempt attempt) {
+  void _activateAttempt(
+    _OwnershipAttempt attempt,
+    List<_ParticipantBlock> mutationBlocks,
+  ) {
+    final releaseFailures = <Object>[];
+    final superseded = <_SupersededOwnershipGeneration>[];
+    for (final target in attempt.targets) {
+      final generation =
+          _latestAttemptGenerations[target.accountId]?[target.key];
+      if (generation == null) continue;
+      superseded.add(
+        _SupersededOwnershipGeneration(target: target, generation: generation),
+      );
+      final retained =
+          _retainedMutationBlocks[target.accountId]?[target.key]?[generation];
+      if (retained == null) continue;
+      final released = _releasePhysicalMutationBlocks(
+        retained,
+        includeRetained: true,
+      );
+      releaseFailures.addAll(released.failures);
+    }
+    if (releaseFailures.isNotEmpty) {
+      for (final previous in superseded) {
+        _retainMutationBlocks(
+          previous.target.accountId,
+          previous.target.key,
+          previous.generation,
+          mutationBlocks,
+          includeAllScopes:
+              previous.target.reason == OfflineOwnershipReason.revocation,
+        );
+      }
+      throw OfflineMutationReleaseException(releaseFailures);
+    }
+
     for (final target in attempt.targets) {
       final key = target.key;
       final latest = _latestAttemptGenerations.putIfAbsent(
@@ -1100,7 +1136,7 @@ final class OfflineOwnershipService
       }
       if (superseded != null) {
         _unblockGeneration(target.accountId, key, superseded);
-        _releaseRetainedMutationBlocks(target.accountId, key, superseded);
+        _removeRetainedMutationBlocks(target.accountId, key, superseded);
       }
     }
   }
@@ -1172,9 +1208,11 @@ final class OfflineOwnershipService
     if (matching.isEmpty) return;
     final byReason = _retainedMutationBlocks.putIfAbsent(accountId, () => {});
     final byGeneration = byReason.putIfAbsent(key, () => {});
-    if (byGeneration.containsKey(generation)) return;
-    byGeneration[generation] = matching;
+    final retained = byGeneration.putIfAbsent(generation, () => []);
     for (final entry in matching) {
+      if (!retained.any((current) => identical(current, entry))) {
+        retained.add(entry);
+      }
       entry.retained = true;
     }
   }
@@ -1188,7 +1226,7 @@ final class OfflineOwnershipService
     final byGeneration = byReason?[key];
     final retained = byGeneration?[generation];
     if (retained != null) {
-      final released = _tryReleaseMutationBlocks(
+      final released = _releasePhysicalMutationBlocks(
         retained,
         includeRetained: true,
       );
@@ -1206,7 +1244,7 @@ final class OfflineOwnershipService
     Iterable<_ParticipantBlock> blocks, {
     bool includeRetained = false,
   }) {
-    final released = _tryReleaseMutationBlocks(
+    final released = _releasePhysicalMutationBlocks(
       blocks,
       includeRetained: includeRetained,
     );
@@ -1215,19 +1253,25 @@ final class OfflineOwnershipService
     }
   }
 
-  _MutationBlockReleaseResult _tryReleaseMutationBlocks(
+  _MutationBlockReleaseResult _releasePhysicalMutationBlocks(
     Iterable<_ParticipantBlock> blocks, {
     bool includeRetained = false,
   }) {
     final failures = <Object>[];
     final unreleased = <_ParticipantBlock>[];
+    final processed = <_PhysicalMutationBlockKey>{};
     for (final entry in blocks) {
       if (entry.retained && !includeRetained) continue;
+      final key = _PhysicalMutationBlockKey(entry);
+      if (!processed.add(key)) continue;
       try {
         entry.block.release();
+        _orphanedMutationBlocks.remove(key);
       } on Object catch (error) {
         failures.add(error);
         unreleased.add(entry);
+        entry.retained = true;
+        _orphanedMutationBlocks[key] = entry;
       }
     }
     return _MutationBlockReleaseResult(
@@ -1238,7 +1282,10 @@ final class OfflineOwnershipService
 
   bool _isBlocked(String accountId) =>
       _commandBlockedAccounts.contains(accountId) ||
-      (_blockedReasons[accountId]?.isNotEmpty ?? false);
+      (_blockedReasons[accountId]?.isNotEmpty ?? false) ||
+      _orphanedMutationBlocks.values.any(
+        (entry) => entry.scope.contains(accountId),
+      );
 
   void _blockGeneration(
     String accountId,
@@ -1338,15 +1385,15 @@ final class OfflineOwnershipService
     }
 
     try {
+      final releaseCandidates = <_ParticipantBlock>[];
       for (final entry in lease.generations) {
         final retained =
             _retainedMutationBlocks[lease.accountId]?[entry.key]?[entry
                 .generation];
         if (retained != null) {
-          _releaseMutationBlocks(retained, includeRetained: true);
+          releaseCandidates.addAll(retained);
         }
       }
-      _releaseMutationBlocks(previousFallback, includeRetained: true);
       final orderedGuard = [...guard]
         ..sort((left, right) {
           final leftPermit =
@@ -1356,6 +1403,8 @@ final class OfflineOwnershipService
           if (leftPermit == rightPermit) return 0;
           return leftPermit ? 1 : -1;
         });
+      releaseCandidates.addAll(previousFallback);
+      _releaseMutationBlocks(releaseCandidates, includeRetained: true);
       _releaseMutationBlocks(orderedGuard, includeRetained: true);
     } on Object catch (error) {
       final report = _reauthenticationFailureReport(
@@ -1638,11 +1687,14 @@ final class _OwnershipAttempt {
   final List<_OwnershipAttemptTarget> targets;
 }
 
-final class _FailedAcquisitionRollback {
-  _FailedAcquisitionRollback({required this.attempt, required this.blocks});
+final class _SupersededOwnershipGeneration {
+  const _SupersededOwnershipGeneration({
+    required this.target,
+    required this.generation,
+  });
 
-  final _OwnershipAttempt attempt;
-  List<_ParticipantBlock> blocks;
+  final _OwnershipAttemptTarget target;
+  final int generation;
 }
 
 final class _MutationBlockReleaseResult {
@@ -1653,6 +1705,28 @@ final class _MutationBlockReleaseResult {
 
   final List<Object> failures;
   final List<_ParticipantBlock> unreleased;
+}
+
+final class _PhysicalMutationBlockKey {
+  _PhysicalMutationBlockKey(_ParticipantBlock entry)
+    : participant = entry.participant,
+      blockId = entry.block.blockId,
+      scopeKey = _mutationScopeKey(entry.scope);
+
+  final OfflineMutationParticipant participant;
+  final Object blockId;
+  final String scopeKey;
+
+  @override
+  bool operator ==(Object other) =>
+      other is _PhysicalMutationBlockKey &&
+      identical(participant, other.participant) &&
+      blockId == other.blockId &&
+      scopeKey == other.scopeKey;
+
+  @override
+  int get hashCode =>
+      Object.hash(identityHashCode(participant), blockId, scopeKey);
 }
 
 final class _OwnershipAttemptTarget {
@@ -1846,3 +1920,18 @@ bool _sameCommandCounts(
         left.stagedTransfers == right.stagedTransfers &&
         left.scanSessions == right.scanSessions,
 };
+
+bool _mutationScopesOverlap(
+  OfflineMutationScope left,
+  OfflineMutationScope right,
+) {
+  if (left.allAccounts || right.allAccounts) return true;
+  final rightAccounts = right.resolvedAccountIds;
+  return left.resolvedAccountIds.any(rightAccounts.contains);
+}
+
+String _mutationScopeKey(OfflineMutationScope scope) {
+  if (scope.allAccounts) return '*';
+  final accountIds = scope.resolvedAccountIds.toList()..sort();
+  return accountIds.map((value) => '${value.length}:$value').join('|');
+}

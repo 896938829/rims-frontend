@@ -1010,6 +1010,297 @@ void main() {
     expect(ownership.debugGenerationMetadataEntryCount, 0);
   });
 
+  test(
+    'preview rollback registers every orphan and overlapping reasons recover them',
+    () async {
+      final first = _ThrowingMutationParticipant()..throwOnReleaseCall = 1;
+      final second = _ThrowingMutationParticipant()..throwOnReleaseCall = 1;
+      final barrier = OfflineWriteBarrier();
+      final acquireThrowing = _ThrowingMutationParticipant(
+        throwOnAcquire: true,
+      );
+      final store = _AttemptControlledOwnershipStore(
+        OfflineOwnershipReason.warehouseSwitch,
+        [_ControlledOwnershipAttempt.successful()],
+      );
+      final ownership = OfflineOwnershipService(
+        store: store,
+        files: const _NoopFiles(),
+        scans: const _NoopScans(),
+        reviews: const _NoopReviews(),
+        databaseKeys: MemoryOfflineDatabaseKeyManager(),
+        mutationParticipants: [first, second, barrier, acquireThrowing],
+      );
+
+      expect(
+        () => ownership.preview(
+          accountId: '7',
+          command: OfflineClearCommand.cache,
+        ),
+        throwsA(isA<OfflineMutationAcquisitionException>()),
+      );
+
+      expect(ownership.debugOrphanedMutationBlockCount, 2);
+      expect(ownership.canAccessOfflineData('7'), isFalse);
+      expect(ownership.canAccessOfflineData('8'), isTrue);
+      await expectLater(
+        barrier.protect(accountId: '7', operation: () async {}),
+        completes,
+      );
+
+      acquireThrowing.throwOnAcquire = false;
+      expect(
+        (await ownership.apply(
+          const OfflineOwnershipIntent.permissionRefresh(accountId: '8'),
+        )).completed,
+        isTrue,
+      );
+      expect(ownership.debugOrphanedMutationBlockCount, 2);
+
+      first.throwOnReleaseCall = null;
+      second.throwOnReleaseCall = second.releaseCalls + 1;
+      await expectLater(
+        ownership.apply(
+          const OfflineOwnershipIntent.warehouseSwitch(
+            accountId: '7',
+            previousWarehouseId: 1,
+            currentWarehouseId: 2,
+          ),
+        ),
+        throwsA(isA<OfflineMutationRecoveryException>()),
+      );
+      expect(store.callCount, 0);
+      expect(ownership.debugOrphanedMutationBlockCount, 1);
+      expect(ownership.canAccessOfflineData('7'), isFalse);
+
+      second.throwOnReleaseCall = null;
+      expect(
+        (await ownership.apply(
+          const OfflineOwnershipIntent.warehouseSwitch(
+            accountId: '7',
+            previousWarehouseId: 1,
+            currentWarehouseId: 2,
+          ),
+        )).completed,
+        isTrue,
+      );
+      expect(store.callCount, 1);
+      expect(ownership.debugOrphanedMutationBlockCount, 0);
+      expect(ownership.canAccessOfflineData('7'), isTrue);
+      expect(first.activeBlocks, 0);
+      expect(second.activeBlocks, 0);
+      expect(ownership.debugGenerationMetadataEntryCount, 0);
+    },
+  );
+
+  test(
+    'revocation account conversion rollback is centrally recoverable',
+    () async {
+      final releaseThrowing = _ThrowingMutationParticipant()
+        ..throwOnReleaseCall = 1;
+      final barrier = OfflineWriteBarrier();
+      final acquireThrowing = _ThrowingMutationParticipant(
+        throwOnAcquireCall: 2,
+      );
+      final ownership = OfflineOwnershipService(
+        store: MemoryOfflineStore(),
+        files: const _NoopFiles(),
+        scans: const _NoopScans(),
+        reviews: const _NoopReviews(),
+        databaseKeys: MemoryOfflineDatabaseKeyManager(),
+        mutationParticipants: [releaseThrowing, barrier, acquireThrowing],
+      );
+
+      await expectLater(
+        ownership.apply(
+          const OfflineOwnershipIntent.revocation(accountId: '7'),
+        ),
+        throwsA(isA<OfflineMutationAcquisitionException>()),
+      );
+
+      expect(ownership.debugOrphanedMutationBlockCount, 1);
+      expect(ownership.canAccessOfflineData('7'), isFalse);
+      await expectLater(
+        barrier.protect(accountId: '7', operation: () async {}),
+        completes,
+      );
+
+      releaseThrowing.throwOnReleaseCall = null;
+      acquireThrowing.throwOnAcquireCall = null;
+      expect(
+        (await ownership.apply(
+          const OfflineOwnershipIntent.permissionRefresh(accountId: '7'),
+        )).completed,
+        isTrue,
+      );
+      expect(ownership.debugOrphanedMutationBlockCount, 0);
+      expect(ownership.canAccessOfflineData('7'), isTrue);
+      expect(releaseThrowing.activeBlocks, 0);
+      expect(ownership.debugGenerationMetadataEntryCount, 0);
+    },
+  );
+
+  test(
+    'clear execution acquisition rollback is recovered by an ownership retry',
+    () async {
+      final releaseThrowing = _ThrowingMutationParticipant();
+      final barrier = OfflineWriteBarrier();
+      final acquireThrowing = _ThrowingMutationParticipant();
+      final ownership = OfflineOwnershipService(
+        store: MemoryOfflineStore(),
+        files: const _NoopFiles(),
+        scans: const _NoopScans(),
+        reviews: const _NoopReviews(),
+        databaseKeys: MemoryOfflineDatabaseKeyManager(),
+        mutationParticipants: [releaseThrowing, barrier, acquireThrowing],
+      );
+      final preview = await ownership.preview(
+        accountId: '7',
+        command: OfflineClearCommand.cache,
+      );
+      releaseThrowing.throwOnReleaseCall = releaseThrowing.releaseCalls + 1;
+      acquireThrowing.throwOnAcquire = true;
+
+      expect(
+        () => ownership.executeClear(preview),
+        throwsA(isA<OfflineMutationAcquisitionException>()),
+      );
+
+      expect(ownership.debugOrphanedMutationBlockCount, 1);
+      expect(ownership.canAccessOfflineData('7'), isFalse);
+      await expectLater(
+        barrier.protect(accountId: '7', operation: () async {}),
+        completes,
+      );
+
+      releaseThrowing.throwOnReleaseCall = null;
+      acquireThrowing.throwOnAcquire = false;
+      expect(
+        (await ownership.apply(
+          const OfflineOwnershipIntent.warehouseSwitch(
+            accountId: '7',
+            previousWarehouseId: 1,
+            currentWarehouseId: 2,
+          ),
+        )).completed,
+        isTrue,
+      );
+      expect(ownership.debugOrphanedMutationBlockCount, 0);
+      expect(ownership.canAccessOfflineData('7'), isTrue);
+      expect(releaseThrowing.activeBlocks, 0);
+      expect(ownership.debugGenerationMetadataEntryCount, 0);
+    },
+  );
+
+  test(
+    'reauthentication guard rollback is recovered by an overlapping reason',
+    () async {
+      final releaseThrowing = _ThrowingMutationParticipant();
+      final barrier = OfflineWriteBarrier();
+      final acquireThrowing = _ThrowingMutationParticipant();
+      final ownership = OfflineOwnershipService(
+        store: MemoryOfflineStore(),
+        files: const _NoopFiles(),
+        scans: const _NoopScans(),
+        reviews: const _NoopReviews(),
+        databaseKeys: MemoryOfflineDatabaseKeyManager(),
+        mutationParticipants: [releaseThrowing, barrier, acquireThrowing],
+      );
+      expect(
+        (await ownership.apply(
+          const OfflineOwnershipIntent.tokenExpiry(accountId: '7'),
+        )).completed,
+        isTrue,
+      );
+      final lease = await ownership.prepareReauthentication(accountId: '7');
+      releaseThrowing.throwOnReleaseCall = 1;
+      acquireThrowing.throwOnAcquireCall = 2;
+
+      expect(
+        await lease.finalize(),
+        isA<FailureResult<OfflineOwnershipReport>>(),
+      );
+      expect(ownership.debugOrphanedMutationBlockCount, 1);
+      expect(ownership.canAccessOfflineData('7'), isFalse);
+
+      releaseThrowing.throwOnReleaseCall = null;
+      acquireThrowing.throwOnAcquireCall = null;
+      expect(
+        (await ownership.apply(
+          const OfflineOwnershipIntent.permissionRefresh(accountId: '7'),
+        )).completed,
+        isTrue,
+      );
+      expect(ownership.debugOrphanedMutationBlockCount, 0);
+      expect(ownership.canAccessOfflineData('7'), isFalse);
+
+      final retryLease = await ownership.prepareReauthentication(
+        accountId: '7',
+      );
+      expect(
+        await retryLease.finalize(),
+        isA<Success<OfflineOwnershipReport>>(),
+      );
+      expect(ownership.canAccessOfflineData('7'), isTrue);
+      expect(releaseThrowing.activeBlocks, 0);
+      expect(ownership.debugOrphanedMutationBlockCount, 0);
+      expect(ownership.debugGenerationMetadataEntryCount, 0);
+    },
+  );
+
+  test(
+    'supersede release failure keeps a logical gate and recovers new blocks',
+    () async {
+      final throwing = _ThrowingMutationParticipant();
+      final barrier = OfflineWriteBarrier();
+      final ownership = OfflineOwnershipService(
+        store: MemoryOfflineStore(),
+        files: const _NoopFiles(),
+        scans: const _NoopScans(),
+        reviews: const _NoopReviews(),
+        databaseKeys: MemoryOfflineDatabaseKeyManager(),
+        mutationParticipants: [throwing, barrier],
+      );
+      expect(
+        (await ownership.apply(
+          const OfflineOwnershipIntent.tokenExpiry(accountId: '7'),
+        )).completed,
+        isTrue,
+      );
+      throwing.throwOnReleaseCall = 1;
+
+      await expectLater(
+        ownership.apply(
+          const OfflineOwnershipIntent.tokenExpiry(accountId: '7'),
+        ),
+        throwsA(isA<OfflineMutationReleaseException>()),
+      );
+
+      expect(ownership.canAccessOfflineData('7'), isFalse);
+      expect(ownership.debugOrphanedMutationBlockCount, 1);
+      await expectLater(
+        barrier.protect(accountId: '7', operation: () async {}),
+        throwsA(isA<OfflineWriteBlockedException>()),
+      );
+
+      throwing.throwOnReleaseCall = null;
+      expect(
+        (await ownership.apply(
+          const OfflineOwnershipIntent.tokenExpiry(accountId: '7'),
+        )).completed,
+        isTrue,
+      );
+      expect(ownership.debugOrphanedMutationBlockCount, 0);
+      expect(ownership.canAccessOfflineData('7'), isFalse);
+      await ownership.apply(
+        const OfflineOwnershipIntent.reauthenticated(accountId: '7'),
+      );
+      expect(ownership.canAccessOfflineData('7'), isTrue);
+      expect(throwing.activeBlocks, 0);
+      expect(ownership.debugGenerationMetadataEntryCount, 0);
+    },
+  );
+
   for (final reason in const [
     OfflineOwnershipReason.tokenExpiry,
     OfflineOwnershipReason.revocation,
