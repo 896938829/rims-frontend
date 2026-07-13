@@ -336,6 +336,93 @@ void main() {
   );
 
   test(
+    'A denied A invalidates an active reviewed suffix through terminal history',
+    () async {
+      await repository.enqueueGraph(
+        OutboxGraph(
+          operations: [
+            _operation('create'),
+            _operation('upload', kind: OutboxOperationKind.attachmentUpload),
+            _operation('complete', kind: OutboxOperationKind.documentComplete),
+          ],
+          dependencies: const {
+            'upload': {'create'},
+            'complete': {'upload'},
+          },
+        ),
+      );
+      const allowedA = OutboxExecutionContext(
+        accountId: '7',
+        warehouseId: 11,
+        permissionStamp: 'permission-a',
+        allowedKinds: {
+          OutboxOperationKind.documentCreate,
+          OutboxOperationKind.attachmentUpload,
+          OutboxOperationKind.documentComplete,
+        },
+      );
+      context = allowedA;
+      await viewModel.load();
+      expect(await viewModel.review('create'), isTrue);
+      await repository.transition(
+        accountId: '7',
+        operationId: 'create',
+        next: OutboxState.syncing,
+      );
+      await repository.completeSuccess(
+        accountId: '7',
+        operationId: 'create',
+        output: OutboxOperationOutput(version: 1, data: {'documentId': 91}),
+      );
+
+      context = const OutboxExecutionContext(
+        accountId: '7',
+        warehouseId: 11,
+        permissionStamp: 'permission-denied',
+        allowedKinds: {OutboxOperationKind.documentCreate},
+      );
+      await viewModel.refreshContext();
+
+      expect(viewModel.loadFailure, isNull);
+      expect(viewModel.permissionBlockedOperationIds, {'upload', 'complete'});
+      expect(
+        viewModel.attention.map((operation) => operation.operationId).toSet(),
+        {'upload', 'complete'},
+      );
+      expect(viewModel.completed.map((operation) => operation.operationId), [
+        'create',
+      ]);
+      final deniedStored = (await repository.list('7')).dataOrNull!;
+      expect(
+        deniedStored
+            .singleWhere((operation) => operation.operationId == 'create')
+            .reviewStamp,
+        allowedA.reviewStamp,
+      );
+      for (final operationId in ['upload', 'complete']) {
+        final operation = deniedStored.singleWhere(
+          (operation) => operation.operationId == operationId,
+        );
+        expect(operation.reviewStamp, isNull);
+        expect(operation.confirmedAt, isNull);
+      }
+
+      context = allowedA;
+      await viewModel.refreshContext();
+
+      expect(viewModel.loadFailure, isNull);
+      expect(viewModel.reviewedOperationIds, isEmpty);
+      expect(
+        viewModel.waiting.map((operation) => operation.operationId).toSet(),
+        {'upload', 'complete'},
+      );
+      expect(viewModel.completed.map((operation) => operation.operationId), [
+        'create',
+      ]);
+    },
+  );
+
+  test(
     're-review after a succeeded prefix selects only remaining graph nodes',
     () async {
       await repository.enqueueGraph(

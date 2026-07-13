@@ -132,8 +132,9 @@ final class SyncCenterViewModel extends ChangeNotifier {
         } else {
           final permissionRelevantIds = _statusClassifier
               .permissionRelevantOperationIds(operations: _operations);
-          final blockedComponent = (component as Success<List<OutboxOperation>>)
-              .data
+          final fullComponent =
+              (component as Success<List<OutboxOperation>>).data;
+          final blockedComponent = fullComponent
               .where(
                 (operation) =>
                     permissionRelevantIds.contains(operation.operationId),
@@ -151,7 +152,7 @@ final class SyncCenterViewModel extends ChangeNotifier {
             final invalidated = await repository.invalidateReviewGraph(
               accountId: context.accountId,
               expectedUpdatedAtByOperation: {
-                for (final operation in blockedComponent)
+                for (final operation in fullComponent)
                   operation.operationId: operation.updatedAt,
               },
             );

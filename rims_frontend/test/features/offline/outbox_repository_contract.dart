@@ -544,6 +544,20 @@ void runOutboxRepositoryContract(String name, OutboxHarnessFactory create) {
           for (final operation in before)
             operation.operationId: operation.updatedAt,
         };
+        final activeOnly = Map<String, DateTime>.of(expected)
+          ..remove(create.operationId);
+        final partialResult = await repository.invalidateReviewGraph(
+          accountId: '7',
+          expectedUpdatedAtByOperation: activeOnly,
+        );
+        expect(
+          partialResult,
+          isA<FailureResult<List<OutboxOperation>>>().having(
+            (result) => result.failure,
+            'failure',
+            isA<ValidationFailure>(),
+          ),
+        );
         final stale = Map<String, DateTime>.of(expected)
           ..[attachment.operationId] = clock.value.subtract(
             const Duration(days: 1),
