@@ -619,9 +619,9 @@ feat: queue reviewed document operations
 - Modify: `rims_frontend/lib/features/profile/presentation/pages/profile_page.dart`
 - Test: `rims_frontend/test/features/offline/offline_ownership_service_test.dart`
 
-- [ ] **Step 1: Write failing tests for logout, account switch, warehouse switch, role/permission refresh, token expiry, revocation, cache clear, draft retention choice, staged files, and database-key rotation.**
+- [x] **Step 1: Write failing tests for logout, account switch, warehouse switch, role/permission refresh, token expiry, revocation, cache clear, draft retention choice, staged files, and database-key rotation.**
 
-- [ ] **Step 2: Implement ownership rules.**
+- [x] **Step 2: Implement ownership rules.**
 
 Logout clears cache, outbox, downloads, scan sessions, and staged transfers for
 the prior account. User-authored drafts may be retained only when the user
@@ -629,9 +629,9 @@ explicitly chooses local retention before logout; they remain encrypted and
 cannot be opened by another account. Token expiry defaults to preserving drafts
 but blocks sync until the same account reauthenticates.
 
-- [ ] **Step 3: Add clear-cache and clear-offline-work commands with exact count previews and confirmation.**
+- [x] **Step 3: Add clear-cache and clear-offline-work commands with exact count previews and confirmation.**
 
-- [ ] **Step 4: Run tests and commit.**
+- [x] **Step 4: Run tests and commit.**
 
 ```text
 feat: enforce offline data ownership

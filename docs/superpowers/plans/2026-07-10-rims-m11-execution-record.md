@@ -229,6 +229,21 @@ counts, encrypted storage ownership, cleanup, and baseline restore are read.
 | Review | independent specification and code-quality reviews APPROVED after all P0/P1/P2 findings covering lifecycle provenance, dependency parsing, staging TOCTOU, replay evidence, and restart ownership were fixed |
 | GREEN | strict analyze PASS; full Flutter suite PASS (973 tests); diff check PASS |
 
+## Task 14 Offline Ownership And Retention Evidence
+
+| Probe | Observed result |
+| --- | --- |
+| RED | ownership transition, exact preview, revocation recovery, key rotation, and command-specific scan cleanup tests exposed missing or over-broad behavior before implementation |
+| Ownership | logout, account switch, warehouse switch, permission refresh, token expiry, and revocation run through serialized ownership transitions with account-scoped physical barriers and orphan recovery |
+| Authentication | pending and committed token-owner generations prevent partially committed login or restore state; scoped reauthentication permits unblock only the matching account transaction |
+| Revocation | a durable pending-revocation journal preserves failed cleanup intent across restart and participates in database-key rotation without exposing another account's data |
+| Retention | explicit logout choice may retain encrypted user drafts for the same account; cache, outbox, downloads, scan data, and staged transfers follow reason-specific cleanup rules |
+| Commands | clear-cache and clear-offline-work use command-specific content revisions, exact count previews, mandatory reconfirmation after change, and visible partial-failure recovery |
+| Scan scope | clear-offline-work removes scan sessions only; clear-cache removes current and legacy lookup cache only; logout, account switch, and revocation remove both; warehouse and permission changes invalidate lookup only |
+| Parity | Memory and real Drift adapters plus legacy SharedPreferences paths assert retained and deleted physical state, preview counts, revision changes, cleanup retry, and key rotation |
+| Review | independent specification and code-quality reviews APPROVED with no open P0/P1/P2 after ownership, authentication, revocation, supersede, and scan-scope findings were fixed |
+| GREEN | strict analyze PASS; full Flutter suite PASS (1157 tests); diff check PASS |
+
 ## Final Android State Evidence
 
 | Evidence | Observed result |
