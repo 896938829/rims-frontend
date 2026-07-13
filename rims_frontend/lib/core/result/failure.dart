@@ -72,6 +72,10 @@ final class LocalStorageFailure extends Failure {
   const LocalStorageFailure({required super.message, super.cause});
 }
 
+final class RevocationCleanupFailure extends Failure {
+  const RevocationCleanupFailure({required super.message, super.cause});
+}
+
 final class AttachmentFailure extends Failure {
   const AttachmentFailure({required super.message, super.cause});
 }

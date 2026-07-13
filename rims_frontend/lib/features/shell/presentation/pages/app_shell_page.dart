@@ -320,10 +320,10 @@ final class _AppShellPageState extends State<AppShellPage> {
   OfflineOwnershipService? get offlineOwnershipService =>
       widget.offlineOwnershipService;
 
-  Future<void> _logout([
+  Future<OfflineOwnershipReport?> _logout([
     DraftRetentionChoice draftRetention = DraftRetentionChoice.delete,
   ]) async {
-    await widget.sessionController.logout(
+    return widget.sessionController.logout(
       authRepository: widget.authRepository,
       draftRetention: draftRetention,
     );

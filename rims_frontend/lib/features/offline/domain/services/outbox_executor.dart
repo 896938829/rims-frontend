@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
 import '../../data/datasources/operation_status_remote_datasource.dart';
@@ -8,6 +10,7 @@ import '../entities/outbox_cleanup_intent.dart';
 import '../repositories/outbox_repository.dart';
 import 'network_status_service.dart';
 import 'idempotency_key_validator.dart';
+import 'offline_ownership_service.dart';
 
 typedef OutboxDelay = Future<void> Function(Duration duration);
 typedef ProbeBackoff = Duration Function(int attempt);
@@ -140,7 +143,8 @@ abstract interface class OutboxExecutorPort {
   Future<OutboxExecutionReport> execute(OutboxReview review);
 }
 
-final class OutboxExecutor implements OutboxExecutorPort {
+final class OutboxExecutor
+    implements OutboxExecutorPort, OfflineMutationParticipant {
   OutboxExecutor({
     required this.repository,
     required this.networkStatusService,
@@ -178,6 +182,12 @@ final class OutboxExecutor implements OutboxExecutorPort {
   final Duration staleSyncingThreshold;
   final OutboxSuccessObserver? onSuccessPersisted;
   bool _isExecuting = false;
+  Completer<void>? _activeExecution;
+
+  @override
+  Future<void> waitForQuiescence() {
+    return _activeExecution?.future ?? Future<void>.value();
+  }
 
   @override
   Future<OutboxExecutionReport> execute(OutboxReview requestedReview) async {
@@ -203,6 +213,8 @@ final class OutboxExecutor implements OutboxExecutorPort {
     if (review.operationIds.isEmpty) return const OutboxExecutionReport();
 
     _isExecuting = true;
+    final activeExecution = Completer<void>();
+    _activeExecution = activeExecution;
     try {
       final componentResult = await repository.loadConnectedComponent(
         accountId: review.accountId,
@@ -558,6 +570,10 @@ final class OutboxExecutor implements OutboxExecutorPort {
       );
     } finally {
       _isExecuting = false;
+      if (identical(_activeExecution, activeExecution)) {
+        _activeExecution = null;
+      }
+      activeExecution.complete();
     }
   }
 

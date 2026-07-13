@@ -28,6 +28,7 @@ final class AuthSessionController extends ChangeNotifier {
   bool _isOwnershipTransitioning = false;
   Failure? _ownershipFailure;
   OfflineOwnershipReport? _lastOwnershipReport;
+  bool _credentialsInvalidated = false;
 
   AuthSession? get session => _session;
   AppUser? get currentUser => _session?.user;
@@ -47,6 +48,7 @@ final class AuthSessionController extends ChangeNotifier {
   bool get isOwnershipTransitioning => _isOwnershipTransitioning;
   Failure? get ownershipFailure => _ownershipFailure;
   OfflineOwnershipReport? get lastOwnershipReport => _lastOwnershipReport;
+  bool get canAuthenticateRequests => !_credentialsInvalidated;
   bool get canAccessOfflineData {
     final accountId = currentUser?.id.toString();
     return !_isOwnershipTransitioning &&
@@ -100,6 +102,7 @@ final class AuthSessionController extends ChangeNotifier {
         );
         if (ownershipReady) {
           _session = candidate;
+          _credentialsInvalidated = candidate == null;
           _restoreFailure = null;
           _sessionMessage = null;
           final AuthSessionRestoreMetadata? metadata =
@@ -123,13 +126,20 @@ final class AuthSessionController extends ChangeNotifier {
       case FailureResult<AuthSession?>(failure: final failure):
         if (!preserveActiveSessionOnFailure ||
             activeSession == null ||
-            failure is AuthenticationFailure) {
+            failure is AuthenticationFailure ||
+            failure is AuthorizationFailure ||
+            failure is RevocationCleanupFailure) {
           _session = null;
         } else {
           _session = activeSession;
         }
         _restoreFailure = failure;
         _sessionMessage = failure.message;
+        if (failure is AuthenticationFailure ||
+            failure is AuthorizationFailure ||
+            failure is RevocationCleanupFailure) {
+          _credentialsInvalidated = true;
+        }
         if (_session == null) _clearSourceMetadata();
     }
 
@@ -142,6 +152,7 @@ final class AuthSessionController extends ChangeNotifier {
     final previous = _session;
     if (!await _prepareOwnershipChange(previous, session)) return false;
     _session = session;
+    _credentialsInvalidated = false;
     _restoreFailure = null;
     _switchWarehouseFailure = null;
     _sessionMessage = null;
@@ -227,6 +238,7 @@ final class AuthSessionController extends ChangeNotifier {
       await repository?.logout();
     }
     _session = null;
+    _credentialsInvalidated = true;
     _restoreFailure = null;
     _switchWarehouseFailure = null;
     _sessionMessage = message;
@@ -260,6 +272,7 @@ final class AuthSessionController extends ChangeNotifier {
     if (report != null && !report.completed) return report;
     await authRepository.logout();
     _session = null;
+    _credentialsInvalidated = true;
     _restoreFailure = null;
     _switchWarehouseFailure = null;
     _sessionMessage = null;
@@ -267,6 +280,17 @@ final class AuthSessionController extends ChangeNotifier {
     _publishOwnershipChanges(previous, _session);
     notifyListeners();
     return report;
+  }
+
+  void invalidateRevokedSession() {
+    final previous = _session;
+    _session = null;
+    _credentialsInvalidated = true;
+    _restoreFailure = const AuthorizationFailure();
+    _sessionMessage = '当前凭据已被撤销';
+    _clearSourceMetadata();
+    _publishOwnershipChanges(previous, null);
+    notifyListeners();
   }
 
   Future<bool> _prepareOwnershipChange(

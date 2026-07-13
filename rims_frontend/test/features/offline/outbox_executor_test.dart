@@ -6,6 +6,7 @@ import 'package:rims_frontend/core/result/result.dart';
 import 'package:rims_frontend/features/auth/domain/entities/app_user.dart';
 import 'package:rims_frontend/features/offline/data/datasources/operation_status_remote_datasource.dart';
 import 'package:rims_frontend/features/offline/data/repositories/memory_outbox_repository.dart';
+import 'package:rims_frontend/features/offline/data/repositories/memory_offline_store.dart';
 import 'package:rims_frontend/features/offline/domain/entities/network_reachability.dart';
 import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.dart';
 import 'package:rims_frontend/features/offline/domain/entities/outbox_graph.dart';
@@ -13,6 +14,7 @@ import 'package:rims_frontend/features/offline/domain/services/network_status_se
 import 'package:rims_frontend/features/offline/domain/services/outbox_executor.dart';
 import 'package:rims_frontend/features/offline/domain/services/outbox_permission_policy.dart';
 import 'package:rims_frontend/features/offline/domain/services/outbox_state_machine.dart';
+import 'package:rims_frontend/features/offline/domain/services/offline_ownership_service.dart';
 
 void main() {
   test(
@@ -494,6 +496,100 @@ void main() {
     expect(handler.calls, ['op']);
   });
 
+  test(
+    'mutation quiescence waits for blocked handler result to reach persisted terminal state',
+    () async {
+      await repository.enqueue(_operation('op'));
+      final handlerGate = Completer<Result<Object?>>();
+      handler.onCall = (_) => handlerGate.future;
+
+      final execution = executor.execute(review({'op'}));
+      await handler.called.future;
+      var drained = false;
+      final drain = executor.waitForQuiescence().then((_) => drained = true);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(drained, isFalse);
+      expect(await state('op'), OutboxState.syncing);
+
+      handlerGate.complete(const Success(null));
+      await execution;
+      await drain;
+
+      expect(drained, isTrue);
+      expect(await state('op'), OutboxState.succeeded);
+    },
+  );
+
+  test(
+    'logout gate drains blocked foreground persistence before cleanup and rejects a second batch',
+    () async {
+      final events = <String>[];
+      final offlineStore = MemoryOfflineStore();
+      final ownershipStore = _RecordingOwnershipStore(offlineStore, events);
+      final ownership = OfflineOwnershipService(
+        store: ownershipStore,
+        files: const _NoopOwnedFiles(),
+        scans: const _NoopOwnedScans(),
+        reviews: const _NoopReviewInvalidator(),
+        databaseKeys: MemoryOfflineDatabaseKeyManager(),
+      );
+      final blockedHandler = _Handler();
+      final handlerGate = Completer<Result<Object?>>();
+      blockedHandler.onCall = (_) async {
+        final result = await handlerGate.future;
+        events.add('handler.return');
+        return result;
+      };
+      const activeContext = OutboxExecutionContext(
+        accountId: '7',
+        warehouseId: 11,
+        permissionStamp: 'stock:write@1',
+        allowedKinds: {OutboxOperationKind.documentCreate},
+      );
+      final gatedExecutor = OutboxExecutor(
+        repository: offlineStore.outboxRepository,
+        networkStatusService: network,
+        statusDataSource: status,
+        handlers: [blockedHandler],
+        contextReader: () => ownership.canSync('7') ? activeContext : null,
+        onSuccessPersisted: (_) async => events.add('terminal.persisted'),
+      );
+      ownership.attachMutationParticipant(gatedExecutor);
+      await offlineStore.outboxRepository.enqueue(_operation('owned-op'));
+      const ownedReview = OutboxReview(
+        operationIds: {'owned-op'},
+        accountId: '7',
+        warehouseId: 11,
+        permissionStamp: 'stock:write@1',
+      );
+
+      final foreground = gatedExecutor.execute(ownedReview);
+      await blockedHandler.called.future;
+      final logout = ownership.apply(
+        const OfflineOwnershipIntent.logout(accountId: '7'),
+      );
+      await Future<void>.delayed(Duration.zero);
+
+      expect(ownership.canSync('7'), isFalse);
+      expect(events, isEmpty);
+      final secondBatch = await gatedExecutor.execute(ownedReview);
+      expect(secondBatch.failure, isA<StateFailure>());
+      expect(blockedHandler.calls, ['owned-op']);
+
+      handlerGate.complete(const Success(null));
+      await foreground;
+      final report = await logout;
+
+      expect(report.completed, isTrue);
+      expect(events, ['handler.return', 'terminal.persisted', 'cleanup']);
+      expect(
+        (await offlineStore.outboxRepository.list('7')).dataOrNull,
+        isEmpty,
+      );
+    },
+  );
+
   test('connectivity changes do not auto-start executor', () async {
     await repository.enqueue(_operation('op'));
 
@@ -969,6 +1065,100 @@ final class _NetworkStatusService implements NetworkStatusService {
 
   @override
   Future<void> dispose() => _changes.close();
+}
+
+final class _RecordingOwnershipStore implements OfflineOwnershipStore {
+  _RecordingOwnershipStore(this.delegate, this.events);
+
+  final MemoryOfflineStore delegate;
+  final List<String> events;
+
+  @override
+  Future<OfflineStoreOwnershipSnapshot> inspectAccount(String accountId) =>
+      delegate.inspectAccount(accountId);
+
+  @override
+  Future<void> clearOwnedAccount(
+    String accountId, {
+    required bool preserveDrafts,
+  }) async {
+    events.add('cleanup');
+    await delegate.clearOwnedAccount(accountId, preserveDrafts: preserveDrafts);
+  }
+
+  @override
+  Future<void> clearAccountCache(String accountId) =>
+      delegate.clearAccountCache(accountId);
+
+  @override
+  Future<void> clearAccountOfflineWork(String accountId) =>
+      delegate.clearAccountOfflineWork(accountId);
+
+  @override
+  Future<void> invalidateWarehouseCache({
+    required String accountId,
+    required int warehouseId,
+  }) => delegate.invalidateWarehouseCache(
+    accountId: accountId,
+    warehouseId: warehouseId,
+  );
+
+  @override
+  Future<void> invalidatePermissionScopedCache(String accountId) =>
+      delegate.invalidatePermissionScopedCache(accountId);
+
+  @override
+  Future<void> discardSessionProjection(String accountId) =>
+      delegate.discardSessionProjection(accountId);
+
+  @override
+  Future<void> clearAllSensitiveData() => delegate.clearAllSensitiveData();
+}
+
+final class _NoopOwnedFiles implements OfflineOwnedFileStore {
+  const _NoopOwnedFiles();
+
+  @override
+  Future<OfflineFileOwnershipSnapshot> inspectAccount(String accountId) async =>
+      const OfflineFileOwnershipSnapshot();
+
+  @override
+  Future<void> clearAccountFiles(
+    String accountId, {
+    required Set<String> retainStagedRequestIds,
+  }) async {}
+
+  @override
+  Future<void> clearDownloads(String accountId) async {}
+
+  @override
+  Future<void> clearStagedTransfers(String accountId) async {}
+
+  @override
+  Future<void> clearAllFiles() async {}
+}
+
+final class _NoopOwnedScans implements OfflineOwnedScanStore {
+  const _NoopOwnedScans();
+
+  @override
+  Future<int> countForAccount(String accountId) async => 0;
+
+  @override
+  Future<void> clearForAccount(String accountId) async {}
+
+  @override
+  Future<void> clearAll() async {}
+}
+
+final class _NoopReviewInvalidator implements OfflineReviewInvalidator {
+  const _NoopReviewInvalidator();
+
+  @override
+  Future<void> invalidate({
+    required String accountId,
+    int? warehouseId,
+  }) async {}
 }
 
 extension<T> on Result<T> {

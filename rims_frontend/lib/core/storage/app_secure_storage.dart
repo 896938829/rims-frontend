@@ -22,17 +22,28 @@ abstract interface class AuthenticatedAccountStorage {
   Future<void> clearAuthenticatedAccountId();
 }
 
+abstract interface class PendingRevocationStorage {
+  Future<void> savePendingRevocationAccountId(String accountId);
+
+  Future<String?> readPendingRevocationAccountId();
+
+  Future<void> clearPendingRevocationAccountId();
+}
+
 final class AppSecureStorage
     implements
         TokenStorage,
         OfflineDatabaseKeyStorage,
-        AuthenticatedAccountStorage {
+        AuthenticatedAccountStorage,
+        PendingRevocationStorage {
   const AppSecureStorage({FlutterSecureStorage? storage})
     : _storage = storage ?? const FlutterSecureStorage();
 
   static const String kAccessTokenKey = 'access_token';
   static const String kOfflineDatabaseKey = 'offline_database_key';
   static const String kAuthenticatedAccountIdKey = 'authenticated_account_id';
+  static const String kPendingRevocationAccountIdKey =
+      'pending_revocation_account_id';
 
   final FlutterSecureStorage _storage;
 
@@ -74,5 +85,23 @@ final class AppSecureStorage
   @override
   Future<void> clearAuthenticatedAccountId() {
     return _storage.delete(key: kAuthenticatedAccountIdKey);
+  }
+
+  @override
+  Future<void> savePendingRevocationAccountId(String accountId) {
+    return _storage.write(
+      key: kPendingRevocationAccountIdKey,
+      value: accountId,
+    );
+  }
+
+  @override
+  Future<String?> readPendingRevocationAccountId() {
+    return _storage.read(key: kPendingRevocationAccountIdKey);
+  }
+
+  @override
+  Future<void> clearPendingRevocationAccountId() {
+    return _storage.delete(key: kPendingRevocationAccountIdKey);
   }
 }

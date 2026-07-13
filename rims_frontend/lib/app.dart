@@ -164,9 +164,10 @@ final class _MainAppState extends State<MainApp> {
     _attachmentShareService = PlatformAttachmentShareService();
     unawaited(_attachmentPicker.recoverLostData());
     _apiClient = ApiClient(
-      tokenReader: () async =>
-          _sessionController.accessToken ??
-          await _secureStorage.readAccessToken(),
+      tokenReader: () async => _sessionController.canAuthenticateRequests
+          ? _sessionController.accessToken ??
+                await _secureStorage.readAccessToken()
+          : null,
       warehouseIdReader: () async => _sessionController.currentWarehouse?.id,
       eventBus: _eventBus,
       requestObserver: (outcome) {
@@ -208,7 +209,9 @@ final class _MainAppState extends State<MainApp> {
       store: widget.offlineStore,
       tokenStorage: _secureStorage,
       accountStorage: _secureStorage,
+      revocationStorage: _secureStorage,
       ownershipCoordinator: _offlineOwnershipService,
+      onSessionRevoked: _sessionController.invalidateRevokedSession,
     );
     final documentsRemoteDataSource = ApiDocumentsRemoteDataSource(_apiClient);
     final documentsRepository = DocumentsRepositoryImpl(
@@ -281,6 +284,7 @@ final class _MainAppState extends State<MainApp> {
       contextReader: _outboxExecutionContext,
       onSuccessPersisted: _outboxCleanupCoordinator.run,
     );
+    _offlineOwnershipService.attachMutationParticipant(_outboxExecutor);
     _adminRepository = AdminRepositoryImpl(
       remoteDataSource: ApiAdminRemoteDataSource(_apiClient),
     );

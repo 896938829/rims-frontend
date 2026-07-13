@@ -299,7 +299,7 @@ void main() {
   );
 
   test(
-    'failed revocation retains credentials so cleanup can be retried',
+    'failed revocation discards credentials and retains a secure retry marker',
     () async {
       final delegate = _FakeAuthRepository(
         restoreResult: const Success(_session),
@@ -319,9 +319,72 @@ void main() {
       final result = await repository.restoreSession();
 
       expect(result, isA<FailureResult<AuthSession?>>());
-      expect(delegate.logoutCalls, 0);
-      expect(storage.token, 'token');
+      expect(delegate.logoutCalls, 1);
+      expect(storage.token, isNull);
       expect(storage.accountId, '7');
+      expect(storage.pendingRevocationAccountId, '7');
+    },
+  );
+
+  test(
+    '403 refresh invalidates request credentials before failed cleanup and retries without the revoked token',
+    () async {
+      final delegate = _FakeAuthRepository(
+        restoreResult: const Success(_session),
+      );
+      final storage = _FakeSessionStorage(token: 'token');
+      final ownership = _RecordingOwnershipCoordinator();
+      final controller = AuthSessionController();
+      addTearDown(controller.dispose);
+      final repository = _repository(
+        delegate,
+        storage,
+        now: now,
+        ownership: ownership,
+        onSessionRevoked: controller.invalidateRevokedSession,
+      );
+      await repository.restoreSession();
+      await controller.startSession(_session);
+      delegate.restoreResult = const FailureResult(AuthorizationFailure());
+      ownership.blocker = Completer<void>();
+      ownership.failNext = true;
+
+      final refresh = controller.refreshSession(repository);
+      while (ownership.intents
+          .where((intent) => intent.reason == OfflineOwnershipReason.revocation)
+          .isEmpty) {
+        await Future<void>.delayed(Duration.zero);
+      }
+
+      expect(controller.session, isNull);
+      expect(controller.canAuthenticateRequests, isFalse);
+      expect(
+        controller.canAuthenticateRequests
+            ? controller.accessToken ?? await storage.readAccessToken()
+            : null,
+        isNull,
+      );
+      expect(storage.pendingRevocationAccountId, '7');
+
+      ownership.blocker!.complete();
+      await refresh;
+      expect(controller.restoreFailure, isA<RevocationCleanupFailure>());
+      expect(storage.token, isNull);
+      expect(storage.accountId, '7');
+
+      delegate.restoreResult = const Success<AuthSession?>(null);
+      final retried = await repository.restoreSession();
+      expect(retried, const Success<AuthSession?>(null));
+      expect(
+        ownership.intents
+            .where(
+              (intent) => intent.reason == OfflineOwnershipReason.revocation,
+            )
+            .length,
+        2,
+      );
+      expect(storage.pendingRevocationAccountId, isNull);
+      expect(storage.accountId, isNull);
     },
   );
 
@@ -424,6 +487,24 @@ void main() {
   );
 
   test(
+    'controller drops the in-memory session when refresh is forbidden',
+    () async {
+      final repository = _FakeAuthRepository(
+        restoreResult: const FailureResult(AuthorizationFailure()),
+      );
+      final controller = AuthSessionController();
+      addTearDown(controller.dispose);
+      await controller.startSession(_session);
+
+      await controller.refreshSession(repository);
+
+      expect(controller.session, isNull);
+      expect(controller.accessToken, isNull);
+      expect(controller.restoreFailure, isA<AuthorizationFailure>());
+    },
+  );
+
+  test(
     'controller distinguishes logout retention, token expiry, warehouse, and permission reasons',
     () async {
       final ownership = _RecordingOwnershipCoordinator();
@@ -471,6 +552,7 @@ CachedAuthRepository _repository(
   _FakeSessionStorage storage, {
   MemoryOfflineStore? store,
   OfflineOwnershipCoordinator? ownership,
+  void Function()? onSessionRevoked,
   required DateTime now,
 }) {
   return CachedAuthRepository(
@@ -478,7 +560,9 @@ CachedAuthRepository _repository(
     store: store ?? MemoryOfflineStore(),
     tokenStorage: storage,
     accountStorage: storage,
+    revocationStorage: storage,
     ownershipCoordinator: ownership,
+    onSessionRevoked: onSessionRevoked ?? () {},
     now: () => now,
   );
 }
@@ -529,11 +613,15 @@ AuthSession? _sessionFrom(Result<AuthSession?> result) {
 }
 
 final class _FakeSessionStorage
-    implements TokenStorage, AuthenticatedAccountStorage {
+    implements
+        TokenStorage,
+        AuthenticatedAccountStorage,
+        PendingRevocationStorage {
   _FakeSessionStorage({this.token});
 
   String? token;
   String? accountId;
+  String? pendingRevocationAccountId;
 
   @override
   Future<void> clearAccessToken() async => token = null;
@@ -553,6 +641,21 @@ final class _FakeSessionStorage
   @override
   Future<void> saveAuthenticatedAccountId(String accountId) async {
     this.accountId = accountId;
+  }
+
+  @override
+  Future<void> clearPendingRevocationAccountId() async {
+    pendingRevocationAccountId = null;
+  }
+
+  @override
+  Future<String?> readPendingRevocationAccountId() async {
+    return pendingRevocationAccountId;
+  }
+
+  @override
+  Future<void> savePendingRevocationAccountId(String accountId) async {
+    pendingRevocationAccountId = accountId;
   }
 }
 

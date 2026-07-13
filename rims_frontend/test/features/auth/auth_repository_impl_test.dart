@@ -87,6 +87,25 @@ void main() {
       expect(storage.clearCallCount, 1);
     });
 
+    test('restoreSession clears a revoked token on backend 403', () async {
+      final storage = _FakeTokenStorage(accessToken: 'revoked-token');
+      final remoteDataSource = _FakeAuthRemoteDataSource(
+        currentUserResult: const FailureResult<AppUserModel>(
+          AuthorizationFailure(statusCode: 403),
+        ),
+      );
+      final repository = AuthRepositoryImpl(
+        remoteDataSource: remoteDataSource,
+        secureStorage: storage,
+      );
+
+      final result = await repository.restoreSession();
+
+      expect(result, isA<FailureResult<AuthSession?>>());
+      expect(storage.accessToken, isNull);
+      expect(storage.clearCallCount, 1);
+    });
+
     test(
       'restoreSession preserves token when backend is unreachable',
       () async {

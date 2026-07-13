@@ -41,16 +41,17 @@ final class AuthRepositoryImpl
           clearTokenOnAnyFailure: false,
         );
 
-        if (sessionResult case FailureResult<AuthSession>(
-          :final failure,
-        ) when failure is AuthenticationFailure) {
+        if (sessionResult case FailureResult<AuthSession>(:final failure)
+            when failure is AuthenticationFailure ||
+                failure is AuthorizationFailure) {
           await secureStorage.clearAccessToken();
         }
 
         return sessionResult;
       },
       failure: (failure) async {
-        if (failure is AuthenticationFailure) {
+        if (failure is AuthenticationFailure ||
+            failure is AuthorizationFailure) {
           await secureStorage.clearAccessToken();
         }
         return FailureResult<AuthSession?>(failure);
@@ -149,7 +150,9 @@ final class AuthRepositoryImpl
         );
       },
       failure: (failure) async {
-        if (clearTokenOnAnyFailure || failure is AuthenticationFailure) {
+        if (clearTokenOnAnyFailure ||
+            failure is AuthenticationFailure ||
+            failure is AuthorizationFailure) {
           await secureStorage.clearAccessToken();
         }
         return FailureResult<AuthSession>(failure);

@@ -360,7 +360,7 @@ void main() {
 
       expect(find.text('缓存记录：4 项'), findsOneWidget);
       expect(find.text('已下载文件：6 项'), findsOneWidget);
-      expect(find.text('不会删除草稿或待同步操作'), findsOneWidget);
+      expect(find.text('不会删除草稿或同步操作记录'), findsOneWidget);
       await tester.tap(find.byKey(const Key('offline-clear-cancel')));
       await tester.pumpAndSettle();
       expect(executions, 0);
@@ -417,7 +417,7 @@ void main() {
       );
       await tester.pumpAndSettle();
       expect(find.text('草稿：2 项'), findsOneWidget);
-      expect(find.text('待同步操作：3 项'), findsOneWidget);
+      expect(find.text('同步操作记录（含待处理、失败和已完成证据）：3 项'), findsOneWidget);
       expect(find.text('暂存附件：5 项'), findsOneWidget);
       expect(find.text('扫码会话：7 项'), findsOneWidget);
       await tester.tap(find.byKey(const Key('offline-clear-confirm')));
@@ -432,6 +432,127 @@ void main() {
       await tester.tap(find.byKey(const Key('offline-clear-confirm')));
       await tester.pumpAndSettle();
       expect(find.textContaining('暂存文件清理失败'), findsOneWidget);
+    },
+  );
+
+  testWidgets(
+    'changed offline-work counts require a fresh confirmation and cancel does not delete',
+    (tester) async {
+      var executions = 0;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: ProfilePage(
+              user: _ordinaryUser,
+              warehouse: _warehouse,
+              previewOfflineData:
+                  ({required accountId, required command}) async =>
+                      OfflineClearPreview(
+                        accountId: accountId,
+                        command: command,
+                        counts: const OfflineOwnershipCounts(
+                          drafts: 1,
+                          outboxOperations: 2,
+                        ),
+                        sequence: 1,
+                      ),
+              executeOfflineClear: (preview) async {
+                executions += 1;
+                return OfflineOwnershipReport(
+                  reason: null,
+                  accountId: preview.accountId,
+                  executedCounts: const OfflineOwnershipCounts(
+                    drafts: 2,
+                    outboxOperations: 3,
+                  ),
+                  currentPreview: OfflineClearPreview(
+                    accountId: preview.accountId,
+                    command: preview.command,
+                    counts: const OfflineOwnershipCounts(
+                      drafts: 2,
+                      outboxOperations: 3,
+                    ),
+                    sequence: 2,
+                  ),
+                  failures: const [],
+                );
+              },
+            ),
+          ),
+        ),
+      );
+      await tester.scrollUntilVisible(
+        find.byKey(const Key('profile-clear-offline-work-command')),
+        300,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.tap(
+        find.byKey(const Key('profile-clear-offline-work-command')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('offline-clear-confirm')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('数据已变化，请重新确认'), findsOneWidget);
+      expect(find.text('草稿：2 项'), findsOneWidget);
+      expect(find.textContaining('同步操作记录'), findsOneWidget);
+      expect(executions, 1);
+
+      await tester.tap(find.byKey(const Key('offline-clear-cancel')));
+      await tester.pumpAndSettle();
+      expect(executions, 1);
+      expect(find.text('离线工作已清除'), findsNothing);
+    },
+  );
+
+  testWidgets(
+    'logout cleanup failure remains visible and can be retried without dropping the page',
+    (tester) async {
+      var calls = 0;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: ProfilePage(
+              user: _ordinaryUser,
+              warehouse: _warehouse,
+              onLogoutRequested: (choice) async {
+                calls += 1;
+                return OfflineOwnershipReport(
+                  reason: OfflineOwnershipReason.logout,
+                  accountId: '2',
+                  executedCounts: const OfflineOwnershipCounts(),
+                  failures: const [
+                    OfflineOwnershipFailure(
+                      step: OfflineOwnershipStep.files,
+                      message: '暂存附件清理失败，请重试',
+                    ),
+                  ],
+                );
+              },
+            ),
+          ),
+        ),
+      );
+
+      await tester.scrollUntilVisible(
+        find.byKey(const Key('profile-logout-button')),
+        300,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.tap(find.byKey(const Key('profile-logout-button')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('profile-logout-delete-drafts')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('暂存附件清理失败，请重试'), findsOneWidget);
+      expect(find.byKey(const Key('profile-logout-button')), findsOneWidget);
+      expect(calls, 1);
+
+      await tester.tap(find.byKey(const Key('profile-logout-button')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('profile-logout-delete-drafts')));
+      await tester.pumpAndSettle();
+      expect(calls, 2);
     },
   );
 }

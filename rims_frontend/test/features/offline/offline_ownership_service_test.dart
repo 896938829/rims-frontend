@@ -60,6 +60,34 @@ void main() {
     );
 
     test(
+      'retained draft attachment enumeration failure aborts every destructive cleanup',
+      () async {
+        final store = _FakeOwnershipStore(
+          snapshots: {
+            '7': const OfflineStoreOwnershipSnapshot(
+              drafts: 1,
+              draftAttachmentRequestIds: {'draft-file'},
+            ),
+          },
+          failOnInspectCall: 2,
+        );
+        final fixture = _Fixture(store: store);
+
+        final report = await fixture.service.apply(
+          const OfflineOwnershipIntent.logout(
+            accountId: '7',
+            draftRetention: DraftRetentionChoice.retainLocally,
+          ),
+        );
+
+        expect(report.completed, isFalse);
+        expect(store.clearAccountCalls, isEmpty);
+        expect(fixture.files.clearAccountCalls, isEmpty);
+        expect(fixture.scans.clearedAccounts, isEmpty);
+      },
+    );
+
+    test(
       'token expiry preserves all data and blocks sync until same account reauthenticates',
       () async {
         final fixture = _Fixture();
@@ -230,7 +258,7 @@ void main() {
     );
 
     test(
-      'clear-cache preview is exact, execution recounts, and drafts and outbox remain',
+      'clear-cache count change requires confirmation of the current exact snapshot before deletion',
       () async {
         final store = _FakeOwnershipStore(
           snapshots: {
@@ -275,12 +303,20 @@ void main() {
         );
         final report = await fixture.service.executeClear(preview);
 
-        expect(report.completed, isTrue);
-        expect(report.changedSincePreview, isTrue);
+        expect(report.completed, isFalse);
+        expect(report.requiresReconfirmation, isTrue);
         expect(report.executedCounts.cacheEntries, 5);
+        expect(report.currentPreview?.counts.cacheEntries, 5);
+        expect(store.clearCacheCalls, isEmpty);
+        expect(files.clearedDownloads, isEmpty);
+        expect(store.clearOfflineWorkCalls, isEmpty);
+
+        final confirmed = await fixture.service.executeClear(
+          report.currentPreview!,
+        );
+        expect(confirmed.completed, isTrue);
         expect(store.clearCacheCalls, ['7']);
         expect(files.clearedDownloads, ['7']);
-        expect(store.clearOfflineWorkCalls, isEmpty);
       },
     );
 
@@ -326,6 +362,38 @@ void main() {
       await Future.wait([first, second]);
       expect(store.clearAccountCalls, [('7', false), ('8', false)]);
     });
+
+    test(
+      'logout account switch and permission refresh drain active mutations before cleanup',
+      () async {
+        final intents = <OfflineOwnershipIntent>[
+          const OfflineOwnershipIntent.logout(accountId: '7'),
+          const OfflineOwnershipIntent.accountSwitch(
+            previousAccountId: '7',
+            currentAccountId: '8',
+          ),
+          const OfflineOwnershipIntent.permissionRefresh(accountId: '7'),
+        ];
+
+        for (final intent in intents) {
+          final participant = _BlockingMutationParticipant();
+          final fixture = _Fixture(participant: participant);
+
+          final pending = fixture.service.apply(intent);
+          await participant.started.future;
+
+          expect(fixture.service.canSync(intent.accountId), isFalse);
+          expect(fixture.store.clearAccountCalls, isEmpty);
+          expect(fixture.store.permissionInvalidations, isEmpty);
+          expect(fixture.files.clearAccountCalls, isEmpty);
+          expect(fixture.scans.clearedAccounts, isEmpty);
+
+          participant.release.complete();
+          final report = await pending;
+          expect(report.completed, isTrue);
+        }
+      },
+    );
   });
 
   group('ownership storage contract', () {
@@ -476,6 +544,7 @@ final class _Fixture {
     _FakeOwnedFiles? files,
     _FakeOwnedScans? scans,
     bool keyRotationFails = false,
+    OfflineMutationParticipant? participant,
   }) : store = store ?? _FakeOwnershipStore(),
        files = files ?? _FakeOwnedFiles(),
        scans = scans ?? _FakeOwnedScans() {
@@ -490,6 +559,7 @@ final class _Fixture {
       reviews: reviews,
       databaseKeys: keys,
     );
+    if (participant != null) service.attachMutationParticipant(participant);
   }
 
   final List<String> order = [];
@@ -501,14 +571,28 @@ final class _Fixture {
   late final OfflineOwnershipService service;
 }
 
+final class _BlockingMutationParticipant implements OfflineMutationParticipant {
+  final Completer<void> started = Completer<void>();
+  final Completer<void> release = Completer<void>();
+
+  @override
+  Future<void> waitForQuiescence() async {
+    started.complete();
+    await release.future;
+  }
+}
+
 final class _FakeOwnershipStore implements OfflineOwnershipStore {
   _FakeOwnershipStore({
     Map<String, OfflineStoreOwnershipSnapshot>? snapshots,
     this.clearBlocker,
+    this.failOnInspectCall,
   }) : snapshots = snapshots ?? <String, OfflineStoreOwnershipSnapshot>{};
 
   final Map<String, OfflineStoreOwnershipSnapshot> snapshots;
   final Future<void>? clearBlocker;
+  final int? failOnInspectCall;
+  int inspectCalls = 0;
   final Completer<void> clearStarted = Completer<void>();
   List<String>? order;
   final List<(String, bool)> clearAccountCalls = [];
@@ -519,9 +603,13 @@ final class _FakeOwnershipStore implements OfflineOwnershipStore {
   final List<String> discardedSessionProjections = [];
 
   @override
-  Future<OfflineStoreOwnershipSnapshot> inspectAccount(
-    String accountId,
-  ) async => snapshots[accountId] ?? const OfflineStoreOwnershipSnapshot();
+  Future<OfflineStoreOwnershipSnapshot> inspectAccount(String accountId) async {
+    inspectCalls += 1;
+    if (inspectCalls == failOnInspectCall) {
+      throw StateError('draft attachment enumeration failed');
+    }
+    return snapshots[accountId] ?? const OfflineStoreOwnershipSnapshot();
+  }
 
   @override
   Future<void> clearOwnedAccount(

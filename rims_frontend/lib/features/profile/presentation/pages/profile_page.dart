@@ -59,7 +59,8 @@ final class ProfilePage extends StatelessWidget {
   final Warehouse? warehouse;
   final List<Warehouse> warehouses;
   final VoidCallback? onLogout;
-  final Future<void> Function(DraftRetentionChoice choice)? onLogoutRequested;
+  final Future<OfflineOwnershipReport?> Function(DraftRetentionChoice choice)?
+  onLogoutRequested;
   final ValueChanged<Warehouse>? onWarehouseSelected;
   final bool isSwitchingWarehouse;
   final String? warehouseSwitchMessage;
@@ -270,41 +271,55 @@ final class _DataAndCacheCardState extends State<_DataAndCacheCard> {
       _resultMessage = null;
     });
     try {
-      final preview = await widget.previewOfflineData!(
+      var preview = await widget.previewOfflineData!(
         accountId: widget.accountId,
         command: command,
       );
-      if (!mounted) return;
-      final confirmed = await showDialog<bool>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: Text(command == OfflineClearCommand.cache ? '清除缓存' : '清除离线工作'),
-          content: _OfflineClearPreviewContent(preview: preview),
-          actions: [
-            TextButton(
-              key: const Key('offline-clear-cancel'),
-              onPressed: () => Navigator.of(context).pop(false),
-              child: const Text('取消'),
+      var requiresReconfirmation = false;
+      while (true) {
+        if (!mounted) return;
+        final confirmed = await showDialog<bool>(
+          context: context,
+          builder: (context) => AlertDialog(
+            title: Text(
+              command == OfflineClearCommand.cache ? '清除缓存' : '清除离线工作',
             ),
-            FilledButton(
-              key: const Key('offline-clear-confirm'),
-              onPressed: () => Navigator.of(context).pop(true),
-              child: const Text('确认清除'),
+            content: _OfflineClearPreviewContent(
+              preview: preview,
+              requiresReconfirmation: requiresReconfirmation,
             ),
-          ],
-        ),
-      );
-      if (confirmed != true || !mounted) return;
-      final report = await widget.executeOfflineClear!(preview);
-      if (!mounted) return;
-      setState(() {
-        _resultIsFailure = !report.completed;
-        _resultMessage = report.completed
-            ? command == OfflineClearCommand.cache
-                  ? '缓存已清除'
-                  : '离线工作已清除'
-            : report.failures.map((failure) => failure.message).join(' ');
-      });
+            actions: [
+              TextButton(
+                key: const Key('offline-clear-cancel'),
+                onPressed: () => Navigator.of(context).pop(false),
+                child: const Text('取消'),
+              ),
+              FilledButton(
+                key: const Key('offline-clear-confirm'),
+                onPressed: () => Navigator.of(context).pop(true),
+                child: const Text('确认清除'),
+              ),
+            ],
+          ),
+        );
+        if (confirmed != true || !mounted) return;
+        final report = await widget.executeOfflineClear!(preview);
+        if (!mounted) return;
+        if (report.requiresReconfirmation) {
+          preview = report.currentPreview!;
+          requiresReconfirmation = true;
+          continue;
+        }
+        setState(() {
+          _resultIsFailure = !report.completed;
+          _resultMessage = report.completed
+              ? command == OfflineClearCommand.cache
+                    ? '缓存已清除'
+                    : '离线工作已清除'
+              : report.failures.map((failure) => failure.message).join(' ');
+        });
+        return;
+      }
     } on Object catch (error) {
       if (!mounted) return;
       setState(() {
@@ -318,9 +333,13 @@ final class _DataAndCacheCardState extends State<_DataAndCacheCard> {
 }
 
 final class _OfflineClearPreviewContent extends StatelessWidget {
-  const _OfflineClearPreviewContent({required this.preview});
+  const _OfflineClearPreviewContent({
+    required this.preview,
+    this.requiresReconfirmation = false,
+  });
 
   final OfflineClearPreview preview;
+  final bool requiresReconfirmation;
 
   @override
   Widget build(BuildContext context) {
@@ -329,11 +348,11 @@ final class _OfflineClearPreviewContent extends StatelessWidget {
         ? [
             '缓存记录：${counts.cacheEntries} 项',
             '已下载文件：${counts.downloads} 项',
-            '不会删除草稿或待同步操作',
+            '不会删除草稿或同步操作记录',
           ]
         : [
             '草稿：${counts.drafts} 项',
-            '待同步操作：${counts.outboxOperations} 项',
+            '同步操作记录（含待处理、失败和已完成证据）：${counts.outboxOperations} 项',
             '暂存附件：${counts.stagedTransfers} 项',
             '扫码会话：${counts.scanSessions} 项',
             '缓存记录和已下载文件将保留',
@@ -342,6 +361,11 @@ final class _OfflineClearPreviewContent extends StatelessWidget {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        if (requiresReconfirmation)
+          const Padding(
+            padding: EdgeInsets.only(bottom: 8),
+            child: Text('数据已变化，请重新确认'),
+          ),
         for (final line in lines)
           Padding(
             padding: const EdgeInsets.symmetric(vertical: 3),
@@ -567,29 +591,54 @@ final class _WarehouseSelectorRow extends StatelessWidget {
   }
 }
 
-final class _LogoutCard extends StatelessWidget {
+final class _LogoutCard extends StatefulWidget {
   const _LogoutCard({required this.onLogout, required this.onLogoutRequested});
 
   final VoidCallback? onLogout;
-  final Future<void> Function(DraftRetentionChoice choice)? onLogoutRequested;
+  final Future<OfflineOwnershipReport?> Function(DraftRetentionChoice choice)?
+  onLogoutRequested;
+
+  @override
+  State<_LogoutCard> createState() => _LogoutCardState();
+}
+
+final class _LogoutCardState extends State<_LogoutCard> {
+  bool _isRunning = false;
+  String? _failureMessage;
 
   @override
   Widget build(BuildContext context) {
     return RimsCard(
       padding: const EdgeInsets.all(10),
-      child: TextButton.icon(
-        key: const Key('profile-logout-button'),
-        onPressed: onLogoutRequested == null
-            ? onLogout
-            : () => _requestLogout(context),
-        icon: const Icon(Icons.logout, color: AppColors.error),
-        label: Text(
-          '退出登录',
-          style: AppTextStyles.bodyMedium.copyWith(
-            color: AppColors.error,
-            fontWeight: FontWeight.w800,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          TextButton.icon(
+            key: const Key('profile-logout-button'),
+            onPressed: _isRunning
+                ? null
+                : widget.onLogoutRequested == null
+                ? widget.onLogout
+                : () => _requestLogout(context),
+            icon: const Icon(Icons.logout, color: AppColors.error),
+            label: Text(
+              _isRunning ? '正在退出...' : '退出登录',
+              style: AppTextStyles.bodyMedium.copyWith(
+                color: AppColors.error,
+                fontWeight: FontWeight.w800,
+              ),
+            ),
           ),
-        ),
+          if (_failureMessage != null)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(8, 0, 8, 8),
+              child: Text(
+                _failureMessage!,
+                key: const Key('profile-logout-failure'),
+                style: AppTextStyles.bodySmall.copyWith(color: AppColors.error),
+              ),
+            ),
+        ],
       ),
     );
   }
@@ -620,7 +669,25 @@ final class _LogoutCard extends StatelessWidget {
         ],
       ),
     );
-    if (choice != null) await onLogoutRequested?.call(choice);
+    if (choice == null || !mounted) return;
+    setState(() {
+      _isRunning = true;
+      _failureMessage = null;
+    });
+    try {
+      final report = await widget.onLogoutRequested?.call(choice);
+      if (!mounted || report == null || report.completed) return;
+      setState(() {
+        _failureMessage = report.failures
+            .map((failure) => failure.message)
+            .join(' ');
+      });
+    } on Object catch (error) {
+      if (!mounted) return;
+      setState(() => _failureMessage = '退出失败：${error.runtimeType}');
+    } finally {
+      if (mounted) setState(() => _isRunning = false);
+    }
   }
 }
 

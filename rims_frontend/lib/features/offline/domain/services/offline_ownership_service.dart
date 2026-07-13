@@ -16,6 +16,7 @@ enum DraftRetentionChoice { delete, retainLocally }
 enum OfflineClearCommand { cache, offlineWork }
 
 enum OfflineOwnershipStep {
+  mutationQuiescence,
   store,
   files,
   scanSessions,
@@ -191,6 +192,7 @@ final class OfflineOwnershipReport {
     required this.executedCounts,
     required List<OfflineOwnershipFailure> failures,
     this.changedSincePreview = false,
+    this.currentPreview,
     this.remainingCounts = const OfflineOwnershipCounts(),
   }) : failures = List.unmodifiable(failures);
 
@@ -200,8 +202,11 @@ final class OfflineOwnershipReport {
   final OfflineOwnershipCounts remainingCounts;
   final List<OfflineOwnershipFailure> failures;
   final bool changedSincePreview;
+  final OfflineClearPreview? currentPreview;
 
-  bool get completed => failures.isEmpty;
+  bool get requiresReconfirmation => currentPreview != null;
+
+  bool get completed => failures.isEmpty && !requiresReconfirmation;
 }
 
 abstract interface class OfflineOwnershipStore {
@@ -259,6 +264,10 @@ abstract interface class OfflineDatabaseKeyManager {
   Future<void> rotateAfterRevocation();
 }
 
+abstract interface class OfflineMutationParticipant {
+  Future<void> waitForQuiescence();
+}
+
 final class MemoryOfflineDatabaseKeyManager
     implements OfflineDatabaseKeyManager {
   int generation = 0;
@@ -291,12 +300,21 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
   final OfflineOwnedScanStore scans;
   final OfflineReviewInvalidator reviews;
   final OfflineDatabaseKeyManager databaseKeys;
+  OfflineMutationParticipant? _mutationParticipant;
 
   final Map<String, Set<OfflineOwnershipReason>> _blockedReasons = {};
   final Set<String> _commandBlockedAccounts = {};
   final Set<String> _successfulRevocations = {};
   Future<void> _tail = Future<void>.value();
   int _previewSequence = 0;
+
+  void attachMutationParticipant(OfflineMutationParticipant participant) {
+    final current = _mutationParticipant;
+    if (current != null && !identical(current, participant)) {
+      throw StateError('An offline mutation participant is already attached.');
+    }
+    _mutationParticipant = participant;
+  }
 
   @override
   bool canSync(String accountId) => !_isBlocked(accountId);
@@ -326,10 +344,41 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
     _commandBlockedAccounts.add(preview.accountId);
     return _serialized(() async {
       final failures = <OfflineOwnershipFailure>[];
+      if (preview.command == OfflineClearCommand.offlineWork) {
+        await _step(
+          OfflineOwnershipStep.mutationQuiescence,
+          'Unable to wait for active synchronization to finish.',
+          () async => _mutationParticipant?.waitForQuiescence(),
+          failures,
+        );
+      }
       final executedCounts = await _inspectWithFailure(
         preview.accountId,
         failures,
       );
+      if (failures.isNotEmpty) {
+        return OfflineOwnershipReport(
+          reason: null,
+          accountId: preview.accountId,
+          executedCounts: executedCounts,
+          failures: failures,
+        );
+      }
+      if (executedCounts != preview.counts) {
+        return OfflineOwnershipReport(
+          reason: null,
+          accountId: preview.accountId,
+          executedCounts: executedCounts,
+          changedSincePreview: true,
+          currentPreview: OfflineClearPreview(
+            accountId: preview.accountId,
+            command: preview.command,
+            counts: executedCounts,
+            sequence: ++_previewSequence,
+          ),
+          failures: const [],
+        );
+      }
       switch (preview.command) {
         case OfflineClearCommand.cache:
           await _step(
@@ -370,7 +419,7 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
         accountId: preview.accountId,
         executedCounts: executedCounts,
         remainingCounts: remaining,
-        changedSincePreview: executedCounts != preview.counts,
+        changedSincePreview: false,
         failures: failures,
       );
     }).whenComplete(() {
@@ -388,20 +437,39 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
 
   Future<OfflineOwnershipReport> _apply(OfflineOwnershipIntent intent) async {
     final failures = <OfflineOwnershipFailure>[];
+    if (intent.reason != OfflineOwnershipReason.reauthenticated) {
+      await _step(
+        OfflineOwnershipStep.mutationQuiescence,
+        'Unable to wait for active synchronization to finish.',
+        () async => _mutationParticipant?.waitForQuiescence(),
+        failures,
+      );
+      if (failures.isNotEmpty) {
+        return OfflineOwnershipReport(
+          reason: intent.reason,
+          accountId: intent.accountId,
+          executedCounts: const OfflineOwnershipCounts(),
+          failures: failures,
+        );
+      }
+    }
     final counts = await _inspectWithFailure(intent.accountId, failures);
 
     switch (intent.reason) {
       case OfflineOwnershipReason.logout:
         final preserveDrafts =
             intent.draftRetention == DraftRetentionChoice.retainLocally;
-        await _clearAccount(
-          intent.accountId,
-          preserveDrafts: preserveDrafts,
-          retainedStagedRequestIds: preserveDrafts
-              ? await _draftAttachmentIds(intent.accountId, failures)
-              : const {},
-          failures: failures,
-        );
+        final retainedStagedRequestIds = preserveDrafts
+            ? await _draftAttachmentIds(intent.accountId, failures)
+            : const <String>{};
+        if (retainedStagedRequestIds != null) {
+          await _clearAccount(
+            intent.accountId,
+            preserveDrafts: preserveDrafts,
+            retainedStagedRequestIds: retainedStagedRequestIds,
+            failures: failures,
+          );
+        }
       case OfflineOwnershipReason.accountSwitch:
         await _clearAccount(
           intent.accountId,
@@ -590,7 +658,7 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
     );
   }
 
-  Future<Set<String>> _draftAttachmentIds(
+  Future<Set<String>?> _draftAttachmentIds(
     String accountId,
     List<OfflineOwnershipFailure> failures,
   ) async {
@@ -606,7 +674,7 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
           cause: error,
         ),
       );
-      return const {};
+      return null;
     }
   }
 
