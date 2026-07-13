@@ -7,14 +7,21 @@ import '../../domain/entities/network_reachability.dart';
 import '../../domain/entities/outbox_operation.dart';
 import '../../domain/repositories/outbox_repository.dart';
 import '../../domain/services/network_status_service.dart';
+import '../../domain/services/outbox_executor.dart';
+import '../../domain/services/outbox_status_classifier.dart';
+
+typedef OfflineStatusTimerFactory =
+    Timer Function(Duration delay, void Function() callback);
 
 final class OfflineStatusViewModel extends ChangeNotifier {
   OfflineStatusViewModel({
     required this.networkStatusService,
     required this.outboxRepository,
-    required this.accountIdReader,
+    required this.contextReader,
     DateTime Function()? now,
+    OfflineStatusTimerFactory? scheduleTimer,
   }) : now = now ?? DateTime.now,
+       scheduleTimer = scheduleTimer ?? Timer.new,
        _reachability = networkStatusService.current {
     _networkSubscription = networkStatusService.changes.listen(
       _handleReachability,
@@ -23,13 +30,18 @@ final class OfflineStatusViewModel extends ChangeNotifier {
 
   final NetworkStatusService networkStatusService;
   final OutboxRepository? outboxRepository;
-  final String? Function() accountIdReader;
+  final OutboxExecutionContext? Function() contextReader;
   final DateTime Function() now;
+  final OfflineStatusTimerFactory scheduleTimer;
+  static const OutboxStatusClassifier _statusClassifier =
+      OutboxStatusClassifier();
   late final StreamSubscription<NetworkReachability> _networkSubscription;
+  Timer? _freshnessTimer;
 
   NetworkReachability _reachability;
   DateTime? _fetchedAt;
   DateTime? _expiresAt;
+  bool _hasCachedData = false;
   int _queuedCount = 0;
   int _attentionCount = 0;
   bool _isDisposed = false;
@@ -48,7 +60,8 @@ final class OfflineStatusViewModel extends ChangeNotifier {
 
   bool get isStale {
     final expiresAt = _expiresAt;
-    return expiresAt != null && now().toUtc().isAfter(expiresAt.toUtc());
+    return _hasCachedData ||
+        (expiresAt != null && !now().toUtc().isBefore(expiresAt.toUtc()));
   }
 
   String get dataAgeLabel {
@@ -70,29 +83,105 @@ final class OfflineStatusViewModel extends ChangeNotifier {
   Future<void> refreshCounts() async {
     final generation = ++_loadGeneration;
     final repository = outboxRepository;
-    final accountId = accountIdReader()?.trim();
-    if (repository == null || accountId == null || accountId.isEmpty) {
+    final context = contextReader();
+    if (repository == null || context == null) {
       _setCounts(0, 0);
       return;
     }
-    final result = await repository.list(accountId);
+    final result = await repository.list(context.accountId);
     if (_isDisposed || generation != _loadGeneration) return;
     switch (result) {
       case Success<List<OutboxOperation>>(:final data):
-        _setCounts(
-          data.where(_isQueued).length,
-          data.where(_needsAttention).length,
+        final visible = _statusClassifier.visibleOperations(
+          operations: data,
+          context: context,
         );
+        final deniedIds = _statusClassifier.deniedOperationIds(
+          operations: visible,
+          context: context,
+        );
+        final component = await repository.loadConnectedComponent(
+          accountId: context.accountId,
+          operationIds: deniedIds,
+        );
+        if (_isDisposed || generation != _loadGeneration) return;
+        final blockedIds = switch (component) {
+          Success<List<OutboxOperation>>(:final data) =>
+            data
+                .map((operation) => operation.operationId)
+                .where(
+                  visible
+                      .map((operation) => operation.operationId)
+                      .toSet()
+                      .contains,
+                )
+                .toSet(),
+          FailureResult<List<OutboxOperation>>() => deniedIds,
+        };
+        final buckets = _statusClassifier.classify(
+          operations: visible,
+          permissionBlockedOperationIds: blockedIds,
+        );
+        _setCounts(buckets.waiting.length, buckets.attention.length);
       case FailureResult<List<OutboxOperation>>():
         break;
     }
   }
 
-  void updateDataFreshness({DateTime? fetchedAt, DateTime? expiresAt}) {
-    if (_fetchedAt == fetchedAt && _expiresAt == expiresAt) return;
+  void updateDataFreshness({
+    DateTime? fetchedAt,
+    DateTime? expiresAt,
+    bool hasCachedData = false,
+  }) {
+    if (_fetchedAt == fetchedAt &&
+        _expiresAt == expiresAt &&
+        _hasCachedData == hasCachedData) {
+      return;
+    }
     _fetchedAt = fetchedAt;
     _expiresAt = expiresAt;
+    _hasCachedData = hasCachedData;
+    _scheduleFreshnessUpdate();
     notifyListeners();
+  }
+
+  void _scheduleFreshnessUpdate() {
+    _freshnessTimer?.cancel();
+    _freshnessTimer = null;
+    final fetchedAt = _fetchedAt?.toUtc();
+    if (fetchedAt == null || _isDisposed) return;
+    final current = now().toUtc();
+    final age = current.difference(fetchedAt);
+    final normalizedAge = age.isNegative ? Duration.zero : age;
+    final nextAgeBoundary = switch (normalizedAge) {
+      Duration(inMinutes: < 1) => fetchedAt.add(const Duration(minutes: 1)),
+      Duration(inHours: < 1) => fetchedAt.add(
+        Duration(minutes: normalizedAge.inMinutes + 1),
+      ),
+      Duration(inDays: < 1) => fetchedAt.add(
+        Duration(hours: normalizedAge.inHours + 1),
+      ),
+      _ => fetchedAt.add(Duration(days: normalizedAge.inDays + 1)),
+    };
+    var deadline = nextAgeBoundary;
+    final expiresAt = _expiresAt?.toUtc();
+    if (expiresAt != null &&
+        current.isBefore(expiresAt) &&
+        expiresAt.isBefore(deadline)) {
+      deadline = expiresAt;
+    }
+    final delay = deadline.difference(current);
+    _freshnessTimer = scheduleTimer(
+      delay.isNegative ? Duration.zero : delay,
+      _handleFreshnessTimer,
+    );
+  }
+
+  void _handleFreshnessTimer() {
+    _freshnessTimer = null;
+    if (_isDisposed) return;
+    notifyListeners();
+    _scheduleFreshnessUpdate();
   }
 
   void _handleReachability(NetworkReachability reachability) {
@@ -108,21 +197,12 @@ final class OfflineStatusViewModel extends ChangeNotifier {
     notifyListeners();
   }
 
-  bool _isQueued(OutboxOperation operation) {
-    return operation.state == OutboxState.queued ||
-        operation.state == OutboxState.retryableFailure ||
-        operation.state == OutboxState.syncing;
-  }
-
-  bool _needsAttention(OutboxOperation operation) {
-    return operation.state == OutboxState.conflict ||
-        operation.state == OutboxState.permanentFailure;
-  }
-
   @override
   void dispose() {
     _isDisposed = true;
     _loadGeneration += 1;
+    _freshnessTimer?.cancel();
+    _freshnessTimer = null;
     unawaited(_networkSubscription.cancel());
     super.dispose();
   }

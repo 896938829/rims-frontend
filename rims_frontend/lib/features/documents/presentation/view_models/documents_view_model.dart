@@ -1946,6 +1946,48 @@ final class DocumentsViewModel extends ChangeNotifier {
     );
   }
 
+  bool prepareOfflineLifecycleSubmission(
+    DocumentRecord document,
+    OutboxOperationKind kind,
+  ) {
+    if (canSubmitAuthoritatively) {
+      _documentActionError = '服务当前可用，请直接提交单据动作';
+      notifyListeners();
+      return false;
+    }
+    final isAllowedAction = switch (kind) {
+      OutboxOperationKind.documentComplete =>
+        canCompleteDocument(document) &&
+            (!_isAdminOnlyDocument(document) || canManageAdminDocumentActions),
+      OutboxOperationKind.stocktakeConfirm => canConfirmStocktakeDocument(
+        document,
+      ),
+      OutboxOperationKind.stocktakeSettle => canSettleStocktakeDocument(
+        document,
+      ),
+      _ => false,
+    };
+    if (!isAllowedAction) {
+      _documentActionError = '当前状态或权限不能执行该动作';
+      notifyListeners();
+      return false;
+    }
+    if (_completingDocumentIds.contains(document.id)) return false;
+    final requestKey = '${kind.wireValue}:${document.id}';
+    final requestId = _lifecycleRequestIds.putIfAbsent(
+      requestKey,
+      const Uuid().v4,
+    );
+    final prepared = _prepareLifecycleForQueue(
+      document: document,
+      kind: kind,
+      requestId: requestId,
+      requiresStatusProbe: false,
+    );
+    notifyListeners();
+    return prepared;
+  }
+
   Future<bool> _runLifecycleAction({
     required DocumentRecord document,
     required OutboxOperationKind kind,
@@ -1991,33 +2033,13 @@ final class DocumentsViewModel extends ChangeNotifier {
         await load();
       },
       failure: (failure) async {
-        final currentAccountId = accountId;
-        final warehouse = currentWarehouse;
         if (_canOfferOfflineQueue(failure) &&
-            currentAccountId != null &&
-            warehouse != null &&
-            outboxRepository != null) {
-          _pendingOfflineSubmission = null;
-          _pendingLifecycleSubmission = _PendingLifecycleSubmission(
-            kind: kind,
-            requestId: requestId,
-            documentId: document.id,
-            expectedDocType: document.docType,
-            expectedStatus: document.status,
-            accountId: currentAccountId,
-            warehouseId: warehouse.id,
-            requiresStatusProbe: failure is TransportUnknownFailure,
-            review: OfflineSubmissionReview(
-              warehouseName: warehouse.name,
-              documentType: document.title,
-              lineCount: 0,
-              lines: [document.number],
-              staleAssumptions: const [
-                '单据状态、库存和权限将在同步前重新校验',
-                '保存前需具备引用单据和生命周期操作的完整权限',
-              ],
-            ),
-          );
+            _prepareLifecycleForQueue(
+              document: document,
+              kind: kind,
+              requestId: requestId,
+              requiresStatusProbe: failure is TransportUnknownFailure,
+            )) {
           _documentActionError = '网络结果不确定，确认后可保存到待同步';
         } else {
           _pendingLifecycleSubmission = null;
@@ -2033,6 +2055,46 @@ final class DocumentsViewModel extends ChangeNotifier {
     };
     notifyListeners();
     return completed;
+  }
+
+  bool _prepareLifecycleForQueue({
+    required DocumentRecord document,
+    required OutboxOperationKind kind,
+    required String requestId,
+    required bool requiresStatusProbe,
+  }) {
+    final currentAccountId = accountId;
+    final warehouse = currentWarehouse;
+    if (currentAccountId == null ||
+        warehouse == null ||
+        outboxRepository == null) {
+      _pendingLifecycleSubmission = null;
+      _documentActionError = '待同步服务当前不可用';
+      return false;
+    }
+    _pendingOfflineSubmission = null;
+    _pendingLifecycleSubmission = _PendingLifecycleSubmission(
+      kind: kind,
+      requestId: requestId,
+      documentId: document.id,
+      expectedDocType: document.docType,
+      expectedStatus: document.status,
+      accountId: currentAccountId,
+      warehouseId: warehouse.id,
+      requiresStatusProbe: requiresStatusProbe,
+      review: OfflineSubmissionReview(
+        warehouseName: warehouse.name,
+        documentType: document.title,
+        lineCount: 0,
+        lines: [document.number],
+        staleAssumptions: const [
+          '单据状态、库存和权限将在同步前重新校验',
+          '保存前需具备引用单据和生命周期操作的完整权限',
+        ],
+      ),
+    );
+    _documentActionError = '确认复核后可保存到待同步';
+    return true;
   }
 
   bool _matchesDocumentDate(DocumentRecord document) {

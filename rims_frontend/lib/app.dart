@@ -432,8 +432,6 @@ final class _MainAppState extends State<MainApp> {
     return MaterialApp.router(
       title: 'RIMS',
       theme: AppTheme.light,
-      darkTheme: AppTheme.dark,
-      themeMode: ThemeMode.system,
       routerConfig: _router,
     );
   }

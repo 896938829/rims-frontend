@@ -1,3 +1,4 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rims_frontend/main.dart';
 import 'package:rims_frontend/features/offline/data/repositories/memory_offline_store.dart';
@@ -16,6 +17,28 @@ void main() {
 
     expect(find.text('RIMS'), findsWidgets);
     expect(find.text('登录'), findsWidgets);
+  });
+
+  testWidgets('production app keeps its existing light theme behavior', (
+    tester,
+  ) async {
+    tester.platformDispatcher.platformBrightnessTestValue = Brightness.dark;
+    addTearDown(tester.platformDispatcher.clearPlatformBrightnessTestValue);
+
+    await tester.pumpWidget(
+      MainApp(
+        offlineStore: MemoryOfflineStore(),
+        networkStatusService: _OnlineNetworkStatusService(),
+      ),
+    );
+    await tester.pump();
+
+    final app = tester.widget<MaterialApp>(find.byType(MaterialApp));
+    expect(app.darkTheme, isNull);
+    expect(
+      Theme.of(tester.element(find.byType(Scaffold).first)).brightness,
+      Brightness.light,
+    );
   });
 }
 

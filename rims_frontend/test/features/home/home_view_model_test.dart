@@ -61,6 +61,22 @@ void main() {
     expect(viewModel.recentDocuments, [_recentDocument]);
   });
 
+  test(
+    'HomeViewModel preserves stale inventory metadata after fresher reads',
+    () async {
+      final inventoryRepository = _FreshnessInventoryRepository();
+      final viewModel = HomeViewModel(inventoryRepository: inventoryRepository);
+
+      await viewModel.load();
+
+      expect(inventoryRepository.readCount, 3);
+      expect(viewModel.dataFreshness, isNotNull);
+      expect(viewModel.dataFreshness!.fetchedAt, DateTime.utc(2026, 7, 14, 8));
+      expect(viewModel.dataFreshness!.expiresAt, DateTime.utc(2026, 7, 14, 9));
+      expect(viewModel.dataFreshness!.hasCachedData, isTrue);
+    },
+  );
+
   test('operator quick actions hide admin-only document workflows', () {
     final viewModel = HomeViewModel(user: _operatorUser);
 
@@ -517,6 +533,68 @@ final class _FakeInventoryRepository implements InventoryRepository {
     int page = 1,
   }) async {
     return Success(_homePage(nonStandardItems, total: nonStandardTotal));
+  }
+}
+
+final class _FreshnessInventoryRepository
+    implements InventoryRepository, InventoryReadMetadata {
+  int readCount = 0;
+
+  @override
+  InventoryReadStatus? lastReadStatus;
+
+  @override
+  Future<Result<PageData<InventoryItem>>> listInventory({
+    String keyword = '',
+    int page = 1,
+  }) async {
+    readCount += 1;
+    lastReadStatus = InventoryReadStatus(
+      source: InventoryDataSource.cache,
+      fetchedAt: DateTime.utc(2026, 7, 14, 8),
+      expiresAt: DateTime.utc(2026, 7, 14, 9),
+    );
+    return Success(_homePage([_standardItem]));
+  }
+
+  @override
+  Future<Result<PageData<InventoryItem>>> listInventoryAlerts({
+    int page = 1,
+  }) async {
+    readCount += 1;
+    lastReadStatus = InventoryReadStatus(
+      source: InventoryDataSource.network,
+      fetchedAt: DateTime.utc(2026, 7, 14, 11),
+      expiresAt: DateTime.utc(2026, 7, 14, 12),
+    );
+    return Success(_homePage([]));
+  }
+
+  @override
+  Future<Result<PageData<NonStandardInventoryItem>>> listNonStandardInventory({
+    int page = 1,
+  }) async {
+    readCount += 1;
+    lastReadStatus = InventoryReadStatus(
+      source: InventoryDataSource.network,
+      fetchedAt: DateTime.utc(2026, 7, 14, 11, 30),
+      expiresAt: DateTime.utc(2026, 7, 14, 12, 30),
+    );
+    return Success(_homePage([]));
+  }
+
+  @override
+  Future<Result<InventoryItem>> findProductByBarcode(String barcode) async {
+    return const Success(_standardItem);
+  }
+
+  @override
+  Future<Result<InventoryItem>> updateInventorySettings({
+    required int inventoryId,
+    int? alertThreshold,
+    int? status,
+  }) async {
+    return const Success(_standardItem);
   }
 }
 

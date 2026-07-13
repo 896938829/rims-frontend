@@ -889,54 +889,60 @@ final class _DocumentDetailActions extends StatelessWidget {
     final actions = <Widget>[
       if (viewModel.canCompleteDocument(document))
         _DocumentDetailActionButton(
-          label: '完成单据',
+          label: viewModel.canSubmitAuthoritatively ? '完成单据' : '复核完成并保存待同步',
           icon: Icons.check_circle_outline,
           isBusy: viewModel.isCompletingDocument(document),
-          onPressed: viewModel.canSubmitAuthoritatively
-              ? () => unawaited(
-                  _confirmAndRun(
-                    context: context,
-                    title: '完成单据',
-                    content: '确认完成 ${document.number}？完成后将执行库存变更。',
-                    confirmLabel: '确认完成',
-                    run: () => viewModel.completeDocument(document),
-                  ),
-                )
-              : null,
+          onPressed: () => unawaited(
+            _confirmLifecycleAction(
+              context: context,
+              document: document,
+              viewModel: viewModel,
+              kind: OutboxOperationKind.documentComplete,
+              title: '完成单据',
+              content: '确认完成 ${document.number}？完成后将执行库存变更。',
+              confirmLabel: '确认完成',
+              eventBus: eventBus,
+              closeOnSuccess: true,
+            ),
+          ),
         ),
       if (viewModel.canConfirmStocktakeDocument(document))
         _DocumentDetailActionButton(
-          label: '确认盘点差异',
+          label: viewModel.canSubmitAuthoritatively ? '确认盘点差异' : '复核确认并保存待同步',
           icon: Icons.fact_check_outlined,
           isBusy: viewModel.isCompletingDocument(document),
-          onPressed: viewModel.canSubmitAuthoritatively
-              ? () => unawaited(
-                  _confirmAndRun(
-                    context: context,
-                    title: '确认盘点差异',
-                    content: '确认 ${document.number} 的盘点差异？',
-                    confirmLabel: '确认差异',
-                    run: () => viewModel.confirmStocktakeDocument(document),
-                  ),
-                )
-              : null,
+          onPressed: () => unawaited(
+            _confirmLifecycleAction(
+              context: context,
+              document: document,
+              viewModel: viewModel,
+              kind: OutboxOperationKind.stocktakeConfirm,
+              title: '确认盘点差异',
+              content: '确认 ${document.number} 的盘点差异？',
+              confirmLabel: '确认差异',
+              eventBus: eventBus,
+              closeOnSuccess: true,
+            ),
+          ),
         ),
       if (viewModel.canSettleStocktakeDocument(document))
         _DocumentDetailActionButton(
-          label: '结转盘点差异',
+          label: viewModel.canSubmitAuthoritatively ? '结转盘点差异' : '复核结转并保存待同步',
           icon: Icons.done_all_outlined,
           isBusy: viewModel.isCompletingDocument(document),
-          onPressed: viewModel.canSubmitAuthoritatively
-              ? () => unawaited(
-                  _confirmAndRun(
-                    context: context,
-                    title: '结转盘点差异',
-                    content: '确认结转 ${document.number}？结转后将应用库存差异。',
-                    confirmLabel: '确认结转',
-                    run: () => viewModel.settleStocktakeDocument(document),
-                  ),
-                )
-              : null,
+          onPressed: () => unawaited(
+            _confirmLifecycleAction(
+              context: context,
+              document: document,
+              viewModel: viewModel,
+              kind: OutboxOperationKind.stocktakeSettle,
+              title: '结转盘点差异',
+              content: '确认结转 ${document.number}？结转后将应用库存差异。',
+              confirmLabel: '确认结转',
+              eventBus: eventBus,
+              closeOnSuccess: true,
+            ),
+          ),
         ),
     ];
 
@@ -975,44 +981,6 @@ final class _DocumentDetailActions extends StatelessWidget {
         ],
       ],
     );
-  }
-
-  Future<void> _confirmAndRun({
-    required BuildContext context,
-    required String title,
-    required String content,
-    required String confirmLabel,
-    required Future<bool> Function() run,
-  }) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) {
-        return AlertDialog(
-          title: Text(title),
-          content: Text(content),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(false),
-              child: const Text('取消'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.of(context).pop(true),
-              child: Text(confirmLabel),
-            ),
-          ],
-        );
-      },
-    );
-
-    if (confirmed == true && context.mounted) {
-      final succeeded = await run();
-      if (succeeded) {
-        eventBus?.publish(const GlobalRefreshRequestedEvent());
-        if (context.mounted) {
-          Navigator.of(context).maybePop();
-        }
-      }
-    }
   }
 }
 
@@ -1940,62 +1908,65 @@ final class _RecentDocumentCard extends StatelessWidget {
                 const SizedBox(height: 6),
                 _LifecycleButton(
                   key: Key('document-complete-${document.id}'),
-                  label: '完成',
+                  label: viewModel.canSubmitAuthoritatively ? '完成' : '复核完成待同步',
                   busyLabel: '完成中',
                   isBusy: viewModel.isCompletingDocument(document),
-                  onPressed: viewModel.canSubmitAuthoritatively
-                      ? () => unawaited(
-                          _confirmAndRun(
-                            context: context,
-                            title: '完成单据',
-                            content: '确认完成 ${document.number}？完成后将执行库存变更。',
-                            confirmLabel: '确认完成',
-                            run: () => viewModel.completeDocument(document),
-                          ),
-                        )
-                      : null,
+                  onPressed: () => unawaited(
+                    _confirmLifecycleAction(
+                      context: context,
+                      document: document,
+                      viewModel: viewModel,
+                      kind: OutboxOperationKind.documentComplete,
+                      title: '完成单据',
+                      content: '确认完成 ${document.number}？完成后将执行库存变更。',
+                      confirmLabel: '确认完成',
+                      eventBus: eventBus,
+                    ),
+                  ),
                 ),
               ],
               if (viewModel.canConfirmStocktakeDocument(document)) ...[
                 const SizedBox(height: 6),
                 _LifecycleButton(
                   key: Key('document-confirm-${document.id}'),
-                  label: '确认差异',
+                  label: viewModel.canSubmitAuthoritatively
+                      ? '确认差异'
+                      : '复核确认待同步',
                   busyLabel: '确认中',
                   isBusy: viewModel.isCompletingDocument(document),
-                  onPressed: viewModel.canSubmitAuthoritatively
-                      ? () => unawaited(
-                          _confirmAndRun(
-                            context: context,
-                            title: '确认盘点差异',
-                            content: '确认 ${document.number} 的盘点差异？',
-                            confirmLabel: '确认差异',
-                            run: () =>
-                                viewModel.confirmStocktakeDocument(document),
-                          ),
-                        )
-                      : null,
+                  onPressed: () => unawaited(
+                    _confirmLifecycleAction(
+                      context: context,
+                      document: document,
+                      viewModel: viewModel,
+                      kind: OutboxOperationKind.stocktakeConfirm,
+                      title: '确认盘点差异',
+                      content: '确认 ${document.number} 的盘点差异？',
+                      confirmLabel: '确认差异',
+                      eventBus: eventBus,
+                    ),
+                  ),
                 ),
               ],
               if (viewModel.canSettleStocktakeDocument(document)) ...[
                 const SizedBox(height: 6),
                 _LifecycleButton(
                   key: Key('document-settle-${document.id}'),
-                  label: '结转',
+                  label: viewModel.canSubmitAuthoritatively ? '结转' : '复核结转待同步',
                   busyLabel: '结转中',
                   isBusy: viewModel.isCompletingDocument(document),
-                  onPressed: viewModel.canSubmitAuthoritatively
-                      ? () => unawaited(
-                          _confirmAndRun(
-                            context: context,
-                            title: '结转盘点差异',
-                            content: '确认结转 ${document.number}？结转后将应用库存差异。',
-                            confirmLabel: '确认结转',
-                            run: () =>
-                                viewModel.settleStocktakeDocument(document),
-                          ),
-                        )
-                      : null,
+                  onPressed: () => unawaited(
+                    _confirmLifecycleAction(
+                      context: context,
+                      document: document,
+                      viewModel: viewModel,
+                      kind: OutboxOperationKind.stocktakeSettle,
+                      title: '结转盘点差异',
+                      content: '确认结转 ${document.number}？结转后将应用库存差异。',
+                      confirmLabel: '确认结转',
+                      eventBus: eventBus,
+                    ),
+                  ),
                 ),
               ],
             ],
@@ -2004,67 +1975,90 @@ final class _RecentDocumentCard extends StatelessWidget {
       ),
     );
   }
+}
 
-  Future<void> _confirmAndRun({
-    required BuildContext context,
-    required String title,
-    required String content,
-    required String confirmLabel,
-    required Future<bool> Function() run,
-  }) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (context) {
-        return AlertDialog(
-          title: Text(title),
-          content: Text(content),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(false),
-              child: const Text('取消'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.of(context).pop(true),
-              child: Text(confirmLabel),
-            ),
-          ],
-        );
-      },
-    );
-
-    if (confirmed == true && context.mounted) {
-      final succeeded = await run();
-      if (succeeded) {
-        eventBus?.publish(const GlobalRefreshRequestedEvent());
-        return;
-      }
-      final review = viewModel.offlineSubmissionReview;
-      if (review == null || !context.mounted) return;
-      final queueConfirmed = await showDialog<bool>(
-        context: context,
-        builder: (context) => AlertDialog(
-          title: const Text('保存到待同步'),
-          content: Text(
-            '${review.warehouseName} · ${review.documentType}\n'
-            '${review.lines.join('\n')}\n\n'
-            '${review.staleAssumptions.join('\n')}',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(false),
-              child: const Text('取消'),
-            ),
-            FilledButton(
-              onPressed: () => Navigator.of(context).pop(true),
-              child: const Text('确认保存'),
-            ),
-          ],
+Future<void> _confirmLifecycleAction({
+  required BuildContext context,
+  required DocumentRecord document,
+  required DocumentsViewModel viewModel,
+  required OutboxOperationKind kind,
+  required String title,
+  required String content,
+  required String confirmLabel,
+  AppEventBus? eventBus,
+  bool closeOnSuccess = false,
+}) async {
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text(title),
+      content: Text(content),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(false),
+          child: const Text('取消'),
         ),
-      );
-      if (queueConfirmed == true) {
-        await viewModel.confirmOfflineSubmission();
-      }
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(true),
+          child: Text(confirmLabel),
+        ),
+      ],
+    ),
+  );
+  if (confirmed != true || !context.mounted) return;
+
+  var succeeded = false;
+  if (viewModel.canSubmitAuthoritatively) {
+    succeeded = switch (kind) {
+      OutboxOperationKind.documentComplete => await viewModel.completeDocument(
+        document,
+      ),
+      OutboxOperationKind.stocktakeConfirm =>
+        await viewModel.confirmStocktakeDocument(document),
+      OutboxOperationKind.stocktakeSettle =>
+        await viewModel.settleStocktakeDocument(document),
+      _ => false,
+    };
+  } else if (!viewModel.prepareOfflineLifecycleSubmission(document, kind)) {
+    return;
+  }
+  if (succeeded) {
+    eventBus?.publish(const GlobalRefreshRequestedEvent());
+    if (closeOnSuccess && context.mounted) {
+      Navigator.of(context).maybePop();
     }
+    return;
+  }
+
+  final review = viewModel.offlineSubmissionReview;
+  if (review == null || !context.mounted) return;
+  final queueConfirmed = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: const Text('保存到待同步'),
+      content: Text(
+        '${review.warehouseName} · ${review.documentType}\n'
+        '${review.lines.join('\n')}\n\n'
+        '${review.staleAssumptions.join('\n')}',
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.of(context).pop(false),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.of(context).pop(true),
+          child: const Text('确认保存'),
+        ),
+      ],
+    ),
+  );
+  if (queueConfirmed != true) return;
+  final queued = await viewModel.confirmOfflineSubmission();
+  if (!queued) return;
+  eventBus?.publish(const GlobalRefreshRequestedEvent());
+  if (closeOnSuccess && context.mounted) {
+    Navigator.of(context).maybePop();
   }
 }
 

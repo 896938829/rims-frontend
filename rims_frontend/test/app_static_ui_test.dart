@@ -15,10 +15,15 @@ import 'package:rims_frontend/features/auth/presentation/view_models/auth_sessio
 import 'package:rims_frontend/features/home/presentation/view_models/home_view_model.dart';
 import 'package:rims_frontend/features/offline/data/repositories/drift_document_draft_repository.dart';
 import 'package:rims_frontend/features/offline/data/repositories/memory_offline_store.dart';
+import 'package:rims_frontend/features/offline/data/repositories/memory_outbox_repository.dart';
 import 'package:rims_frontend/features/offline/domain/entities/document_draft.dart';
 import 'package:rims_frontend/features/offline/domain/entities/network_reachability.dart';
+import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.dart';
 import 'package:rims_frontend/features/offline/domain/repositories/document_draft_repository.dart';
+import 'package:rims_frontend/features/offline/domain/repositories/outbox_repository.dart';
 import 'package:rims_frontend/features/offline/domain/services/network_status_service.dart';
+import 'package:rims_frontend/features/offline/domain/services/outbox_state_machine.dart';
+import 'package:rims_frontend/features/offline/presentation/widgets/offline_status_bar.dart';
 import 'package:rims_frontend/features/reports/domain/entities/report_data.dart';
 import 'package:rims_frontend/features/reports/domain/repositories/reports_repository.dart';
 import 'package:rims_frontend/routes/app_router.dart';
@@ -116,6 +121,63 @@ void main() {
       expect(find.text('在线，服务可用'), findsNothing);
     },
   );
+
+  testWidgets('shell refreshes status counts after Sync Center returns', (
+    tester,
+  ) async {
+    final outbox = MemoryOutboxRepository(stateMachine: OutboxStateMachine());
+    await outbox.enqueue(_statusOperation('first'));
+    final sessionController = AuthSessionController()
+      ..startSession(_statusSession);
+    await _pumpApp(
+      tester,
+      initialLocation: RoutePaths.shell,
+      sessionController: sessionController,
+      networkStatusService: const _FakeNetworkStatusService(
+        NetworkReachability.online,
+      ),
+      outboxRepository: outbox,
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('待同步 1'), findsOneWidget);
+    await tester.tap(find.text('待同步 1'));
+    await tester.pumpAndSettle();
+    expect(find.text('同步服务不可用'), findsOneWidget);
+
+    await outbox.enqueue(_statusOperation('second'));
+    Navigator.of(tester.element(find.text('同步服务不可用'))).pop();
+    await tester.pumpAndSettle();
+
+    expect(find.text('待同步 2'), findsOneWidget);
+  });
+
+  testWidgets('shell keeps the status band below the top SafeArea', (
+    tester,
+  ) async {
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1;
+    tester.view.padding = const FakeViewPadding(top: 24);
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+    addTearDown(tester.view.resetPadding);
+    final sessionController = AuthSessionController()..startSession(_session);
+
+    await _pumpApp(
+      tester,
+      initialLocation: RoutePaths.shell,
+      sessionController: sessionController,
+      networkStatusService: const _FakeNetworkStatusService(
+        NetworkReachability.unreachable,
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    final bandTop = tester.getTopLeft(find.byType(OfflineStatusBar)).dy;
+    expect(bandTop, 24);
+    expect(find.text('你好，系统管理员'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
 
   testWidgets('profile warehouse selector switches active warehouse', (
     tester,
@@ -576,6 +638,7 @@ Future<void> _pumpApp(
   ReportsRepository? reportsRepository,
   DocumentDraftRepository? documentDraftRepository,
   NetworkStatusService? networkStatusService,
+  OutboxRepository? outboxRepository,
 }) async {
   final activeSessionController = sessionController ?? AuthSessionController();
 
@@ -588,6 +651,7 @@ Future<void> _pumpApp(
         reportsRepository: reportsRepository,
         documentDraftRepository: documentDraftRepository,
         networkStatusService: networkStatusService,
+        outboxRepository: outboxRepository,
         initialLocation: initialLocation,
       ),
     ),
@@ -658,6 +722,38 @@ const _session = AuthSession(
   currentWarehouse: Warehouse(id: 1, code: 'SH', name: '上海仓', isDefault: true),
   warehouses: [Warehouse(id: 1, code: 'SH', name: '上海仓', isDefault: true)],
 );
+
+const _statusSession = AuthSession(
+  accessToken: 'token-status',
+  user: AppUser(
+    id: 7,
+    username: 'status-user',
+    realName: '状态用户',
+    roleCode: 'operator',
+    roleName: '操作员',
+    permissionCodes: {'document:create'},
+  ),
+  currentWarehouse: Warehouse(
+    id: 11,
+    code: 'MAIN',
+    name: 'Main',
+    isDefault: true,
+  ),
+  warehouses: [Warehouse(id: 11, code: 'MAIN', name: 'Main', isDefault: true)],
+);
+
+OutboxOperation _statusOperation(String id) {
+  return OutboxOperation(
+    operationId: id,
+    idempotencyKey: 'status-$id',
+    accountId: '7',
+    warehouseId: 11,
+    kind: OutboxOperationKind.documentCreate,
+    payload: const {},
+    state: OutboxState.queued,
+    createdAt: DateTime.utc(2026, 7, 14),
+  );
+}
 
 const _secondAccountSession = AuthSession(
   accessToken: 'token-2',

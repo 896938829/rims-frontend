@@ -43,8 +43,7 @@ final class HomePage extends StatefulWidget {
   final ReportsRepository? reportsRepository;
   final AppEventBus? eventBus;
   final ValueChanged<HomeQuickAction>? onQuickActionSelected;
-  final void Function(DateTime? fetchedAt, DateTime? expiresAt)?
-  onDataFreshnessChanged;
+  final ValueChanged<HomeDataFreshness?>? onDataFreshnessChanged;
 
   @override
   State<HomePage> createState() => _HomePageState();
@@ -107,45 +106,7 @@ final class _HomePageState extends State<HomePage> {
   }
 
   void _reportDataFreshness() {
-    final timestamps = <({DateTime fetchedAt, DateTime expiresAt})>[];
-    final inventoryRepository = widget.inventoryRepository;
-    if (inventoryRepository case final InventoryReadMetadata metadata) {
-      final status = metadata.lastReadStatus;
-      if (status != null) {
-        timestamps.add((
-          fetchedAt: status.fetchedAt,
-          expiresAt: status.expiresAt,
-        ));
-      }
-    }
-    final documentsRepository = widget.documentsRepository;
-    if (documentsRepository case final DocumentReadMetadata metadata) {
-      final status = metadata.lastReadStatus;
-      if (status != null) {
-        timestamps.add((
-          fetchedAt: status.fetchedAt,
-          expiresAt: status.expiresAt,
-        ));
-      }
-    }
-    final reportsRepository = widget.reportsRepository;
-    if (reportsRepository case final ReportReadMetadata metadata) {
-      final status = metadata.lastReadStatus;
-      if (status != null) {
-        timestamps.add((
-          fetchedAt: status.fetchedAt,
-          expiresAt: status.expiresAt,
-        ));
-      }
-    }
-    if (timestamps.isEmpty) {
-      widget.onDataFreshnessChanged?.call(null, null);
-      return;
-    }
-    timestamps.sort((left, right) => left.fetchedAt.compareTo(right.fetchedAt));
-    final fetchedAt = timestamps.first.fetchedAt;
-    timestamps.sort((left, right) => left.expiresAt.compareTo(right.expiresAt));
-    widget.onDataFreshnessChanged?.call(fetchedAt, timestamps.first.expiresAt);
+    widget.onDataFreshnessChanged?.call(viewModel.dataFreshness);
   }
 
   @override

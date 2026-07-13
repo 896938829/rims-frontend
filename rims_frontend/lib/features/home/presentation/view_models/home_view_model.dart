@@ -48,6 +48,26 @@ final class InventoryWarning {
   final String level;
 }
 
+final class HomeDataFreshness {
+  const HomeDataFreshness({
+    required this.fetchedAt,
+    required this.expiresAt,
+    required this.hasCachedData,
+  });
+
+  final DateTime fetchedAt;
+  final DateTime expiresAt;
+  final bool hasCachedData;
+}
+
+enum _HomeDataSlice {
+  inventory,
+  inventoryAlerts,
+  nonStandardInventory,
+  inventoryOverview,
+  recentDocuments,
+}
+
 final class HomeViewModel extends ChangeNotifier {
   HomeViewModel({
     this.user,
@@ -75,6 +95,7 @@ final class HomeViewModel extends ChangeNotifier {
   bool _isDisposed = false;
   String? _errorMessage;
   String? _recentDocumentsErrorMessage;
+  final Map<_HomeDataSlice, HomeDataFreshness> _freshnessBySlice = {};
 
   String get warehouseName => warehouse?.name ?? '未选择仓库';
   String get greeting {
@@ -91,6 +112,23 @@ final class HomeViewModel extends ChangeNotifier {
   int get inventoryAlertTotal => _inventoryAlertTotal;
   int get nonStandardInventoryTotal => _nonStandardInventoryTotal;
   int get recentDocumentsTotal => _recentDocumentsTotal;
+  HomeDataFreshness? get dataFreshness {
+    final values = _freshnessBySlice.values;
+    if (values.isEmpty) return null;
+    var fetchedAt = values.first.fetchedAt;
+    var expiresAt = values.first.expiresAt;
+    var hasCachedData = false;
+    for (final value in values) {
+      if (value.fetchedAt.isBefore(fetchedAt)) fetchedAt = value.fetchedAt;
+      if (value.expiresAt.isBefore(expiresAt)) expiresAt = value.expiresAt;
+      hasCachedData = hasCachedData || value.hasCachedData;
+    }
+    return HomeDataFreshness(
+      fetchedAt: fetchedAt,
+      expiresAt: expiresAt,
+      hasCachedData: hasCachedData,
+    );
+  }
 
   List<HomeMetric> get metrics => [
     HomeMetric(
@@ -187,6 +225,9 @@ final class HomeViewModel extends ChangeNotifier {
     } else {
       final inventoryResult = await inventoryRepository.listInventory();
       if (_isDisposed) return;
+      if (inventoryResult.isSuccess) {
+        _recordInventoryFreshness(_HomeDataSlice.inventory);
+      }
       inventoryResult.when(
         success: (page) {
           _inventoryItems = page.items;
@@ -199,6 +240,9 @@ final class HomeViewModel extends ChangeNotifier {
 
       final alertsResult = await inventoryRepository.listInventoryAlerts();
       if (_isDisposed) return;
+      if (alertsResult.isSuccess) {
+        _recordInventoryFreshness(_HomeDataSlice.inventoryAlerts);
+      }
       alertsResult.when(
         success: (page) {
           _inventoryAlertTotal = page.total;
@@ -210,6 +254,9 @@ final class HomeViewModel extends ChangeNotifier {
       final nonStandardResult = await inventoryRepository
           .listNonStandardInventory();
       if (_isDisposed) return;
+      if (nonStandardResult.isSuccess) {
+        _recordInventoryFreshness(_HomeDataSlice.nonStandardInventory);
+      }
       nonStandardResult.when(
         success: (page) {
           _nonStandardInventoryTotal = page.total;
@@ -225,6 +272,9 @@ final class HomeViewModel extends ChangeNotifier {
     } else {
       final overviewResult = await reportsRepository.loadInventoryOverview();
       if (_isDisposed) return;
+      if (overviewResult.isSuccess) {
+        _recordReportFreshness(_HomeDataSlice.inventoryOverview);
+      }
       overviewResult.when(
         success: (items) => _inventoryOverviewItems = items,
         failure: (_) {},
@@ -239,6 +289,9 @@ final class HomeViewModel extends ChangeNotifier {
     } else {
       final documentsResult = await documentsRepository.listRecentDocuments();
       if (_isDisposed) return;
+      if (documentsResult.isSuccess) {
+        _recordDocumentFreshness(_HomeDataSlice.recentDocuments);
+      }
       documentsResult.when(
         success: (page) {
           _recentDocuments = page.items;
@@ -254,6 +307,48 @@ final class HomeViewModel extends ChangeNotifier {
     _isLoading = false;
     _errorMessage = failure?.message;
     notifyListeners();
+  }
+
+  void _recordInventoryFreshness(_HomeDataSlice slice) {
+    final repository = inventoryRepository;
+    if (repository case final InventoryReadMetadata metadata) {
+      final status = metadata.lastReadStatus;
+      if (status != null) {
+        _freshnessBySlice[slice] = HomeDataFreshness(
+          fetchedAt: status.fetchedAt,
+          expiresAt: status.expiresAt,
+          hasCachedData: status.isCached,
+        );
+      }
+    }
+  }
+
+  void _recordDocumentFreshness(_HomeDataSlice slice) {
+    final repository = documentsRepository;
+    if (repository case final DocumentReadMetadata metadata) {
+      final status = metadata.lastReadStatus;
+      if (status != null) {
+        _freshnessBySlice[slice] = HomeDataFreshness(
+          fetchedAt: status.fetchedAt,
+          expiresAt: status.expiresAt,
+          hasCachedData: status.isCached,
+        );
+      }
+    }
+  }
+
+  void _recordReportFreshness(_HomeDataSlice slice) {
+    final repository = reportsRepository;
+    if (repository case final ReportReadMetadata metadata) {
+      final status = metadata.lastReadStatus;
+      if (status != null) {
+        _freshnessBySlice[slice] = HomeDataFreshness(
+          fetchedAt: status.fetchedAt,
+          expiresAt: status.expiresAt,
+          hasCachedData: status.isCached,
+        );
+      }
+    }
   }
 
   int get _lowStockCount {

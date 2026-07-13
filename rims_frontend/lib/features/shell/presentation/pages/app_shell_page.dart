@@ -112,8 +112,7 @@ final class _AppShellPageState extends State<AppShellPage> {
       _offlineStatusViewModel = OfflineStatusViewModel(
         networkStatusService: networkStatusService,
         outboxRepository: widget.outboxRepository,
-        accountIdReader: () =>
-            widget.sessionController.currentUser?.id.toString(),
+        contextReader: () => _outboxExecutionContext,
       );
       widget.sessionController.addListener(_refreshOfflineStatus);
       unawaited(_offlineStatusViewModel!.load());
@@ -145,9 +144,12 @@ final class _AppShellPageState extends State<AppShellPage> {
       body: Column(
         children: [
           if (statusViewModel != null)
-            OfflineStatusBar(
-              viewModel: statusViewModel,
-              onOpenSyncCenter: () => context.push(RoutePaths.syncCenter),
+            SafeArea(
+              bottom: false,
+              child: OfflineStatusBar(
+                viewModel: statusViewModel,
+                onOpenSyncCenter: () => unawaited(_openSyncCenter()),
+              ),
             ),
           Expanded(
             child: KeyboardWedgeListener(
@@ -190,10 +192,11 @@ final class _AppShellPageState extends State<AppShellPage> {
         reportsRepository: widget.reportsRepository,
         eventBus: widget.eventBus,
         onQuickActionSelected: _handleHomeQuickAction,
-        onDataFreshnessChanged: (fetchedAt, expiresAt) {
+        onDataFreshnessChanged: (freshness) {
           _offlineStatusViewModel?.updateDataFreshness(
-            fetchedAt: fetchedAt,
-            expiresAt: expiresAt,
+            fetchedAt: freshness?.fetchedAt,
+            expiresAt: freshness?.expiresAt,
+            hasCachedData: freshness?.hasCachedData ?? false,
           );
         },
       ),
@@ -391,5 +394,11 @@ final class _AppShellPageState extends State<AppShellPage> {
 
   void _refreshOfflineStatus() {
     unawaited(_offlineStatusViewModel?.load());
+  }
+
+  Future<void> _openSyncCenter() async {
+    await context.push(RoutePaths.syncCenter);
+    if (!mounted) return;
+    await _offlineStatusViewModel?.load();
   }
 }

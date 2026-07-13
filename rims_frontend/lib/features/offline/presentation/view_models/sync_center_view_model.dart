@@ -5,6 +5,7 @@ import '../../../../core/result/result.dart';
 import '../../domain/entities/outbox_operation.dart';
 import '../../domain/repositories/outbox_repository.dart';
 import '../../domain/services/outbox_executor.dart';
+import '../../domain/services/outbox_status_classifier.dart';
 
 final class SyncConfirmationSummary {
   const SyncConfirmationSummary({
@@ -34,6 +35,8 @@ final class SyncCenterViewModel extends ChangeNotifier {
   final OutboxExecutionContext? Function() contextReader;
   final DateTime Function() now;
   final Duration staleSyncingThreshold;
+  static const OutboxStatusClassifier _statusClassifier =
+      OutboxStatusClassifier();
   final Set<String> _reviewedOperationIds = {};
   final Set<String> _selectedOperationIds = {};
   final Set<String> _permissionBlockedOperationIds = {};
@@ -62,33 +65,16 @@ final class SyncCenterViewModel extends ChangeNotifier {
   Failure? get failure => _commandFailure ?? _loadFailure;
   int get contextGeneration => _contextGeneration;
 
-  List<OutboxOperation> get waiting => _operations
-      .where(
-        (operation) =>
-            !_permissionBlockedOperationIds.contains(operation.operationId) &&
-            (operation.state == OutboxState.queued ||
-                operation.state == OutboxState.retryableFailure ||
-                operation.state == OutboxState.syncing),
-      )
-      .toList(growable: false);
+  OutboxStatusBuckets get _buckets => _statusClassifier.classify(
+    operations: _operations,
+    permissionBlockedOperationIds: _permissionBlockedOperationIds,
+  );
 
-  List<OutboxOperation> get attention => _operations
-      .where(
-        (operation) =>
-            _permissionBlockedOperationIds.contains(operation.operationId) ||
-            operation.state == OutboxState.conflict ||
-            operation.state == OutboxState.permanentFailure,
-      )
-      .toList(growable: false);
+  List<OutboxOperation> get waiting => _buckets.waiting;
 
-  List<OutboxOperation> get completed => _operations
-      .where(
-        (operation) =>
-            !_permissionBlockedOperationIds.contains(operation.operationId) &&
-            (operation.state == OutboxState.succeeded ||
-                operation.state == OutboxState.cancelled),
-      )
-      .toList(growable: false);
+  List<OutboxOperation> get attention => _buckets.attention;
+
+  List<OutboxOperation> get completed => _buckets.completed;
 
   Future<void> load() => _beginLoad();
 
@@ -121,17 +107,14 @@ final class SyncCenterViewModel extends ChangeNotifier {
       _permissionBlockedOperationIds.clear();
       _loadFailure = failure;
     } else {
-      _operations = (result as Success<List<OutboxOperation>>).data
-          .where(
-            (operation) =>
-                operation.accountId == context.accountId &&
-                operation.warehouseId == context.warehouseId,
-          )
-          .toList(growable: false);
-      final deniedIds = _operations
-          .where((operation) => !context.allowedKinds.contains(operation.kind))
-          .map((operation) => operation.operationId)
-          .toSet();
+      _operations = _statusClassifier.visibleOperations(
+        operations: (result as Success<List<OutboxOperation>>).data,
+        context: context,
+      );
+      final deniedIds = _statusClassifier.deniedOperationIds(
+        operations: _operations,
+        context: context,
+      );
       final component = await repository.loadConnectedComponent(
         accountId: context.accountId,
         operationIds: deniedIds,

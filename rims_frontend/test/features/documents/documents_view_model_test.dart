@@ -2653,6 +2653,96 @@ void main() {
   });
 
   testWidgets(
+    'offline detail lifecycle uses reviewed queue without repository request',
+    (tester) async {
+      final repository = _FakeDocumentsRepository(
+        listResults: const [
+          Success<List<DocumentRecord>>([_remoteDocument]),
+        ],
+      );
+      final outbox = MemoryOutboxRepository(stateMachine: OutboxStateMachine());
+      final viewModel = _draftEnabledViewModel(
+        drafts: _FakeDocumentDraftRepository(),
+        documents: repository,
+        outbox: outbox,
+        networkReachability: NetworkReachability.unreachable,
+      );
+      await viewModel.load();
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: DocumentsPage(viewModel: viewModel)),
+        ),
+      );
+
+      await tester.scrollUntilVisible(
+        find.text('SO-20260626-001 · 矿泉水 550ml x3'),
+        300,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.tap(find.text('SO-20260626-001 · 矿泉水 550ml x3'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('复核完成并保存待同步'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('确认完成'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('保存到待同步'), findsOneWidget);
+      expect(repository.completeCallCount, 0);
+      expect((await outbox.list('7')).successData, isEmpty);
+
+      await tester.tap(find.text('确认保存'));
+      await tester.pumpAndSettle();
+      expect((await outbox.list('7')).successData, hasLength(2));
+    },
+  );
+
+  testWidgets(
+    'detail lifecycle asks before queueing an unknown network result',
+    (tester) async {
+      final repository = _FakeDocumentsRepository(
+        completeResult: Future.value(
+          const FailureResult<void>(TransportUnknownFailure()),
+        ),
+        listResults: const [
+          Success<List<DocumentRecord>>([_remoteDocument]),
+        ],
+      );
+      final outbox = MemoryOutboxRepository(stateMachine: OutboxStateMachine());
+      final viewModel = _draftEnabledViewModel(
+        drafts: _FakeDocumentDraftRepository(),
+        documents: repository,
+        outbox: outbox,
+      );
+      await viewModel.load();
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(body: DocumentsPage(viewModel: viewModel)),
+        ),
+      );
+
+      await tester.scrollUntilVisible(
+        find.text('SO-20260626-001 · 矿泉水 550ml x3'),
+        300,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.tap(find.text('SO-20260626-001 · 矿泉水 550ml x3'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('完成单据'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('确认完成'));
+      await tester.pumpAndSettle();
+
+      expect(repository.completeCallCount, 1);
+      expect(find.text('保存到待同步'), findsOneWidget);
+      expect((await outbox.list('7')).successData, isEmpty);
+
+      await tester.tap(find.text('确认保存'));
+      await tester.pumpAndSettle();
+      expect((await outbox.list('7')).successData, hasLength(2));
+    },
+  );
+
+  testWidgets(
     'DocumentsPage detail replaces list summary with authoritative lines',
     (tester) async {
       final repository = _FakeDocumentsRepository();

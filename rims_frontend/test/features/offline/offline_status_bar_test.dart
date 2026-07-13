@@ -8,6 +8,7 @@ import 'package:rims_frontend/features/offline/data/repositories/memory_outbox_r
 import 'package:rims_frontend/features/offline/domain/entities/network_reachability.dart';
 import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.dart';
 import 'package:rims_frontend/features/offline/domain/services/network_status_service.dart';
+import 'package:rims_frontend/features/offline/domain/services/outbox_executor.dart';
 import 'package:rims_frontend/features/offline/domain/services/outbox_state_machine.dart';
 import 'package:rims_frontend/features/offline/presentation/view_models/offline_status_view_model.dart';
 import 'package:rims_frontend/features/offline/presentation/widgets/offline_status_bar.dart';
@@ -53,6 +54,39 @@ void main() {
     expect(find.text('陈旧缓存 · 3 小时前'), findsOneWidget);
   });
 
+  test('notifies at age and expiry boundaries without real waiting', () async {
+    final clock = _FakeClock(DateTime.utc(2026, 7, 14, 12));
+    final scheduler = _FakeTimerScheduler(clock);
+    final network = _FakeNetworkStatusService(NetworkReachability.online);
+    final viewModel = OfflineStatusViewModel(
+      networkStatusService: network,
+      outboxRepository: null,
+      contextReader: () => null,
+      now: clock.now,
+      scheduleTimer: scheduler.schedule,
+    );
+    var notifications = 0;
+    viewModel.addListener(() => notifications += 1);
+    viewModel.updateDataFreshness(
+      fetchedAt: DateTime.utc(2026, 7, 14, 11, 59, 30),
+      expiresAt: DateTime.utc(2026, 7, 14, 12, 0, 45),
+    );
+
+    expect(viewModel.dataAgeLabel, '数据刚刚更新');
+    scheduler.advance(const Duration(seconds: 30));
+    expect(viewModel.dataAgeLabel, '数据1 分钟前');
+    expect(notifications, 2);
+
+    scheduler.advance(const Duration(seconds: 15));
+    expect(viewModel.isStale, isTrue);
+    expect(viewModel.dataAgeLabel, '陈旧缓存 · 1 分钟前');
+    expect(notifications, 3);
+
+    viewModel.dispose();
+    expect(scheduler.activeTimerCount, 0);
+    await network.dispose();
+  });
+
   testWidgets('shows queued and conflict counts and opens Sync Center', (
     tester,
   ) async {
@@ -78,6 +112,30 @@ void main() {
     await tester.tap(find.text('需处理 1'));
     expect(openCount, 2);
   });
+
+  testWidgets(
+    'scopes counts to warehouse and classifies permission blocks as attention',
+    (tester) async {
+      final harness = await _createHarness(
+        operations: [
+          _operation('allowed', OutboxState.queued),
+          _operation('other-warehouse', OutboxState.queued, warehouseId: 12),
+          _operation(
+            'permission-blocked',
+            OutboxState.queued,
+            kind: OutboxOperationKind.documentComplete,
+          ),
+        ],
+        allowedKinds: const {OutboxOperationKind.documentCreate},
+      );
+      addTearDown(harness.dispose);
+
+      await _pumpBar(tester, harness.viewModel);
+
+      expect(find.text('待同步 1'), findsOneWidget);
+      expect(find.text('需处理 1'), findsOneWidget);
+    },
+  );
 
   testWidgets('supports keyboard activation and descriptive semantics', (
     tester,
@@ -162,11 +220,14 @@ Future<_Harness> _createHarness({
   NetworkReachability reachability = NetworkReachability.online,
   List<OutboxOperation> operations = const [],
   DateTime? now,
+  Set<OutboxOperationKind> allowedKinds = const {...OutboxOperationKind.values},
 }) async {
   final network = _FakeNetworkStatusService(reachability);
+  final clock = _FakeClock(now ?? DateTime.now());
+  final scheduler = _FakeTimerScheduler(clock);
   final repository = MemoryOutboxRepository(
-    stateMachine: OutboxStateMachine(now: () => now ?? DateTime.now()),
-    now: () => now ?? DateTime.now(),
+    stateMachine: OutboxStateMachine(now: clock.now),
+    now: clock.now,
   );
   for (final operation in operations) {
     await repository.enqueue(
@@ -190,20 +251,31 @@ Future<_Harness> _createHarness({
   final viewModel = OfflineStatusViewModel(
     networkStatusService: network,
     outboxRepository: repository,
-    accountIdReader: () => '7',
-    now: () => now ?? DateTime.now(),
+    contextReader: () => OutboxExecutionContext(
+      accountId: '7',
+      warehouseId: 11,
+      permissionStamp: 'test',
+      allowedKinds: allowedKinds,
+    ),
+    now: clock.now,
+    scheduleTimer: scheduler.schedule,
   );
   await viewModel.load();
   return _Harness(network: network, viewModel: viewModel);
 }
 
-OutboxOperation _operation(String id, OutboxState state) {
+OutboxOperation _operation(
+  String id,
+  OutboxState state, {
+  int warehouseId = 11,
+  OutboxOperationKind kind = OutboxOperationKind.documentCreate,
+}) {
   return OutboxOperation(
     operationId: id,
     idempotencyKey: 'key-$id',
     accountId: '7',
-    warehouseId: 1,
-    kind: OutboxOperationKind.documentCreate,
+    warehouseId: warehouseId,
+    kind: kind,
     payload: const {},
     state: state,
     createdAt: DateTime.utc(2026, 7, 14),
@@ -271,4 +343,65 @@ final class _FakeNetworkStatusService implements NetworkStatusService {
 
   @override
   Future<void> dispose() => _controller.close();
+}
+
+final class _FakeClock {
+  _FakeClock(this.value);
+
+  DateTime value;
+
+  DateTime now() => value;
+}
+
+final class _FakeTimerScheduler {
+  _FakeTimerScheduler(this.clock);
+
+  final _FakeClock clock;
+  final List<_FakeTimer> _timers = [];
+
+  int get activeTimerCount => _timers.where((timer) => timer.isActive).length;
+
+  Timer schedule(Duration delay, void Function() callback) {
+    final timer = _FakeTimer(dueAt: clock.value.add(delay), callback: callback);
+    _timers.add(timer);
+    return timer;
+  }
+
+  void advance(Duration duration) {
+    clock.value = clock.value.add(duration);
+    while (true) {
+      final due =
+          _timers
+              .where(
+                (timer) => timer.isActive && !timer.dueAt.isAfter(clock.value),
+              )
+              .toList()
+            ..sort((left, right) => left.dueAt.compareTo(right.dueAt));
+      if (due.isEmpty) return;
+      due.first.fire();
+    }
+  }
+}
+
+final class _FakeTimer implements Timer {
+  _FakeTimer({required this.dueAt, required this.callback});
+
+  final DateTime dueAt;
+  final void Function() callback;
+  bool _isActive = true;
+
+  @override
+  bool get isActive => _isActive;
+
+  @override
+  int get tick => _isActive ? 0 : 1;
+
+  @override
+  void cancel() => _isActive = false;
+
+  void fire() {
+    if (!_isActive) return;
+    _isActive = false;
+    callback();
+  }
 }
