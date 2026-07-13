@@ -7,6 +7,7 @@ import '../entities/outbox_graph.dart';
 import '../entities/outbox_cleanup_intent.dart';
 import '../repositories/outbox_repository.dart';
 import 'network_status_service.dart';
+import 'idempotency_key_validator.dart';
 
 typedef OutboxDelay = Future<void> Function(Duration duration);
 typedef ProbeBackoff = Duration Function(int attempt);
@@ -20,7 +21,65 @@ abstract interface class OutboxOperationHandler {
   Future<Result<OutboxHandlerSuccess>> execute(
     OutboxOperation operation, {
     Map<String, OutboxOperationOutput> dependencyOutputs = const {},
+    OutboxHandlerExecutionContext executionContext =
+        const OutboxHandlerExecutionContext.unverified(),
   });
+}
+
+final class OutboxHandlerExecutionContext {
+  const OutboxHandlerExecutionContext.unverified()
+    : completedReplayProof = null;
+
+  const OutboxHandlerExecutionContext._completed(this.completedReplayProof);
+
+  final OutboxCompletedReplayProof? completedReplayProof;
+}
+
+final class OutboxCompletedReplayProof {
+  const OutboxCompletedReplayProof._({
+    required this.referenceOperationId,
+    required this.referenceIdempotencyKey,
+    required this.lifecycleOperationId,
+    required this.lifecycleKind,
+    required this.lifecycleIdempotencyKey,
+    required this.accountId,
+    required this.warehouseId,
+    required this.statusScope,
+  });
+
+  final String referenceOperationId;
+  final String referenceIdempotencyKey;
+  final String lifecycleOperationId;
+  final OutboxOperationKind lifecycleKind;
+  final String lifecycleIdempotencyKey;
+  final String accountId;
+  final int warehouseId;
+  final String statusScope;
+
+  bool matchesReference({
+    required OutboxOperation reference,
+    required OutboxOperationKind expectedLifecycleKind,
+    required String expectedStatusScope,
+  }) {
+    late final String expectedReferenceKey;
+    try {
+      expectedReferenceKey = IdempotencyKeyValidator.compose(
+        lifecycleIdempotencyKey,
+        'document-reference',
+      );
+    } on ArgumentError {
+      return false;
+    }
+    return lifecycleOperationId.isNotEmpty &&
+        reference.operationId != lifecycleOperationId &&
+        reference.operationId == referenceOperationId &&
+        reference.idempotencyKey == referenceIdempotencyKey &&
+        reference.idempotencyKey == expectedReferenceKey &&
+        reference.accountId == accountId &&
+        reference.warehouseId == warehouseId &&
+        lifecycleKind == expectedLifecycleKind &&
+        statusScope == expectedStatusScope;
+  }
 }
 
 final class OutboxHandlerSuccess {
@@ -234,6 +293,7 @@ final class OutboxExecutor implements OutboxExecutorPort {
           operation.operationId,
       };
       final preflightStatusResults = <String, Result<OperationStatus>>{};
+      final completedReplayProofs = <String, OutboxCompletedReplayProof>{};
       for (final operation in reloaded) {
         if (!review.operationIds.contains(operation.operationId) ||
             initiallyReadyIds.contains(operation.operationId) ||
@@ -295,6 +355,16 @@ final class OutboxExecutor implements OutboxExecutorPort {
           );
         }
         preflightStatusResults[operation.operationId] = statusResult;
+        if (statusResult case Success<OperationStatus>(:final data)
+            when data.state == OperationState.completed &&
+                _hasSafeCompletedReplayLease(data)) {
+          _bindCompletedReplayProof(
+            lifecycleOperation: operation,
+            lifecycleHandler: handler,
+            component: reloaded,
+            proofsByReferenceId: completedReplayProofs,
+          );
+        }
       }
       final succeeded = <String>[];
       final processed = <String>{};
@@ -448,11 +518,17 @@ final class OutboxExecutor implements OutboxExecutorPort {
           );
         }
 
+        final completedReplayProof = completedReplayProofs.remove(
+          operation.operationId,
+        );
         final outcome = await _executeOne(
           operation,
           preflightStatusResult: preflightStatusResults.remove(
             operation.operationId,
           ),
+          executionContext: completedReplayProof == null
+              ? const OutboxHandlerExecutionContext.unverified()
+              : OutboxHandlerExecutionContext._completed(completedReplayProof),
         );
         processed.add(operation.operationId);
         if (outcome.succeeded) succeeded.add(operation.operationId);
@@ -577,6 +653,8 @@ final class OutboxExecutor implements OutboxExecutorPort {
   Future<_OperationOutcome> _executeOne(
     OutboxOperation operation, {
     Result<OperationStatus>? preflightStatusResult,
+    OutboxHandlerExecutionContext executionContext =
+        const OutboxHandlerExecutionContext.unverified(),
   }) async {
     final handler = handlers[operation.kind];
     if (handler == null) {
@@ -604,7 +682,11 @@ final class OutboxExecutor implements OutboxExecutorPort {
       );
       if (probeOutcome != null) return probeOutcome;
     }
-    return _executeHandler(syncingOperation, handler);
+    return _executeHandler(
+      syncingOperation,
+      handler,
+      executionContext: executionContext,
+    );
   }
 
   Future<_OperationOutcome?> _probeUnknown(
@@ -625,7 +707,7 @@ final class OutboxExecutor implements OutboxExecutorPort {
       }
       final status = (result as Success<OperationStatus>).data;
       if (status.state == OperationState.completed) {
-        if (!status.expiresAt.isAfter(now().toUtc().add(minimumReplayWindow))) {
+        if (!_hasSafeCompletedReplayLease(status)) {
           const failure = StateFailure(
             message: 'Completed operation replay lease is not safely valid.',
           );
@@ -658,8 +740,10 @@ final class OutboxExecutor implements OutboxExecutorPort {
 
   Future<_OperationOutcome> _executeHandler(
     OutboxOperation operation,
-    OutboxOperationHandler handler,
-  ) async {
+    OutboxOperationHandler handler, {
+    OutboxHandlerExecutionContext executionContext =
+        const OutboxHandlerExecutionContext.unverified(),
+  }) async {
     final dependencyResult = await repository.loadDependencyOutputs(
       accountId: operation.accountId,
       operationId: operation.operationId,
@@ -676,8 +760,47 @@ final class OutboxExecutor implements OutboxExecutorPort {
         dependencyOutputs:
             (dependencyResult as Success<Map<String, OutboxOperationOutput>>)
                 .data,
+        executionContext: executionContext,
       ),
     );
+  }
+
+  bool _hasSafeCompletedReplayLease(OperationStatus status) =>
+      status.expiresAt.isAfter(now().toUtc().add(minimumReplayWindow));
+
+  void _bindCompletedReplayProof({
+    required OutboxOperation lifecycleOperation,
+    required OutboxOperationHandler lifecycleHandler,
+    required List<OutboxOperation> component,
+    required Map<String, OutboxCompletedReplayProof> proofsByReferenceId,
+  }) {
+    late final String expectedReferenceKey;
+    try {
+      expectedReferenceKey = IdempotencyKeyValidator.compose(
+        lifecycleOperation.idempotencyKey,
+        'document-reference',
+      );
+    } on ArgumentError {
+      return;
+    }
+    for (final reference in component) {
+      if (reference.kind != OutboxOperationKind.documentReference ||
+          reference.idempotencyKey != expectedReferenceKey ||
+          reference.accountId != lifecycleOperation.accountId ||
+          reference.warehouseId != lifecycleOperation.warehouseId) {
+        continue;
+      }
+      proofsByReferenceId[reference.operationId] = OutboxCompletedReplayProof._(
+        referenceOperationId: reference.operationId,
+        referenceIdempotencyKey: reference.idempotencyKey,
+        lifecycleOperationId: lifecycleOperation.operationId,
+        lifecycleKind: lifecycleOperation.kind,
+        lifecycleIdempotencyKey: lifecycleOperation.idempotencyKey,
+        accountId: lifecycleOperation.accountId,
+        warehouseId: lifecycleOperation.warehouseId,
+        statusScope: lifecycleHandler.statusScope,
+      );
+    }
   }
 
   Future<_OperationOutcome> _handleResult(

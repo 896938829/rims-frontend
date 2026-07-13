@@ -34,6 +34,8 @@ final class AttachmentOutboxHandler implements OutboxOperationHandler {
   Future<Result<OutboxHandlerSuccess>> execute(
     OutboxOperation operation, {
     Map<String, OutboxOperationOutput> dependencyOutputs = const {},
+    OutboxHandlerExecutionContext executionContext =
+        const OutboxHandlerExecutionContext.unverified(),
   }) async {
     if (operation.kind != kind) {
       return const FailureResult(

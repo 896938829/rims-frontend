@@ -693,6 +693,8 @@ final class _RecordingHandler implements OutboxOperationHandler {
   Future<Result<OutboxHandlerSuccess>> execute(
     OutboxOperation operation, {
     Map<String, OutboxOperationOutput> dependencyOutputs = const {},
+    OutboxHandlerExecutionContext executionContext =
+        const OutboxHandlerExecutionContext.unverified(),
   }) async {
     events.add('handler');
     return Success(

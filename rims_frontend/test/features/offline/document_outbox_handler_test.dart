@@ -198,7 +198,7 @@ void main() {
   );
 
   test(
-    'lifecycle reference accepts only the exact authoritative post-state',
+    'reference cannot infer completed proof from authoritative post-state',
     () async {
       final handler = DocumentOutboxHandler(
         kind: OutboxOperationKind.documentReference,
@@ -249,11 +249,7 @@ void main() {
           ),
         );
 
-        expect(result, isA<Success<OutboxHandlerSuccess>>());
-        expect((result as Success<OutboxHandlerSuccess>).data.output.data, {
-          'operationKind': testCase.marker,
-          'documentId': 91,
-        });
+        expect(result.failureOrNull, isA<ConflictFailure>());
       }
     },
   );
@@ -379,49 +375,249 @@ void main() {
     },
   );
 
+  test('404 settle probe rejects post-state without completed proof', () async {
+    dataSource
+      ..detailResult = Success(_detail(docType: 5, status: '已结转'))
+      ..seedSettledRequest('settle-request-1');
+    final repository = MemoryOutboxRepository(
+      stateMachine: OutboxStateMachine(),
+    );
+    await _enqueueReviewedSettleGraph(repository, requiresStatusProbe: true);
+    final executor = _settleExecutor(
+      repository: repository,
+      dataSource: dataSource,
+      stagingStore: stagingStore,
+      draftRepository: draftRepository,
+      eventBus: eventBus,
+      statusDataSource: _AbsentStatus(dataSource.events),
+    );
+
+    final report = await executor.execute(_settleReview);
+
+    expect(report.failure, isA<ConflictFailure>());
+    expect(report.succeededOperationIds, isEmpty);
+    expect(dataSource.events, ['status:settle-request-1', 'detail:91']);
+    expect(dataSource.lifecycleRequestIds, isEmpty);
+    expect(dataSource.settleEffects, 1);
+
+    dataSource.events.clear();
+    final repeated = await executor.execute(_settleReview);
+
+    expect(repeated.failure, isNull);
+    expect(repeated.succeededOperationIds, isEmpty);
+    expect(dataSource.events, isEmpty);
+    expect(dataSource.settleEffects, 1);
+  });
+
   test(
-    'executor probes unknown settle before verified reference and replays same key',
+    '404 proof accepts strict pre-state for every lifecycle intent',
     () async {
-      dataSource
-        ..detailResult = Success(_detail(docType: 5, status: '已结转'))
-        ..seedSettledRequest('settle-request-1');
-      final repository = MemoryOutboxRepository(
-        stateMachine: OutboxStateMachine(),
-      );
-      await _enqueueReviewedSettleGraph(repository, requiresStatusProbe: true);
-      final executor = _settleExecutor(
-        repository: repository,
-        dataSource: dataSource,
-        stagingStore: stagingStore,
-        draftRepository: draftRepository,
-        eventBus: eventBus,
-        statusDataSource: _AbsentStatus(dataSource.events),
-      );
+      for (final testCase in _lifecycleReplayCases) {
+        dataSource
+          ..events.clear()
+          ..detailIds.clear()
+          ..lifecycleRequestIds.clear()
+          ..detailResult = Success(
+            _detail(docType: testCase.docType, status: testCase.preState),
+          );
+        final repository = MemoryOutboxRepository(
+          stateMachine: OutboxStateMachine(),
+        );
+        final review = await _enqueueReviewedLifecycleGraph(
+          repository,
+          testCase,
+        );
+        final executor = _lifecycleExecutor(
+          repository: repository,
+          dataSource: dataSource,
+          stagingStore: stagingStore,
+          draftRepository: draftRepository,
+          eventBus: eventBus,
+          statusDataSource: _AbsentStatus(dataSource.events),
+          testCase: testCase,
+        );
 
-      final report = await executor.execute(_settleReview);
+        final report = await executor.execute(review);
 
-      expect(report.failure, isNull);
-      expect(report.succeededOperationIds, [
-        'reference-settle-91',
-        'settle-91',
-      ]);
-      expect(dataSource.events, [
-        'status:settle-request-1',
-        'detail:91',
-        'settle:91',
-      ]);
-      expect(dataSource.lifecycleRequestIds, ['settle-request-1']);
-      expect(dataSource.settleEffects, 1);
-
-      dataSource.events.clear();
-      final repeated = await executor.execute(_settleReview);
-
-      expect(repeated.failure, isNull);
-      expect(repeated.succeededOperationIds, isEmpty);
-      expect(dataSource.events, isEmpty);
-      expect(dataSource.settleEffects, 1);
+        expect(report.failure, isNull, reason: testCase.intent);
+        expect(report.succeededOperationIds, [
+          testCase.referenceOperationId,
+          testCase.lifecycleOperationId,
+        ]);
+        expect(dataSource.events, [
+          'status:${testCase.key}',
+          'detail:91',
+          '${testCase.event}:91',
+        ]);
+        expect(dataSource.lifecycleRequestIds, [testCase.key]);
+      }
     },
   );
+
+  test(
+    'completed proof accepts exact post-state for every lifecycle intent',
+    () async {
+      for (final testCase in _lifecycleReplayCases) {
+        dataSource
+          ..events.clear()
+          ..detailIds.clear()
+          ..lifecycleRequestIds.clear()
+          ..detailResult = Success(
+            _detail(docType: testCase.docType, status: testCase.postState),
+          );
+        final repository = MemoryOutboxRepository(
+          stateMachine: OutboxStateMachine(),
+        );
+        final review = await _enqueueReviewedLifecycleGraph(
+          repository,
+          testCase,
+        );
+        final executor = _lifecycleExecutor(
+          repository: repository,
+          dataSource: dataSource,
+          stagingStore: stagingStore,
+          draftRepository: draftRepository,
+          eventBus: eventBus,
+          statusDataSource: _CompletedStatus(dataSource.events),
+          testCase: testCase,
+        );
+
+        final report = await executor.execute(review);
+
+        expect(report.failure, isNull, reason: testCase.intent);
+        expect(report.succeededOperationIds, [
+          testCase.referenceOperationId,
+          testCase.lifecycleOperationId,
+        ]);
+        expect(dataSource.events, [
+          'status:${testCase.key}',
+          'detail:91',
+          '${testCase.event}:91',
+        ]);
+        expect(dataSource.lifecycleRequestIds, [testCase.key]);
+      }
+    },
+  );
+
+  test('completed proof with mismatched lifecycle key is rejected', () async {
+    final testCase = _lifecycleReplayCases.last;
+    dataSource.detailResult = Success(
+      _detail(docType: testCase.docType, status: testCase.postState),
+    );
+    final repository = MemoryOutboxRepository(
+      stateMachine: OutboxStateMachine(),
+    );
+    final review = await _enqueueReviewedLifecycleGraph(
+      repository,
+      testCase,
+      referenceKey: '${testCase.key}.wrong-reference',
+    );
+    final executor = _lifecycleExecutor(
+      repository: repository,
+      dataSource: dataSource,
+      stagingStore: stagingStore,
+      draftRepository: draftRepository,
+      eventBus: eventBus,
+      statusDataSource: _CompletedStatus(dataSource.events),
+      testCase: testCase,
+    );
+
+    final report = await executor.execute(review);
+
+    expect(report.failure, isA<ConflictFailure>());
+    expect(
+      await _operationState(repository, testCase.referenceOperationId),
+      OutboxState.conflict,
+    );
+    expect(dataSource.lifecycleRequestIds, isEmpty);
+  });
+
+  test('completed proof with mismatched lifecycle scope is rejected', () async {
+    final testCase = _lifecycleReplayCases.last;
+    dataSource.detailResult = Success(
+      _detail(docType: testCase.docType, status: testCase.postState),
+    );
+    final repository = MemoryOutboxRepository(
+      stateMachine: OutboxStateMachine(),
+    );
+    final review = await _enqueueReviewedLifecycleGraph(
+      repository,
+      testCase,
+      lifecycleKind: OutboxOperationKind.stocktakeConfirm,
+    );
+    final executor = _lifecycleExecutor(
+      repository: repository,
+      dataSource: dataSource,
+      stagingStore: stagingStore,
+      draftRepository: draftRepository,
+      eventBus: eventBus,
+      statusDataSource: _CompletedStatus(dataSource.events),
+      testCase: testCase,
+      lifecycleKind: OutboxOperationKind.stocktakeConfirm,
+    );
+
+    final report = await executor.execute(review);
+
+    expect(report.failure, isA<ConflictFailure>());
+    expect(
+      await _operationState(repository, testCase.referenceOperationId),
+      OutboxState.conflict,
+    );
+    expect(dataSource.lifecycleRequestIds, isEmpty);
+  });
+
+  test('processing status never authorizes a post-state reference', () async {
+    final testCase = _lifecycleReplayCases.last;
+    dataSource.detailResult = Success(
+      _detail(docType: testCase.docType, status: testCase.postState),
+    );
+    final repository = MemoryOutboxRepository(
+      stateMachine: OutboxStateMachine(),
+    );
+    final review = await _enqueueReviewedLifecycleGraph(repository, testCase);
+    final executor = _lifecycleExecutor(
+      repository: repository,
+      dataSource: dataSource,
+      stagingStore: stagingStore,
+      draftRepository: draftRepository,
+      eventBus: eventBus,
+      statusDataSource: _ProcessingStatus(dataSource.events),
+      testCase: testCase,
+    );
+
+    final report = await executor.execute(review);
+
+    expect(report.failure, isA<ConflictFailure>());
+    expect(dataSource.events, ['status:${testCase.key}', 'detail:91']);
+    expect(dataSource.lifecycleRequestIds, isEmpty);
+  });
+
+  test('failed status probe never authorizes a post-state reference', () async {
+    final testCase = _lifecycleReplayCases.last;
+    dataSource.detailResult = Success(
+      _detail(docType: testCase.docType, status: testCase.postState),
+    );
+    final repository = MemoryOutboxRepository(
+      stateMachine: OutboxStateMachine(),
+    );
+    final review = await _enqueueReviewedLifecycleGraph(repository, testCase);
+    final executor = _lifecycleExecutor(
+      repository: repository,
+      dataSource: dataSource,
+      stagingStore: stagingStore,
+      draftRepository: draftRepository,
+      eventBus: eventBus,
+      statusDataSource: _FailedStatus(dataSource.events),
+      testCase: testCase,
+    );
+
+    final report = await executor.execute(review);
+
+    expect(report.failure, isA<NetworkFailure>());
+    expect(dataSource.events, ['status:${testCase.key}']);
+    expect(dataSource.detailIds, isEmpty);
+    expect(dataSource.lifecycleRequestIds, isEmpty);
+  });
 
   test(
     'completed settle lease verifies post-state before same-key replay',
@@ -846,6 +1042,167 @@ DocumentDetailModel _detail({required int docType, required String status}) =>
       lines: const [],
     );
 
+typedef _LifecycleReplayCase = ({
+  OutboxOperationKind kind,
+  String intent,
+  String key,
+  String referenceOperationId,
+  String lifecycleOperationId,
+  int docType,
+  String preState,
+  String postState,
+  String event,
+});
+
+const List<_LifecycleReplayCase> _lifecycleReplayCases = [
+  (
+    kind: OutboxOperationKind.documentComplete,
+    intent: 'document_complete',
+    key: 'complete-request-1',
+    referenceOperationId: 'reference-complete-91',
+    lifecycleOperationId: 'complete-91',
+    docType: 2,
+    preState: '待提交',
+    postState: '已完成',
+    event: 'complete',
+  ),
+  (
+    kind: OutboxOperationKind.stocktakeConfirm,
+    intent: 'stocktake_confirm',
+    key: 'confirm-request-1',
+    referenceOperationId: 'reference-confirm-91',
+    lifecycleOperationId: 'confirm-91',
+    docType: 5,
+    preState: '盘点中',
+    postState: '差异已确认',
+    event: 'confirm',
+  ),
+  (
+    kind: OutboxOperationKind.stocktakeSettle,
+    intent: 'stocktake_settle',
+    key: 'settle-request-1',
+    referenceOperationId: 'reference-settle-91',
+    lifecycleOperationId: 'settle-91',
+    docType: 5,
+    preState: '差异已确认',
+    postState: '已结转',
+    event: 'settle',
+  ),
+];
+
+Future<OutboxReview> _enqueueReviewedLifecycleGraph(
+  MemoryOutboxRepository repository,
+  _LifecycleReplayCase testCase, {
+  String? referenceKey,
+  OutboxOperationKind? lifecycleKind,
+}) async {
+  final createdAt = DateTime.utc(2026, 7, 13);
+  const reviewStamp = '42\u00008\u0000lifecycle@1';
+  final result = await repository.enqueueGraph(
+    OutboxGraph(
+      operations: [
+        OutboxOperation(
+          operationId: testCase.referenceOperationId,
+          idempotencyKey: referenceKey ?? '${testCase.key}.document-reference',
+          accountId: '42',
+          warehouseId: 8,
+          kind: OutboxOperationKind.documentReference,
+          payload: {
+            'version': 1,
+            'documentId': 91,
+            'expectedDocType': testCase.docType,
+            'expectedStatus': testCase.preState,
+            'lifecycleIntent': testCase.intent,
+          },
+          state: OutboxState.queued,
+          createdAt: createdAt,
+          confirmedAt: createdAt,
+          reviewStamp: reviewStamp,
+        ),
+        OutboxOperation(
+          operationId: testCase.lifecycleOperationId,
+          idempotencyKey: testCase.key,
+          accountId: '42',
+          warehouseId: 8,
+          kind: lifecycleKind ?? testCase.kind,
+          payload: const {'version': 1},
+          state: OutboxState.queued,
+          createdAt: createdAt.add(const Duration(microseconds: 1)),
+          confirmedAt: createdAt,
+          reviewStamp: reviewStamp,
+          requiresStatusProbe: true,
+        ),
+      ],
+      dependencies: {
+        testCase.lifecycleOperationId: {testCase.referenceOperationId},
+      },
+    ),
+  );
+  if (result case FailureResult<List<OutboxOperation>>(:final failure)) {
+    throw StateError(failure.message);
+  }
+  return OutboxReview(
+    operationIds: {
+      testCase.referenceOperationId,
+      testCase.lifecycleOperationId,
+    },
+    accountId: '42',
+    warehouseId: 8,
+    permissionStamp: 'lifecycle@1',
+  );
+}
+
+OutboxExecutor _lifecycleExecutor({
+  required MemoryOutboxRepository repository,
+  required DocumentsRemoteDataSource dataSource,
+  required OutboxAttachmentStagingStore stagingStore,
+  required DocumentDraftRepository draftRepository,
+  required AppEventBus eventBus,
+  required OperationStatusRemoteDataSource statusDataSource,
+  required _LifecycleReplayCase testCase,
+  OutboxOperationKind? lifecycleKind,
+}) {
+  final effectiveKind = lifecycleKind ?? testCase.kind;
+  return OutboxExecutor(
+    repository: repository,
+    networkStatusService: const _OnlineNetwork(),
+    statusDataSource: statusDataSource,
+    handlers: [
+      DocumentOutboxHandler(
+        kind: OutboxOperationKind.documentReference,
+        remoteDataSource: dataSource,
+        stagingStore: stagingStore,
+        draftRepository: draftRepository,
+        eventBus: eventBus,
+      ),
+      DocumentOutboxHandler(
+        kind: effectiveKind,
+        remoteDataSource: dataSource,
+        stagingStore: stagingStore,
+        draftRepository: draftRepository,
+        eventBus: eventBus,
+      ),
+    ],
+    contextReader: () => OutboxExecutionContext(
+      accountId: '42',
+      warehouseId: 8,
+      permissionStamp: 'lifecycle@1',
+      allowedKinds: {OutboxOperationKind.documentReference, effectiveKind},
+    ),
+    delay: (_) async {},
+  );
+}
+
+Future<OutboxState> _operationState(
+  MemoryOutboxRepository repository,
+  String operationId,
+) async {
+  final listed = await repository.list('42');
+  return (listed as Success<List<OutboxOperation>>).data
+      .singleWhere((operation) => operation.operationId == operationId)
+      .state;
+}
+
 const _settleReview = OutboxReview(
   operationIds: {'reference-settle-91', 'settle-91'},
   accountId: '42',
@@ -864,7 +1221,7 @@ Future<void> _enqueueReviewedSettleGraph(
       operations: [
         OutboxOperation(
           operationId: 'reference-settle-91',
-          idempotencyKey: 'settle-request-1.document_reference',
+          idempotencyKey: 'settle-request-1.document-reference',
           accountId: '42',
           warehouseId: 8,
           kind: OutboxOperationKind.documentReference,
@@ -1175,6 +1532,42 @@ final class _CompletedStatus implements OperationStatusRemoteDataSource {
         expiresAt: DateTime.now().toUtc().add(const Duration(minutes: 1)),
       ),
     );
+  }
+}
+
+final class _ProcessingStatus implements OperationStatusRemoteDataSource {
+  const _ProcessingStatus(this.events);
+
+  final List<String> events;
+
+  @override
+  Future<Result<OperationStatus>> loadStatus({
+    required String key,
+    required String scope,
+  }) async {
+    events.add('status:$key');
+    return Success(
+      OperationStatus(
+        state: OperationState.processing,
+        statusCode: 202,
+        expiresAt: DateTime.now().toUtc().add(const Duration(minutes: 1)),
+      ),
+    );
+  }
+}
+
+final class _FailedStatus implements OperationStatusRemoteDataSource {
+  const _FailedStatus(this.events);
+
+  final List<String> events;
+
+  @override
+  Future<Result<OperationStatus>> loadStatus({
+    required String key,
+    required String scope,
+  }) async {
+    events.add('status:$key');
+    return const FailureResult(NetworkFailure());
   }
 }
 

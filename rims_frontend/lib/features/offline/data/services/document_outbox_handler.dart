@@ -50,6 +50,8 @@ final class DocumentOutboxHandler implements OutboxOperationHandler {
   Future<Result<OutboxHandlerSuccess>> execute(
     OutboxOperation operation, {
     Map<String, OutboxOperationOutput> dependencyOutputs = const {},
+    OutboxHandlerExecutionContext executionContext =
+        const OutboxHandlerExecutionContext.unverified(),
   }) async {
     if (operation.kind != kind) {
       return const FailureResult(
@@ -69,6 +71,7 @@ final class DocumentOutboxHandler implements OutboxOperationHandler {
       return switch (kind) {
         OutboxOperationKind.documentReference => await _executeReference(
           operation,
+          executionContext,
         ),
         OutboxOperationKind.documentCreate => await _executeCreate(operation),
         _ => await _executeLifecycle(operation, dependencyOutputs),
@@ -82,6 +85,7 @@ final class DocumentOutboxHandler implements OutboxOperationHandler {
 
   Future<Result<OutboxHandlerSuccess>> _executeReference(
     OutboxOperation operation,
+    OutboxHandlerExecutionContext executionContext,
   ) async {
     final payload = _DocumentReferencePayload.fromJson(operation.payload);
     final loaded = await remoteDataSource.getDocument(payload.documentId);
@@ -97,8 +101,16 @@ final class DocumentOutboxHandler implements OutboxOperationHandler {
         ),
       );
     }
-    if (record.status != payload.expectedStatus &&
-        record.status != payload.acceptedPostStatus) {
+    final completedProof = executionContext.completedReplayProof;
+    final validStatus = completedProof == null
+        ? record.status == payload.expectedStatus
+        : completedProof.matchesReference(
+                reference: operation,
+                expectedLifecycleKind: payload.lifecycleKind,
+                expectedStatusScope: payload.lifecycleStatusScope,
+              ) &&
+              record.status == payload.acceptedPostStatus;
+    if (!validStatus) {
       return const FailureResult(
         ConflictFailure(
           message: 'Authoritative document state changed after review.',
@@ -212,6 +224,8 @@ final class _DocumentReferencePayload {
     required this.expectedDocType,
     required this.expectedStatus,
     required this.acceptedPostStatus,
+    required this.lifecycleKind,
+    required this.lifecycleStatusScope,
     required this.outputMarker,
   });
 
@@ -228,17 +242,37 @@ final class _DocumentReferencePayload {
     final expectedDocType = _positiveInt(json, 'expectedDocType');
     final expectedStatus = _string(json, 'expectedStatus');
     final lifecycleIntent = _string(json, 'lifecycleIntent');
-    final (outputMarker, acceptedPostStatus) = switch (lifecycleIntent) {
+    final (
+      outputMarker,
+      acceptedPostStatus,
+      lifecycleKind,
+      lifecycleStatusScope,
+    ) = switch (lifecycleIntent) {
       'document_complete'
           when expectedDocType != 5 &&
               (expectedStatus == '待提交' || expectedStatus == '草稿') =>
-        ('document_complete_reference', '已完成'),
+        (
+          'document_complete_reference',
+          '已完成',
+          OutboxOperationKind.documentComplete,
+          'POST /api/v1/documents/:id/complete',
+        ),
       'stocktake_confirm'
           when expectedDocType == 5 && expectedStatus == '盘点中' =>
-        ('stocktake_confirm_reference', '差异已确认'),
+        (
+          'stocktake_confirm_reference',
+          '差异已确认',
+          OutboxOperationKind.stocktakeConfirm,
+          'POST /api/v1/documents/:id/confirm',
+        ),
       'stocktake_settle'
           when expectedDocType == 5 && expectedStatus == '差异已确认' =>
-        ('stocktake_settle_reference', '已结转'),
+        (
+          'stocktake_settle_reference',
+          '已结转',
+          OutboxOperationKind.stocktakeSettle,
+          'POST /api/v1/documents/:id/settle',
+        ),
       _ => throw const FormatException(
         'Document reference lifecycle intent is inconsistent.',
       ),
@@ -248,6 +282,8 @@ final class _DocumentReferencePayload {
       expectedDocType: expectedDocType,
       expectedStatus: expectedStatus,
       acceptedPostStatus: acceptedPostStatus,
+      lifecycleKind: lifecycleKind,
+      lifecycleStatusScope: lifecycleStatusScope,
       outputMarker: outputMarker,
     );
   }
@@ -256,6 +292,8 @@ final class _DocumentReferencePayload {
   final int expectedDocType;
   final String expectedStatus;
   final String acceptedPostStatus;
+  final OutboxOperationKind lifecycleKind;
+  final String lifecycleStatusScope;
   final String outputMarker;
 }
 

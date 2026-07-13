@@ -615,6 +615,8 @@ final class _Handler implements OutboxOperationHandler {
   Future<Result<OutboxHandlerSuccess>> execute(
     OutboxOperation operation, {
     Map<String, OutboxOperationOutput> dependencyOutputs = const {},
+    OutboxHandlerExecutionContext executionContext =
+        const OutboxHandlerExecutionContext.unverified(),
   }) async {
     calls += 1;
     events?.add('handler:${operation.operationId}');
