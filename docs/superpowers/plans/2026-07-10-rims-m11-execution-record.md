@@ -28,8 +28,8 @@ counts, encrypted storage ownership, cleanup, and baseline restore are read.
 | Explicit reviewed queueing | 11-13 | confirmation and immutable payload | planned |
 | Outbox states and legal transitions | 11 | complete state matrix | planned |
 | Operation dependency ordering | 11, 13 | attachment -> create -> lifecycle | planned |
-| Client operation/idempotency IDs | 10-13 | backend status and duplicate replay | planned |
-| Unknown-result recovery | 10, 12 | status first, replay same key, one effect | planned |
+| Client operation/idempotency IDs | 10-13 | backend status and duplicate replay | status API PASS; replay pending |
+| Unknown-result recovery | 10, 12 | status first, replay same key, one effect | status API PASS; coordinator pending |
 | Conflict visibility/resolution | 12, 16 | no overwrite, replacement operation | planned |
 | Session/permission revalidation | 12, 14, 16 | 401/403/account/warehouse probes | planned |
 | Account cleanup and retention | 2, 14 | counts, files, key lifecycle | planned |
@@ -168,6 +168,19 @@ counts, encrypted storage ownership, cleanup, and baseline restore are read.
 | Management | Profile > Data and Cache exposes a dense authenticated draft list with review state and open, duplicate, rename, and confirmed discard workflows |
 | Review | independent specification and code-quality reviews APPROVED after all P0/P1/P2 findings were fixed |
 | GREEN | strict analyze PASS; full Flutter suite PASS (658 tests); diff check PASS |
+
+## Task 10 Idempotency Status Evidence
+
+| Probe | Observed result |
+| --- | --- |
+| RED | authenticated status handler, safe projection, shared route scopes, typed frontend parser, and key contract were absent |
+| Isolation | repository status reads always include JWT user ID, scope, and key and project only state, status code, and expiry |
+| Route | authenticated GET status returns processing/completed only; missing and expired records return 404 without stored response bodies |
+| Scope | five idempotent mutation routes and the status allowlist share one registry with contract tests against actual Gin routes |
+| Key | write middleware, status handler, and Flutter enforce the same 1-255 URL-safe contract and reject slash, Unicode, and dot segments |
+| Client | key paths remain encoded, scope is a query parameter, known states and exact fields parse strictly, and ApiClient failures pass through unchanged |
+| Review | independent specification and code-quality reviews APPROVED after key reachability and route-registry findings were fixed |
+| GREEN | backend `go test ./...` PASS; frontend strict analyze and full suite PASS (680 tests); both diff checks PASS |
 
 ## Final Android State Evidence
 

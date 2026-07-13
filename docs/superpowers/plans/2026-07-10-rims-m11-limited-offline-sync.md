@@ -480,7 +480,7 @@ feat: add recoverable document drafts
 - Create: `rims_frontend/lib/features/offline/data/datasources/operation_status_remote_datasource.dart`
 - Test: `rims_frontend/test/features/offline/operation_status_remote_datasource_test.dart`
 
-- [ ] **Step 1: Write failing backend tests for current-user isolation, allowed scope validation, absent, processing, completed, expired, and no response-body leakage.**
+- [x] **Step 1: Write failing backend tests for current-user isolation, allowed scope validation, absent, processing, completed, expired, and no response-body leakage.**
 
 Endpoint:
 
@@ -492,14 +492,14 @@ Response contains only `state`, `status_code`, and `expires_at`. It never return
 request hashes or stored response bodies. The client recovers a completed body
 by replaying the original request with the same idempotency key.
 
-- [ ] **Step 2: Implement service and authenticated route.**
+- [x] **Step 2: Implement service and authenticated route.**
 
 Allow only registered idempotent mutation scopes. Repository lookup always uses
 the JWT user ID. Missing/expired is 404, processing/completed is 200.
 
-- [ ] **Step 3: Write frontend parsing and failure-mapping tests, then implement the datasource.**
+- [x] **Step 3: Write frontend parsing and failure-mapping tests, then implement the datasource.**
 
-- [ ] **Step 4: Run Go and Flutter tests.**
+- [x] **Step 4: Run Go and Flutter tests.**
 
 ```bash
 ~/local/go/bin/go test ./internal/idempotency ./internal/app
@@ -509,7 +509,7 @@ the JWT user ID. Missing/expired is 404, processing/completed is 200.
 flutter test --no-pub test/features/offline/operation_status_remote_datasource_test.dart
 ```
 
-- [ ] **Step 5: Commit frontend and backend separately.**
+- [x] **Step 5: Commit frontend and backend separately.**
 
 ```text
 feat: expose idempotency operation status
