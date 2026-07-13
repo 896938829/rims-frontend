@@ -1,0 +1,129 @@
+import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:rims_frontend/core/result/failure.dart';
+import 'package:rims_frontend/core/result/result.dart';
+import 'package:rims_frontend/core/storage/app_secure_storage.dart';
+import 'package:rims_frontend/features/auth/domain/entities/auth_session.dart';
+import 'package:rims_frontend/features/auth/domain/entities/warehouse.dart';
+import 'package:rims_frontend/features/auth/domain/repositories/auth_repository.dart';
+import 'package:rims_frontend/features/offline/data/repositories/cached_auth_repository.dart';
+import 'package:rims_frontend/features/offline/data/repositories/memory_offline_store.dart';
+
+void main() {
+  test('token owner rollback cannot delete a newer equal token', () async {
+    final raw = _MemoryFlutterSecureStorage();
+    final storage = AppSecureStorage(storage: raw);
+    await storage.saveAccessTokenForOwner(token: 'T', ownerId: 'owner-a');
+    await storage.saveAccessTokenForOwner(token: 'T', ownerId: 'owner-b');
+    final restarted = AppSecureStorage(storage: raw);
+
+    expect(await restarted.readAccessToken(), 'T');
+    expect(await restarted.clearAccessTokenForOwner('owner-a'), isFalse);
+    expect(await restarted.readAccessToken(), 'T');
+    expect(await restarted.clearAccessTokenForOwner('owner-b'), isTrue);
+    expect(await restarted.readAccessToken(), isNull);
+  });
+
+  test('legacy plain tokens remain readable and clearable', () async {
+    final raw = _MemoryFlutterSecureStorage()
+      ..values[AppSecureStorage.kAccessTokenKey] = 'legacy-token';
+    final storage = AppSecureStorage(storage: raw);
+
+    expect(await storage.readAccessToken(), 'legacy-token');
+    expect(await storage.clearAccessTokenIfMatches('legacy-token'), isTrue);
+    expect(await storage.readAccessToken(), isNull);
+  });
+
+  test(
+    'malformed versioned token records become typed restore failures',
+    () async {
+      final raw = _MemoryFlutterSecureStorage()
+        ..values[AppSecureStorage.kAccessTokenKey] = '{broken';
+      final storage = AppSecureStorage(storage: raw);
+      final repository = CachedAuthRepository(
+        delegate: const _NullAuthRepository(),
+        store: MemoryOfflineStore(),
+        tokenStorage: storage,
+        accountStorage: storage,
+        revocationStorage: storage,
+        onSessionRevoked: () {},
+      );
+
+      final result = await repository.restoreSession();
+
+      expect(
+        result.when(success: (_) => null, failure: (failure) => failure),
+        isA<LocalStorageFailure>(),
+      );
+    },
+  );
+}
+
+final class _MemoryFlutterSecureStorage extends FlutterSecureStorage {
+  _MemoryFlutterSecureStorage();
+
+  final Map<String, String> values = {};
+
+  @override
+  Future<void> delete({
+    required String key,
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    values.remove(key);
+  }
+
+  @override
+  Future<String?> read({
+    required String key,
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async => values[key];
+
+  @override
+  Future<void> write({
+    required String key,
+    required String? value,
+    AppleOptions? iOptions,
+    AndroidOptions? aOptions,
+    LinuxOptions? lOptions,
+    WebOptions? webOptions,
+    AppleOptions? mOptions,
+    WindowsOptions? wOptions,
+  }) async {
+    if (value == null) {
+      values.remove(key);
+    } else {
+      values[key] = value;
+    }
+  }
+}
+
+final class _NullAuthRepository implements AuthRepository {
+  const _NullAuthRepository();
+
+  @override
+  Future<Result<AuthSession>> login({
+    required String username,
+    required String password,
+  }) async => const FailureResult(UnknownFailure());
+
+  @override
+  Future<void> logout() async {}
+
+  @override
+  Future<Result<AuthSession?>> restoreSession() async =>
+      const Success<AuthSession?>(null);
+
+  @override
+  Future<Result<Warehouse>> switchCurrentWarehouse(Warehouse warehouse) async =>
+      Success(warehouse);
+}

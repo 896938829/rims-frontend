@@ -16,6 +16,14 @@ abstract interface class AuthCredentialInvalidator {
   Future<void> expireCredentials();
 }
 
+abstract interface class AuthTokenTransactionRepository {
+  Future<Result<AuthSession>> loginWithTokenOwner({
+    required String username,
+    required String password,
+    required String ownerId,
+  });
+}
+
 abstract interface class AuthRepository {
   Future<Result<AuthSession?>> restoreSession();
 

@@ -401,6 +401,112 @@ void main() {
     },
   );
 
+  for (final reason in const [
+    OfflineOwnershipReason.accountSwitch,
+    OfflineOwnershipReason.revocation,
+    OfflineOwnershipReason.permissionRefresh,
+    OfflineOwnershipReason.warehouseSwitch,
+  ]) {
+    test(
+      '${reason.name} only releases the latest successful overlapping attempt',
+      () async {
+        final barrier = OfflineWriteBarrier();
+        final store = _AttemptControlledOwnershipStore(reason, [
+          _ControlledOwnershipAttempt.blocked(),
+          _ControlledOwnershipAttempt.failed(),
+          _ControlledOwnershipAttempt.successful(),
+        ]);
+        final ownership = OfflineOwnershipService(
+          store: store,
+          files: const _NoopFiles(),
+          scans: const _NoopScans(),
+          reviews: const _NoopReviews(),
+          databaseKeys: MemoryOfflineDatabaseKeyManager(),
+          mutationParticipants: [barrier],
+        );
+        final first = ownership.apply(_intentFor(reason));
+        await store.attempts.first.started.future;
+
+        final second = ownership.apply(_intentFor(reason));
+        await Future<void>.delayed(Duration.zero);
+        expect(store.attempts[1].started.isCompleted, isFalse);
+        store.attempts.first.release.complete();
+        expect((await first).completed, isTrue);
+        expect((await second).completed, isFalse);
+
+        expect(ownership.canAccessOfflineData('7'), isFalse);
+        await expectLater(
+          barrier.protect(accountId: '7', operation: () async {}),
+          throwsA(isA<OfflineWriteBlockedException>()),
+        );
+        await ownership.apply(
+          const OfflineOwnershipIntent.reauthenticated(accountId: '7'),
+        );
+        expect(ownership.canAccessOfflineData('7'), isFalse);
+        if (reason == OfflineOwnershipReason.accountSwitch) {
+          expect(ownership.canAccessOfflineData('8'), isFalse);
+          await expectLater(
+            barrier.protect(accountId: '8', operation: () async {}),
+            throwsA(isA<OfflineWriteBlockedException>()),
+          );
+        }
+
+        expect((await ownership.apply(_intentFor(reason))).completed, isTrue);
+        if (reason == OfflineOwnershipReason.accountSwitch ||
+            reason == OfflineOwnershipReason.revocation) {
+          expect(ownership.canAccessOfflineData('7'), isFalse);
+          await ownership.apply(
+            const OfflineOwnershipIntent.reauthenticated(accountId: '7'),
+          );
+        }
+        expect(ownership.canAccessOfflineData('7'), isTrue);
+        if (reason == OfflineOwnershipReason.accountSwitch) {
+          expect(ownership.canAccessOfflineData('8'), isTrue);
+          await barrier.protect(accountId: '8', operation: () async {});
+        }
+        await barrier.protect(accountId: '7', operation: () async {});
+      },
+    );
+
+    test(
+      '${reason.name} releases when the newer overlapping attempt succeeds',
+      () async {
+        final barrier = OfflineWriteBarrier();
+        final store = _AttemptControlledOwnershipStore(reason, [
+          _ControlledOwnershipAttempt.blocked(fails: true),
+          _ControlledOwnershipAttempt.successful(),
+        ]);
+        final ownership = OfflineOwnershipService(
+          store: store,
+          files: const _NoopFiles(),
+          scans: const _NoopScans(),
+          reviews: const _NoopReviews(),
+          databaseKeys: MemoryOfflineDatabaseKeyManager(),
+          mutationParticipants: [barrier],
+        );
+        final first = ownership.apply(_intentFor(reason));
+        await store.attempts.first.started.future;
+        final second = ownership.apply(_intentFor(reason));
+        store.attempts.first.release.complete();
+
+        expect((await first).completed, isFalse);
+        expect((await second).completed, isTrue);
+        if (reason == OfflineOwnershipReason.accountSwitch ||
+            reason == OfflineOwnershipReason.revocation) {
+          await ownership.apply(
+            const OfflineOwnershipIntent.reauthenticated(accountId: '7'),
+          );
+        }
+        expect(ownership.canAccessOfflineData('7'), isTrue);
+        if (reason == OfflineOwnershipReason.accountSwitch) {
+          expect(ownership.canAccessOfflineData('8'), isTrue);
+          await barrier.protect(accountId: '8', operation: () async {});
+        }
+        await barrier.protect(accountId: '7', operation: () async {});
+      },
+    );
+  }
+
   test(
     'successful account switch is recoverable when the previous account logs in again',
     () async {
@@ -982,6 +1088,93 @@ OfflineOwnershipService _service({
     databaseKeys: keys,
     mutationParticipants: participants,
   );
+}
+
+OfflineOwnershipIntent _intentFor(OfflineOwnershipReason reason) =>
+    switch (reason) {
+      OfflineOwnershipReason.accountSwitch =>
+        const OfflineOwnershipIntent.accountSwitch(
+          previousAccountId: '7',
+          currentAccountId: '8',
+        ),
+      OfflineOwnershipReason.revocation =>
+        const OfflineOwnershipIntent.revocation(accountId: '7'),
+      OfflineOwnershipReason.permissionRefresh =>
+        const OfflineOwnershipIntent.permissionRefresh(accountId: '7'),
+      OfflineOwnershipReason.warehouseSwitch =>
+        const OfflineOwnershipIntent.warehouseSwitch(
+          accountId: '7',
+          previousWarehouseId: 1,
+          currentWarehouseId: 2,
+        ),
+      _ => throw ArgumentError.value(reason),
+    };
+
+final class _ControlledOwnershipAttempt {
+  _ControlledOwnershipAttempt._({required this.fails, required bool blocked}) {
+    if (!blocked) release.complete();
+  }
+
+  factory _ControlledOwnershipAttempt.blocked({bool fails = false}) =>
+      _ControlledOwnershipAttempt._(fails: fails, blocked: true);
+  factory _ControlledOwnershipAttempt.failed() =>
+      _ControlledOwnershipAttempt._(fails: true, blocked: false);
+  factory _ControlledOwnershipAttempt.successful() =>
+      _ControlledOwnershipAttempt._(fails: false, blocked: false);
+
+  final bool fails;
+  final Completer<void> started = Completer<void>();
+  final Completer<void> release = Completer<void>();
+}
+
+final class _AttemptControlledOwnershipStore implements OfflineOwnershipStore {
+  _AttemptControlledOwnershipStore(this.reason, this.attempts);
+
+  final OfflineOwnershipReason reason;
+  final List<_ControlledOwnershipAttempt> attempts;
+  int _callCount = 0;
+
+  Future<void> _run(OfflineOwnershipReason invokedReason) async {
+    if (invokedReason != reason) return;
+    final attempt = attempts[_callCount++];
+    attempt.started.complete();
+    await attempt.release.future;
+    if (attempt.fails) throw StateError('${reason.name} failed');
+  }
+
+  @override
+  Future<void> clearAccountCache(String accountId) async {}
+
+  @override
+  Future<void> clearAccountOfflineWork(String accountId) async {}
+
+  @override
+  Future<void> clearAllSensitiveData() =>
+      _run(OfflineOwnershipReason.revocation);
+
+  @override
+  Future<void> clearOwnedAccount(
+    String accountId, {
+    required bool preserveDrafts,
+  }) => _run(OfflineOwnershipReason.accountSwitch);
+
+  @override
+  Future<void> discardSessionProjection(String accountId) async {}
+
+  @override
+  Future<void> invalidatePermissionScopedCache(String accountId) =>
+      _run(OfflineOwnershipReason.permissionRefresh);
+
+  @override
+  Future<void> invalidateWarehouseCache({
+    required String accountId,
+    required int warehouseId,
+  }) => _run(OfflineOwnershipReason.warehouseSwitch);
+
+  @override
+  Future<OfflineStoreOwnershipSnapshot> inspectAccount(
+    String accountId,
+  ) async => const OfflineStoreOwnershipSnapshot();
 }
 
 final class _BlockedScanStorage implements AsyncScanStorage {

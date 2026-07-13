@@ -353,10 +353,13 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
 
   final Map<String, Set<OfflineOwnershipReason>> _blockedReasons = {};
   final Set<String> _commandBlockedAccounts = {};
-  final Set<String> _successfulRevocations = {};
-  final Map<String, Set<OfflineOwnershipReason>> _recoverableReasonsReady = {};
+  final Map<String, Map<OfflineOwnershipReason, int>>
+  _latestAttemptGenerations = {};
+  final Map<String, Map<OfflineOwnershipReason, int>>
+  _successfulAttemptGenerations = {};
   Future<void> _tail = Future<void>.value();
   int _previewSequence = 0;
+  int _attemptGeneration = 0;
 
   void attachMutationParticipant(OfflineMutationParticipant participant) {
     if (_mutationParticipants.any(
@@ -520,11 +523,12 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
 
   @override
   Future<OfflineOwnershipReport> apply(OfflineOwnershipIntent intent) {
+    final generation = _startAttempt(intent);
     _blockBefore(intent);
     final mutationBlocks = _beginMutationBlocks(_mutationScopesFor(intent));
     return _serialized(() async {
       final report = await _apply(intent, mutationBlocks);
-      _finishMutationBlocks(intent, report, mutationBlocks);
+      _finishMutationBlocks(intent, report, mutationBlocks, generation);
       return report;
     });
   }
@@ -569,10 +573,6 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
           retainedStagedRequestIds: const {},
           failures: failures,
         );
-        final current = intent.currentAccountId;
-        if (current != null && failures.isEmpty) {
-          _unblock(current, OfflineOwnershipReason.accountSwitch);
-        }
       case OfflineOwnershipReason.warehouseSwitch:
         final previousWarehouseId = intent.previousWarehouseId;
         if (previousWarehouseId != null &&
@@ -607,9 +607,6 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
             failures,
           );
         }
-        if (failures.isEmpty) {
-          _unblock(intent.accountId, OfflineOwnershipReason.warehouseSwitch);
-        }
       case OfflineOwnershipReason.permissionRefresh:
         await _step(
           OfflineOwnershipStep.store,
@@ -631,9 +628,6 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
           () => reviews.invalidate(accountId: intent.accountId),
           failures,
         );
-        if (failures.isEmpty) {
-          _unblock(intent.accountId, OfflineOwnershipReason.permissionRefresh);
-        }
       case OfflineOwnershipReason.tokenExpiry:
         await _step(
           OfflineOwnershipStep.reviewedSyncAuthority,
@@ -642,15 +636,7 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
           failures,
         );
       case OfflineOwnershipReason.reauthenticated:
-        if (failures.isEmpty) {
-          final ready = _recoverableReasonsReady[intent.accountId] ?? const {};
-          for (final reason in ready) {
-            _unblock(intent.accountId, reason);
-          }
-          if (_successfulRevocations.remove(intent.accountId)) {
-            _unblock(intent.accountId, OfflineOwnershipReason.revocation);
-          }
-        }
+        break;
       case OfflineOwnershipReason.revocation:
         final sensitiveFailureCount = failures.length;
         await _step(
@@ -689,7 +675,6 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
             ),
           );
         }
-        if (failures.isEmpty) _successfulRevocations.add(intent.accountId);
       case OfflineOwnershipReason.invalidSessionProjection:
         await _step(
           OfflineOwnershipStep.store,
@@ -758,57 +743,59 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
     OfflineOwnershipIntent intent,
     OfflineOwnershipReport report,
     List<_ParticipantBlock> blocks,
+    int? generation,
   ) {
     if (intent.reason == OfflineOwnershipReason.reauthenticated) {
       if (report.completed) {
-        final ready = _recoverableReasonsReady[intent.accountId];
-        if (ready != null) {
-          for (final reason in ready.toList(growable: false)) {
-            if (!(_blockedReasons[intent.accountId]?.contains(reason) ??
-                false)) {
-              _releaseRetainedMutationBlocks(intent.accountId, reason);
-              ready.remove(reason);
+        final successful = _successfulAttemptGenerations[intent.accountId];
+        if (successful != null) {
+          for (final entry in successful.entries.toList(growable: false)) {
+            final latest =
+                _latestAttemptGenerations[intent.accountId]?[entry.key];
+            if (latest == entry.value) {
+              _unblock(intent.accountId, entry.key);
+              _releaseRetainedMutationBlocks(intent.accountId, entry.key);
+              successful.remove(entry.key);
             }
           }
-          if (ready.isEmpty) _recoverableReasonsReady.remove(intent.accountId);
-        }
-        if (!(_blockedReasons[intent.accountId]?.contains(
-              OfflineOwnershipReason.revocation,
-            ) ??
-            false)) {
-          _releaseRetainedMutationBlocks(
-            intent.accountId,
-            OfflineOwnershipReason.revocation,
-          );
+          if (successful.isEmpty) {
+            _successfulAttemptGenerations.remove(intent.accountId);
+          }
         }
       }
       return;
     }
-    if (report.completed &&
-        (intent.reason == OfflineOwnershipReason.logout ||
-            intent.reason == OfflineOwnershipReason.tokenExpiry ||
-            intent.reason == OfflineOwnershipReason.invalidSessionProjection ||
-            intent.reason == OfflineOwnershipReason.accountSwitch)) {
-      _recoverableReasonsReady
-          .putIfAbsent(intent.accountId, () => {})
-          .add(intent.reason);
-    }
+    final latestSucceeded =
+        generation != null &&
+        report.completed &&
+        _latestAttemptGenerations[intent.accountId]?[intent.reason] ==
+            generation;
     switch (intent.reason) {
       case OfflineOwnershipReason.logout ||
           OfflineOwnershipReason.invalidSessionProjection ||
           OfflineOwnershipReason.tokenExpiry:
+        if (latestSucceeded) {
+          _recordSuccessfulAttempt(intent, generation);
+        }
         _retainMutationBlocks(intent.accountId, intent.reason, blocks);
       case OfflineOwnershipReason.accountSwitch:
+        if (latestSucceeded) {
+          _recordSuccessfulAttempt(intent, generation);
+        }
         _retainMutationBlocks(intent.accountId, intent.reason, blocks);
         final current = intent.currentAccountId;
         if (current != null) {
-          if (report.completed) {
+          if (latestSucceeded) {
+            _unblock(current, intent.reason);
             _releaseRetainedMutationBlocks(current, intent.reason);
           } else {
             _retainMutationBlocks(current, intent.reason, blocks);
           }
         }
       case OfflineOwnershipReason.revocation:
+        if (latestSucceeded) {
+          _recordSuccessfulAttempt(intent, generation);
+        }
         final accountBlocks = _beginMutationBlocks([
           OfflineMutationScope.account(intent.accountId),
         ]);
@@ -816,7 +803,8 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
         _releaseMutationBlocks(accountBlocks);
       case OfflineOwnershipReason.warehouseSwitch ||
           OfflineOwnershipReason.permissionRefresh:
-        if (report.completed) {
+        if (latestSucceeded) {
+          _unblock(intent.accountId, intent.reason);
           _releaseRetainedMutationBlocks(intent.accountId, intent.reason);
         } else {
           _retainMutationBlocks(intent.accountId, intent.reason, blocks);
@@ -825,6 +813,28 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
         break;
     }
     _releaseMutationBlocks(blocks);
+  }
+
+  int? _startAttempt(OfflineOwnershipIntent intent) {
+    if (intent.reason == OfflineOwnershipReason.reauthenticated) return null;
+    final generation = ++_attemptGeneration;
+    _latestAttemptGenerations.putIfAbsent(
+      intent.accountId,
+      () => {},
+    )[intent.reason] = generation;
+    final successful = _successfulAttemptGenerations[intent.accountId];
+    successful?.remove(intent.reason);
+    if (successful?.isEmpty ?? false) {
+      _successfulAttemptGenerations.remove(intent.accountId);
+    }
+    return generation;
+  }
+
+  void _recordSuccessfulAttempt(OfflineOwnershipIntent intent, int generation) {
+    _successfulAttemptGenerations.putIfAbsent(
+      intent.accountId,
+      () => {},
+    )[intent.reason] = generation;
   }
 
   void _retainMutationBlocks(
@@ -875,13 +885,10 @@ final class OfflineOwnershipService implements OfflineOwnershipCoordinator {
       case OfflineOwnershipReason.logout ||
           OfflineOwnershipReason.tokenExpiry ||
           OfflineOwnershipReason.invalidSessionProjection:
-        _recoverableReasonsReady[intent.accountId]?.remove(intent.reason);
         _block(intent.accountId, intent.reason);
       case OfflineOwnershipReason.revocation:
-        _successfulRevocations.remove(intent.accountId);
         _block(intent.accountId, intent.reason);
       case OfflineOwnershipReason.accountSwitch:
-        _recoverableReasonsReady[intent.accountId]?.remove(intent.reason);
         _block(intent.accountId, intent.reason);
         final current = intent.currentAccountId;
         if (current != null) _block(current, intent.reason);

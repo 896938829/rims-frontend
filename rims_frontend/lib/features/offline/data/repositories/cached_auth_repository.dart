@@ -2,6 +2,7 @@ import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
 import '../../../../core/storage/app_secure_storage.dart';
 import '../../../../core/storage/pending_revocation_journal.dart';
+import 'package:uuid/uuid.dart';
 import '../../../auth/domain/entities/app_user.dart';
 import '../../../auth/domain/entities/auth_session.dart';
 import '../../../auth/domain/entities/warehouse.dart';
@@ -28,6 +29,7 @@ final class CachedAuthRepository
     this.ownershipCoordinator,
     this.authEpochReader,
     this.revocationJournal,
+    this.authTransactionOwnerFactory = _newAuthTransactionOwnerId,
     DateTime Function()? now,
   }) : now = now ?? DateTime.now;
 
@@ -42,6 +44,7 @@ final class CachedAuthRepository
   final OfflineOwnershipCoordinator? ownershipCoordinator;
   final int Function()? authEpochReader;
   final PendingRevocationJournal? revocationJournal;
+  final String Function() authTransactionOwnerFactory;
   final void Function() onSessionRevoked;
   final void Function()? onSessionExpired;
   final DateTime Function() now;
@@ -215,10 +218,26 @@ final class CachedAuthRepository
     final operationEpoch = authEpochReader?.call();
     final pendingFailure = await _retryPendingRevocation();
     if (pendingFailure != null) return FailureResult(pendingFailure);
-    final result = await delegate.login(username: username, password: password);
+    final transactionOwnerId = authTransactionOwnerFactory();
+    final usesTokenTransaction =
+        delegate is AuthTokenTransactionRepository &&
+        tokenStorage is AuthTokenTransactionStorage;
+    final Result<AuthSession> result;
+    if (delegate case final AuthTokenTransactionRepository owned) {
+      result = await owned.loginWithTokenOwner(
+        username: username,
+        password: password,
+        ownerId: transactionOwnerId,
+      );
+    } else {
+      result = await delegate.login(username: username, password: password);
+    }
     if (result case Success<AuthSession>(:final data)) {
       if (!_isCurrentEpoch(operationEpoch)) {
-        await _rollbackAccessToken(data.accessToken);
+        await _rollbackAccessToken(
+          data.accessToken,
+          ownerId: usesTokenTransaction ? transactionOwnerId : null,
+        );
         return _staleSessionFailure();
       }
       final previousAccountId = await accountStorage
@@ -232,7 +251,10 @@ final class CachedAuthRepository
           ),
         );
         if (ownershipFailure != null) {
-          await _rollbackAccessToken(data.accessToken);
+          await _rollbackAccessToken(
+            data.accessToken,
+            ownerId: usesTokenTransaction ? transactionOwnerId : null,
+          );
           return FailureResult(ownershipFailure);
         }
       }
@@ -240,17 +262,26 @@ final class CachedAuthRepository
         OfflineOwnershipIntent.reauthenticated(accountId: accountId),
       );
       if (reauthenticationFailure != null) {
-        await _rollbackAccessToken(data.accessToken);
+        await _rollbackAccessToken(
+          data.accessToken,
+          ownerId: usesTokenTransaction ? transactionOwnerId : null,
+        );
         return FailureResult(reauthenticationFailure);
       }
       if (!_isCurrentEpoch(operationEpoch)) {
-        await _rollbackAccessToken(data.accessToken);
+        await _rollbackAccessToken(
+          data.accessToken,
+          ownerId: usesTokenTransaction ? transactionOwnerId : null,
+        );
         return _staleSessionFailure();
       }
       try {
         await _writeSession(data, expectedEpoch: operationEpoch);
       } on _StaleAuthOperation {
-        await _rollbackAccessToken(data.accessToken);
+        await _rollbackAccessToken(
+          data.accessToken,
+          ownerId: usesTokenTransaction ? transactionOwnerId : null,
+        );
         return _staleSessionFailure();
       }
     }
@@ -498,7 +529,16 @@ final class CachedAuthRepository
     return null;
   }
 
-  Future<void> _rollbackAccessToken(String expectedToken) async {
+  Future<void> _rollbackAccessToken(
+    String expectedToken, {
+    String? ownerId,
+  }) async {
+    if (ownerId != null) {
+      if (tokenStorage case final AuthTokenTransactionStorage owned) {
+        await owned.clearAccessTokenForOwner(ownerId);
+        return;
+      }
+    }
     if (tokenStorage case final ConditionalTokenStorage conditional) {
       await conditional.clearAccessTokenIfMatches(expectedToken);
       return;
@@ -586,6 +626,8 @@ final class CachedAuthRepository
         StateFailure(message: 'Warehouse switch was superseded.'),
       );
 }
+
+String _newAuthTransactionOwnerId() => const Uuid().v4();
 
 final class _StaleAuthOperation implements Exception {
   const _StaleAuthOperation();

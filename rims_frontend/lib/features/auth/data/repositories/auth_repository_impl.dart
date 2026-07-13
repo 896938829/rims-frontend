@@ -1,6 +1,7 @@
 import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
 import '../../../../core/storage/app_secure_storage.dart';
+import 'package:uuid/uuid.dart';
 import '../../domain/entities/app_user.dart';
 import '../../domain/entities/auth_session.dart';
 import '../../domain/entities/warehouse.dart';
@@ -9,14 +10,19 @@ import '../datasources/auth_remote_datasource.dart';
 import '../models/auth_models.dart';
 
 final class AuthRepositoryImpl
-    implements AuthRepository, AuthCredentialInvalidator {
+    implements
+        AuthRepository,
+        AuthCredentialInvalidator,
+        AuthTokenTransactionRepository {
   const AuthRepositoryImpl({
     required this.remoteDataSource,
     required this.secureStorage,
+    this.tokenOwnerFactory = _newTokenOwnerId,
   });
 
   final AuthRemoteDataSource remoteDataSource;
   final TokenStorage secureStorage;
+  final String Function() tokenOwnerFactory;
 
   @override
   Future<Result<AuthSession?>> restoreSession() async {
@@ -51,13 +57,24 @@ final class AuthRepositoryImpl
   Future<Result<AuthSession>> login({
     required String username,
     required String password,
+  }) => loginWithTokenOwner(
+    username: username,
+    password: password,
+    ownerId: tokenOwnerFactory(),
+  );
+
+  @override
+  Future<Result<AuthSession>> loginWithTokenOwner({
+    required String username,
+    required String password,
+    required String ownerId,
   }) async {
     final loginResult = await remoteDataSource.login(
       username: username,
       password: password,
     );
 
-    return _sessionFromLoginResult(loginResult);
+    return _sessionFromLoginResult(loginResult, ownerId: ownerId);
   }
 
   @override
@@ -86,8 +103,9 @@ final class AuthRepositoryImpl
   }
 
   Future<Result<AuthSession>> _sessionFromLoginResult(
-    Result<LoginResponseModel> loginResult,
-  ) async {
+    Result<LoginResponseModel> loginResult, {
+    required String ownerId,
+  }) async {
     return loginResult.when(
       success: (login) async {
         final token = login.token.trim();
@@ -103,12 +121,26 @@ final class AuthRepositoryImpl
           return FailureResult<AuthSession>(userFailure);
         }
 
-        await secureStorage.saveAccessToken(token);
+        try {
+          if (secureStorage case final AuthTokenTransactionStorage owned) {
+            await owned.saveAccessTokenForOwner(token: token, ownerId: ownerId);
+          } else {
+            await secureStorage.saveAccessToken(token);
+          }
+        } on Object catch (error) {
+          return FailureResult<AuthSession>(
+            LocalStorageFailure(
+              message: 'Unable to store the authenticated credential.',
+              cause: error,
+            ),
+          );
+        }
 
         return _sessionFromUserAndToken(
           token: token,
           user: user,
           clearTokenOnAnyFailure: true,
+          tokenOwnerId: ownerId,
         );
       },
       failure: (failure) async => FailureResult<AuthSession>(failure),
@@ -119,6 +151,7 @@ final class AuthRepositoryImpl
     required String token,
     required AppUser user,
     required bool clearTokenOnAnyFailure,
+    String? tokenOwnerId,
   }) async {
     final warehouseResult = await remoteDataSource.loadWarehouses(
       accessToken: clearTokenOnAnyFailure ? token : null,
@@ -141,7 +174,7 @@ final class AuthRepositoryImpl
       },
       failure: (failure) async {
         if (clearTokenOnAnyFailure) {
-          await _clearAccessTokenIfMatches(token);
+          await _clearLoginToken(token: token, ownerId: tokenOwnerId);
         }
         return FailureResult<AuthSession>(failure);
       },
@@ -156,7 +189,16 @@ final class AuthRepositoryImpl
   @override
   Future<void> expireCredentials() => logout();
 
-  Future<void> _clearAccessTokenIfMatches(String token) async {
+  Future<void> _clearLoginToken({
+    required String token,
+    required String? ownerId,
+  }) async {
+    if (ownerId != null) {
+      if (secureStorage case final AuthTokenTransactionStorage owned) {
+        await owned.clearAccessTokenForOwner(ownerId);
+        return;
+      }
+    }
     if (secureStorage case final ConditionalTokenStorage conditional) {
       await conditional.clearAccessTokenIfMatches(token);
       return;
@@ -189,3 +231,5 @@ final class AuthRepositoryImpl
     return null;
   }
 }
+
+String _newTokenOwnerId() => const Uuid().v4();

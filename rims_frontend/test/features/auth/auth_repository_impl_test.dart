@@ -295,6 +295,8 @@ void main() {
         remoteDataSource.lastWarehouseAccessToken,
         isNot('old-invalid-token'),
       );
+      expect(storage.ownerId, isNotNull);
+      expect(storage.ownerId, isNotEmpty);
     });
 
     test('login rejects user without username before saving token', () async {
@@ -361,6 +363,7 @@ void main() {
             ),
           ),
           secureStorage: storage,
+          tokenOwnerFactory: () => 'bootstrap-owner',
         );
 
         final result = await repository.login(
@@ -370,7 +373,42 @@ void main() {
 
         expect(result, isA<FailureResult<AuthSession>>());
         expect(storage.accessToken, isNull);
-        expect(storage.conditionalClearAttempts, ['login-token']);
+        expect(storage.ownerClearAttempts, ['bootstrap-owner']);
+      },
+    );
+
+    test(
+      'token storage write failures are returned as typed failures',
+      () async {
+        final storage = _FakeTokenStorage()..failWrites = true;
+        final repository = AuthRepositoryImpl(
+          remoteDataSource: _FakeAuthRemoteDataSource(
+            loginResult: const Success(
+              LoginResponseModel(
+                token: 'login-token',
+                user: AppUserModel(
+                  id: 7,
+                  username: 'alice',
+                  realName: 'Alice',
+                  roleCode: 'user',
+                  roleName: 'User',
+                ),
+              ),
+            ),
+          ),
+          secureStorage: storage,
+          tokenOwnerFactory: () => 'raw-owner',
+        );
+
+        final result = await repository.login(
+          username: 'alice',
+          password: 'secret',
+        );
+
+        expect(
+          result.when(success: (_) => null, failure: (failure) => failure),
+          isA<LocalStorageFailure>(),
+        );
       },
     );
 
@@ -443,18 +481,26 @@ void main() {
   });
 }
 
-final class _FakeTokenStorage implements TokenStorage, ConditionalTokenStorage {
+final class _FakeTokenStorage
+    implements
+        TokenStorage,
+        ConditionalTokenStorage,
+        AuthTokenTransactionStorage {
   _FakeTokenStorage({this.accessToken});
 
   String? accessToken;
   int clearCallCount = 0;
   int saveCallCount = 0;
   final List<String> conditionalClearAttempts = [];
+  final List<String> ownerClearAttempts = [];
+  String? ownerId;
+  bool failWrites = false;
 
   @override
   Future<void> clearAccessToken() async {
     clearCallCount += 1;
     accessToken = null;
+    ownerId = null;
   }
 
   @override
@@ -466,12 +512,33 @@ final class _FakeTokenStorage implements TokenStorage, ConditionalTokenStorage {
   }
 
   @override
+  Future<bool> clearAccessTokenForOwner(String ownerId) async {
+    ownerClearAttempts.add(ownerId);
+    if (this.ownerId != ownerId) return false;
+    await clearAccessToken();
+    return true;
+  }
+
+  @override
   Future<String?> readAccessToken() async => accessToken;
 
   @override
   Future<void> saveAccessToken(String token) async {
+    if (failWrites) throw StateError('token write failed');
     saveCallCount += 1;
     accessToken = token;
+    ownerId = null;
+  }
+
+  @override
+  Future<void> saveAccessTokenForOwner({
+    required String token,
+    required String ownerId,
+  }) async {
+    if (failWrites) throw StateError('token write failed');
+    saveCallCount += 1;
+    accessToken = token;
+    this.ownerId = ownerId;
   }
 }
 

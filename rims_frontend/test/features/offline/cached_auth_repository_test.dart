@@ -653,6 +653,7 @@ void main() {
     var epoch = 0;
     final storage = _FakeSessionStorage();
     final delegate = _ConcurrentLoginAuthRepository(storage);
+    final owners = ['owner-a', 'owner-b'].iterator;
     final repository = CachedAuthRepository(
       delegate: delegate,
       store: MemoryOfflineStore(),
@@ -661,6 +662,10 @@ void main() {
       revocationStorage: storage,
       ownershipCoordinator: _RecordingOwnershipCoordinator(),
       authEpochReader: () => epoch,
+      authTransactionOwnerFactory: () {
+        owners.moveNext();
+        return owners.current;
+      },
       onSessionRevoked: () {},
     );
     final stale = repository.login(username: 'alice', password: 'secret');
@@ -673,8 +678,9 @@ void main() {
 
     expect(current, isA<Success<AuthSession>>());
     expect(staleResult, isA<FailureResult<AuthSession>>());
-    expect(storage.token, 'token-8');
-    expect(storage.conditionalClearAttempts, ['token-7']);
+    expect(storage.token, 'token');
+    expect(storage.tokenOwnerId, 'owner-b');
+    expect(storage.ownerClearAttempts, ['owner-a']);
   });
 
   test(
@@ -683,6 +689,7 @@ void main() {
       var epoch = 0;
       final storage = _FakeSessionStorage();
       final delegate = _ConcurrentLoginAuthRepository(storage)..bobFails = true;
+      final owners = ['owner-a', 'owner-b'].iterator;
       final repository = CachedAuthRepository(
         delegate: delegate,
         store: MemoryOfflineStore(),
@@ -691,6 +698,10 @@ void main() {
         revocationStorage: storage,
         ownershipCoordinator: _RecordingOwnershipCoordinator(),
         authEpochReader: () => epoch,
+        authTransactionOwnerFactory: () {
+          owners.moveNext();
+          return owners.current;
+        },
         onSessionRevoked: () {},
       );
       final stale = repository.login(username: 'alice', password: 'secret');
@@ -705,7 +716,7 @@ void main() {
       expect(await stale, isA<FailureResult<AuthSession>>());
 
       expect(storage.token, isNull);
-      expect(storage.conditionalClearAttempts, ['token-7']);
+      expect(storage.ownerClearAttempts, ['owner-a']);
       final restarted = CachedAuthRepository(
         delegate: _FakeAuthRepository(
           restoreResult: const Success<AuthSession?>(null),
@@ -722,6 +733,57 @@ void main() {
       );
     },
   );
+
+  for (final newerBootstrapFails in [false, true]) {
+    test('real auth layering keeps equal-token owners isolated when newer '
+        'bootstrap ${newerBootstrapFails ? 'fails' : 'succeeds'}', () async {
+      var epoch = 0;
+      final storage = _FakeSessionStorage();
+      final remote = _ConcurrentSameTokenRemoteDataSource(
+        newerBootstrapFails: newerBootstrapFails,
+      );
+      final delegate = AuthRepositoryImpl(
+        remoteDataSource: remote,
+        secureStorage: storage,
+      );
+      final owners = ['owner-a', 'owner-b'].iterator;
+      final repository = CachedAuthRepository(
+        delegate: delegate,
+        store: MemoryOfflineStore(),
+        tokenStorage: storage,
+        accountStorage: storage,
+        revocationStorage: storage,
+        ownershipCoordinator: _RecordingOwnershipCoordinator(),
+        authEpochReader: () => epoch,
+        authTransactionOwnerFactory: () {
+          owners.moveNext();
+          return owners.current;
+        },
+        onSessionRevoked: () {},
+      );
+      final stale = repository.login(username: 'alice', password: 'secret');
+      await remote.firstWarehouseStarted.future;
+      epoch += 1;
+
+      final current = await repository.login(
+        username: 'bob',
+        password: 'secret',
+      );
+      remote.releaseFirstWarehouse.complete();
+      expect(await stale, isA<FailureResult<AuthSession>>());
+
+      if (newerBootstrapFails) {
+        expect(current, isA<FailureResult<AuthSession>>());
+        expect(storage.token, isNull);
+        expect(storage.ownerClearAttempts, ['owner-b', 'owner-a']);
+      } else {
+        expect(current, isA<Success<AuthSession>>());
+        expect(storage.token, 'token');
+        expect(storage.tokenOwnerId, 'owner-b');
+        expect(storage.ownerClearAttempts, ['owner-a']);
+      }
+    });
+  }
 
   test(
     'revocation keeps the durable marker until account metadata is cleared',
@@ -1150,16 +1212,19 @@ final class _FakeSessionStorage
     implements
         TokenStorage,
         ConditionalTokenStorage,
+        AuthTokenTransactionStorage,
         AuthenticatedAccountStorage,
         PendingRevocationStorage,
         ConditionalPendingRevocationStorage {
   _FakeSessionStorage({this.token});
 
   String? token;
+  String? tokenOwnerId;
   String? accountId;
   String? pendingRevocationAccountId;
   final Map<_RevocationStorageFailure, int> _remainingFailures = {};
   final List<String> conditionalClearAttempts = [];
+  final List<String> ownerClearAttempts = [];
 
   void failNext(_RevocationStorageFailure failure, {int times = 1}) {
     _remainingFailures[failure] = times;
@@ -1180,6 +1245,7 @@ final class _FakeSessionStorage
   Future<void> clearAccessToken() async {
     _throwIf(_RevocationStorageFailure.clearCredential);
     token = null;
+    tokenOwnerId = null;
   }
 
   @override
@@ -1191,10 +1257,30 @@ final class _FakeSessionStorage
   }
 
   @override
+  Future<bool> clearAccessTokenForOwner(String ownerId) async {
+    ownerClearAttempts.add(ownerId);
+    if (tokenOwnerId != ownerId) return false;
+    await clearAccessToken();
+    return true;
+  }
+
+  @override
   Future<String?> readAccessToken() async => token;
 
   @override
-  Future<void> saveAccessToken(String token) async => this.token = token;
+  Future<void> saveAccessToken(String token) async {
+    this.token = token;
+    tokenOwnerId = null;
+  }
+
+  @override
+  Future<void> saveAccessTokenForOwner({
+    required String token,
+    required String ownerId,
+  }) async {
+    this.token = token;
+    tokenOwnerId = ownerId;
+  }
 
   @override
   Future<void> clearAuthenticatedAccountId() async {
@@ -1268,6 +1354,58 @@ final class _MutableAuthRemoteDataSource implements AuthRemoteDataSource {
     required String username,
     required String password,
   }) async => const FailureResult(UnknownFailure());
+
+  @override
+  Future<Result<WarehouseModel?>> switchCurrentWarehouse(
+    int warehouseId,
+  ) async => const FailureResult(UnknownFailure());
+}
+
+final class _ConcurrentSameTokenRemoteDataSource
+    implements AuthRemoteDataSource {
+  _ConcurrentSameTokenRemoteDataSource({required this.newerBootstrapFails});
+
+  final bool newerBootstrapFails;
+  final Completer<void> firstWarehouseStarted = Completer<void>();
+  final Completer<void> releaseFirstWarehouse = Completer<void>();
+  int _warehouseCalls = 0;
+
+  @override
+  Future<Result<AppUserModel>> loadCurrentUser() async =>
+      const FailureResult(UnknownFailure());
+
+  @override
+  Future<Result<List<WarehouseModel>>> loadWarehouses({
+    String? accessToken,
+  }) async {
+    _warehouseCalls += 1;
+    if (_warehouseCalls == 1) {
+      firstWarehouseStarted.complete();
+      await releaseFirstWarehouse.future;
+    } else if (newerBootstrapFails) {
+      return const FailureResult(NetworkFailure(message: 'bootstrap failed'));
+    }
+    return const Success([
+      WarehouseModel(id: 11, code: 'SH', name: 'Shanghai', isDefault: true),
+    ]);
+  }
+
+  @override
+  Future<Result<LoginResponseModel>> login({
+    required String username,
+    required String password,
+  }) async => Success(
+    LoginResponseModel(
+      token: 'token',
+      user: AppUserModel(
+        id: username == 'alice' ? 7 : 8,
+        username: username,
+        realName: username,
+        roleCode: 'user',
+        roleName: 'User',
+      ),
+    ),
+  );
 
   @override
   Future<Result<WarehouseModel?>> switchCurrentWarehouse(
@@ -1371,7 +1509,8 @@ final class _FakeAuthRepository implements AuthRepository {
   }
 }
 
-final class _ConcurrentLoginAuthRepository implements AuthRepository {
+final class _ConcurrentLoginAuthRepository
+    implements AuthRepository, AuthTokenTransactionRepository {
   _ConcurrentLoginAuthRepository(this.storage);
 
   final _FakeSessionStorage storage;
@@ -1384,15 +1523,28 @@ final class _ConcurrentLoginAuthRepository implements AuthRepository {
     required String username,
     required String password,
   }) async {
+    return loginWithTokenOwner(
+      username: username,
+      password: password,
+      ownerId: 'raw-${username.hashCode}',
+    );
+  }
+
+  @override
+  Future<Result<AuthSession>> loginWithTokenOwner({
+    required String username,
+    required String password,
+    required String ownerId,
+  }) async {
     if (username == 'alice') {
-      await storage.saveAccessToken('token-7');
+      await storage.saveAccessTokenForOwner(token: 'token', ownerId: ownerId);
       aliceStarted.complete();
       await releaseAlice.future;
-      return const Success(_account7TokenSession);
+      return const Success(_session);
     }
     if (bobFails) return const FailureResult(AuthenticationFailure());
-    await storage.saveAccessToken('token-8');
-    return const Success(_secondAccountSession);
+    await storage.saveAccessTokenForOwner(token: 'token', ownerId: ownerId);
+    return const Success(_secondSameTokenSession);
   }
 
   @override
@@ -1467,12 +1619,6 @@ const _session = AuthSession(
   currentWarehouse: _warehouse11,
   warehouses: [_warehouse11, _warehouse12],
 );
-const _account7TokenSession = AuthSession(
-  accessToken: 'token-7',
-  user: _user,
-  currentWarehouse: _warehouse11,
-  warehouses: [_warehouse11, _warehouse12],
-);
 const _adminSession = AuthSession(
   accessToken: 'token',
   user: _admin,
@@ -1482,6 +1628,18 @@ const _adminSession = AuthSession(
 
 const _secondAccountSession = AuthSession(
   accessToken: 'token-8',
+  user: AppUser(
+    id: 8,
+    username: 'bob',
+    realName: 'Bob',
+    roleCode: 'user',
+    roleName: '普通用户',
+  ),
+  currentWarehouse: _warehouse12,
+  warehouses: [_warehouse12],
+);
+const _secondSameTokenSession = AuthSession(
+  accessToken: 'token',
   user: AppUser(
     id: 8,
     username: 'bob',
