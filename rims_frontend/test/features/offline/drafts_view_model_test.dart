@@ -402,6 +402,28 @@ void main() {
       expect(viewModel.drafts.map((item) => item.draft.id), ['account-8']);
     },
   );
+
+  test('late open result is rejected after account switch', () async {
+    final repository = _DelayedOpenDraftRepository();
+    final viewModel = DraftsViewModel(
+      repository: repository,
+      accountId: '7',
+      roleCode: 'operator',
+      warehouseId: 11,
+    );
+
+    final opened = viewModel.open('draft-7');
+    await repository.openStarted.future;
+    await viewModel.updateContext(
+      accountId: '8',
+      roleCode: 'operator',
+      warehouseId: 11,
+    );
+    repository.openResult.complete(_draft('draft-7'));
+
+    expect(await opened, isNull);
+    expect(viewModel.drafts, isEmpty);
+  });
 }
 
 DocumentDraft _draft(
@@ -593,6 +615,38 @@ final class _ScopedDelayedDeleteRepository implements DocumentDraftRepository {
     deleteStarted.complete();
     await releaseDelete.future;
   }
+
+  @override
+  Future<Result<DocumentDraft>> save(
+    DocumentDraft draft, {
+    required int expectedVersion,
+  }) async => Success(draft);
+
+  @override
+  Future<void> prune() async {}
+}
+
+final class _DelayedOpenDraftRepository implements DocumentDraftRepository {
+  final Completer<void> openStarted = Completer<void>();
+  final Completer<DocumentDraft?> openResult = Completer<DocumentDraft?>();
+
+  @override
+  Future<DocumentDraft?> load({
+    required String accountId,
+    required String draftId,
+  }) async {
+    openStarted.complete();
+    return openResult.future;
+  }
+
+  @override
+  Future<List<DocumentDraft>> list(String accountId) async => const [];
+
+  @override
+  Future<void> delete({
+    required String accountId,
+    required String draftId,
+  }) async {}
 
   @override
   Future<Result<DocumentDraft>> save(

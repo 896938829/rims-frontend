@@ -181,6 +181,79 @@ void main() {
 
     expect(staging.removed, ['late-dispose']);
   });
+
+  test(
+    'delayed remove stays busy and reconciles after submission epoch changes',
+    () async {
+      final removed = Completer<Result<void>>();
+      final staging = _DraftStaging(removeResult: removed.future)
+        ..recovered = [_staged('remove-me', 'draft-a')];
+      final changes = <List<String>>[];
+      var canMutate = true;
+      var epoch = 0;
+      final viewModel = DraftAttachmentsViewModel(
+        picker: _DraftPicker(),
+        stagingStore: staging,
+        userId: '7',
+        draftIdProvider: () => 'draft-a',
+        canMutate: () => canMutate,
+        mutationEpochProvider: () => epoch,
+        onChanged: changes.add,
+      );
+      await viewModel.recover(['remove-me']);
+
+      final remove = viewModel.remove('remove-me');
+      await staging.removeStarted.future;
+
+      expect(viewModel.isBusy, isTrue);
+      canMutate = false;
+      epoch += 1;
+      removed.complete(const Success(null));
+      await remove;
+
+      expect(viewModel.isBusy, isFalse);
+      expect(viewModel.staged, isEmpty);
+      expect(staging.recovered, isEmpty);
+      expect(changes.last, isEmpty);
+    },
+  );
+
+  test(
+    'late remove for draft A reconciles A without overwriting draft B',
+    () async {
+      final removed = Completer<Result<void>>();
+      final staging = _DraftStaging(removeResult: removed.future)
+        ..recovered = [
+          _staged('remove-a', 'draft-a'),
+          _staged('keep-b', 'draft-b'),
+        ];
+      final scopedChanges = <(String, List<String>)>[];
+      var draftId = 'draft-a';
+      final viewModel = DraftAttachmentsViewModel(
+        picker: _DraftPicker(),
+        stagingStore: staging,
+        userId: '7',
+        draftIdProvider: () => draftId,
+        onChanged: (_) {},
+        onChangedForDraft: (id, ids) => scopedChanges.add((id, ids)),
+      );
+      await viewModel.recover(['remove-a']);
+
+      final remove = viewModel.remove('remove-a');
+      await staging.removeStarted.future;
+      draftId = 'draft-b';
+      await viewModel.recover(['keep-b']);
+      removed.complete(const Success(null));
+      await remove;
+
+      expect(viewModel.staged.map((item) => item.pending.requestId), [
+        'keep-b',
+      ]);
+      expect(scopedChanges, hasLength(1));
+      expect(scopedChanges.single.$1, 'draft-a');
+      expect(scopedChanges.single.$2, isEmpty);
+    },
+  );
 }
 
 const _selection = SelectedAttachmentSource(
@@ -224,16 +297,20 @@ final class _DraftPicker implements AttachmentPicker {
 final class _DraftStaging implements AttachmentStagingStore {
   _DraftStaging({
     Future<Result<StagedAttachment>>? stageResult,
+    Future<Result<void>>? removeResult,
     this.recoverResults = const [],
   }) : stageResult =
-           stageResult ?? Future.value(Success(_staged('request-1', 'draft')));
+           stageResult ?? Future.value(Success(_staged('request-1', 'draft'))),
+       removeResult = removeResult ?? Future.value(const Success(null));
 
   final Future<Result<StagedAttachment>> stageResult;
+  final Future<Result<void>> removeResult;
   final List<Future<Result<List<StagedAttachment>>>> recoverResults;
   List<StagedAttachment> recovered = [];
   final List<AttachmentBinding> bindings = [];
   final List<String> removed = [];
   final Completer<void> stageStarted = Completer<void>();
+  final Completer<void> removeStarted = Completer<void>();
   int recoverCallCount = 0;
 
   @override
@@ -263,7 +340,12 @@ final class _DraftStaging implements AttachmentStagingStore {
   @override
   Future<Result<void>> remove(String userId, String requestId) async {
     removed.add(requestId);
-    return const Success(null);
+    if (!removeStarted.isCompleted) removeStarted.complete();
+    final result = await removeResult;
+    if (result case Success<void>()) {
+      recovered.removeWhere((item) => item.pending.requestId == requestId);
+    }
+    return result;
   }
 
   @override

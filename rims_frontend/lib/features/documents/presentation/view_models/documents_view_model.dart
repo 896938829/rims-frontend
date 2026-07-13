@@ -106,6 +106,7 @@ final class DocumentsViewModel extends ChangeNotifier {
   bool _isLoadingReturnSources = false;
   bool _hasLoadedReturnSourceDocuments = false;
   bool _isSubmitting = false;
+  bool _isAttachmentMutationInProgress = false;
   int _documentPage = 0;
   int _documentTotal = 0;
   int _documentGeneration = 0;
@@ -126,6 +127,7 @@ final class DocumentsViewModel extends ChangeNotifier {
   bool _draftSubmissionBarrier = false;
   int _submissionEpoch = 0;
   int _draftContextGeneration = 0;
+  int _draftOpenGeneration = 0;
   String? _activeDraftId;
   DateTime? _draftCreatedAt;
   int _draftVersion = 0;
@@ -238,6 +240,7 @@ final class DocumentsViewModel extends ChangeNotifier {
   bool get isLoadingNonStandardInventory => _isLoadingNonStandardInventory;
   bool get isLoadingReturnSources => _isLoadingReturnSources;
   bool get isSubmitting => _isSubmitting;
+  bool get isAttachmentMutationInProgress => _isAttachmentMutationInProgress;
   int get submissionEpoch => _submissionEpoch;
   int get documentTotal => _documentTotal;
   bool get hasMoreDocuments =>
@@ -677,6 +680,19 @@ final class DocumentsViewModel extends ChangeNotifier {
     notifyListeners();
   }
 
+  void reconcileAttachmentStagingIds(String draftId, List<String> requestIds) {
+    if (_isDisposed || _activeDraftId != draftId) return;
+    _attachmentStagingIds = List.unmodifiable(requestIds);
+    _scheduleDraftSave();
+    notifyListeners();
+  }
+
+  void setAttachmentMutationInProgress(bool value) {
+    if (_isDisposed || _isAttachmentMutationInProgress == value) return;
+    _isAttachmentMutationInProgress = value;
+    notifyListeners();
+  }
+
   void confirmDraftReview() {
     if (!_canMutateDocumentForm) return;
     if (!_requiresDraftReview) return;
@@ -730,6 +746,7 @@ final class DocumentsViewModel extends ChangeNotifier {
   }
 
   Future<bool> openDraft(String draftId) async {
+    final openGeneration = ++_draftOpenGeneration;
     final repository = draftRepository;
     final activeAccountId = accountId;
     final warehouseId = currentWarehouse?.id;
@@ -740,6 +757,9 @@ final class DocumentsViewModel extends ChangeNotifier {
       accountId: activeAccountId,
       draftId: draftId,
     );
+    if (_isDisposed || openGeneration != _draftOpenGeneration) {
+      return false;
+    }
     if (draft == null) {
       _draftSaveError = '草稿不存在或不属于当前账号';
       notifyListeners();
@@ -1167,6 +1187,11 @@ final class DocumentsViewModel extends ChangeNotifier {
 
   Future<bool> createDocument() async {
     if (_isSubmitting) {
+      return false;
+    }
+    if (_isAttachmentMutationInProgress) {
+      _formError = '附件操作进行中，请稍后提交';
+      notifyListeners();
       return false;
     }
     if (!canManageAdminDocumentActions &&

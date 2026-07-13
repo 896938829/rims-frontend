@@ -12,6 +12,8 @@ final class DraftAttachmentsViewModel extends ChangeNotifier {
     required this.userId,
     required this.draftIdProvider,
     required this.onChanged,
+    this.onChangedForDraft,
+    this.onBusyChanged,
     bool Function()? canMutate,
     int Function()? mutationEpochProvider,
   }) : canMutate = canMutate ?? _alwaysCanMutate,
@@ -22,6 +24,9 @@ final class DraftAttachmentsViewModel extends ChangeNotifier {
   final String userId;
   final String Function() draftIdProvider;
   final ValueChanged<List<String>> onChanged;
+  final void Function(String draftId, List<String> requestIds)?
+  onChangedForDraft;
+  final ValueChanged<bool>? onBusyChanged;
   final bool Function() canMutate;
   final int Function() mutationEpochProvider;
   List<StagedAttachment> _staged = const [];
@@ -40,7 +45,7 @@ final class DraftAttachmentsViewModel extends ChangeNotifier {
     final generation = ++_generation;
     final draftId = draftIdProvider();
     final mutationEpoch = mutationEpochProvider();
-    _isBusy = true;
+    _setBusy(true);
     _errorMessage = null;
     _notify();
     try {
@@ -69,7 +74,7 @@ final class DraftAttachmentsViewModel extends ChangeNotifier {
           {
             final item = data;
             _staged = List.unmodifiable([..._staged, item]);
-            _publish();
+            _publish(draftId);
           }
         case FailureResult(:final failure):
           if (_matchesOperation(generation, draftId, mutationEpoch)) {
@@ -77,8 +82,7 @@ final class DraftAttachmentsViewModel extends ChangeNotifier {
           }
       }
     } finally {
-      _isBusy = false;
-      _notify();
+      _setBusy(false);
     }
   }
 
@@ -112,25 +116,67 @@ final class DraftAttachmentsViewModel extends ChangeNotifier {
   }
 
   Future<void> remove(String requestId) async {
-    if (!isMutationAllowed) return;
-    final result = await stagingStore.remove(userId, requestId);
-    if (_isDisposed) return;
-    result.when(
-      success: (_) {
-        _staged = _staged
-            .where((item) => item.pending.requestId != requestId)
-            .toList(growable: false);
-        _publish();
-      },
-      failure: (failure) => _errorMessage = failure.message,
-    );
-    _notify();
+    if (_isBusy || !isMutationAllowed) return;
+    final generation = ++_generation;
+    final draftId = draftIdProvider();
+    final mutationEpoch = mutationEpochProvider();
+    final requestIdsBefore = _staged
+        .map((item) => item.pending.requestId)
+        .toList(growable: false);
+    _setBusy(true);
+    _errorMessage = null;
+    try {
+      final result = await stagingStore.remove(userId, requestId);
+      switch (result) {
+        case Success<void>():
+          final reconciledIds = requestIdsBefore
+              .where((id) => id != requestId)
+              .toList(growable: false);
+          final isCurrentDraft =
+              !_isDisposed &&
+              generation == _generation &&
+              draftIdProvider() == draftId;
+          if (!isCurrentDraft) {
+            onChangedForDraft?.call(draftId, reconciledIds);
+            return;
+          }
+          _staged = _staged
+              .where((item) => item.pending.requestId != requestId)
+              .toList(growable: false);
+          _publish(
+            draftId,
+            preferScoped:
+                mutationEpochProvider() != mutationEpoch || !canMutate(),
+          );
+        case FailureResult<void>(:final failure):
+          if (!_isDisposed &&
+              generation == _generation &&
+              draftIdProvider() == draftId) {
+            _errorMessage = failure.message;
+          }
+      }
+    } finally {
+      _setBusy(false);
+    }
   }
 
-  void _publish() {
-    onChanged(
-      _staged.map((item) => item.pending.requestId).toList(growable: false),
-    );
+  void _publish(String draftId, {bool preferScoped = false}) {
+    final requestIds = _staged
+        .map((item) => item.pending.requestId)
+        .toList(growable: false);
+    final scopedCallback = onChangedForDraft;
+    if (preferScoped && scopedCallback != null) {
+      scopedCallback(draftId, requestIds);
+    } else {
+      onChanged(requestIds);
+    }
+  }
+
+  void _setBusy(bool value) {
+    if (_isBusy == value) return;
+    _isBusy = value;
+    onBusyChanged?.call(value);
+    _notify();
   }
 
   void _notify() {
@@ -141,6 +187,10 @@ final class DraftAttachmentsViewModel extends ChangeNotifier {
   void dispose() {
     _isDisposed = true;
     _generation += 1;
+    if (_isBusy) {
+      _isBusy = false;
+      onBusyChanged?.call(false);
+    }
     super.dispose();
   }
 

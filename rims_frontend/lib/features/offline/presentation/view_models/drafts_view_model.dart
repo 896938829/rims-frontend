@@ -103,8 +103,17 @@ final class DraftsViewModel extends ChangeNotifier {
     await load();
   }
 
-  Future<DocumentDraft?> open(String draftId) {
-    return repository.load(accountId: accountId, draftId: draftId);
+  Future<DocumentDraft?> open(String draftId) async {
+    final operationGeneration = _contextGeneration;
+    final operationAccountId = accountId;
+    final draft = await repository.load(
+      accountId: operationAccountId,
+      draftId: draftId,
+    );
+    if (!_isCurrentContext(operationGeneration, operationAccountId)) {
+      return null;
+    }
+    return draft;
   }
 
   Future<DocumentDraft?> duplicate(String draftId) async {

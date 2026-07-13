@@ -211,6 +211,38 @@ void main() {
     viewModel.dispose();
   });
 
+  test('only the latest concurrent openDraft request can apply', () async {
+    final drafts = _OutOfOrderOpenDraftRepository();
+    final viewModel = _draftEnabledViewModel(drafts: drafts);
+
+    final openA = viewModel.openDraft('draft-a');
+    final openB = viewModel.openDraft('draft-b');
+    drafts.complete('draft-b', _savedDraft('draft-b', remark: 'draft B'));
+    expect(await openB, isTrue);
+    drafts.complete('draft-a', _savedDraft('draft-a', remark: 'draft A'));
+
+    expect(await openA, isFalse);
+    expect(viewModel.activeDraftId, 'draft-b');
+    expect(viewModel.remark, 'draft B');
+    viewModel.dispose();
+  });
+
+  test('stale openDraft failure cannot overwrite the latest success', () async {
+    final drafts = _OutOfOrderOpenDraftRepository();
+    final viewModel = _draftEnabledViewModel(drafts: drafts);
+
+    final openMissing = viewModel.openDraft('missing-a');
+    final openB = viewModel.openDraft('draft-b');
+    drafts.complete('draft-b', _savedDraft('draft-b', remark: 'draft B'));
+    expect(await openB, isTrue);
+    drafts.complete('missing-a', null);
+
+    expect(await openMissing, isFalse);
+    expect(viewModel.activeDraftId, 'draft-b');
+    expect(viewModel.draftSaveError, isNull);
+    viewModel.dispose();
+  });
+
   test('successful submit deletes only the active account draft', () async {
     final drafts = _FakeDocumentDraftRepository();
     final viewModel = DocumentsViewModel(
@@ -830,6 +862,38 @@ void main() {
     pending.complete(const Success(_remoteDocument));
     expect(await submit, isTrue);
   });
+
+  test(
+    'attachment removal blocks submit and failed submit keeps reconciled ids',
+    () async {
+      final repository = _FakeDocumentsRepository(
+        createResult: Future.value(
+          const FailureResult<DocumentRecord>(NetworkFailure(message: '提交失败')),
+        ),
+      );
+      final viewModel =
+          DocumentsViewModel(
+              repository: repository,
+              draftIdFactory: () => 'attachment-draft',
+            )
+            ..addProductToDraft(_standardItem, quantity: 2)
+            ..updateAttachmentStagingIds(['remove-me']);
+      final draftId = viewModel.ensureDraftId();
+
+      viewModel.setAttachmentMutationInProgress(true);
+      expect(await viewModel.createDocument(), isFalse);
+      expect(repository.createCallCount, 0);
+      expect(viewModel.attachmentStagingIds, ['remove-me']);
+
+      viewModel.reconcileAttachmentStagingIds(draftId, const []);
+      viewModel.setAttachmentMutationInProgress(false);
+      expect(await viewModel.createDocument(), isFalse);
+
+      expect(repository.createCallCount, 1);
+      expect(viewModel.attachmentStagingIds, isEmpty);
+      expect(viewModel.formError, '提交失败');
+    },
+  );
 
   test('createDocument surfaces repository failure', () async {
     final repository = _FakeDocumentsRepository(
@@ -1744,6 +1808,81 @@ void main() {
     await tester.pumpAndSettle();
   });
 
+  testWidgets(
+    'delayed attachment remove stays consistent across a failed submit',
+    (tester) async {
+      final removeResult = Completer<Result<void>>();
+      final staging = _PageDraftStaging(removeResult: removeResult.future);
+      final repository = _FakeDocumentsRepository(
+        createResult: Future.value(
+          const FailureResult<DocumentRecord>(NetworkFailure(message: '提交失败')),
+        ),
+      );
+      final viewModel = DocumentsViewModel(
+        repository: repository,
+        draftIdFactory: () => 'remove-ui-draft',
+      )..addProductToDraft(_standardItem, quantity: 2);
+      final draftId = viewModel.ensureDraftId();
+      staging.items.add(_pageStaged('remove-ui', draftId));
+      viewModel.updateAttachmentStagingIds(['remove-ui']);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: DocumentsPage(
+              viewModel: viewModel,
+              attachmentPicker: _PageDraftPicker(),
+              attachmentStagingStore: staging,
+              attachmentUserId: '7',
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      await tester.ensureVisible(find.byTooltip('移除暂存附件'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byTooltip('移除暂存附件'));
+      await staging.removeStarted.future;
+      await tester.pump();
+
+      expect(viewModel.isAttachmentMutationInProgress, isTrue);
+      expect(
+        tester
+            .widget<FilledButton>(
+              find.byKey(const Key('document-create-button')),
+            )
+            .onPressed,
+        isNull,
+      );
+      expect(viewModel.attachmentStagingIds, ['remove-ui']);
+      expect(staging.items, hasLength(1));
+      expect(find.text('remove-ui.pdf'), findsOneWidget);
+      expect(await viewModel.createDocument(), isFalse);
+      expect(repository.createCallCount, 0);
+
+      removeResult.complete(const Success(null));
+      await tester.pumpAndSettle();
+
+      expect(viewModel.isAttachmentMutationInProgress, isFalse);
+      expect(viewModel.attachmentStagingIds, isEmpty);
+      expect(staging.items, isEmpty);
+      expect(find.text('remove-ui.pdf'), findsNothing);
+
+      await tester.ensureVisible(
+        find.byKey(const Key('document-create-button')),
+      );
+      await tester.tap(find.byKey(const Key('document-create-button')));
+      await tester.pumpAndSettle();
+
+      expect(repository.createCallCount, 1);
+      expect(viewModel.formError, '提交失败');
+      expect(viewModel.attachmentStagingIds, isEmpty);
+      expect(staging.items, isEmpty);
+      expect(find.text('remove-ui.pdf'), findsNothing);
+    },
+  );
+
   testWidgets('DocumentsPage clears transfer target selector after success', (
     tester,
   ) async {
@@ -2541,6 +2680,38 @@ final class _ControlledDraftRepository implements DocumentDraftRepository {
   Future<void> prune() async {}
 }
 
+final class _OutOfOrderOpenDraftRepository implements DocumentDraftRepository {
+  final Map<String, Completer<DocumentDraft?>> _loads = {};
+
+  void complete(String draftId, DocumentDraft? draft) {
+    (_loads[draftId] ??= Completer<DocumentDraft?>()).complete(draft);
+  }
+
+  @override
+  Future<DocumentDraft?> load({
+    required String accountId,
+    required String draftId,
+  }) => (_loads[draftId] ??= Completer<DocumentDraft?>()).future;
+
+  @override
+  Future<Result<DocumentDraft>> save(
+    DocumentDraft draft, {
+    required int expectedVersion,
+  }) async => Success(draft);
+
+  @override
+  Future<List<DocumentDraft>> list(String accountId) async => const [];
+
+  @override
+  Future<void> delete({
+    required String accountId,
+    required String draftId,
+  }) async {}
+
+  @override
+  Future<void> prune() async {}
+}
+
 final class _PageDraftPicker implements AttachmentPicker {
   @override
   Future<Result<SelectedAttachmentSource?>> pick(
@@ -2563,8 +2734,13 @@ final class _PageDraftPicker implements AttachmentPicker {
 }
 
 final class _PageDraftStaging implements AttachmentStagingStore {
+  _PageDraftStaging({Future<Result<void>>? removeResult})
+    : removeResult = removeResult ?? Future.value(const Success(null));
+
+  final Future<Result<void>> removeResult;
   final List<AttachmentBinding> bindings = [];
   final List<StagedAttachment> items = [];
+  final Completer<void> removeStarted = Completer<void>();
 
   @override
   Future<Result<StagedAttachment>> stage({
@@ -2595,8 +2771,14 @@ final class _PageDraftStaging implements AttachmentStagingStore {
       Success(items);
 
   @override
-  Future<Result<void>> remove(String userId, String requestId) async =>
-      const Success(null);
+  Future<Result<void>> remove(String userId, String requestId) async {
+    if (!removeStarted.isCompleted) removeStarted.complete();
+    final result = await removeResult;
+    if (result case Success<void>()) {
+      items.removeWhere((item) => item.pending.requestId == requestId);
+    }
+    return result;
+  }
 
   @override
   Future<Result<void>> cleanupStale({required Duration maxAge}) async =>
@@ -2612,6 +2794,20 @@ final class _PageDraftStaging implements AttachmentStagingStore {
     required Uint8List bytes,
   }) async => const Success('/download');
 }
+
+StagedAttachment _pageStaged(String requestId, String draftId) =>
+    StagedAttachment(
+      pending: PendingAttachment(
+        requestId: requestId,
+        binding: AttachmentBinding.documentDraft(draftId),
+        stagedPath: '/staged/$requestId',
+        originalName: '$requestId.pdf',
+        mimeType: 'application/pdf',
+        fileSize: 12,
+      ),
+      thumbnailPath: null,
+      createdAt: DateTime.utc(2026, 7, 13),
+    );
 
 const _remoteDocument = DocumentRecord(
   id: 1,

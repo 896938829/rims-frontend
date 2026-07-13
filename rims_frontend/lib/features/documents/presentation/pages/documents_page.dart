@@ -1266,6 +1266,8 @@ final class _DocumentFormState extends State<_DocumentForm> {
       userId: userId,
       draftIdProvider: widget.viewModel.ensureDraftId,
       onChanged: widget.viewModel.updateAttachmentStagingIds,
+      onChangedForDraft: widget.viewModel.reconcileAttachmentStagingIds,
+      onBusyChanged: widget.viewModel.setAttachmentMutationInProgress,
       canMutate: () => !widget.viewModel.isSubmitting,
       mutationEpochProvider: () => widget.viewModel.submissionEpoch,
     );
@@ -1502,7 +1504,9 @@ final class _DocumentFormState extends State<_DocumentForm> {
           const SizedBox(height: 14),
           FilledButton(
             key: const Key('document-create-button'),
-            onPressed: viewModel.isSubmitting
+            onPressed:
+                viewModel.isSubmitting ||
+                    viewModel.isAttachmentMutationInProgress
                 ? null
                 : () => unawaited(_createDocument()),
             style: FilledButton.styleFrom(

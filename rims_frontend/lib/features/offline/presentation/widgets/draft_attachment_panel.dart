@@ -74,9 +74,9 @@ final class DraftAttachmentPanel extends StatelessWidget {
               ),
               trailing: IconButton(
                 tooltip: '移除暂存附件',
-                onPressed: viewModel.isMutationAllowed
-                    ? () => unawaited(viewModel.remove(item.pending.requestId))
-                    : null,
+                onPressed: viewModel.isBusy || !viewModel.isMutationAllowed
+                    ? null
+                    : () => unawaited(viewModel.remove(item.pending.requestId)),
                 icon: const Icon(Icons.close, size: 18),
               ),
             ),
