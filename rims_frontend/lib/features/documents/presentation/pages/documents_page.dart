@@ -120,7 +120,13 @@ final class _DocumentsPageState extends State<DocumentsPage> {
               widget.attachmentStagingStore is OutboxAttachmentStagingStore
               ? widget.attachmentStagingStore! as OutboxAttachmentStagingStore
               : null,
+          outboxContextReader: widget.outboxContextReader,
+          outboxContextGenerationReader: widget.outboxContextGenerationReader,
         );
+    viewModel.configureOfflineSubmissionContext(
+      contextReader: widget.outboxContextReader,
+      contextGenerationReader: widget.outboxContextGenerationReader,
+    );
 
     _selectInitialAction();
     if (widget.initialDraftId case final draftId?) {
@@ -140,6 +146,10 @@ final class _DocumentsPageState extends State<DocumentsPage> {
   void didUpdateWidget(covariant DocumentsPage oldWidget) {
     super.didUpdateWidget(oldWidget);
     viewModel.updateAllowedOutboxKinds(widget.allowedOutboxKinds);
+    viewModel.configureOfflineSubmissionContext(
+      contextReader: widget.outboxContextReader,
+      contextGenerationReader: widget.outboxContextGenerationReader,
+    );
     if (widget.networkReachability case final reachability?) {
       viewModel.updateNetworkReachability(reachability);
     }
@@ -1308,7 +1318,8 @@ final class _DocumentFormState extends State<_DocumentForm> {
     }
     if (!authoritative && !completed) return;
     final review = widget.viewModel.offlineSubmissionReview;
-    if (review == null || !mounted) return;
+    final snapshot = widget.viewModel.offlineSubmissionSnapshot;
+    if (review == null || snapshot == null || !mounted) return;
     final confirmed = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
@@ -1332,8 +1343,11 @@ final class _DocumentFormState extends State<_DocumentForm> {
         ],
       ),
     );
-    if (confirmed == true) {
-      final queued = await widget.viewModel.confirmOfflineSubmission();
+    if (confirmed == true &&
+        mounted &&
+        !widget.viewModel.isDisposed &&
+        widget.viewModel.isOfflineSubmissionSnapshotCurrent(snapshot)) {
+      final queued = await widget.viewModel.confirmOfflineSubmission(snapshot);
       if (queued) {
         widget.eventBus?.publish(const GlobalRefreshRequestedEvent());
       }
@@ -2031,7 +2045,8 @@ Future<void> _confirmLifecycleAction({
   }
 
   final review = viewModel.offlineSubmissionReview;
-  if (review == null || !context.mounted) return;
+  final snapshot = viewModel.offlineSubmissionSnapshot;
+  if (review == null || snapshot == null || !context.mounted) return;
   final queueConfirmed = await showDialog<bool>(
     context: context,
     builder: (context) => AlertDialog(
@@ -2053,8 +2068,13 @@ Future<void> _confirmLifecycleAction({
       ],
     ),
   );
-  if (queueConfirmed != true) return;
-  final queued = await viewModel.confirmOfflineSubmission();
+  if (queueConfirmed != true ||
+      !context.mounted ||
+      viewModel.isDisposed ||
+      !viewModel.isOfflineSubmissionSnapshotCurrent(snapshot)) {
+    return;
+  }
+  final queued = await viewModel.confirmOfflineSubmission(snapshot);
   if (!queued) return;
   eventBus?.publish(const GlobalRefreshRequestedEvent());
   if (closeOnSuccess && context.mounted) {

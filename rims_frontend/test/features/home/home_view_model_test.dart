@@ -77,6 +77,51 @@ void main() {
     },
   );
 
+  test(
+    'latest overlapping Home load wins when completions are reversed',
+    () async {
+      final repository = _OverlappingInventoryRepository();
+      final viewModel = HomeViewModel(inventoryRepository: repository);
+
+      final older = viewModel.load();
+      final newer = viewModel.load();
+      repository.completeSecond();
+      await newer;
+
+      expect(viewModel.inventoryTotal, 22);
+      expect(viewModel.isLoading, isFalse);
+
+      repository.completeFirst();
+      await older;
+
+      expect(viewModel.inventoryTotal, 22);
+      expect(viewModel.errorMessage, isNull);
+      expect(viewModel.isLoading, isFalse);
+    },
+  );
+
+  test('partial Home success cannot advertise incomplete freshness', () async {
+    final repository = _PartialFreshnessInventoryRepository();
+    final viewModel = HomeViewModel(inventoryRepository: repository);
+
+    await viewModel.load();
+
+    expect(viewModel.dataFreshness, isNull);
+  });
+
+  test('freshness recovers only after a complete later generation', () async {
+    final repository = _RecoveringFreshnessInventoryRepository();
+    final viewModel = HomeViewModel(inventoryRepository: repository);
+
+    await viewModel.load();
+    expect(viewModel.dataFreshness, isNull);
+
+    await viewModel.load();
+    expect(viewModel.dataFreshness, isNotNull);
+    expect(viewModel.dataFreshness!.hasCachedData, isTrue);
+    expect(viewModel.dataFreshness!.fetchedAt, DateTime.utc(2026, 7, 14, 8));
+  });
+
   test('operator quick actions hide admin-only document workflows', () {
     final viewModel = HomeViewModel(user: _operatorUser);
 
@@ -373,6 +418,36 @@ void main() {
     expect(freshnessReports, [null, null]);
   });
 
+  testWidgets('overlapping global refresh reports only the latest completion', (
+    tester,
+  ) async {
+    final eventBus = AppEventBus();
+    addTearDown(eventBus.dispose);
+    final repository = _OverlappingInventoryRepository();
+    final viewModel = HomeViewModel(inventoryRepository: repository);
+    final reports = <HomeDataFreshness?>[];
+    await tester.pumpWidget(
+      MaterialApp(
+        home: HomePage(
+          viewModel: viewModel,
+          eventBus: eventBus,
+          onDataFreshnessChanged: reports.add,
+        ),
+      ),
+    );
+
+    eventBus.publish(const GlobalRefreshRequestedEvent());
+    eventBus.publish(const GlobalRefreshRequestedEvent());
+    repository.completeSecond();
+    await tester.pump();
+    expect(reports, [null]);
+
+    repository.completeFirst();
+    await tester.pump();
+    expect(reports, [null]);
+    expect(viewModel.inventoryTotal, 22);
+  });
+
   testWidgets('HomePage retries loading after an error', (tester) async {
     final inventoryRepository = _RetryInventoryRepository();
     final viewModel = HomeViewModel(
@@ -634,6 +709,133 @@ final class _FreshnessInventoryRepository
     int? status,
   }) async {
     return const Success(_standardItem);
+  }
+}
+
+final class _OverlappingInventoryRepository implements InventoryRepository {
+  final _first = Completer<void>();
+  final _second = Completer<void>();
+  int _inventoryCalls = 0;
+
+  void completeFirst() => _first.complete();
+  void completeSecond() => _second.complete();
+
+  @override
+  Future<Result<PageData<InventoryItem>>> listInventory({
+    String keyword = '',
+    int page = 1,
+  }) async {
+    _inventoryCalls += 1;
+    final call = _inventoryCalls;
+    await (call == 1 ? _first.future : _second.future);
+    return Success(
+      _homePage(
+        call == 1 ? [_standardItem] : [_standardItem, _lowStockItem],
+        total: call == 1 ? 11 : 22,
+      ),
+    );
+  }
+
+  @override
+  Future<Result<PageData<InventoryItem>>> listInventoryAlerts({
+    int page = 1,
+  }) async => Success(_homePage(const []));
+
+  @override
+  Future<Result<PageData<NonStandardInventoryItem>>> listNonStandardInventory({
+    int page = 1,
+  }) async => Success(_homePage(const []));
+
+  @override
+  Future<Result<InventoryItem>> findProductByBarcode(String barcode) async =>
+      const Success(_standardItem);
+
+  @override
+  Future<Result<InventoryItem>> updateInventorySettings({
+    required int inventoryId,
+    int? alertThreshold,
+    int? status,
+  }) async => const Success(_standardItem);
+}
+
+class _PartialFreshnessInventoryRepository
+    implements InventoryRepository, InventoryReadMetadata {
+  @override
+  InventoryReadStatus? lastReadStatus;
+
+  @override
+  Future<Result<PageData<InventoryItem>>> listInventory({
+    String keyword = '',
+    int page = 1,
+  }) async {
+    lastReadStatus = InventoryReadStatus(
+      source: InventoryDataSource.network,
+      fetchedAt: DateTime.utc(2026, 7, 14, 10),
+      expiresAt: DateTime.utc(2026, 7, 14, 11),
+    );
+    return Success(_homePage([_standardItem]));
+  }
+
+  @override
+  Future<Result<PageData<InventoryItem>>> listInventoryAlerts({
+    int page = 1,
+  }) async => const FailureResult(NetworkFailure(message: 'alerts failed'));
+
+  @override
+  Future<Result<PageData<NonStandardInventoryItem>>> listNonStandardInventory({
+    int page = 1,
+  }) async {
+    lastReadStatus = InventoryReadStatus(
+      source: InventoryDataSource.network,
+      fetchedAt: DateTime.utc(2026, 7, 14, 10),
+      expiresAt: DateTime.utc(2026, 7, 14, 11),
+    );
+    return Success(_homePage(const []));
+  }
+
+  @override
+  Future<Result<InventoryItem>> findProductByBarcode(String barcode) async =>
+      const Success(_standardItem);
+
+  @override
+  Future<Result<InventoryItem>> updateInventorySettings({
+    required int inventoryId,
+    int? alertThreshold,
+    int? status,
+  }) async => const Success(_standardItem);
+}
+
+final class _RecoveringFreshnessInventoryRepository
+    extends _PartialFreshnessInventoryRepository {
+  int _generation = 0;
+
+  @override
+  Future<Result<PageData<InventoryItem>>> listInventory({
+    String keyword = '',
+    int page = 1,
+  }) async {
+    _generation += 1;
+    lastReadStatus = InventoryReadStatus(
+      source: InventoryDataSource.cache,
+      fetchedAt: DateTime.utc(2026, 7, 14, 8),
+      expiresAt: DateTime.utc(2026, 7, 14, 9),
+    );
+    return Success(_homePage([_standardItem]));
+  }
+
+  @override
+  Future<Result<PageData<InventoryItem>>> listInventoryAlerts({
+    int page = 1,
+  }) async {
+    if (_generation == 1) {
+      return const FailureResult(NetworkFailure(message: 'alerts failed'));
+    }
+    lastReadStatus = InventoryReadStatus(
+      source: InventoryDataSource.network,
+      fetchedAt: DateTime.utc(2026, 7, 14, 10),
+      expiresAt: DateTime.utc(2026, 7, 14, 11),
+    );
+    return Success(_homePage(const []));
   }
 }
 

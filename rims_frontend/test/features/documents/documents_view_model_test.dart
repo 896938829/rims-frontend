@@ -31,9 +31,10 @@ import 'package:rims_frontend/features/offline/data/repositories/drift_document_
 import 'package:rims_frontend/features/offline/data/repositories/memory_offline_store.dart';
 import 'package:rims_frontend/features/offline/data/repositories/memory_outbox_repository.dart';
 import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.dart';
-import 'package:rims_frontend/features/offline/domain/entities/outbox_operation_output.dart';
+import 'package:rims_frontend/features/offline/domain/entities/outbox_graph.dart';
 import 'package:rims_frontend/features/offline/domain/repositories/outbox_repository.dart';
 import 'package:rims_frontend/features/offline/domain/services/idempotency_key_validator.dart';
+import 'package:rims_frontend/features/offline/domain/services/outbox_executor.dart';
 import 'package:rims_frontend/features/offline/domain/services/outbox_state_machine.dart';
 
 void main() {
@@ -717,6 +718,110 @@ void main() {
     },
   );
 
+  test(
+    'reviewed queue rejects a stale warehouse or permission generation',
+    () async {
+      var context = const OutboxExecutionContext(
+        accountId: '7',
+        warehouseId: 11,
+        permissionStamp: 'full',
+        allowedKinds: {...OutboxOperationKind.values},
+      );
+      var generation = 4;
+      final outbox = MemoryOutboxRepository(stateMachine: OutboxStateMachine());
+      final viewModel = _draftEnabledViewModel(
+        drafts: _FakeDocumentDraftRepository(),
+        documents: _FakeDocumentsRepository(),
+        outbox: outbox,
+        submissionStagingStore: _OutboxSubmissionStagingStore(),
+        networkReachability: NetworkReachability.offline,
+        outboxContextReader: () => context,
+        outboxContextGenerationReader: () => generation,
+      )..addScannedProduct(_standardItem);
+      expect(await viewModel.prepareOfflineSubmission(), isTrue);
+      final stale = viewModel.offlineSubmissionSnapshot!;
+
+      context = const OutboxExecutionContext(
+        accountId: '7',
+        warehouseId: 12,
+        permissionStamp: 'limited',
+        allowedKinds: {OutboxOperationKind.documentCreate},
+      );
+      generation += 1;
+
+      expect(await viewModel.confirmOfflineSubmission(stale), isFalse);
+      expect((await outbox.list('7')).successData, isEmpty);
+      expect(viewModel.offlineSubmissionReview, isNull);
+    },
+  );
+
+  test(
+    'dispose invalidates old reviewed confirmation without notifications',
+    () async {
+      final outbox = MemoryOutboxRepository(stateMachine: OutboxStateMachine());
+      final viewModel = _draftEnabledViewModel(
+        drafts: _FakeDocumentDraftRepository(),
+        documents: _FakeDocumentsRepository(),
+        outbox: outbox,
+        submissionStagingStore: _OutboxSubmissionStagingStore(),
+        networkReachability: NetworkReachability.offline,
+      )..addScannedProduct(_standardItem);
+      expect(await viewModel.prepareOfflineSubmission(), isTrue);
+      final stale = viewModel.offlineSubmissionSnapshot!;
+      viewModel.dispose();
+
+      expect(await viewModel.confirmOfflineSubmission(stale), isFalse);
+      expect((await outbox.list('7')).successData, isEmpty);
+    },
+  );
+
+  test('offline enqueue uses the unified immutable submission gate', () async {
+    final staging = _ControlledSubmissionStagingStore();
+    final outbox = _CountingEnqueueOutboxRepository(
+      MemoryOutboxRepository(stateMachine: OutboxStateMachine()),
+    );
+    final documents = _FakeDocumentsRepository();
+    final viewModel =
+        _draftEnabledViewModel(
+            drafts: _FakeDocumentDraftRepository(),
+            documents: documents,
+            outbox: outbox,
+            submissionStagingStore: staging,
+            networkReachability: NetworkReachability.offline,
+            draftIdFactory: () => 'draft-1',
+          )
+          ..addScannedProduct(_standardItem)
+          ..updateRemark('reviewed')
+          ..updateAttachmentStagingIds(const ['slow-attachment']);
+    expect(await viewModel.prepareOfflineSubmission(), isTrue);
+    final snapshot = viewModel.offlineSubmissionSnapshot!;
+
+    final first = viewModel.confirmOfflineSubmission(snapshot);
+    await staging.loadStarted.future;
+    expect(viewModel.isSubmitting, isTrue);
+    viewModel.updateRemark('mutated');
+    viewModel.updateAttachmentStagingIds(const ['different']);
+    expect(viewModel.remark, 'reviewed');
+    expect(viewModel.attachmentStagingIds, ['slow-attachment']);
+    expect(await viewModel.createDocument(), isFalse);
+    expect(
+      viewModel.prepareOfflineLifecycleSubmission(
+        _draftSalesDocument,
+        OutboxOperationKind.documentComplete,
+      ),
+      isFalse,
+    );
+    expect(await viewModel.confirmOfflineSubmission(snapshot), isFalse);
+
+    staging.release.complete();
+    expect(await first, isTrue);
+    expect(outbox.enqueueGraphCalls, 1);
+    expect(documents.createCallCount, 0);
+    expect(viewModel.isSubmitting, isFalse);
+    viewModel.updateRemark('after');
+    expect(viewModel.remark, 'after');
+  });
+
   testWidgets(
     'offline document form keeps draft and labels reviewed queue flow',
     (tester) async {
@@ -739,6 +844,57 @@ void main() {
       expect(find.text('创建单据'), findsNothing);
     },
   );
+
+  testWidgets('create queue dialog rejects confirmation from an old scope', (
+    tester,
+  ) async {
+    var context = const OutboxExecutionContext(
+      accountId: '7',
+      warehouseId: 11,
+      permissionStamp: 'full',
+      allowedKinds: {...OutboxOperationKind.values},
+    );
+    var generation = 1;
+    final outbox = MemoryOutboxRepository(stateMachine: OutboxStateMachine());
+    final viewModel = _draftEnabledViewModel(
+      drafts: _FakeDocumentDraftRepository(),
+      documents: _FakeDocumentsRepository(),
+      outbox: outbox,
+      submissionStagingStore: _OutboxSubmissionStagingStore(),
+      networkReachability: NetworkReachability.offline,
+      outboxContextReader: () => context,
+      outboxContextGenerationReader: () => generation,
+    )..addScannedProduct(_standardItem);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: DocumentsPage(
+            viewModel: viewModel,
+            outboxContextReader: () => context,
+            outboxContextGenerationReader: () => generation,
+          ),
+        ),
+      ),
+    );
+    await tester.ensureVisible(find.byKey(const Key('document-create-button')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('document-create-button')));
+    await tester.pumpAndSettle();
+    expect(find.text('保存到待同步'), findsOneWidget);
+
+    context = const OutboxExecutionContext(
+      accountId: '8',
+      warehouseId: 11,
+      permissionStamp: 'other-account',
+      allowedKinds: {...OutboxOperationKind.values},
+    );
+    generation += 1;
+    await tester.tap(find.text('确认保存'));
+    await tester.pumpAndSettle();
+
+    expect((await outbox.list('7')).successData, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
 
   test('known offline state blocks authoritative lifecycle commands', () async {
     final repository = _FakeDocumentsRepository();
@@ -2697,6 +2853,111 @@ void main() {
   );
 
   testWidgets(
+    'old lifecycle dialog completion is rejected after scope change',
+    (tester) async {
+      var context = const OutboxExecutionContext(
+        accountId: '7',
+        warehouseId: 11,
+        permissionStamp: 'full',
+        allowedKinds: {...OutboxOperationKind.values},
+      );
+      var generation = 1;
+      final repository = _FakeDocumentsRepository(
+        listResults: const [
+          Success<List<DocumentRecord>>([_remoteDocument]),
+        ],
+      );
+      final outbox = MemoryOutboxRepository(stateMachine: OutboxStateMachine());
+      final viewModel = _draftEnabledViewModel(
+        drafts: _FakeDocumentDraftRepository(),
+        documents: repository,
+        outbox: outbox,
+        networkReachability: NetworkReachability.unreachable,
+        outboxContextReader: () => context,
+        outboxContextGenerationReader: () => generation,
+      );
+      await viewModel.load();
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: DocumentsPage(
+              viewModel: viewModel,
+              outboxContextReader: () => context,
+              outboxContextGenerationReader: () => generation,
+            ),
+          ),
+        ),
+      );
+      await tester.scrollUntilVisible(
+        find.text('SO-20260626-001 · 矿泉水 550ml x3'),
+        300,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.tap(find.text('SO-20260626-001 · 矿泉水 550ml x3'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('复核完成并保存待同步'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('确认完成'));
+      await tester.pumpAndSettle();
+      expect(find.text('保存到待同步'), findsOneWidget);
+
+      context = const OutboxExecutionContext(
+        accountId: '7',
+        warehouseId: 12,
+        permissionStamp: 'limited',
+        allowedKinds: {OutboxOperationKind.documentCreate},
+      );
+      generation += 1;
+      await tester.tap(find.text('确认保存'));
+      await tester.pumpAndSettle();
+
+      expect((await outbox.list('7')).successData, isEmpty);
+      expect(tester.takeException(), isNull);
+    },
+  );
+
+  testWidgets('disposing page while queue dialog is open never enqueues', (
+    tester,
+  ) async {
+    final repository = _FakeDocumentsRepository(
+      listResults: const [
+        Success<List<DocumentRecord>>([_remoteDocument]),
+      ],
+    );
+    final outbox = MemoryOutboxRepository(stateMachine: OutboxStateMachine());
+    final viewModel = _draftEnabledViewModel(
+      drafts: _FakeDocumentDraftRepository(),
+      documents: repository,
+      outbox: outbox,
+      networkReachability: NetworkReachability.unreachable,
+    );
+    await viewModel.load();
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(body: DocumentsPage(viewModel: viewModel)),
+      ),
+    );
+    await tester.scrollUntilVisible(
+      find.text('SO-20260626-001 · 矿泉水 550ml x3'),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.text('SO-20260626-001 · 矿泉水 550ml x3'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('复核完成并保存待同步'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('确认完成'));
+    await tester.pumpAndSettle();
+    expect(find.text('保存到待同步'), findsOneWidget);
+
+    await tester.pumpWidget(const MaterialApp(home: SizedBox()));
+    await tester.pumpAndSettle();
+
+    expect((await outbox.list('7')).successData, isEmpty);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets(
     'detail lifecycle asks before queueing an unknown network result',
     (tester) async {
       final repository = _FakeDocumentsRepository(
@@ -3191,6 +3452,8 @@ DocumentsViewModel _draftEnabledViewModel({
   Set<OutboxOperationKind> allowedOutboxKinds = const {
     ...OutboxOperationKind.values,
   },
+  OutboxExecutionContext? Function()? outboxContextReader,
+  int Function()? outboxContextGenerationReader,
 }) => DocumentsViewModel(
   repository: documents,
   inventoryRepository: inventory,
@@ -3201,6 +3464,8 @@ DocumentsViewModel _draftEnabledViewModel({
   observedRoleCode: roleCode,
   initialReachability: networkReachability,
   allowedOutboxKinds: allowedOutboxKinds,
+  outboxContextReader: outboxContextReader,
+  outboxContextGenerationReader: outboxContextGenerationReader,
   currentWarehouse: const Warehouse(
     id: 11,
     code: 'MAIN',
@@ -3210,6 +3475,67 @@ DocumentsViewModel _draftEnabledViewModel({
   draftIdFactory:
       draftIdFactory ?? () => 'draft-${DateTime.now().microsecondsSinceEpoch}',
 );
+
+final class _ControlledSubmissionStagingStore
+    implements OutboxAttachmentStagingStore {
+  final loadStarted = Completer<void>();
+  final release = Completer<void>();
+
+  @override
+  Future<Result<StagedAttachment>> loadStaged({
+    required String userId,
+    required String requestId,
+  }) async {
+    if (!loadStarted.isCompleted) loadStarted.complete();
+    await release.future;
+    return Success(
+      StagedAttachment(
+        pending: PendingAttachment(
+          requestId: requestId,
+          binding: AttachmentBinding.documentDraft('draft-1'),
+          stagedPath: 'owned/$requestId.pdf',
+          originalName: 'proof.pdf',
+          mimeType: 'application/pdf',
+          fileSize: 3,
+        ),
+        thumbnailPath: null,
+        createdAt: DateTime.utc(2026, 7, 14),
+        sha256: 'stable-hash',
+      ),
+    );
+  }
+
+  @override
+  Future<Result<void>> rebindDocumentDraft({
+    required String userId,
+    required String localAggregateId,
+    required int documentId,
+    required List<String> requestIds,
+  }) async => const Success(null);
+
+  @override
+  Future<Result<void>> removeStagedAttachments({
+    required String userId,
+    required List<String> requestIds,
+  }) async => const Success(null);
+}
+
+final class _CountingEnqueueOutboxRepository implements OutboxRepository {
+  _CountingEnqueueOutboxRepository(this.delegate);
+
+  final OutboxRepository delegate;
+  int enqueueGraphCalls = 0;
+
+  @override
+  Future<Result<List<OutboxOperation>>> enqueueGraph(OutboxGraph graph) {
+    enqueueGraphCalls += 1;
+    return delegate.enqueueGraph(graph);
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      delegate.noSuchMethod(invocation);
+}
 
 final class _OutboxSubmissionStagingStore
     implements OutboxAttachmentStagingStore {

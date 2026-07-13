@@ -20,6 +20,7 @@ import '../../../offline/domain/entities/outbox_graph.dart';
 import '../../../offline/domain/repositories/document_draft_repository.dart';
 import '../../../offline/domain/repositories/outbox_repository.dart';
 import '../../../offline/domain/services/idempotency_key_validator.dart';
+import '../../../offline/domain/services/outbox_executor.dart';
 
 final class DocumentAction {
   const DocumentAction({
@@ -42,6 +43,7 @@ final class _PendingOfflineSubmission {
     required this.attachmentRequestIds,
     required this.requiresStatusProbe,
     required this.review,
+    required this.snapshot,
   });
 
   final CreateDocumentRequest request;
@@ -51,6 +53,7 @@ final class _PendingOfflineSubmission {
   final List<String> attachmentRequestIds;
   final bool requiresStatusProbe;
   final OfflineSubmissionReview review;
+  final OfflineSubmissionSnapshot snapshot;
 }
 
 final class _PendingLifecycleSubmission {
@@ -64,6 +67,7 @@ final class _PendingLifecycleSubmission {
     required this.warehouseId,
     required this.requiresStatusProbe,
     required this.review,
+    required this.snapshot,
   });
 
   final OutboxOperationKind kind;
@@ -75,6 +79,25 @@ final class _PendingLifecycleSubmission {
   final int warehouseId;
   final bool requiresStatusProbe;
   final OfflineSubmissionReview review;
+  final OfflineSubmissionSnapshot snapshot;
+}
+
+final class OfflineSubmissionSnapshot {
+  const OfflineSubmissionSnapshot({
+    required this.accountId,
+    required this.warehouseId,
+    required this.permissionStamp,
+    required this.contextGeneration,
+    required this.submissionEpoch,
+    required this.reviewEpoch,
+  });
+
+  final String accountId;
+  final int warehouseId;
+  final String permissionStamp;
+  final int contextGeneration;
+  final int submissionEpoch;
+  final int reviewEpoch;
 }
 
 final class OfflineSubmissionReview {
@@ -106,6 +129,8 @@ final class DocumentsViewModel extends ChangeNotifier {
     this.submissionStagingStore,
     this.accountId,
     this.observedRoleCode = '',
+    this.outboxContextReader,
+    this.outboxContextGenerationReader,
     NetworkReachability initialReachability = NetworkReachability.online,
     Set<OutboxOperationKind> allowedOutboxKinds = const {
       ...OutboxOperationKind.values,
@@ -144,6 +169,8 @@ final class DocumentsViewModel extends ChangeNotifier {
   final OutboxAttachmentStagingStore? submissionStagingStore;
   final String? accountId;
   final String observedRoleCode;
+  OutboxExecutionContext? Function()? outboxContextReader;
+  int Function()? outboxContextGenerationReader;
   Set<OutboxOperationKind> _allowedOutboxKinds;
   NetworkReachability _networkReachability;
   final String Function() draftIdFactory;
@@ -205,6 +232,8 @@ final class DocumentsViewModel extends ChangeNotifier {
   bool _draftDirty = false;
   bool _draftSubmissionBarrier = false;
   int _submissionEpoch = 0;
+  int _submissionContextGeneration = 0;
+  int _offlineReviewEpoch = 0;
   int _draftContextGeneration = 0;
   int _draftOpenGeneration = 0;
   String? _activeDraftId;
@@ -224,6 +253,9 @@ final class DocumentsViewModel extends ChangeNotifier {
   @override
   void dispose() {
     _isDisposed = true;
+    _submissionContextGeneration += 1;
+    _pendingOfflineSubmission = null;
+    _pendingLifecycleSubmission = null;
     _draftSaveTimer?.cancel();
     super.dispose();
   }
@@ -237,6 +269,10 @@ final class DocumentsViewModel extends ChangeNotifier {
   List<String> get flowSteps => const ['创建', '确认', '提交', '完成'];
   OfflineSubmissionReview? get offlineSubmissionReview =>
       _pendingOfflineSubmission?.review ?? _pendingLifecycleSubmission?.review;
+  OfflineSubmissionSnapshot? get offlineSubmissionSnapshot =>
+      _pendingOfflineSubmission?.snapshot ??
+      _pendingLifecycleSubmission?.snapshot;
+  bool get isDisposed => _isDisposed;
   Failure? get offlineSubmissionFailure => _offlineSubmissionFailure;
   Set<OutboxOperationKind> get allowedOutboxKinds => _allowedOutboxKinds;
   bool get canSubmitAuthoritatively =>
@@ -249,7 +285,30 @@ final class DocumentsViewModel extends ChangeNotifier {
   }
 
   void updateAllowedOutboxKinds(Set<OutboxOperationKind> allowedKinds) {
+    if (setEquals(_allowedOutboxKinds, allowedKinds)) return;
+    final hadPendingSubmission = offlineSubmissionSnapshot != null;
     _allowedOutboxKinds = Set.unmodifiable(allowedKinds);
+    _submissionContextGeneration += 1;
+    _invalidateOfflineSubmission();
+    if (hadPendingSubmission) {
+      _offlineSubmissionFailure = const AuthorizationFailure(
+        message: '权限已变化，请重新复核后再保存到待同步',
+      );
+      _formError = _offlineSubmissionFailure!.message;
+      _documentActionError = _offlineSubmissionFailure!.message;
+    }
+    if (!_isDisposed) notifyListeners();
+  }
+
+  void configureOfflineSubmissionContext({
+    OutboxExecutionContext? Function()? contextReader,
+    int Function()? contextGenerationReader,
+  }) {
+    if (contextReader != null) outboxContextReader = contextReader;
+    if (contextGenerationReader != null) {
+      outboxContextGenerationReader = contextGenerationReader;
+    }
+    _cancelPendingIfContextChanged();
   }
 
   List<DocumentRecord> get recentDocuments =>
@@ -925,6 +984,10 @@ final class DocumentsViewModel extends ChangeNotifier {
       currentWarehouse != null;
 
   void _scheduleDraftSave() {
+    if (_pendingOfflineSubmission != null) {
+      _submissionEpoch += 1;
+      _invalidateOfflineSubmission();
+    }
     if (!_canPersistDraft || _isDisposed || _draftSubmissionBarrier) return;
     _ensureDraftIdentity();
     _draftDirty = true;
@@ -1534,8 +1597,12 @@ final class DocumentsViewModel extends ChangeNotifier {
     required bool requiresStatusProbe,
   }) {
     final warehouse = currentWarehouse;
+    final context = _currentSubmissionContext();
     if (accountId == null ||
         warehouse == null ||
+        context == null ||
+        context.accountId != accountId ||
+        context.warehouseId != warehouse.id ||
         outboxRepository == null ||
         submissionStagingStore == null) {
       _pendingOfflineSubmission = null;
@@ -1544,6 +1611,21 @@ final class DocumentsViewModel extends ChangeNotifier {
     }
     _pendingLifecycleSubmission = null;
     _offlineSubmissionFailure = null;
+    final review = OfflineSubmissionReview(
+      warehouseName: warehouse.name,
+      documentType: request.typeLabel,
+      lineCount: request.effectiveLines.length,
+      lines: request.effectiveLines
+          .map((line) => '${line.productName} × ${line.quantity}')
+          .toList(growable: false),
+      staleAssumptions: [
+        request.docType == 5 ? '离线同步将创建盘点单、确认差异并结转库存' : '离线同步将创建并完成单据以产生库存效果',
+        '库存、原单状态和权限将在同步前重新校验',
+        '附件内容必须与当前暂存快照一致',
+        '保存前需具备整张同步图的完整权限，任一权限缺失均不会入队',
+      ],
+    );
+    final snapshot = _newOfflineSubmissionSnapshot(context);
     _pendingOfflineSubmission = _PendingOfflineSubmission(
       request: request,
       accountId: accountId,
@@ -1551,33 +1633,36 @@ final class DocumentsViewModel extends ChangeNotifier {
       localAggregateId: localAggregateId,
       attachmentRequestIds: List.unmodifiable(_attachmentStagingIds),
       requiresStatusProbe: requiresStatusProbe,
-      review: OfflineSubmissionReview(
-        warehouseName: warehouse.name,
-        documentType: request.typeLabel,
-        lineCount: request.effectiveLines.length,
-        lines: request.effectiveLines
-            .map((line) => '${line.productName} × ${line.quantity}')
-            .toList(growable: false),
-        staleAssumptions: [
-          request.docType == 5 ? '离线同步将创建盘点单、确认差异并结转库存' : '离线同步将创建并完成单据以产生库存效果',
-          '库存、原单状态和权限将在同步前重新校验',
-          '附件内容必须与当前暂存快照一致',
-          '保存前需具备整张同步图的完整权限，任一权限缺失均不会入队',
-        ],
-      ),
+      review: review,
+      snapshot: snapshot,
     );
     _formError = '确认复核后可保存到待同步';
     return true;
   }
 
-  Future<bool> confirmOfflineSubmission() async {
-    if (_offlineEnqueueInFlight) return false;
+  Future<bool> confirmOfflineSubmission([
+    OfflineSubmissionSnapshot? expectedSnapshot,
+  ]) async {
+    if (_isDisposed || _offlineEnqueueInFlight || _isSubmitting) return false;
     final create = _pendingOfflineSubmission;
     final lifecycle = _pendingLifecycleSubmission;
+    final snapshot = create?.snapshot ?? lifecycle?.snapshot;
     final outbox = outboxRepository;
-    if (outbox == null || (create == null && lifecycle == null)) return false;
+    if (outbox == null ||
+        snapshot == null ||
+        (create == null && lifecycle == null)) {
+      return false;
+    }
+    if ((expectedSnapshot != null &&
+            expectedSnapshot.reviewEpoch != snapshot.reviewEpoch) ||
+        !isOfflineSubmissionSnapshotCurrent(snapshot)) {
+      _invalidateOfflineSubmission();
+      return false;
+    }
 
     _offlineEnqueueInFlight = true;
+    _draftSubmissionBarrier = true;
+    _isSubmitting = true;
     _offlineSubmissionFailure = null;
     _formError = null;
     _documentActionError = null;
@@ -1587,7 +1672,9 @@ final class DocumentsViewModel extends ChangeNotifier {
       return await _enqueueLifecycleSubmission(lifecycle!, outbox);
     } finally {
       _offlineEnqueueInFlight = false;
-      notifyListeners();
+      _draftSubmissionBarrier = false;
+      _isSubmitting = false;
+      if (!_isDisposed) notifyListeners();
     }
   }
 
@@ -1602,6 +1689,7 @@ final class DocumentsViewModel extends ChangeNotifier {
         userId: pending.accountId,
         requestId: requestId,
       );
+      if (!isOfflineSubmissionSnapshotCurrent(pending.snapshot)) return false;
       if (result case FailureResult<StagedAttachment>(:final failure)) {
         _formError = failure.message;
         return false;
@@ -1713,6 +1801,7 @@ final class DocumentsViewModel extends ChangeNotifier {
       _formError = permissionFailure.message;
       return false;
     }
+    if (!isOfflineSubmissionSnapshotCurrent(pending.snapshot)) return false;
     final result = await outbox.enqueueGraph(
       OutboxGraph(operations: operations, dependencies: dependencies),
     );
@@ -1768,6 +1857,7 @@ final class DocumentsViewModel extends ChangeNotifier {
       _documentActionError = permissionFailure.message;
       return false;
     }
+    if (!isOfflineSubmissionSnapshotCurrent(pending.snapshot)) return false;
     final result = await outbox.enqueueGraph(
       OutboxGraph(
         operations: operations,
@@ -1889,7 +1979,7 @@ final class DocumentsViewModel extends ChangeNotifier {
   }
 
   bool isCompletingDocument(DocumentRecord document) {
-    return _completingDocumentIds.contains(document.id);
+    return _isSubmitting || _completingDocumentIds.contains(document.id);
   }
 
   Future<bool> completeDocument(DocumentRecord document) async {
@@ -1950,6 +2040,7 @@ final class DocumentsViewModel extends ChangeNotifier {
     DocumentRecord document,
     OutboxOperationKind kind,
   ) {
+    if (_isDisposed || _isSubmitting || _offlineEnqueueInFlight) return false;
     if (canSubmitAuthoritatively) {
       _documentActionError = '服务当前可用，请直接提交单据动作';
       notifyListeners();
@@ -1998,7 +2089,9 @@ final class DocumentsViewModel extends ChangeNotifier {
     )
     run,
   }) async {
-    if (_completingDocumentIds.contains(document.id)) {
+    if (_isSubmitting ||
+        _offlineEnqueueInFlight ||
+        _completingDocumentIds.contains(document.id)) {
       return false;
     }
     if (!canSubmitAuthoritatively) {
@@ -2065,14 +2158,26 @@ final class DocumentsViewModel extends ChangeNotifier {
   }) {
     final currentAccountId = accountId;
     final warehouse = currentWarehouse;
+    final context = _currentSubmissionContext();
     if (currentAccountId == null ||
         warehouse == null ||
+        context == null ||
+        context.accountId != currentAccountId ||
+        context.warehouseId != warehouse.id ||
         outboxRepository == null) {
       _pendingLifecycleSubmission = null;
       _documentActionError = '待同步服务当前不可用';
       return false;
     }
     _pendingOfflineSubmission = null;
+    final review = OfflineSubmissionReview(
+      warehouseName: warehouse.name,
+      documentType: document.title,
+      lineCount: 0,
+      lines: [document.number],
+      staleAssumptions: const ['单据状态、库存和权限将在同步前重新校验', '保存前需具备引用单据和生命周期操作的完整权限'],
+    );
+    final snapshot = _newOfflineSubmissionSnapshot(context);
     _pendingLifecycleSubmission = _PendingLifecycleSubmission(
       kind: kind,
       requestId: requestId,
@@ -2082,19 +2187,70 @@ final class DocumentsViewModel extends ChangeNotifier {
       accountId: currentAccountId,
       warehouseId: warehouse.id,
       requiresStatusProbe: requiresStatusProbe,
-      review: OfflineSubmissionReview(
-        warehouseName: warehouse.name,
-        documentType: document.title,
-        lineCount: 0,
-        lines: [document.number],
-        staleAssumptions: const [
-          '单据状态、库存和权限将在同步前重新校验',
-          '保存前需具备引用单据和生命周期操作的完整权限',
-        ],
-      ),
+      review: review,
+      snapshot: snapshot,
     );
     _documentActionError = '确认复核后可保存到待同步';
     return true;
+  }
+
+  bool isOfflineSubmissionSnapshotCurrent(OfflineSubmissionSnapshot snapshot) {
+    if (_isDisposed) return false;
+    final pending = offlineSubmissionSnapshot;
+    if (pending == null || pending.reviewEpoch != snapshot.reviewEpoch) {
+      return false;
+    }
+    final context = _currentSubmissionContext();
+    return context != null &&
+        context.accountId == snapshot.accountId &&
+        context.warehouseId == snapshot.warehouseId &&
+        context.permissionStamp == snapshot.permissionStamp &&
+        _currentSubmissionContextGeneration == snapshot.contextGeneration &&
+        _submissionEpoch == snapshot.submissionEpoch;
+  }
+
+  OfflineSubmissionSnapshot _newOfflineSubmissionSnapshot(
+    OutboxExecutionContext context,
+  ) => OfflineSubmissionSnapshot(
+    accountId: context.accountId,
+    warehouseId: context.warehouseId,
+    permissionStamp: context.permissionStamp,
+    contextGeneration: _currentSubmissionContextGeneration,
+    submissionEpoch: _submissionEpoch,
+    reviewEpoch: ++_offlineReviewEpoch,
+  );
+
+  int get _currentSubmissionContextGeneration =>
+      (outboxContextGenerationReader?.call() ?? 0) +
+      _submissionContextGeneration;
+
+  OutboxExecutionContext? _currentSubmissionContext() {
+    final external = outboxContextReader?.call();
+    if (external != null) return external;
+    final currentAccountId = accountId;
+    final warehouseId = currentWarehouse?.id;
+    if (currentAccountId == null || warehouseId == null) return null;
+    final kinds = _allowedOutboxKinds.map((kind) => kind.wireValue).toList()
+      ..sort();
+    return OutboxExecutionContext(
+      accountId: currentAccountId,
+      warehouseId: warehouseId,
+      permissionStamp: '$observedRoleCode:${kinds.join(',')}',
+      allowedKinds: _allowedOutboxKinds,
+    );
+  }
+
+  void _cancelPendingIfContextChanged() {
+    final snapshot = offlineSubmissionSnapshot;
+    if (snapshot != null && !isOfflineSubmissionSnapshotCurrent(snapshot)) {
+      _invalidateOfflineSubmission();
+      if (!_isDisposed) notifyListeners();
+    }
+  }
+
+  void _invalidateOfflineSubmission() {
+    _pendingOfflineSubmission = null;
+    _pendingLifecycleSubmission = null;
   }
 
   bool _matchesDocumentDate(DocumentRecord document) {

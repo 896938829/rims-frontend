@@ -45,6 +45,7 @@ final class OfflineStatusViewModel extends ChangeNotifier {
   bool _hasCachedData = false;
   String? _scopeAccountId;
   int? _scopeWarehouseId;
+  String? _scopePermissionStamp;
   int _queuedCount = 0;
   int _attentionCount = 0;
   bool _isDisposed = false;
@@ -93,7 +94,7 @@ final class OfflineStatusViewModel extends ChangeNotifier {
       return;
     }
     final result = await repository.list(context.accountId);
-    if (_isDisposed || generation != _loadGeneration) return;
+    if (!_isCurrentLoad(context, generation)) return;
     switch (result) {
       case Success<List<OutboxOperation>>(:final data):
         final visible = _statusClassifier.visibleOperations(
@@ -104,11 +105,19 @@ final class OfflineStatusViewModel extends ChangeNotifier {
           operations: visible,
           context: context,
         );
+        if (deniedIds.isEmpty) {
+          final buckets = _statusClassifier.classify(
+            operations: visible,
+            permissionBlockedOperationIds: const {},
+          );
+          _setCounts(buckets.waiting.length, buckets.attention.length);
+          return;
+        }
         final component = await repository.loadConnectedComponent(
           accountId: context.accountId,
           operationIds: deniedIds,
         );
-        if (_isDisposed || generation != _loadGeneration) return;
+        if (!_isCurrentLoad(context, generation)) return;
         final blockedIds = switch (component) {
           Success<List<OutboxOperation>>(:final data) =>
             data
@@ -128,13 +137,14 @@ final class OfflineStatusViewModel extends ChangeNotifier {
         );
         _setCounts(buckets.waiting.length, buckets.attention.length);
       case FailureResult<List<OutboxOperation>>():
-        break;
+        _setCounts(0, 0);
     }
   }
 
   void updateDataFreshness({
     required String accountId,
     required int warehouseId,
+    required String permissionStamp,
     DateTime? fetchedAt,
     DateTime? expiresAt,
     bool hasCachedData = false,
@@ -143,7 +153,8 @@ final class OfflineStatusViewModel extends ChangeNotifier {
     _synchronizeScope(context);
     if (context == null ||
         context.accountId != accountId ||
-        context.warehouseId != warehouseId) {
+        context.warehouseId != warehouseId ||
+        context.permissionStamp != permissionStamp) {
       return;
     }
     if (_fetchedAt == fetchedAt &&
@@ -168,11 +179,15 @@ final class OfflineStatusViewModel extends ChangeNotifier {
   }) {
     final accountId = context?.accountId;
     final warehouseId = context?.warehouseId;
-    if (_scopeAccountId == accountId && _scopeWarehouseId == warehouseId) {
+    final permissionStamp = context?.permissionStamp;
+    if (_scopeAccountId == accountId &&
+        _scopeWarehouseId == warehouseId &&
+        _scopePermissionStamp == permissionStamp) {
       return;
     }
     _scopeAccountId = accountId;
     _scopeWarehouseId = warehouseId;
+    _scopePermissionStamp = permissionStamp;
     _loadGeneration += 1;
     _freshnessTimer?.cancel();
     _freshnessTimer = null;
@@ -234,6 +249,18 @@ final class OfflineStatusViewModel extends ChangeNotifier {
     _queuedCount = queued;
     _attentionCount = attention;
     notifyListeners();
+  }
+
+  bool _isCurrentLoad(OutboxExecutionContext context, int generation) {
+    if (_isDisposed || generation != _loadGeneration) return false;
+    final current = contextReader();
+    if (current?.accountId == context.accountId &&
+        current?.warehouseId == context.warehouseId &&
+        current?.permissionStamp == context.permissionStamp) {
+      return true;
+    }
+    _synchronizeScope(current);
+    return false;
   }
 
   @override

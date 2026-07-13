@@ -200,6 +200,7 @@ final class _AppShellPageState extends State<AppShellPage> {
           _offlineStatusViewModel?.updateDataFreshness(
             accountId: currentUser.id.toString(),
             warehouseId: currentWarehouse.id,
+            permissionStamp: _outboxExecutionContext?.permissionStamp ?? '',
             fetchedAt: freshness?.fetchedAt,
             expiresAt: freshness?.expiresAt,
             hasCachedData: freshness?.hasCachedData ?? false,

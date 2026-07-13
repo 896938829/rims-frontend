@@ -60,14 +60,6 @@ final class HomeDataFreshness {
   final bool hasCachedData;
 }
 
-enum _HomeDataSlice {
-  inventory,
-  inventoryAlerts,
-  nonStandardInventory,
-  inventoryOverview,
-  recentDocuments,
-}
-
 final class HomeViewModel extends ChangeNotifier {
   HomeViewModel({
     this.user,
@@ -93,9 +85,10 @@ final class HomeViewModel extends ChangeNotifier {
   int _recentDocumentsTotal = 0;
   bool _isLoading = false;
   bool _isDisposed = false;
+  int _loadGeneration = 0;
   String? _errorMessage;
   String? _recentDocumentsErrorMessage;
-  final Map<_HomeDataSlice, HomeDataFreshness> _freshnessBySlice = {};
+  HomeDataFreshness? _dataFreshness;
 
   String get warehouseName => warehouse?.name ?? '未选择仓库';
   String get greeting {
@@ -106,29 +99,14 @@ final class HomeViewModel extends ChangeNotifier {
   }
 
   bool get isLoading => _isLoading;
+  int get loadGeneration => _loadGeneration;
   String? get errorMessage => _errorMessage;
   String? get recentDocumentsErrorMessage => _recentDocumentsErrorMessage;
   int get inventoryTotal => _inventoryTotal;
   int get inventoryAlertTotal => _inventoryAlertTotal;
   int get nonStandardInventoryTotal => _nonStandardInventoryTotal;
   int get recentDocumentsTotal => _recentDocumentsTotal;
-  HomeDataFreshness? get dataFreshness {
-    final values = _freshnessBySlice.values;
-    if (values.isEmpty) return null;
-    var fetchedAt = values.first.fetchedAt;
-    var expiresAt = values.first.expiresAt;
-    var hasCachedData = false;
-    for (final value in values) {
-      if (value.fetchedAt.isBefore(fetchedAt)) fetchedAt = value.fetchedAt;
-      if (value.expiresAt.isBefore(expiresAt)) expiresAt = value.expiresAt;
-      hasCachedData = hasCachedData || value.hasCachedData;
-    }
-    return HomeDataFreshness(
-      fetchedAt: fetchedAt,
-      expiresAt: expiresAt,
-      hasCachedData: hasCachedData,
-    );
-  }
+  HomeDataFreshness? get dataFreshness => _dataFreshness;
 
   List<HomeMetric> get metrics => [
     HomeMetric(
@@ -204,151 +182,201 @@ final class HomeViewModel extends ChangeNotifier {
   @override
   void dispose() {
     _isDisposed = true;
+    _loadGeneration += 1;
     super.dispose();
   }
 
   Future<void> load() async {
+    final generation = ++_loadGeneration;
     _isLoading = true;
     _errorMessage = null;
     _recentDocumentsErrorMessage = null;
     notifyListeners();
 
     Failure? failure;
+    var inventoryItems = _inventoryItems;
+    var inventoryOverviewItems = _inventoryOverviewItems;
+    var recentDocuments = _recentDocuments;
+    var inventoryAlertsLoaded = _inventoryAlertsLoaded;
+    var nonStandardInventoryLoaded = _nonStandardInventoryLoaded;
+    var inventoryTotal = _inventoryTotal;
+    var inventoryAlertTotal = _inventoryAlertTotal;
+    var nonStandardInventoryTotal = _nonStandardInventoryTotal;
+    var recentDocumentsTotal = _recentDocumentsTotal;
+    String? recentDocumentsErrorMessage;
+    final freshness = <HomeDataFreshness>[];
+    var freshnessComplete = true;
+    var expectedFreshnessSlices = 0;
+
+    bool isCurrent() => !_isDisposed && generation == _loadGeneration;
+
+    void recordFreshness(HomeDataFreshness? value) {
+      expectedFreshnessSlices += 1;
+      if (value == null) {
+        freshnessComplete = false;
+      } else {
+        freshness.add(value);
+      }
+    }
+
     final inventoryRepository = this.inventoryRepository;
     if (inventoryRepository == null) {
-      _inventoryItems = const [];
-      _inventoryAlertsLoaded = false;
-      _nonStandardInventoryLoaded = false;
-      _inventoryTotal = 0;
-      _inventoryAlertTotal = 0;
-      _nonStandardInventoryTotal = 0;
+      inventoryItems = const [];
+      inventoryAlertsLoaded = false;
+      nonStandardInventoryLoaded = false;
+      inventoryTotal = 0;
+      inventoryAlertTotal = 0;
+      nonStandardInventoryTotal = 0;
     } else {
       final inventoryResult = await inventoryRepository.listInventory();
-      if (_isDisposed) return;
-      if (inventoryResult.isSuccess) {
-        _recordInventoryFreshness(_HomeDataSlice.inventory);
-      }
+      if (!isCurrent()) return;
       inventoryResult.when(
         success: (page) {
-          _inventoryItems = page.items;
-          _inventoryTotal = page.total;
+          inventoryItems = page.items;
+          inventoryTotal = page.total;
+          recordFreshness(_inventoryFreshness(inventoryRepository));
         },
         failure: (value) {
           failure ??= value;
+          recordFreshness(null);
         },
       );
 
       final alertsResult = await inventoryRepository.listInventoryAlerts();
-      if (_isDisposed) return;
-      if (alertsResult.isSuccess) {
-        _recordInventoryFreshness(_HomeDataSlice.inventoryAlerts);
-      }
+      if (!isCurrent()) return;
       alertsResult.when(
         success: (page) {
-          _inventoryAlertTotal = page.total;
-          _inventoryAlertsLoaded = true;
+          inventoryAlertTotal = page.total;
+          inventoryAlertsLoaded = true;
+          recordFreshness(_inventoryFreshness(inventoryRepository));
         },
-        failure: (_) {},
+        failure: (_) => recordFreshness(null),
       );
 
       final nonStandardResult = await inventoryRepository
           .listNonStandardInventory();
-      if (_isDisposed) return;
-      if (nonStandardResult.isSuccess) {
-        _recordInventoryFreshness(_HomeDataSlice.nonStandardInventory);
-      }
+      if (!isCurrent()) return;
       nonStandardResult.when(
         success: (page) {
-          _nonStandardInventoryTotal = page.total;
-          _nonStandardInventoryLoaded = true;
+          nonStandardInventoryTotal = page.total;
+          nonStandardInventoryLoaded = true;
+          recordFreshness(_inventoryFreshness(inventoryRepository));
         },
-        failure: (_) {},
+        failure: (_) => recordFreshness(null),
       );
     }
 
     final reportsRepository = this.reportsRepository;
     if (reportsRepository == null) {
-      _inventoryOverviewItems = const [];
+      inventoryOverviewItems = const [];
     } else {
       final overviewResult = await reportsRepository.loadInventoryOverview();
-      if (_isDisposed) return;
-      if (overviewResult.isSuccess) {
-        _recordReportFreshness(_HomeDataSlice.inventoryOverview);
-      }
+      if (!isCurrent()) return;
       overviewResult.when(
-        success: (items) => _inventoryOverviewItems = items,
-        failure: (_) {},
+        success: (items) {
+          inventoryOverviewItems = items;
+          recordFreshness(_reportFreshness(reportsRepository));
+        },
+        failure: (_) => recordFreshness(null),
       );
     }
 
     final documentsRepository = this.documentsRepository;
     if (documentsRepository == null) {
-      _recentDocuments = const [];
-      _recentDocumentsTotal = 0;
-      _recentDocumentsErrorMessage = null;
+      recentDocuments = const [];
+      recentDocumentsTotal = 0;
     } else {
       final documentsResult = await documentsRepository.listRecentDocuments();
-      if (_isDisposed) return;
-      if (documentsResult.isSuccess) {
-        _recordDocumentFreshness(_HomeDataSlice.recentDocuments);
-      }
+      if (!isCurrent()) return;
       documentsResult.when(
         success: (page) {
-          _recentDocuments = page.items;
-          _recentDocumentsTotal = page.total;
-          _recentDocumentsErrorMessage = null;
+          recentDocuments = page.items;
+          recentDocumentsTotal = page.total;
+          recordFreshness(_documentFreshness(documentsRepository));
         },
         failure: (value) {
-          _recentDocumentsErrorMessage = value.message;
+          recentDocumentsErrorMessage = value.message;
+          recordFreshness(null);
         },
       );
     }
 
+    if (!isCurrent()) return;
+    _inventoryItems = inventoryItems;
+    _inventoryOverviewItems = inventoryOverviewItems;
+    _recentDocuments = recentDocuments;
+    _inventoryAlertsLoaded = inventoryAlertsLoaded;
+    _nonStandardInventoryLoaded = nonStandardInventoryLoaded;
+    _inventoryTotal = inventoryTotal;
+    _inventoryAlertTotal = inventoryAlertTotal;
+    _nonStandardInventoryTotal = nonStandardInventoryTotal;
+    _recentDocumentsTotal = recentDocumentsTotal;
+    _recentDocumentsErrorMessage = recentDocumentsErrorMessage;
+    _dataFreshness =
+        freshnessComplete &&
+            expectedFreshnessSlices > 0 &&
+            freshness.length == expectedFreshnessSlices
+        ? _aggregateFreshness(freshness)
+        : null;
     _isLoading = false;
     _errorMessage = failure?.message;
     notifyListeners();
   }
 
-  void _recordInventoryFreshness(_HomeDataSlice slice) {
-    final repository = inventoryRepository;
+  HomeDataFreshness? _inventoryFreshness(InventoryRepository repository) {
     if (repository case final InventoryReadMetadata metadata) {
       final status = metadata.lastReadStatus;
       if (status != null) {
-        _freshnessBySlice[slice] = HomeDataFreshness(
-          fetchedAt: status.fetchedAt,
-          expiresAt: status.expiresAt,
-          hasCachedData: status.isCached,
-        );
+        return _freshness(status.fetchedAt, status.expiresAt, status.isCached);
       }
     }
+    return null;
   }
 
-  void _recordDocumentFreshness(_HomeDataSlice slice) {
-    final repository = documentsRepository;
+  HomeDataFreshness? _documentFreshness(DocumentsRepository repository) {
     if (repository case final DocumentReadMetadata metadata) {
       final status = metadata.lastReadStatus;
       if (status != null) {
-        _freshnessBySlice[slice] = HomeDataFreshness(
-          fetchedAt: status.fetchedAt,
-          expiresAt: status.expiresAt,
-          hasCachedData: status.isCached,
-        );
+        return _freshness(status.fetchedAt, status.expiresAt, status.isCached);
       }
     }
+    return null;
   }
 
-  void _recordReportFreshness(_HomeDataSlice slice) {
-    final repository = reportsRepository;
+  HomeDataFreshness? _reportFreshness(ReportsRepository repository) {
     if (repository case final ReportReadMetadata metadata) {
       final status = metadata.lastReadStatus;
       if (status != null) {
-        _freshnessBySlice[slice] = HomeDataFreshness(
-          fetchedAt: status.fetchedAt,
-          expiresAt: status.expiresAt,
-          hasCachedData: status.isCached,
-        );
+        return _freshness(status.fetchedAt, status.expiresAt, status.isCached);
       }
     }
+    return null;
+  }
+
+  HomeDataFreshness _freshness(
+    DateTime fetchedAt,
+    DateTime expiresAt,
+    bool cached,
+  ) => HomeDataFreshness(
+    fetchedAt: fetchedAt,
+    expiresAt: expiresAt,
+    hasCachedData: cached,
+  );
+
+  HomeDataFreshness _aggregateFreshness(List<HomeDataFreshness> values) {
+    var fetchedAt = values.first.fetchedAt;
+    var expiresAt = values.first.expiresAt;
+    var hasCachedData = false;
+    for (final value in values) {
+      if (value.fetchedAt.isBefore(fetchedAt)) fetchedAt = value.fetchedAt;
+      if (value.expiresAt.isBefore(expiresAt)) expiresAt = value.expiresAt;
+      hasCachedData = hasCachedData || value.hasCachedData;
+    }
+    return HomeDataFreshness(
+      fetchedAt: fetchedAt,
+      expiresAt: expiresAt,
+      hasCachedData: hasCachedData,
+    );
   }
 
   int get _lowStockCount {

@@ -246,6 +246,33 @@ void runOutboxRepositoryContract(String name, OutboxHarnessFactory create) {
       );
     });
 
+    test(
+      '500-node multi-source component keeps Memory and Drift parity',
+      () async {
+        final operations = <OutboxOperation>[];
+        final dependencies = <String, Set<String>>{};
+        for (var index = 0; index < 500; index += 1) {
+          final id = 'large-component-$index';
+          operations.add(_operation(id, clock.value));
+          if (index > 0) dependencies[id] = {'large-component-${index - 1}'};
+        }
+        await repository.enqueueGraph(
+          OutboxGraph(operations: operations, dependencies: dependencies),
+        );
+
+        final component = await repository.loadConnectedComponent(
+          accountId: '7',
+          operationIds: const {
+            'large-component-125',
+            'large-component-250',
+            'large-component-499',
+          },
+        );
+
+        expect(component.successData, hasLength(500));
+      },
+    );
+
     test('success atomically persists output and cleanup intent', () async {
       final operation = _operation('output-create', clock.value);
       await repository.enqueueGraph(OutboxGraph(operations: [operation]));

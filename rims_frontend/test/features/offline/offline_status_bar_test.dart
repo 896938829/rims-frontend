@@ -4,9 +4,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rims_frontend/core/theme/app_theme.dart';
+import 'package:rims_frontend/core/result/failure.dart';
+import 'package:rims_frontend/core/result/result.dart';
 import 'package:rims_frontend/features/offline/data/repositories/memory_outbox_repository.dart';
 import 'package:rims_frontend/features/offline/domain/entities/network_reachability.dart';
 import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.dart';
+import 'package:rims_frontend/features/offline/domain/repositories/outbox_repository.dart';
 import 'package:rims_frontend/features/offline/domain/services/network_status_service.dart';
 import 'package:rims_frontend/features/offline/domain/services/outbox_executor.dart';
 import 'package:rims_frontend/features/offline/domain/services/outbox_state_machine.dart';
@@ -46,6 +49,7 @@ void main() {
     harness.viewModel.updateDataFreshness(
       accountId: '7',
       warehouseId: 11,
+      permissionStamp: 'test',
       fetchedAt: DateTime.utc(2026, 7, 14, 9),
       expiresAt: DateTime.utc(2026, 7, 14, 10),
     );
@@ -72,6 +76,7 @@ void main() {
     viewModel.updateDataFreshness(
       accountId: '7',
       warehouseId: 11,
+      permissionStamp: 'test',
       fetchedAt: DateTime.utc(2026, 7, 14, 11, 59, 30),
       expiresAt: DateTime.utc(2026, 7, 14, 12, 0, 45),
       hasCachedData: true,
@@ -104,6 +109,7 @@ void main() {
     harness.viewModel.updateDataFreshness(
       accountId: '7',
       warehouseId: 11,
+      permissionStamp: 'test',
       fetchedAt: DateTime.utc(2026, 7, 14, 11, 59, 30),
       expiresAt: DateTime.utc(2026, 7, 14, 12, 5),
       hasCachedData: true,
@@ -132,6 +138,7 @@ void main() {
     viewModel.updateDataFreshness(
       accountId: '7',
       warehouseId: 11,
+      permissionStamp: 'test',
       fetchedAt: DateTime.utc(2026, 7, 14, 9),
       expiresAt: DateTime.utc(2026, 7, 14, 10),
       hasCachedData: true,
@@ -164,6 +171,7 @@ void main() {
       viewModel.updateDataFreshness(
         accountId: '7',
         warehouseId: 11,
+        permissionStamp: 'test',
         fetchedAt: DateTime.utc(2026, 7, 14, 8),
         expiresAt: DateTime.utc(2026, 7, 14, 9),
         hasCachedData: true,
@@ -177,6 +185,140 @@ void main() {
 
     expect(viewModel.dataAgeLabel, '数据时间未知');
     expect(scheduler.activeTimerCount, 0);
+    viewModel.dispose();
+    await network.dispose();
+  });
+
+  test(
+    'permission stamp change clears freshness and rejects late reports',
+    () async {
+      final network = _FakeNetworkStatusService(NetworkReachability.online);
+      var context = _context(permissionStamp: 'full');
+      final viewModel = OfflineStatusViewModel(
+        networkStatusService: network,
+        outboxRepository: null,
+        contextReader: () => context,
+      );
+      viewModel.updateDataFreshness(
+        accountId: '7',
+        warehouseId: 11,
+        permissionStamp: 'full',
+        fetchedAt: DateTime.utc(2026, 7, 14, 8),
+        expiresAt: DateTime.utc(2026, 7, 14, 9),
+        hasCachedData: true,
+      );
+
+      context = _context(permissionStamp: 'limited');
+      viewModel.refreshContext();
+      viewModel.updateDataFreshness(
+        accountId: '7',
+        warehouseId: 11,
+        permissionStamp: 'full',
+        fetchedAt: DateTime.utc(2026, 7, 14, 7),
+        expiresAt: DateTime.utc(2026, 7, 14, 8),
+        hasCachedData: true,
+      );
+
+      expect(viewModel.dataAgeLabel, '数据时间未知');
+      viewModel.dispose();
+      await network.dispose();
+    },
+  );
+
+  test(
+    'permission changes clear counts and list failure keeps them cleared',
+    () async {
+      final network = _FakeNetworkStatusService(NetworkReachability.online);
+      final delegate = MemoryOutboxRepository(
+        stateMachine: OutboxStateMachine(),
+      );
+      await delegate.enqueue(
+        _operation(
+          'permission-sensitive',
+          OutboxState.queued,
+          kind: OutboxOperationKind.documentComplete,
+        ),
+      );
+      final repository = _CountingOutboxRepository(delegate);
+      var context = _context(permissionStamp: 'full');
+      final viewModel = OfflineStatusViewModel(
+        networkStatusService: network,
+        outboxRepository: repository,
+        contextReader: () => context,
+      );
+      await viewModel.load();
+      expect(viewModel.queuedCount, 1);
+
+      context = _context(
+        permissionStamp: 'limited',
+        allowedKinds: const {OutboxOperationKind.documentCreate},
+      );
+      viewModel.refreshContext();
+      expect((viewModel.queuedCount, viewModel.attentionCount), (0, 0));
+      await viewModel.load();
+      expect((viewModel.queuedCount, viewModel.attentionCount), (0, 1));
+
+      repository.listFailure = const LocalStorageFailure(
+        message: 'read failed',
+      );
+      context = _context(permissionStamp: 'restored');
+      viewModel.refreshContext();
+      await viewModel.load();
+      expect((viewModel.queuedCount, viewModel.attentionCount), (0, 0));
+
+      repository.listFailure = null;
+      context = _context(permissionStamp: 'full-again');
+      viewModel.refreshContext();
+      await viewModel.load();
+      expect((viewModel.queuedCount, viewModel.attentionCount), (1, 0));
+
+      viewModel.dispose();
+      await network.dispose();
+    },
+  );
+
+  test('status graph lookup is skipped when no permission is denied', () async {
+    final network = _FakeNetworkStatusService(NetworkReachability.online);
+    final delegate = MemoryOutboxRepository(stateMachine: OutboxStateMachine());
+    await delegate.enqueue(_operation('allowed', OutboxState.queued));
+    final repository = _CountingOutboxRepository(delegate);
+    final viewModel = OfflineStatusViewModel(
+      networkStatusService: network,
+      outboxRepository: repository,
+      contextReader: _context,
+    );
+
+    await viewModel.load();
+
+    expect(repository.connectedComponentCalls, 0);
+    viewModel.dispose();
+    await network.dispose();
+  });
+
+  test('500 denied operations use one connected graph lookup', () async {
+    final network = _FakeNetworkStatusService(NetworkReachability.online);
+    final delegate = MemoryOutboxRepository(stateMachine: OutboxStateMachine());
+    for (var index = 0; index < 500; index += 1) {
+      await delegate.enqueue(
+        _operation(
+          'denied-$index',
+          OutboxState.queued,
+          kind: OutboxOperationKind.documentComplete,
+        ),
+      );
+    }
+    final repository = _CountingOutboxRepository(delegate);
+    final viewModel = OfflineStatusViewModel(
+      networkStatusService: network,
+      outboxRepository: repository,
+      contextReader: () =>
+          _context(allowedKinds: const {OutboxOperationKind.documentCreate}),
+    );
+
+    await viewModel.load();
+
+    expect(repository.connectedComponentCalls, 1);
+    expect(viewModel.attentionCount, 500);
     viewModel.dispose();
     await network.dispose();
   });
@@ -247,7 +389,8 @@ void main() {
       onOpenSyncCenter: () => openCount += 1,
     );
 
-    expect(find.bySemanticsLabel('网络状态：在线，服务可用。数据时间未知'), findsOneWidget);
+    expect(find.bySemanticsLabel('在线，服务可用'), findsOneWidget);
+    expect(find.bySemanticsLabel('数据时间未知'), findsOneWidget);
     expect(find.bySemanticsLabel('1 项待同步，打开同步中心'), findsOneWidget);
     await tester.sendKeyEvent(LogicalKeyboardKey.tab);
     await tester.pump();
@@ -255,6 +398,51 @@ void main() {
     await tester.pump();
     expect(openCount, 1);
     semantics.dispose();
+  });
+
+  testWidgets(
+    'status labels occur once and count controls keep separate actions',
+    (tester) async {
+      final semantics = tester.ensureSemantics();
+      final harness = await _createHarness(
+        operations: [_operation('queued', OutboxState.queued)],
+      );
+      addTearDown(harness.dispose);
+      await _pumpBar(tester, harness.viewModel, onOpenSyncCenter: () {});
+
+      expect(find.bySemanticsLabel('在线，服务可用'), findsOneWidget);
+      expect(find.bySemanticsLabel('数据时间未知'), findsOneWidget);
+      expect(find.bySemanticsLabel('1 项待同步，打开同步中心'), findsOneWidget);
+      expect(find.bySemanticsLabel(RegExp('在线，服务可用.*在线，服务可用')), findsNothing);
+      semantics.dispose();
+    },
+  );
+
+  testWidgets('count controls provide 48 logical pixel touch targets', (
+    tester,
+  ) async {
+    final harness = await _createHarness(
+      operations: [
+        _operation('queued', OutboxState.queued),
+        _operation('conflict', OutboxState.conflict),
+      ],
+    );
+    addTearDown(harness.dispose);
+    await _pumpBar(tester, harness.viewModel, onOpenSyncCenter: () {});
+
+    for (final label in ['待同步 1', '需处理 1']) {
+      final button = find.ancestor(
+        of: find.text(label),
+        matching: find.byType(TextButton),
+      );
+      final size = tester.getSize(button);
+      expect(size.width, greaterThanOrEqualTo(48));
+      expect(size.height, greaterThanOrEqualTo(48));
+      expect(
+        tester.hitTestOnBinding(tester.getCenter(button)).path,
+        isNotEmpty,
+      );
+    }
   });
 
   for (final size in const [Size(320, 640), Size(1024, 768)]) {
@@ -355,14 +543,45 @@ Future<_Harness> _createHarness({
 
 OutboxExecutionContext _context({
   int warehouseId = 11,
+  String permissionStamp = 'test',
   Set<OutboxOperationKind> allowedKinds = const {...OutboxOperationKind.values},
 }) {
   return OutboxExecutionContext(
     accountId: '7',
     warehouseId: warehouseId,
-    permissionStamp: 'test',
+    permissionStamp: permissionStamp,
     allowedKinds: allowedKinds,
   );
+}
+
+final class _CountingOutboxRepository implements OutboxRepository {
+  _CountingOutboxRepository(this.delegate);
+
+  final OutboxRepository delegate;
+  Failure? listFailure;
+  int connectedComponentCalls = 0;
+
+  @override
+  Future<Result<List<OutboxOperation>>> list(String accountId) async =>
+      listFailure == null
+      ? delegate.list(accountId)
+      : FailureResult(listFailure!);
+
+  @override
+  Future<Result<List<OutboxOperation>>> loadConnectedComponent({
+    required String accountId,
+    required Set<String> operationIds,
+  }) {
+    connectedComponentCalls += 1;
+    return delegate.loadConnectedComponent(
+      accountId: accountId,
+      operationIds: operationIds,
+    );
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      Function.apply(delegate.noSuchMethod, [invocation]);
 }
 
 OutboxOperation _operation(

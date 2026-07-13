@@ -25,57 +25,48 @@ final class OfflineStatusBar extends StatelessWidget {
             (theme.brightness == Brightness.dark
                 ? OfflineStatusBandTheme.dark
                 : OfflineStatusBandTheme.light);
-        return Semantics(
-          container: true,
-          explicitChildNodes: true,
-          label: '网络状态：${viewModel.networkLabel}。${viewModel.dataAgeLabel}',
-          child: ColoredBox(
-            color: colors.background,
-            child: SizedBox(
-              width: double.infinity,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 6,
-                ),
-                child: Wrap(
-                  spacing: 8,
-                  runSpacing: 4,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  children: [
-                    _StatusText(
-                      icon: _networkIcon,
-                      label: viewModel.networkLabel,
-                      color: _networkColor(colors),
+        return ColoredBox(
+          color: colors.background,
+          child: SizedBox(
+            width: double.infinity,
+            child: Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+              child: Wrap(
+                spacing: 8,
+                runSpacing: 4,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  _StatusText(
+                    icon: _networkIcon,
+                    label: viewModel.networkLabel,
+                    color: _networkColor(colors),
+                  ),
+                  _StatusText(
+                    icon: viewModel.isStale
+                        ? Icons.history_toggle_off
+                        : Icons.schedule_outlined,
+                    label: viewModel.dataAgeLabel,
+                    color: viewModel.isStale
+                        ? colors.warningForeground
+                        : colors.foreground,
+                  ),
+                  if (viewModel.queuedCount > 0)
+                    _CountButton(
+                      icon: Icons.cloud_upload_outlined,
+                      label: '待同步 ${viewModel.queuedCount}',
+                      semanticsLabel: '${viewModel.queuedCount} 项待同步，打开同步中心',
+                      color: colors.foreground,
+                      onPressed: onOpenSyncCenter,
                     ),
-                    _StatusText(
-                      icon: viewModel.isStale
-                          ? Icons.history_toggle_off
-                          : Icons.schedule_outlined,
-                      label: viewModel.dataAgeLabel,
-                      color: viewModel.isStale
-                          ? colors.warningForeground
-                          : colors.foreground,
+                  if (viewModel.attentionCount > 0)
+                    _CountButton(
+                      icon: Icons.report_problem_outlined,
+                      label: '需处理 ${viewModel.attentionCount}',
+                      semanticsLabel: '${viewModel.attentionCount} 项需处理，打开同步中心',
+                      color: colors.warningForeground,
+                      onPressed: onOpenSyncCenter,
                     ),
-                    if (viewModel.queuedCount > 0)
-                      _CountButton(
-                        icon: Icons.cloud_upload_outlined,
-                        label: '待同步 ${viewModel.queuedCount}',
-                        semanticsLabel: '${viewModel.queuedCount} 项待同步，打开同步中心',
-                        color: colors.foreground,
-                        onPressed: onOpenSyncCenter,
-                      ),
-                    if (viewModel.attentionCount > 0)
-                      _CountButton(
-                        icon: Icons.report_problem_outlined,
-                        label: '需处理 ${viewModel.attentionCount}',
-                        semanticsLabel:
-                            '${viewModel.attentionCount} 项需处理，打开同步中心',
-                        color: colors.warningForeground,
-                        onPressed: onOpenSyncCenter,
-                      ),
-                  ],
-                ),
+                ],
               ),
             ),
           ),
@@ -114,21 +105,25 @@ final class _StatusText extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return ConstrainedBox(
-      constraints: const BoxConstraints(minHeight: 32),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Icon(icon, size: 16, color: color),
-          const SizedBox(width: 5),
-          Text(
-            label,
-            style: Theme.of(context).textTheme.bodySmall?.copyWith(
-              color: color,
-              fontWeight: FontWeight.w600,
+    return Semantics(
+      label: label,
+      excludeSemantics: true,
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(minHeight: 32),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(icon, size: 16, color: color),
+            const SizedBox(width: 5),
+            Text(
+              label,
+              style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                color: color,
+                fontWeight: FontWeight.w600,
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -161,9 +156,9 @@ final class _CountButton extends StatelessWidget {
         label: Text(label),
         style: TextButton.styleFrom(
           foregroundColor: color,
-          minimumSize: const Size(0, 36),
+          minimumSize: const Size(48, 48),
           padding: const EdgeInsets.symmetric(horizontal: 6),
-          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+          tapTargetSize: MaterialTapTargetSize.padded,
           textStyle: Theme.of(
             context,
           ).textTheme.bodySmall?.copyWith(fontWeight: FontWeight.w700),

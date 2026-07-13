@@ -1836,6 +1836,14 @@ Set<String> _connectedOperationIds(
 ) {
   final connected = <String>{};
   final pending = requestedIds.where(accountOperationIds.contains).toList();
+  final dependents = <String, Set<String>>{};
+  for (final entry in dependencies.entries) {
+    if (!accountOperationIds.contains(entry.key)) continue;
+    for (final dependencyId in entry.value) {
+      if (!accountOperationIds.contains(dependencyId)) continue;
+      dependents.putIfAbsent(dependencyId, () => <String>{}).add(entry.key);
+    }
+  }
   while (pending.isNotEmpty) {
     final current = pending.removeLast();
     if (!connected.add(current)) continue;
@@ -1844,12 +1852,7 @@ Set<String> _connectedOperationIds(
         accountOperationIds.contains,
       ),
     );
-    for (final entry in dependencies.entries) {
-      if (entry.value.contains(current) &&
-          accountOperationIds.contains(entry.key)) {
-        pending.add(entry.key);
-      }
-    }
+    pending.addAll(dependents[current] ?? const <String>{});
   }
   return connected;
 }

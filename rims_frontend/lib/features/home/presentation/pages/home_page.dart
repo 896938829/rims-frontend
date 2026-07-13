@@ -100,8 +100,10 @@ final class _HomePageState extends State<HomePage> {
   }
 
   Future<void> _load() async {
-    await viewModel.load();
-    if (!mounted) return;
+    final load = viewModel.load();
+    final generation = viewModel.loadGeneration;
+    await load;
+    if (!mounted || generation != viewModel.loadGeneration) return;
     _reportDataFreshness();
   }
 
