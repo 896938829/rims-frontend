@@ -25,9 +25,9 @@ counts, encrypted storage ownership, cleanup, and baseline restore are read.
 | Product/inventory/alerts/barcode | 6 | offline read, stale source/age, no mutation authority | PASS |
 | Documents/details/reports | 7 | offline read and financial field boundary | PASS |
 | Six document draft types | 8, 9 | autosave, reopen, recreation, ownership | PASS |
-| Explicit reviewed queueing | 11-13 | confirmation and immutable payload | planned |
-| Outbox states and legal transitions | 11 | complete state matrix | planned |
-| Operation dependency ordering | 11, 13 | attachment -> create -> lifecycle | planned |
+| Explicit reviewed queueing | 11-13 | confirmation and immutable payload | immutable outbox PASS; UI pending |
+| Outbox states and legal transitions | 11 | complete state matrix | PASS |
+| Operation dependency ordering | 11, 13 | attachment -> create -> lifecycle | graph PASS; workflow wiring pending |
 | Client operation/idempotency IDs | 10-13 | backend status and duplicate replay | status API PASS; replay pending |
 | Unknown-result recovery | 10, 12 | status first, replay same key, one effect | status API PASS; coordinator pending |
 | Conflict visibility/resolution | 12, 16 | no overwrite, replacement operation | planned |
@@ -181,6 +181,22 @@ counts, encrypted storage ownership, cleanup, and baseline restore are read.
 | Client | key paths remain encoded, scope is a query parameter, known states and exact fields parse strictly, and ApiClient failures pass through unchanged |
 | Review | independent specification and code-quality reviews APPROVED after key reachability and route-registry findings were fixed |
 | GREEN | backend `go test ./...` PASS; frontend strict analyze and full suite PASS (680 tests); both diff checks PASS |
+
+## Task 11 Deterministic Outbox Evidence
+
+| Probe | Observed result |
+| --- | --- |
+| RED | repository contract, explicit transition matrix, transactional dependency graph, CAS, retry readiness, and adapter parity were absent |
+| State | queued/retryable enter syncing; syncing reaches five explicit outcomes; illegal and terminal regressions are rejected with CAS |
+| Graph | transactional enqueue rejects self, missing, cross-account, and cyclic dependencies; parent failures propagate visibly |
+| Ordering | created time plus operation ID gives stable FIFO; injected clock/backoff controls retry readiness without busy loops |
+| Conflict | schema v4 resolution ownership is one-to-one with composite FKs; replay compares immutable payload and actual dependency edges |
+| Storage | active cap is 500 per account; expired terminal history prunes safely without pinning long chains or changing active readiness |
+| Parity | Drift and Memory repositories pass one shared contract for state, dependency, retry, cancellation, conflict, prune, and cleanup behavior |
+| Migration | real file fixtures prove v1, v2, and v3 upgrades to v4 with data, foreign keys, backfills, and repository behavior preserved |
+| Safety | payloads are recursively immutable; account cleanup removes resolutions and graph rows atomically; programming errors are not disguised as storage failures |
+| Review | independent specification and code-quality reviews APPROVED after all concurrency, lifecycle, and legacy-bypass findings were fixed |
+| GREEN | strict analyze PASS; offline suite PASS (219 tests); full Flutter suite PASS (792 tests); diff check PASS |
 
 ## Final Android State Evidence
 

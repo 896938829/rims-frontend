@@ -526,18 +526,18 @@ feat: query idempotency operation status
 - Test: `rims_frontend/test/features/offline/outbox_repository_test.dart`
 - Test: `rims_frontend/test/features/offline/outbox_state_machine_test.dart`
 
-- [ ] **Step 1: Write failing tests for every state transition, illegal regression, dependency cycle, dependency failure propagation, FIFO readiness, retry schedule, cap, cancellation, and pruning.**
+- [x] **Step 1: Write failing tests for every state transition, illegal regression, dependency cycle, dependency failure propagation, FIFO readiness, retry schedule, cap, cancellation, and pruning.**
 
-- [ ] **Step 2: Implement explicit transition matrix.**
+- [x] **Step 2: Implement explicit transition matrix.**
 
 Only queued/retryable may enter syncing. Syncing may become succeeded,
 retryable, conflict, permanent, or cancelled. Succeeded is terminal. Conflict
 requires a user resolution that creates a new operation/key; it never mutates
 the original payload in place.
 
-- [ ] **Step 3: Implement normalized dependency queries and transactional enqueue.**
+- [x] **Step 3: Implement normalized dependency queries and transactional enqueue.**
 
-- [ ] **Step 4: Run tests and commit.**
+- [x] **Step 4: Run tests and commit.**
 
 ```text
 feat: add deterministic offline outbox
