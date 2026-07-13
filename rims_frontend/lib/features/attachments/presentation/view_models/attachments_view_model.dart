@@ -95,6 +95,7 @@ final class AttachmentsViewModel extends ChangeNotifier {
     required this.userId,
     this.warehouseId,
     this.outboxRepository,
+    this.allowedOutboxKindsReader,
     this.onAttachmentPublished,
     this.beforeAttachmentDelete,
     this.restoreAfterDeleteFailure,
@@ -108,6 +109,7 @@ final class AttachmentsViewModel extends ChangeNotifier {
   final String userId;
   final int? warehouseId;
   final OutboxRepository? outboxRepository;
+  final Set<OutboxOperationKind> Function()? allowedOutboxKindsReader;
   final AttachmentSynchronization? onAttachmentPublished;
   final AttachmentSynchronization? beforeAttachmentDelete;
   final AttachmentSynchronization? restoreAfterDeleteFailure;
@@ -122,12 +124,14 @@ final class AttachmentsViewModel extends ChangeNotifier {
   String? _errorMessage;
   final Map<String, bool> _offlineUploadUnknown = {};
   bool _offlineEnqueueInFlight = false;
+  Failure? _offlineUploadFailure;
 
   List<Attachment> get attachments => List.unmodifiable(_attachments);
   List<AttachmentQueueItem> get queue => List.unmodifiable(_queue);
   bool get isLoading => _isLoading;
   bool get isBusy => _isPickingOrTransferring;
   String? get errorMessage => _errorMessage;
+  Failure? get offlineUploadFailure => _offlineUploadFailure;
   String? downloadedPathFor(int attachmentId) => _downloadedPaths[attachmentId];
   OfflineAttachmentReview? offlineUploadReviewFor(String requestId) {
     if (!_offlineUploadUnknown.containsKey(requestId)) return null;
@@ -147,6 +151,10 @@ final class AttachmentsViewModel extends ChangeNotifier {
         outboxRepository == null ||
         warehouseId == null ||
         stagingStore is! OutboxAttachmentStagingStore) {
+      return false;
+    }
+    if (!_isOutboxKindAllowed(OutboxOperationKind.attachmentUpload)) {
+      _denyOfflineUpload(requestId);
       return false;
     }
     final index = _queue.indexWhere((item) => item.requestId == requestId);
@@ -562,6 +570,7 @@ final class AttachmentsViewModel extends ChangeNotifier {
     await result.when(
       success: (attachment) async {
         _offlineUploadUnknown.remove(requestId);
+        _offlineUploadFailure = null;
         final synchronize = onAttachmentPublished;
         if (synchronize != null) {
           final synchronized = await synchronize(attachment);
@@ -598,11 +607,18 @@ final class AttachmentsViewModel extends ChangeNotifier {
             outboxRepository != null &&
             warehouseId != null &&
             stagingStore is OutboxAttachmentStagingStore) {
-          _offlineUploadUnknown[requestId] = failure is TransportUnknownFailure;
+          if (_isOutboxKindAllowed(OutboxOperationKind.attachmentUpload)) {
+            _offlineUploadFailure = null;
+            _offlineUploadUnknown[requestId] =
+                failure is TransportUnknownFailure;
+          } else {
+            _denyOfflineUpload(requestId, notify: false);
+          }
         } else {
           _offlineUploadUnknown.remove(requestId);
+          _offlineUploadFailure = null;
         }
-        _errorMessage = failure.message;
+        if (_offlineUploadFailure == null) _errorMessage = failure.message;
       },
     );
     _notify();
@@ -610,6 +626,17 @@ final class AttachmentsViewModel extends ChangeNotifier {
 
   void _sortAttachments() {
     _attachments.sort((left, right) => left.position.compareTo(right.position));
+  }
+
+  bool _isOutboxKindAllowed(OutboxOperationKind kind) =>
+      allowedOutboxKindsReader?.call().contains(kind) ?? true;
+
+  void _denyOfflineUpload(String requestId, {bool notify = true}) {
+    const failure = AuthorizationFailure(message: '当前账号没有附件待同步权限，未保存任何操作');
+    _offlineUploadUnknown.remove(requestId);
+    _offlineUploadFailure = failure;
+    _errorMessage = failure.message;
+    if (notify) _notify();
   }
 
   void _notify() {

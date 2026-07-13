@@ -31,6 +31,11 @@ abstract interface class OutboxRepository {
     DateTime? expectedUpdatedAt,
   });
 
+  Future<Result<List<OutboxOperation>>> invalidateReviewGraph({
+    required String accountId,
+    required Map<String, DateTime> expectedUpdatedAtByOperation,
+  });
+
   Future<Result<int>> recoverStaleSyncing({
     required String accountId,
     required DateTime staleBefore,

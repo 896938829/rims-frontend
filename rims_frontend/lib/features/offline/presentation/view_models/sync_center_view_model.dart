@@ -136,17 +136,50 @@ final class SyncCenterViewModel extends ChangeNotifier {
       if (component case FailureResult<List<OutboxOperation>>(:final failure)) {
         _loadFailure = failure;
       } else {
+        final blockedComponent =
+            (component as Success<List<OutboxOperation>>).data;
         final visibleIds = _operations
             .map((operation) => operation.operationId)
             .toSet();
         _permissionBlockedOperationIds
           ..clear()
           ..addAll(
-            (component as Success<List<OutboxOperation>>).data
+            blockedComponent
                 .map((operation) => operation.operationId)
                 .where(visibleIds.contains),
           );
-        _loadFailure = null;
+        if (blockedComponent.any(
+          (operation) =>
+              _isNonTerminal(operation) &&
+              (operation.confirmedAt != null || operation.reviewStamp != null),
+        )) {
+          final invalidated = await repository.invalidateReviewGraph(
+            accountId: context.accountId,
+            expectedUpdatedAtByOperation: {
+              for (final operation in blockedComponent)
+                operation.operationId: operation.updatedAt,
+            },
+          );
+          if (!_acceptResult(generation, context)) return;
+          if (invalidated case FailureResult<List<OutboxOperation>>(
+            :final failure,
+          )) {
+            _loadFailure = failure;
+          } else {
+            final invalidatedById = {
+              for (final operation
+                  in (invalidated as Success<List<OutboxOperation>>).data)
+                operation.operationId: operation,
+            };
+            _operations = [
+              for (final operation in _operations)
+                invalidatedById[operation.operationId] ?? operation,
+            ];
+            _loadFailure = null;
+          }
+        } else {
+          _loadFailure = null;
+        }
       }
     }
     _isLoading = false;
@@ -527,6 +560,11 @@ final class SyncCenterViewModel extends ChangeNotifier {
 
   bool _isReviewable(OutboxOperation operation) =>
       operation.state == OutboxState.queued ||
+      operation.state == OutboxState.retryableFailure;
+
+  bool _isNonTerminal(OutboxOperation operation) =>
+      operation.state == OutboxState.queued ||
+      operation.state == OutboxState.syncing ||
       operation.state == OutboxState.retryableFailure;
 
   void _rejectScope() {

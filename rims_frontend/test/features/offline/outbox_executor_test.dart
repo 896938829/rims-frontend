@@ -570,6 +570,87 @@ void main() {
   });
 
   test(
+    'terminal prefix old review does not block newly reviewed remaining graph',
+    () async {
+      await repository.enqueueGraph(
+        OutboxGraph(
+          operations: [
+            _operation('create', reviewStamp: '7\u000011\u0000permission-a'),
+            _operation(
+              'upload',
+              kind: OutboxOperationKind.attachmentUpload,
+              reviewStamp: '7\u000011\u0000permission-a',
+            ),
+            _operation(
+              'complete',
+              kind: OutboxOperationKind.documentComplete,
+              reviewStamp: '7\u000011\u0000permission-a',
+            ),
+          ],
+          dependencies: const {
+            'upload': {'create'},
+            'complete': {'upload'},
+          },
+        ),
+      );
+      await repository.transition(
+        accountId: '7',
+        operationId: 'create',
+        next: OutboxState.syncing,
+      );
+      await repository.completeSuccess(
+        accountId: '7',
+        operationId: 'create',
+        output: OutboxOperationOutput(version: 1, data: {'documentId': 91}),
+      );
+      for (final operationId in ['upload', 'complete']) {
+        await repository.confirm(
+          accountId: '7',
+          operationId: operationId,
+          reviewStamp: '7\u000011\u0000permission-b',
+        );
+      }
+      final uploadHandler = _Handler(
+        kind: OutboxOperationKind.attachmentUpload,
+      );
+      final completeHandler = _Handler(
+        kind: OutboxOperationKind.documentComplete,
+      );
+      context = const OutboxExecutionContext(
+        accountId: '7',
+        warehouseId: 11,
+        permissionStamp: 'permission-b',
+        allowedKinds: {
+          OutboxOperationKind.documentCreate,
+          OutboxOperationKind.attachmentUpload,
+          OutboxOperationKind.documentComplete,
+        },
+      );
+      final partialExecutor = OutboxExecutor(
+        repository: repository,
+        networkStatusService: network,
+        statusDataSource: status,
+        handlers: [handler, uploadHandler, completeHandler],
+        contextReader: () => context,
+      );
+
+      final report = await partialExecutor.execute(
+        const OutboxReview(
+          operationIds: {'upload', 'complete'},
+          accountId: '7',
+          warehouseId: 11,
+          permissionStamp: 'permission-b',
+        ),
+      );
+
+      expect(report.succeededOperationIds, ['upload', 'complete']);
+      expect(handler.calls, isEmpty);
+      expect(uploadHandler.calls, ['upload']);
+      expect(completeHandler.calls, ['complete']);
+    },
+  );
+
+  test(
     'denied successor blocks the complete graph before any network',
     () async {
       await repository.enqueueGraph(

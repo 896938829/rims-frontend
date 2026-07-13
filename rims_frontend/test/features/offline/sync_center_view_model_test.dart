@@ -154,6 +154,139 @@ void main() {
     },
   );
 
+  test(
+    'A denied A invalidates persisted graph review until explicit review',
+    () async {
+      await repository.enqueueGraph(
+        OutboxGraph(
+          operations: [
+            _operation('create'),
+            _operation('upload', kind: OutboxOperationKind.attachmentUpload),
+            _operation('complete', kind: OutboxOperationKind.documentComplete),
+          ],
+          dependencies: const {
+            'upload': {'create'},
+            'complete': {'upload'},
+          },
+        ),
+      );
+      const allowedA = OutboxExecutionContext(
+        accountId: '7',
+        warehouseId: 11,
+        permissionStamp: 'permission-a',
+        allowedKinds: {
+          OutboxOperationKind.documentCreate,
+          OutboxOperationKind.attachmentUpload,
+          OutboxOperationKind.documentComplete,
+        },
+      );
+      context = allowedA;
+      await viewModel.load();
+      expect(await viewModel.review('create'), isTrue);
+      expect(viewModel.reviewedOperationIds, {'create', 'upload', 'complete'});
+
+      context = const OutboxExecutionContext(
+        accountId: '7',
+        warehouseId: 11,
+        permissionStamp: 'permission-denied',
+        allowedKinds: {
+          OutboxOperationKind.documentCreate,
+          OutboxOperationKind.attachmentUpload,
+        },
+      );
+      await viewModel.refreshContext();
+      final deniedStored = (await repository.list('7')).dataOrNull!;
+      expect(
+        deniedStored.map((item) => item.reviewStamp),
+        everyElement(isNull),
+      );
+      expect(
+        deniedStored.map((item) => item.confirmedAt),
+        everyElement(isNull),
+      );
+
+      context = allowedA;
+      await viewModel.refreshContext();
+      expect(viewModel.reviewedOperationIds, isEmpty);
+      await viewModel.retryAllReviewed();
+      expect(executor.reviews, isEmpty);
+
+      expect(await viewModel.review('create'), isTrue);
+      await viewModel.retryAllReviewed();
+      expect(executor.reviews.single.operationIds, {
+        'create',
+        'upload',
+        'complete',
+      });
+    },
+  );
+
+  test(
+    're-review after a succeeded prefix selects only remaining graph nodes',
+    () async {
+      await repository.enqueueGraph(
+        OutboxGraph(
+          operations: [
+            _operation('create'),
+            _operation('upload', kind: OutboxOperationKind.attachmentUpload),
+            _operation('complete', kind: OutboxOperationKind.documentComplete),
+          ],
+          dependencies: const {
+            'upload': {'create'},
+            'complete': {'upload'},
+          },
+        ),
+      );
+      context = const OutboxExecutionContext(
+        accountId: '7',
+        warehouseId: 11,
+        permissionStamp: 'permission-a',
+        allowedKinds: {
+          OutboxOperationKind.documentCreate,
+          OutboxOperationKind.attachmentUpload,
+          OutboxOperationKind.documentComplete,
+        },
+      );
+      await viewModel.load();
+      await viewModel.review('create');
+      await repository.transition(
+        accountId: '7',
+        operationId: 'create',
+        next: OutboxState.syncing,
+      );
+      await repository.completeSuccess(
+        accountId: '7',
+        operationId: 'create',
+        output: OutboxOperationOutput(version: 1, data: {'documentId': 91}),
+      );
+
+      context = const OutboxExecutionContext(
+        accountId: '7',
+        warehouseId: 11,
+        permissionStamp: 'permission-b',
+        allowedKinds: {
+          OutboxOperationKind.documentCreate,
+          OutboxOperationKind.attachmentUpload,
+          OutboxOperationKind.documentComplete,
+        },
+      );
+      await viewModel.refreshContext();
+      expect(viewModel.reviewedOperationIds, isEmpty);
+      expect(await viewModel.review('upload'), isTrue);
+      expect(viewModel.reviewedOperationIds, {'upload', 'complete'});
+
+      await viewModel.retryAllReviewed();
+
+      expect(executor.reviews.single.operationIds, {'upload', 'complete'});
+      expect(
+        (await repository.list('7')).dataOrNull!
+            .singleWhere((item) => item.operationId == 'create')
+            .state,
+        OutboxState.succeeded,
+      );
+    },
+  );
+
   test('review persistently confirms an unconfirmed operation', () async {
     await repository.enqueue(_operation('op', confirmed: false));
     await viewModel.load();
@@ -616,6 +749,15 @@ final class _DeferredRepository implements OutboxRepository {
         reviewStamp: reviewStamp,
         expectedUpdatedAt: expectedUpdatedAt,
       );
+
+  @override
+  Future<Result<List<OutboxOperation>>> invalidateReviewGraph({
+    required String accountId,
+    required Map<String, DateTime> expectedUpdatedAtByOperation,
+  }) => delegate.invalidateReviewGraph(
+    accountId: accountId,
+    expectedUpdatedAtByOperation: expectedUpdatedAtByOperation,
+  );
 
   @override
   Future<Result<OutboxOperation>> enqueue(

@@ -435,7 +435,8 @@ final class OutboxExecutor implements OutboxExecutorPort {
       if (operation == null) continue;
       final failure = _validateOperation(review, operation);
       if (failure != null) return failure;
-      if (operation.reviewStamp != _reviewStamp(review)) {
+      if (_requiresCurrentReview(operation) &&
+          operation.reviewStamp != _reviewStamp(review)) {
         return const AuthorizationFailure(
           message: 'The operation must be reviewed in the current context.',
         );
@@ -443,6 +444,11 @@ final class OutboxExecutor implements OutboxExecutorPort {
     }
     return null;
   }
+
+  bool _requiresCurrentReview(OutboxOperation operation) =>
+      operation.state == OutboxState.queued ||
+      operation.state == OutboxState.syncing ||
+      operation.state == OutboxState.retryableFailure;
 
   Future<_OperationOutcome> _executeOne(OutboxOperation operation) async {
     final handler = handlers[operation.kind];

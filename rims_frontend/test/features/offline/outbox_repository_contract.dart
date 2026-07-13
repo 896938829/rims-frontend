@@ -362,6 +362,96 @@ void runOutboxRepositoryContract(String name, OutboxHarnessFactory create) {
     });
 
     test(
+      'review graph invalidation is atomic and leaves terminal history intact',
+      () async {
+        final create = _operation('invalidate-create', clock.value);
+        final attachment = _operation(
+          'invalidate-attachment',
+          clock.value,
+          kind: OutboxOperationKind.attachmentUpload,
+        );
+        final complete = _operation(
+          'invalidate-complete',
+          clock.value,
+          kind: OutboxOperationKind.documentComplete,
+        );
+        await repository.enqueueGraph(
+          OutboxGraph(
+            operations: [create, attachment, complete],
+            dependencies: const {
+              'invalidate-attachment': {'invalidate-create'},
+              'invalidate-complete': {'invalidate-attachment'},
+            },
+          ),
+        );
+        for (final operation in [create, attachment, complete]) {
+          await repository.confirm(
+            accountId: '7',
+            operationId: operation.operationId,
+            reviewStamp: 'review-a',
+          );
+        }
+        await repository.transition(
+          accountId: '7',
+          operationId: create.operationId,
+          next: OutboxState.syncing,
+        );
+        await repository.completeSuccess(
+          accountId: '7',
+          operationId: create.operationId,
+          output: OutboxOperationOutput(version: 1, data: {'documentId': 91}),
+        );
+        final before = (await repository.list('7')).successData;
+        final expected = {
+          for (final operation in before)
+            operation.operationId: operation.updatedAt,
+        };
+        final stale = Map<String, DateTime>.of(expected)
+          ..[attachment.operationId] = clock.value.subtract(
+            const Duration(days: 1),
+          );
+
+        final staleResult = await repository.invalidateReviewGraph(
+          accountId: '7',
+          expectedUpdatedAtByOperation: stale,
+        );
+        expect(
+          staleResult,
+          isA<FailureResult<List<OutboxOperation>>>().having(
+            (result) => result.failure,
+            'failure',
+            isA<ConflictFailure>(),
+          ),
+        );
+        expect(
+          (await repository.list(
+            '7',
+          )).successData.map((item) => item.reviewStamp),
+          everyElement('review-a'),
+        );
+
+        final invalidated = await repository.invalidateReviewGraph(
+          accountId: '7',
+          expectedUpdatedAtByOperation: expected,
+        );
+
+        expect(invalidated, isA<Success<List<OutboxOperation>>>());
+        final after = (await repository.list('7')).successData;
+        expect(
+          after
+              .singleWhere((item) => item.operationId == create.operationId)
+              .reviewStamp,
+          'review-a',
+        );
+        for (final id in [attachment.operationId, complete.operationId]) {
+          final operation = after.singleWhere((item) => item.operationId == id);
+          expect(operation.reviewStamp, isNull);
+          expect(operation.confirmedAt, isNull);
+        }
+      },
+    );
+
+    test(
       'current CAS can replace an obsolete permission review stamp',
       () async {
         await repository.enqueue(_operation('replace-review', clock.value));

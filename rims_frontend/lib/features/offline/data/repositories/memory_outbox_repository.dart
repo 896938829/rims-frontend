@@ -253,6 +253,64 @@ final class MemoryOutboxRepository implements OutboxRepository {
   }
 
   @override
+  Future<Result<List<OutboxOperation>>> invalidateReviewGraph({
+    required String accountId,
+    required Map<String, DateTime> expectedUpdatedAtByOperation,
+  }) async {
+    if (expectedUpdatedAtByOperation.isEmpty) return const Success([]);
+    final requestedIds = expectedUpdatedAtByOperation.keys.toSet();
+    final accountIds = {
+      for (final operation in _operations.values)
+        if (operation.accountId == accountId) operation.operationId,
+    };
+    final connectedIds = _connectedOperationIds(
+      accountIds,
+      _dependencies,
+      requestedIds,
+    );
+    if (connectedIds.length != requestedIds.length ||
+        !connectedIds.containsAll(requestedIds)) {
+      return const FailureResult(
+        ValidationFailure(
+          message: 'Review invalidation requires a full graph.',
+        ),
+      );
+    }
+    for (final entry in expectedUpdatedAtByOperation.entries) {
+      final operation = _operations[entry.key];
+      if (operation == null ||
+          operation.accountId != accountId ||
+          operation.updatedAt.toUtc() != entry.value.toUtc()) {
+        return const FailureResult(
+          ConflictFailure(message: 'Offline review context changed.'),
+        );
+      }
+    }
+    final nextOperations = Map<String, OutboxOperation>.of(_operations);
+    final invalidated = <OutboxOperation>[];
+    for (final operationId in requestedIds) {
+      final operation = nextOperations[operationId]!;
+      if (_isActive(operation.state) &&
+          (operation.confirmedAt != null || operation.reviewStamp != null)) {
+        final timestamp = _nextReviewTimestamp(now(), operation.updatedAt);
+        final updated = operation.copyWith(
+          updatedAt: timestamp,
+          clearReview: true,
+        );
+        nextOperations[operationId] = updated;
+        invalidated.add(updated);
+      } else {
+        invalidated.add(operation);
+      }
+    }
+    _operations
+      ..clear()
+      ..addAll(nextOperations);
+    invalidated.sort(_compareOperations);
+    return Success(List.unmodifiable(invalidated));
+  }
+
+  @override
   Future<Result<int>> recoverStaleSyncing({
     required String accountId,
     required DateTime staleBefore,

@@ -100,6 +100,48 @@ void main() {
   );
 
   test(
+    'initially denied attachment upload never offers offline queue',
+    () async {
+      final repository = _FakeRepository()
+        ..uploadResult = const FailureResult(NetworkFailure());
+      final outbox = MemoryOutboxRepository(stateMachine: OutboxStateMachine());
+      final viewModel = _viewModel(
+        repository: repository,
+        outbox: outbox,
+        allowedOutboxKindsReader: () => const {
+          OutboxOperationKind.documentCreate,
+        },
+      );
+
+      await viewModel.pickAndUpload(AttachmentPickSource.file);
+
+      expect(viewModel.offlineUploadReviewFor('stable-request'), isNull);
+      expect(viewModel.offlineUploadFailure, isA<AuthorizationFailure>());
+      expect((await outbox.list('3')).successData, isEmpty);
+    },
+  );
+
+  test('attachment permission revoked after offer prevents enqueue', () async {
+    var allowedKinds = const {OutboxOperationKind.attachmentUpload};
+    final repository = _FakeRepository()
+      ..uploadResult = const FailureResult(NetworkFailure());
+    final outbox = MemoryOutboxRepository(stateMachine: OutboxStateMachine());
+    final viewModel = _viewModel(
+      repository: repository,
+      outbox: outbox,
+      allowedOutboxKindsReader: () => allowedKinds,
+    );
+
+    await viewModel.pickAndUpload(AttachmentPickSource.file);
+    expect(viewModel.offlineUploadReviewFor('stable-request'), isNotNull);
+    allowedKinds = const {OutboxOperationKind.documentCreate};
+
+    expect(await viewModel.confirmOfflineUpload('stable-request'), isFalse);
+    expect(viewModel.offlineUploadFailure, isA<AuthorizationFailure>());
+    expect((await outbox.list('3')).successData, isEmpty);
+  });
+
+  test(
     'unknown upload queues status-first but validation remains immediate',
     () async {
       final unknownOutbox = MemoryOutboxRepository(
@@ -238,6 +280,7 @@ AttachmentsViewModel _viewModel({
   _FakeStaging? staging,
   _FakeShare? share,
   OutboxRepository? outbox,
+  Set<OutboxOperationKind> Function()? allowedOutboxKindsReader,
 }) => AttachmentsViewModel(
   repository: repository ?? _FakeRepository(),
   picker: picker ?? _FakePicker(),
@@ -247,6 +290,7 @@ AttachmentsViewModel _viewModel({
   userId: '3',
   warehouseId: 11,
   outboxRepository: outbox,
+  allowedOutboxKindsReader: allowedOutboxKindsReader,
 );
 
 Attachment _attachment({int id = 7, int position = 0}) => Attachment(

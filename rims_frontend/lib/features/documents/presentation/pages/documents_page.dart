@@ -631,6 +631,7 @@ final class _DocumentDetailSheetState extends State<_DocumentDetailSheet> {
         userId: userId,
         warehouseId: viewModel.currentWarehouse?.id,
         outboxRepository: viewModel.outboxRepository,
+        allowedOutboxKindsReader: () => viewModel.allowedOutboxKinds,
       );
     }
   }

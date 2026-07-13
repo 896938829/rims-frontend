@@ -465,6 +465,104 @@ WHERE account_id = ? AND operation_id = ? AND operation_state = ?
   }
 
   @override
+  Future<Result<List<OutboxOperation>>> invalidateReviewGraph({
+    required String accountId,
+    required Map<String, DateTime> expectedUpdatedAtByOperation,
+  }) async {
+    if (expectedUpdatedAtByOperation.isEmpty) return const Success([]);
+    try {
+      return await database.transaction(() async {
+        final accountRows = await (database.select(
+          database.offlineOutboxOperations,
+        )..where((row) => row.accountId.equals(accountId))).get();
+        final accountIds = accountRows.map((row) => row.operationId).toSet();
+        final edges = await (database.select(
+          database.offlineOutboxDependencies,
+        )..where((row) => row.operationId.isIn(accountIds))).get();
+        final dependencies = <String, Set<String>>{};
+        for (final edge in edges) {
+          if (!accountIds.contains(edge.dependencyId)) continue;
+          dependencies
+              .putIfAbsent(edge.operationId, () => <String>{})
+              .add(edge.dependencyId);
+        }
+        final requestedIds = expectedUpdatedAtByOperation.keys.toSet();
+        final connectedIds = _connectedOperationIds(
+          accountIds,
+          dependencies,
+          requestedIds,
+        );
+        if (connectedIds.length != requestedIds.length ||
+            !connectedIds.containsAll(requestedIds)) {
+          throw const _OutboxValidationException(
+            'Review invalidation requires a full graph.',
+          );
+        }
+        final rowsById = {for (final row in accountRows) row.operationId: row};
+        for (final entry in expectedUpdatedAtByOperation.entries) {
+          final row = rowsById[entry.key];
+          if (row == null || row.updatedAt?.toUtc() != entry.value.toUtc()) {
+            throw const _OutboxConflictException(
+              'Offline review context changed.',
+            );
+          }
+        }
+        final result = <OutboxOperation>[];
+        for (final operationId in requestedIds) {
+          final operation = _toDomainOperation(rowsById[operationId]!);
+          if (!_isActiveState(operation.state) ||
+              (operation.confirmedAt == null &&
+                  operation.reviewStamp == null)) {
+            result.add(operation);
+            continue;
+          }
+          final timestamp = _nextReviewTimestamp(now(), operation.updatedAt);
+          final changed = await database.customUpdate(
+            '''
+UPDATE outbox_operations
+SET confirmed_at = NULL, review_stamp = NULL, updated_at = ?
+WHERE account_id = ? AND operation_id = ? AND updated_at = ?
+  AND operation_state IN (?, ?, ?)
+''',
+            variables: [
+              Variable(timestamp),
+              Variable(accountId),
+              Variable(operationId),
+              Variable(operation.updatedAt.toUtc()),
+              Variable(OutboxState.queued.wireValue),
+              Variable(OutboxState.syncing.wireValue),
+              Variable(OutboxState.retryableFailure.wireValue),
+            ],
+            updates: {database.offlineOutboxOperations},
+          );
+          if (changed != 1) {
+            throw const _OutboxConflictException(
+              'Offline review context changed.',
+            );
+          }
+          result.add(
+            operation.copyWith(updatedAt: timestamp, clearReview: true),
+          );
+        }
+        result.sort(_compareOperations);
+        return Success(List.unmodifiable(result));
+      });
+    } on _OutboxValidationException catch (error) {
+      return FailureResult(ValidationFailure(message: error.message));
+    } on _OutboxConflictException catch (error) {
+      return FailureResult(ConflictFailure(message: error.message));
+    } on Exception catch (error) {
+      if (!_isStorageException(error)) rethrow;
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to invalidate offline review graph.',
+          cause: error,
+        ),
+      );
+    }
+  }
+
+  @override
   Future<Result<int>> recoverStaleSyncing({
     required String accountId,
     required DateTime staleBefore,
@@ -1725,6 +1823,16 @@ DateTime _nextReviewTimestamp(DateTime now, DateTime current) {
   final minimum = current.toUtc().add(const Duration(seconds: 1));
   return candidate.isAfter(minimum) ? candidate : minimum;
 }
+
+int _compareOperations(OutboxOperation left, OutboxOperation right) {
+  final byTime = left.createdAt.compareTo(right.createdAt);
+  return byTime != 0 ? byTime : left.operationId.compareTo(right.operationId);
+}
+
+bool _isActiveState(OutboxState state) =>
+    state == OutboxState.queued ||
+    state == OutboxState.syncing ||
+    state == OutboxState.retryableFailure;
 
 Set<String> _connectedOperationIds(
   Set<String> accountOperationIds,
