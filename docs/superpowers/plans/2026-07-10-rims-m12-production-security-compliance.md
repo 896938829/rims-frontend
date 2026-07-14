@@ -90,15 +90,15 @@ Run `go test ./internal/config ./internal/app -count=1`, `go test ./...`, `go ve
 - Test: `rims_frontend/test/core/config/app_environment_test.dart`
 - Test: `rims_frontend/test/core/network/api_url_policy_test.dart`
 
-- [ ] **Step 1: Write RED URL matrix**
+- [x] **Step 1: Write RED URL matrix**
 
 Allow local HTTP only for explicit loopback/emulator/private development targets. Reject userinfo, fragments, queries, wrong API prefix, scheme-relative input, Unicode host confusion, unexpected ports, and all staging/production HTTP.
 
-- [ ] **Step 2: Implement typed bootstrap**
+- [x] **Step 2: Implement typed bootstrap**
 
 Read `APP_ENV`, `API_BASE_URL`, and `ALLOW_LOCAL_HTTP` once. Validate before `runApp`; inject typed config into tests and `ApiClient`. Managed scripts pass explicit development defines; release commands cannot inherit local override.
 
-- [ ] **Step 3: Verify and commit**
+- [x] **Step 3: Verify and commit**
 
 Run focused tests, full analyze, and diff check. Commit: `feat: enforce frontend environment policy`.
 
