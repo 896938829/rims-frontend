@@ -168,6 +168,7 @@ void main() {
       delay: (duration) async => delays.add(duration),
       probeBackoff: (attempt) => Duration(seconds: attempt),
       maxStatusProbes: 3,
+      now: () => now,
     );
   });
 
