@@ -310,6 +310,7 @@ void main() {
           tester,
           documents,
           beforeUnknown,
+          startAuthoritatively: true,
         )).operation;
         expect(unknownCreate.requiresStatusProbe, isTrue);
         expect(
@@ -1358,14 +1359,17 @@ Future<({OutboxOperation operation, int enqueueLatencyMs})> _queueCurrentDraft(
   DocumentsViewModel documents,
   List<OutboxOperation> before, {
   Duration timeout = const Duration(seconds: 12),
+  bool startAuthoritatively = false,
 }) async {
   final submitButton = find.byKey(const Key('document-create-button'));
   await waitUntil(
     tester,
-    description: 'offline draft submission readiness',
+    description: startAuthoritatively
+        ? 'authoritative unknown-result submission readiness'
+        : 'offline draft submission readiness',
     timeout: timeout,
     condition: () =>
-        !documents.canSubmitAuthoritatively &&
+        documents.canSubmitAuthoritatively == startAuthoritatively &&
         !documents.isSubmitting &&
         !documents.isAttachmentMutationInProgress,
   );
@@ -1381,7 +1385,7 @@ Future<({OutboxOperation operation, int enqueueLatencyMs})> _queueCurrentDraft(
     timeout: timeout,
     condition: () {
       final hitTarget = submitButton.hitTestable();
-      return !documents.canSubmitAuthoritatively &&
+      return documents.canSubmitAuthoritatively == startAuthoritatively &&
           !documents.isSubmitting &&
           !documents.isAttachmentMutationInProgress &&
           hitTarget.evaluate().length == 1 &&
