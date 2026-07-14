@@ -37,6 +37,7 @@ const _environmentIds = <String>{
 
 const _androidPermissionIds = <String>{
   'android.permission.INTERNET',
+  'android.permission.ACCESS_NETWORK_STATE',
   'android.permission.CAMERA',
 };
 
@@ -58,6 +59,16 @@ const _sdkIds = <String>{
   'sdk.file_picker',
   'sdk.share_plus',
   'sdk.connectivity_plus',
+  'sdk.crypto',
+  'sdk.drift_flutter',
+  'sdk.fl_chart',
+  'sdk.go_router',
+  'sdk.intl',
+  'sdk.json_annotation',
+  'sdk.path_provider',
+  'sdk.provider',
+  'sdk.shared_preferences',
+  'sdk.uuid',
 };
 
 const _financialFieldIds = <String>{

@@ -63,8 +63,11 @@ URLs. These are target rules until later M12 tasks provide observed evidence.
 | ID | Protection level | Purpose and data | Request timing | Denial behavior | Environment |
 | --- | --- | --- | --- | --- | --- |
 | `android.permission.INTERNET` | Normal install-time permission | Connect to the configured RIMS API and download/upload explicitly requested business data | Declared in manifest; no runtime prompt | App remains unable to reach backend; cached read-only state may remain visible under existing ownership rules | All Android profiles; non-local traffic must use HTTPS |
+| `android.permission.ACCESS_NETWORK_STATE` | Normal install-time permission contributed by locked `connectivity_plus` 7.1.1 | Read Android network connectivity state as a hint before bounded backend health verification; no network payload is read | Merged from the plugin manifest at build time; no runtime prompt | Missing or unavailable state is treated as an indeterminate hint and never as proof of backend reachability or authorization | All Android profiles; only the verified health probe may establish backend reachability |
 | `android.permission.CAMERA` | Dangerous runtime permission | Decode barcodes locally for inventory/document workflows; camera frames are not persisted or transmitted | Request only when the user enters scanner/camera capture | Show denied state and allow keyboard/file alternatives where supported; no repeated background prompt | Android scanner and camera attachment flows only |
 
+The effective merged Android permission baseline is `INTERNET`,
+`ACCESS_NETWORK_STATE` from locked `connectivity_plus` 7.1.1, and `CAMERA`.
 No contacts, location, microphone, phone, SMS, broad media-library, or storage
 permission is approved. `image_picker` and `file_picker` must use Android system
 pickers or scoped grants. Any new manifest permission requires a new stable row,
