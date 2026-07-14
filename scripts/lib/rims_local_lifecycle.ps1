@@ -227,7 +227,8 @@ function Invoke-RimsLocalStatusUnlocked {
     [string]$BackendWorkspaceRoot,
     [Parameter(Mandatory = $true)]
     [int]$BackendPort,
-    [switch]$IncludeDependencies
+    [switch]$IncludeDependencies,
+    [switch]$UseLocalTls
   )
 
   $result = New-RimsLocalResult -Command 'status'
@@ -300,6 +301,12 @@ function Invoke-RimsLocalStatusUnlocked {
       -Healthy $healthy `
       -Stale $false `
       -Port $BackendPort
+    if ($UseLocalTls) {
+      $result.components += New-RimsLocalTlsComponent `
+        -State $null `
+        -TlsPaths (Get-RimsLocalTlsPaths -ScriptDirectory $ScriptDirectory) `
+        -Required $true
+    }
     return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
   }
 
@@ -432,9 +439,15 @@ function Invoke-RimsLocalStatusUnlocked {
   if ($null -ne $emulatorComponent) {
     $result.components += $emulatorComponent
   }
+  $tlsComponent = New-RimsLocalTlsComponent `
+    -State $state `
+    -TlsPaths (Get-RimsLocalTlsPaths -ScriptDirectory $ScriptDirectory) `
+    -Required ([bool]$UseLocalTls)
+  $result.components += $tlsComponent
   $overallHealthy = $healthy -and $dependenciesHealthy -and
     $frontendComponent.ok -and
-    ($null -eq $emulatorComponent -or $emulatorComponent.ok)
+    ($null -eq $emulatorComponent -or $emulatorComponent.ok) -and
+    $tlsComponent.ok
   return Complete-RimsLocalResult `
     -Result $result `
     -Ok $overallHealthy `
@@ -444,7 +457,8 @@ function Invoke-RimsLocalStatusUnlocked {
 function Invoke-RimsLocalLogsUnlocked {
   param(
     [Parameter(Mandatory = $true)]
-    [string]$ScriptDirectory
+    [string]$ScriptDirectory,
+    [switch]$UseLocalTls
   )
 
   $result = New-RimsLocalResult -Command 'logs'
@@ -499,6 +513,28 @@ function Invoke-RimsLocalLogsUnlocked {
       stdoutTail = $targetStdout
       stderrTail = $targetStderr
     }
+  }
+  $state = Read-RimsRuntimeState -Paths $paths
+  $tlsState = Get-RimsObjectPropertyValue -Value $state -Name 'localTls'
+  if ($UseLocalTls -or $null -ne $tlsState) {
+    $tlsPaths = Get-RimsLocalTlsPaths -ScriptDirectory $ScriptDirectory
+    $tlsStdout = @(Get-RimsSanitizedLogTail -Path $tlsPaths.proxyStdoutLog)
+    $tlsStderr = @(Get-RimsSanitizedLogTail -Path $tlsPaths.proxyStderrLog)
+    $result.components += [pscustomobject][ordered]@{
+      name = 'localTlsLogs'
+      ok = $true
+      required = $false
+      detail = 'Returned bounded sanitized local HTTPS proxy log tails.'
+      remediation = ''
+      stdoutLogPath = $tlsPaths.proxyStdoutLog
+      stderrLogPath = $tlsPaths.proxyStderrLog
+      stdoutTail = $tlsStdout
+      stderrTail = $tlsStderr
+    }
+    $result.components += New-RimsLocalTlsComponent `
+      -State $state `
+      -TlsPaths $tlsPaths `
+      -Required ([bool]$UseLocalTls)
   }
   return Complete-RimsLocalResult `
     -Result $result `
@@ -667,6 +703,44 @@ function Resolve-RimsFailedLifecycleCleanup {
       stateRetained = Test-Path -LiteralPath $Paths.state -PathType Leaf
       detail = "Cleanup was not started because pending ownership could not be persisted: $persistenceDetail"
       remediation = 'Restore runtime state write access, then run down with the same paths and port.'
+    }
+  }
+
+  $tlsPaths = Get-RimsLocalTlsPaths `
+    -ScriptDirectory (Join-Path ([string]$State.frontendPath) 'scripts')
+  $tlsCleanup = Stop-RimsLocalTlsRuntime `
+    -State $State `
+    -TlsPaths $tlsPaths
+  if (-not $tlsCleanup.ok) {
+    $State.cleanupPending = $true
+    try {
+      if ($null -eq $PersistStateAction) {
+        Write-RimsRuntimeState -Paths $Paths -State $State
+      } else {
+        & $PersistStateAction $Paths $State
+      }
+    } catch {
+    }
+    return [pscustomobject][ordered]@{
+      ok = $false
+      backendCleanup = [pscustomobject]@{
+        required = Test-RimsStateOwnsAnyBackendProcess -State $State
+        attempted = $false
+        ok = $false
+        detail = 'Backend cleanup is deferred until exact TLS cleanup completes.'
+      }
+      dependencyCleanup = [pscustomobject]@{
+        required = $composeOwned
+        attempted = $false
+        ok = -not $composeOwned
+        detail = 'Dependency cleanup is deferred until exact TLS cleanup completes.'
+      }
+      cleanupPending = $true
+      managed = Test-RimsStateOwnsAnyBackendProcess -State $State
+      healthy = $false
+      stateRetained = $true
+      detail = $tlsCleanup.detail
+      remediation = 'Run down with the same parameters to retry exact TLS cleanup.'
     }
   }
 
@@ -895,7 +969,8 @@ function Invoke-RimsLocalDownUnlocked {
     [string]$BackendWorkspaceRoot,
     [Parameter(Mandatory = $true)]
     [int]$BackendPort,
-    [switch]$IncludeDependencies
+    [switch]$IncludeDependencies,
+    [switch]$UseLocalTls
   )
 
   $result = New-RimsLocalResult -Command 'down'
@@ -946,6 +1021,25 @@ function Invoke-RimsLocalDownUnlocked {
 
   $wasOwned = Test-RimsStateOwnsAnyBackendProcess -State $state
   $wasCleanupPending = Test-RimsAnyRuntimeCleanupPending -State $state
+  $hadLocalTls = $null -ne (Get-RimsObjectPropertyValue `
+      -Value $state `
+      -Name 'localTls')
+  $tlsCleanup = Stop-RimsLocalTlsRuntime `
+    -State $state `
+    -TlsPaths (Get-RimsLocalTlsPaths -ScriptDirectory $ScriptDirectory)
+  $result.components += New-RimsLocalComponent `
+    -Name 'localTlsCleanup' `
+    -Ok $tlsCleanup.ok `
+    -Required $hadLocalTls `
+    -Detail $tlsCleanup.detail `
+    -Remediation $(if ($tlsCleanup.ok) { '' } else {
+        'Retry down after exact TLS proxy and emulator ownership can be inspected.'
+      })
+  if (-not $tlsCleanup.ok) {
+    $state.cleanupPending = $true
+    Write-RimsRuntimeState -Paths $paths -State $state
+    return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+  }
   $frontendCleanup = Stop-RimsFrontendResources `
     -State $state `
     -Paths $paths
@@ -1042,7 +1136,8 @@ function New-RimsManagedRuntimeState {
     [bool]$Healthy = $true,
     [AllowNull()]
     [AllowEmptyString()]
-    [string]$FailureContext = ''
+    [string]$FailureContext = '',
+    [switch]$UseLocalTls
   )
 
   $runtimeCommit = Get-RimsGitCommit -Path $FrontendPath
@@ -1091,6 +1186,8 @@ function New-RimsManagedRuntimeState {
     }
     frontend = $null
     emulator = $null
+    useLocalTls = [bool]$UseLocalTls
+    localTls = $null
   }
 }
 
@@ -1254,10 +1351,12 @@ function Invoke-RimsLocalUpUnlocked {
     [AllowNull()]
     [AllowEmptyString()]
     [string]$AndroidDevice,
-    [switch]$IncludeDependencies
+    [switch]$IncludeDependencies,
+    [switch]$UseLocalTls
   )
 
   $result = New-RimsLocalResult -Command 'up'
+  $tlsPort = Get-RimsLocalTlsPort
   $paths = Get-RimsRuntimePaths -ScriptDirectory $ScriptDirectory
   $result.components += New-RimsRuntimePathsComponent -Paths $paths
   $resolved = Resolve-RimsLifecyclePaths `
@@ -1275,7 +1374,8 @@ function Invoke-RimsLocalUpUnlocked {
       -BackendDir $BackendDir `
       -BackendWorkspaceRoot $BackendWorkspaceRoot `
       -AndroidDevice $doctorAndroidDevice `
-      -ScriptDirectory $ScriptDirectory)
+      -ScriptDirectory $ScriptDirectory `
+      -UseLocalTls:$UseLocalTls)
   $result.components += $doctorComponents
   $failedDoctor = @($doctorComponents | Where-Object {
       $_.required -and -not $_.ok
@@ -1338,6 +1438,19 @@ function Invoke-RimsLocalUpUnlocked {
         -ProcessId (Get-RimsObjectPropertyValue -Value $state -Name 'windowsPid')
       return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
     } else {
+      $recordedUseLocalTls = [bool](Get-RimsObjectPropertyValue `
+          -Value $state `
+          -Name 'useLocalTls' `
+          -DefaultValue $false)
+      if ($recordedUseLocalTls -ne [bool]$UseLocalTls) {
+        $result.components += New-RimsLocalComponent `
+          -Name 'localTls' `
+          -Ok $false `
+          -Required $true `
+          -Detail 'The requested local HTTPS mode differs from the managed runtime state.' `
+          -Remediation 'Run down with the recorded parameters before changing -UseLocalTls.'
+        return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+      }
       $healthUrl = [string](Get-RimsObjectPropertyValue `
           -Value $state `
           -Name 'healthUrl' `
@@ -1410,6 +1523,16 @@ function Invoke-RimsLocalUpUnlocked {
             -Value $state `
             -Name 'target' `
             -DefaultValue 'none')
+        if ($UseLocalTls -and $Target -eq 'android' -and
+            $currentTarget -eq 'none') {
+          $result.components += New-RimsLocalComponent `
+            -Name 'localTls' `
+            -Ok $false `
+            -Required $true `
+            -Detail 'Android HTTPS trust must be installed before Flutter starts.' `
+            -Remediation 'Run restart or down, then up -Target android -UseLocalTls.'
+          return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+        }
         if (-not $frontendCompatibility.matches -and
             ($Target -eq 'none' -or $currentTarget -ne 'none' -or
               $frontendCompatibility.hasRecordedResources)) {
@@ -1432,7 +1555,9 @@ function Invoke-RimsLocalUpUnlocked {
             -Target $Target `
             -BackendPort $BackendPort `
             -FrontendPort $FrontendPort `
-            -AndroidDevice $AndroidDevice
+            -AndroidDevice $AndroidDevice `
+            -UseLocalTls:$UseLocalTls `
+            -TlsPort $tlsPort
           $result.components += New-RimsLocalComponent `
             -Name 'frontend' `
             -Ok $frontendStarted.ok `
@@ -1448,6 +1573,14 @@ function Invoke-RimsLocalUpUnlocked {
             -FrontendPort $FrontendPort
           $result.components += $existingFrontend
           $healthy = $existingFrontend.ok
+        }
+        if ($UseLocalTls) {
+          $existingTls = New-RimsLocalTlsComponent `
+            -State $state `
+            -TlsPaths (Get-RimsLocalTlsPaths -ScriptDirectory $ScriptDirectory) `
+            -Required $true
+          $result.components += $existingTls
+          $healthy = $healthy -and $existingTls.ok
         }
       }
       return Complete-RimsLocalResult `
@@ -1518,7 +1651,8 @@ function Invoke-RimsLocalUpUnlocked {
     -PostgresWasRunning $postgresWasRunning `
     -ComposeStartedByController $composeStarted `
     -Healthy $false `
-    -FailureContext 'Backend startup did not complete.'
+    -FailureContext 'Backend startup did not complete.' `
+    -UseLocalTls:$UseLocalTls
   $postgresResourceIdentity = $null
   if (-not $postgresBefore.healthy) {
     if (-not $IncludeDependencies) {
@@ -1721,7 +1855,8 @@ function Invoke-RimsLocalUpUnlocked {
     -PostgresWasRunning $postgresWasRunning `
     -ComposeStartedByController $composeStarted `
     -PostgresResourceIdentity $postgresResourceIdentity `
-    -Healthy $true
+    -Healthy $true `
+    -UseLocalTls:$UseLocalTls
   try {
     Write-RimsRuntimeState -Paths $paths -State $newState
   } catch {
@@ -1739,6 +1874,67 @@ function Invoke-RimsLocalUpUnlocked {
       -Remediation 'Restore runtime directory write access, then retry up.'
   }
 
+  if ($UseLocalTls) {
+    if ($Target -eq 'android') {
+      try {
+        $androidRuntime = Resolve-RimsAndroidRuntime `
+          -State $newState `
+          -Paths $paths `
+          -AndroidDevice $AndroidDevice
+        if (-not $androidRuntime.owned) {
+          throw 'Local HTTPS trust installation refuses a pre-existing emulator.'
+        }
+      } catch {
+        $detail = ConvertTo-RimsDiagnosticSummary `
+          -StandardOutput '' `
+          -StandardError $_.Exception.Message
+        $result.components += New-RimsLocalComponent `
+          -Name 'localTls' `
+          -Ok $false `
+          -Required $true `
+          -Detail $detail `
+          -Remediation 'Use an available controller-owned AVD or stop the pre-existing emulator yourself.'
+        return Complete-RimsFailedUpResult `
+          -Result $result `
+          -Paths $paths `
+          -State $newState `
+          -BackendWorkspaceRoot $resolved.workspacePath `
+          -FailureContext $detail `
+          -BackendPort $BackendPort `
+          -Remediation 'Correct Android emulator ownership and retry up.'
+      }
+    }
+    $tlsPaths = Get-RimsLocalTlsPaths -ScriptDirectory $ScriptDirectory
+    $tlsStarted = Invoke-RimsLocalTlsUp `
+      -TlsPaths $tlsPaths `
+      -BackendPort $BackendPort `
+      -TlsPort $tlsPort `
+      -Target $Target `
+      -EmulatorState $newState.emulator
+    if (-not $tlsStarted.ok) {
+      $result.components += New-RimsLocalComponent `
+        -Name 'localTls' `
+        -Ok $false `
+        -Required $true `
+        -Detail $tlsStarted.detail `
+        -Remediation 'Inspect WSL OpenSSL, TLS port, and owned emulator trust prerequisites.'
+      return Complete-RimsFailedUpResult `
+        -Result $result `
+        -Paths $paths `
+        -State $newState `
+        -BackendWorkspaceRoot $resolved.workspacePath `
+        -FailureContext $tlsStarted.detail `
+        -BackendPort $BackendPort `
+        -Remediation 'Correct the local HTTPS failure and retry up.'
+    }
+    $newState.localTls = $tlsStarted.state
+    Write-RimsRuntimeState -Paths $paths -State $newState
+    $result.components += New-RimsLocalTlsComponent `
+      -State $newState `
+      -TlsPaths $tlsPaths `
+      -Required $true
+  }
+
   if ($Target -ne 'none') {
     $frontendStarted = Start-RimsManagedFrontend `
       -State $newState `
@@ -1746,7 +1942,9 @@ function Invoke-RimsLocalUpUnlocked {
       -Target $Target `
       -BackendPort $BackendPort `
       -FrontendPort $FrontendPort `
-      -AndroidDevice $AndroidDevice
+      -AndroidDevice $AndroidDevice `
+      -UseLocalTls:$UseLocalTls `
+      -TlsPort $tlsPort
     $result.components += New-RimsLocalComponent `
       -Name 'frontend' `
       -Ok $frontendStarted.ok `
@@ -2053,7 +2251,8 @@ function Invoke-RimsLocalStatus {
     [string]$BackendWorkspaceRoot,
     [Parameter(Mandatory = $true)]
     [int]$BackendPort,
-    [switch]$IncludeDependencies
+    [switch]$IncludeDependencies,
+    [switch]$UseLocalTls
   )
 
   $paths = Get-RimsRuntimePaths -ScriptDirectory $ScriptDirectory
@@ -2086,7 +2285,8 @@ function Invoke-RimsLocalHealth {
     [string]$BackendWorkspaceRoot,
     [Parameter(Mandatory = $true)]
     [int]$BackendPort,
-    [switch]$IncludeDependencies
+    [switch]$IncludeDependencies,
+    [switch]$UseLocalTls
   )
 
   $result = Invoke-RimsLocalStatus @PSBoundParameters
@@ -2097,7 +2297,8 @@ function Invoke-RimsLocalHealth {
 function Invoke-RimsLocalLogs {
   param(
     [Parameter(Mandatory = $true)]
-    [string]$ScriptDirectory
+    [string]$ScriptDirectory,
+    [switch]$UseLocalTls
   )
 
   $paths = Get-RimsRuntimePaths -ScriptDirectory $ScriptDirectory
@@ -2129,7 +2330,8 @@ function Invoke-RimsLocalDown {
     [string]$BackendWorkspaceRoot,
     [Parameter(Mandatory = $true)]
     [int]$BackendPort,
-    [switch]$IncludeDependencies
+    [switch]$IncludeDependencies,
+    [switch]$UseLocalTls
   )
 
   $paths = Get-RimsRuntimePaths -ScriptDirectory $ScriptDirectory
@@ -2170,7 +2372,8 @@ function Invoke-RimsLocalUp {
     [AllowNull()]
     [AllowEmptyString()]
     [string]$AndroidDevice,
-    [switch]$IncludeDependencies
+    [switch]$IncludeDependencies,
+    [switch]$UseLocalTls
   )
 
   $paths = Get-RimsRuntimePaths -ScriptDirectory $ScriptDirectory

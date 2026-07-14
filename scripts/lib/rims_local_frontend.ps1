@@ -22,6 +22,9 @@ function New-FlutterLaunchSpec {
     [Parameter(Mandatory = $true)]
     [ValidateRange(1, 65535)]
     [int]$FrontendPort,
+    [switch]$UseLocalTls,
+    [ValidateRange(1, 65535)]
+    [int]$TlsPort = 8443,
     [AllowNull()]
     [AllowEmptyString()]
     [string]$AndroidSerial
@@ -35,6 +38,18 @@ function New-FlutterLaunchSpec {
     throw 'Android serial contains unsupported command characters.'
   }
 
+  $allowLocalHttp = if ($UseLocalTls) { 'false' } else { 'true' }
+  $apiBaseUrl = if ($UseLocalTls) {
+    if ($Target -eq 'web') {
+      "https://localhost:$TlsPort/api/v1"
+    } else {
+      "https://10.0.2.2:$TlsPort/api/v1"
+    }
+  } elseif ($Target -eq 'web') {
+    "http://localhost:$BackendPort/api/v1"
+  } else {
+    "http://10.0.2.2:$BackendPort/api/v1"
+  }
   $arguments = if ($Target -eq 'web') {
     @(
       'run',
@@ -46,8 +61,8 @@ function New-FlutterLaunchSpec {
       '--web-port',
       [string]$FrontendPort,
       '--dart-define=APP_ENV=development',
-      '--dart-define=ALLOW_LOCAL_HTTP=true',
-      "--dart-define=API_BASE_URL=http://localhost:$BackendPort/api/v1"
+      "--dart-define=ALLOW_LOCAL_HTTP=$allowLocalHttp",
+      "--dart-define=API_BASE_URL=$apiBaseUrl"
     )
   } else {
     @(
@@ -57,8 +72,8 @@ function New-FlutterLaunchSpec {
       '-d',
       $AndroidSerial,
       '--dart-define=APP_ENV=development',
-      '--dart-define=ALLOW_LOCAL_HTTP=true',
-      "--dart-define=API_BASE_URL=http://10.0.2.2:$BackendPort/api/v1"
+      "--dart-define=ALLOW_LOCAL_HTTP=$allowLocalHttp",
+      "--dart-define=API_BASE_URL=$apiBaseUrl"
     )
   }
   return [pscustomobject][ordered]@{
@@ -840,7 +855,9 @@ function Start-RimsManagedFrontend {
     [Parameter(Mandatory = $true)][ValidateSet('web', 'android')][string]$Target,
     [Parameter(Mandatory = $true)][int]$BackendPort,
     [Parameter(Mandatory = $true)][int]$FrontendPort,
-    [AllowNull()][AllowEmptyString()][string]$AndroidDevice
+    [AllowNull()][AllowEmptyString()][string]$AndroidDevice,
+    [switch]$UseLocalTls,
+    [ValidateRange(1, 65535)][int]$TlsPort = 8443
   )
 
   $frontendDirectory = Join-Path $State.frontendPath 'rims_frontend'
@@ -869,10 +886,32 @@ function Start-RimsManagedFrontend {
     $android = $null
     try {
     if ($Target -eq 'android') {
-      $android = Resolve-RimsAndroidRuntime `
-        -State $State `
-        -Paths $Paths `
-        -AndroidDevice $AndroidDevice
+      $recordedEmulator = Get-RimsObjectPropertyValue `
+        -Value $State `
+        -Name 'emulator'
+      $recordedOwned = [bool](Get-RimsObjectPropertyValue `
+          -Value $recordedEmulator `
+          -Name 'owned' `
+          -DefaultValue $false)
+      $recordedSerial = [string](Get-RimsObjectPropertyValue `
+          -Value $recordedEmulator `
+          -Name 'serial' `
+          -DefaultValue '')
+      if ($recordedOwned -and
+          -not [string]::IsNullOrWhiteSpace($recordedSerial)) {
+        $android = [pscustomobject]@{
+          ok = $true
+          serial = $recordedSerial
+          avdName = [string]$recordedEmulator.avdName
+          owned = $true
+          detail = 'Reused the exactly owned Android emulator.'
+        }
+      } else {
+        $android = Resolve-RimsAndroidRuntime `
+          -State $State `
+          -Paths $Paths `
+          -AndroidDevice $AndroidDevice
+      }
     }
     $serial = if ($null -eq $android) { $null } else { $android.serial }
     $launchSpec = New-FlutterLaunchSpec `
@@ -880,7 +919,9 @@ function Start-RimsManagedFrontend {
       -FrontendDirectory $frontendDirectory `
       -BackendPort $BackendPort `
       -FrontendPort $FrontendPort `
-      -AndroidSerial $serial
+      -AndroidSerial $serial `
+      -UseLocalTls:$UseLocalTls `
+      -TlsPort $TlsPort
     $flutter = Resolve-RimsCommandPath -Name 'flutter'
     if ([string]::IsNullOrWhiteSpace($flutter)) {
       throw 'flutter was not found on PATH.'
@@ -1120,6 +1161,7 @@ function Test-RimsAnyRuntimeCleanupPending {
 
   $frontend = Get-RimsObjectPropertyValue -Value $State -Name 'frontend'
   $emulator = Get-RimsObjectPropertyValue -Value $State -Name 'emulator'
+  $localTls = Get-RimsObjectPropertyValue -Value $State -Name 'localTls'
   return (Test-RimsRuntimeCleanupPending -State $State) -or
     [bool](Get-RimsObjectPropertyValue `
       -Value $frontend `
@@ -1127,6 +1169,10 @@ function Test-RimsAnyRuntimeCleanupPending {
       -DefaultValue $false) -or
     [bool](Get-RimsObjectPropertyValue `
       -Value $emulator `
+      -Name 'cleanupPending' `
+      -DefaultValue $false) -or
+    [bool](Get-RimsObjectPropertyValue `
+      -Value $localTls `
       -Name 'cleanupPending' `
       -DefaultValue $false)
 }

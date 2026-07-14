@@ -11,6 +11,7 @@ $rimsLocalModules = @(
   'rims_local_compose_resources.ps1',
   'rims_local_fixtures.ps1',
   'rims_local_frontend.ps1',
+  'rims_local_tls.ps1',
   'rims_local_lifecycle.ps1'
 )
 

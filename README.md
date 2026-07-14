@@ -21,6 +21,31 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rims_local.ps1 -Co
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rims_local.ps1 -Command down
 ```
 
+M12 local security acceptance uses the controller-owned HTTPS runtime:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rims_local.ps1 -Command doctor -Target android -UseLocalTls -AndroidDevice $env:RIMS_ANDROID_DEVICE
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rims_local.ps1 -Command up -Target android -UseLocalTls -IncludeDependencies -AndroidDevice $env:RIMS_ANDROID_DEVICE
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rims_local.ps1 -Command status -UseLocalTls -Output Json
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rims_local.ps1 -Command down -UseLocalTls
+```
+
+WSL OpenSSL creates a workspace-scoped CA and server certificate under the
+ignored `.runtime/rims-local/tls/` directory. The server SANs cover
+`localhost`, `127.0.0.1`, `10.0.2.2`, and `rims.local`. The controller owns the
+HTTPS proxy and records only certificate fingerprints, paths, and exact
+PID/start-time/port/command identity. For Android, it installs and later removes
+the CA only on an emulator started by this controller; pre-existing trust and
+pre-existing emulators remain untouched. A debug-only Android network security
+config trusts user CAs; release/profile manifests do not opt into that trust.
+The AVD defaults to
+`Medium_Phone_API_36.1`, while `-AndroidDevice` and `RIMS_ANDROID_DEVICE` may
+select any installed named AVD.
+
+The legacy Web and Android smoke wrappers remain explicitly pinned to local
+HTTP until their runner trust migration is verified. Consequently,
+`smoke -UseLocalTls` fails instead of silently producing HTTP evidence.
+
 The controller starts only resources whose identity it can persist and later
 verify by PID, process start time, and platform-specific identity. `down` stops
 only those owned resources. Existing PostgreSQL containers, Android emulators,

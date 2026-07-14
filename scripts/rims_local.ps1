@@ -11,7 +11,8 @@ param(
   [int]$BackendPort = 8080,
   [int]$FrontendPort = 8091,
   [string]$AndroidDevice = $env:RIMS_ANDROID_DEVICE,
-  [switch]$IncludeDependencies
+  [switch]$IncludeDependencies,
+  [switch]$UseLocalTls
 )
 
 $ErrorActionPreference = 'Stop'
@@ -67,7 +68,8 @@ if ($Command -eq 'doctor') {
         -BackendDir $BackendDir `
         -BackendWorkspaceRoot $BackendWorkspaceRoot `
         -AndroidDevice $AndroidDevice `
-        -ScriptDirectory $scriptDir)
+        -ScriptDirectory $scriptDir `
+        -UseLocalTls:$UseLocalTls)
     $failedRequiredComponents = @($result.components | Where-Object {
         $_.required -and -not $_.ok
       })
@@ -91,6 +93,21 @@ if ($Command -eq 'doctor') {
 }
 
 if ($Command -eq 'smoke') {
+  if ($UseLocalTls) {
+    $message = 'Legacy Web and Android smoke wrappers remain pinned to explicit local HTTP until their TLS migration is verified.'
+    if ($Output -eq 'Json') {
+      $result = New-RimsLocalResult -Command $Command
+      $result.errors = @($message)
+      $result = Complete-RimsLocalResult `
+        -Result $result `
+        -Ok $false `
+        -ExitCode 2
+      Write-RimsLocalJson -Result $result
+    } else {
+      [Console]::Error.WriteLine($message)
+    }
+    exit 2
+  }
   if ($Target -notin @('web', 'android')) {
     $message = "Smoke target '$Target' is not implemented yet."
     if ($Output -eq 'Json') {
@@ -184,7 +201,8 @@ if ($Command -in @('up', 'status', 'health', 'logs', 'restart', 'reset', 'down')
           -BackendPort $BackendPort `
           -FrontendPort $FrontendPort `
           -AndroidDevice $AndroidDevice `
-          -IncludeDependencies:$IncludeDependencies
+          -IncludeDependencies:$IncludeDependencies `
+          -UseLocalTls:$UseLocalTls
         break
       }
       'status' {
@@ -193,7 +211,8 @@ if ($Command -in @('up', 'status', 'health', 'logs', 'restart', 'reset', 'down')
           -BackendDir $BackendDir `
           -BackendWorkspaceRoot $BackendWorkspaceRoot `
           -BackendPort $BackendPort `
-          -IncludeDependencies:$IncludeDependencies
+          -IncludeDependencies:$IncludeDependencies `
+          -UseLocalTls:$UseLocalTls
         break
       }
       'health' {
@@ -206,7 +225,9 @@ if ($Command -in @('up', 'status', 'health', 'logs', 'restart', 'reset', 'down')
         break
       }
       'logs' {
-        Invoke-RimsLocalLogs -ScriptDirectory $scriptDir
+        Invoke-RimsLocalLogs `
+          -ScriptDirectory $scriptDir `
+          -UseLocalTls:$UseLocalTls
         break
       }
       'restart' {
@@ -236,7 +257,8 @@ if ($Command -in @('up', 'status', 'health', 'logs', 'restart', 'reset', 'down')
           -BackendDir $BackendDir `
           -BackendWorkspaceRoot $BackendWorkspaceRoot `
           -BackendPort $BackendPort `
-          -IncludeDependencies:$IncludeDependencies
+          -IncludeDependencies:$IncludeDependencies `
+          -UseLocalTls:$UseLocalTls
         break
       }
     }

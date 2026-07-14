@@ -21,6 +21,7 @@ try {
   foreach ($testFile in $testFiles) {
     . (Join-Path $testRoot $testFile)
   }
+  & (Join-Path $scriptDir 'test_rims_local_tls.ps1')
   Write-Host 'Local runtime aggregate test passed.'
 } catch {
   [Console]::Error.WriteLine($_.Exception.Message)

@@ -42,6 +42,18 @@ Assert-Equal -Actual $result.command -Expected 'help' -Message 'Unexpected resul
 Assert-Equal -Actual $result.ok -Expected $true -Message 'Help result was not successful.'
 Assert-Equal -Actual $result.exitCode -Expected 0 -Message 'Unexpected result exit code.'
 
+$tlsHelp = Invoke-LocalCli -Arguments @(
+  '-Command',
+  'help',
+  '-Output',
+  'Json',
+  '-UseLocalTls'
+)
+Assert-Equal `
+  -Actual $tlsHelp.ExitCode `
+  -Expected 0 `
+  -Message 'The local command wrapper did not accept -UseLocalTls.'
+
 $expectedCommands = @(
   'help',
   'doctor',

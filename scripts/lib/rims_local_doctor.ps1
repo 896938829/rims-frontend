@@ -596,7 +596,8 @@ function Invoke-RimsLocalDoctor {
     [AllowEmptyString()]
     [string]$AndroidDevice,
     [Parameter(Mandatory = $true)]
-    [string]$ScriptDirectory
+    [string]$ScriptDirectory,
+    [switch]$UseLocalTls
   )
 
   $backendPathState = Resolve-RimsBackendDirectoryState `
@@ -646,6 +647,13 @@ function Invoke-RimsLocalDoctor {
         -WslExecutable $wslExecutable `
         -BashCommand 'test -x ~/local/go/bin/go && ~/local/go/bin/go version' `
         -Remediation 'Install Go at ~/local/go/bin/go inside the default WSL distribution.'))
+  if ($UseLocalTls) {
+    [void]$components.Add((Test-RimsWslCommandComponent `
+          -Name 'openssl' `
+          -WslExecutable $wslExecutable `
+          -BashCommand 'openssl version' `
+          -Remediation 'Install OpenSSL in the default WSL distribution.'))
+  }
   [void]$components.Add((Test-RimsWslCommandComponent `
         -Name 'docker' `
         -WslExecutable $wslExecutable `
