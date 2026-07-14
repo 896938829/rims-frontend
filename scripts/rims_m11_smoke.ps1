@@ -12,6 +12,8 @@ param(
   [switch]$TestMode,
   [string]$FixturePath,
   [string]$CommandRecordPath,
+  [string]$TestFrontendCommit,
+  [string]$TestBackendCommit,
   [switch]$TestPreExistingRuntime,
   [switch]$TestPreExistingEmulator,
   [ValidateSet(
@@ -128,6 +130,8 @@ $evidence = $null
 $childReport = $null
 $frontendCommit = $null
 $backendCommit = $null
+$reportedFrontendCommit = $null
+$reportedBackendCommit = $null
 $ownership = [pscustomobject][ordered]@{
   backendOwned = -not $TestPreExistingRuntime
   emulatorOwned = -not $TestPreExistingEmulator
@@ -194,6 +198,22 @@ function Test-M11Number($Value) {
     $Value -is [decimal]
 }
 
+function Test-M11FiniteNonNegativeNumber($Value) {
+  if (-not (Test-M11Number $Value)) { return $false }
+  $number = [double]$Value
+  return -not [double]::IsNaN($number) -and
+    -not [double]::IsInfinity($number) -and $number -ge 0
+}
+
+function Test-M11JsonArray($Value) {
+  return $Value -is [Array] -or
+    ($Value -is [Collections.IList] -and $Value -isnot [string])
+}
+
+function Test-M11Commit($Value) {
+  return $Value -is [string] -and $Value -cmatch '^[0-9a-fA-F]{40}$'
+}
+
 function Get-M11EvidenceErrors($Candidate) {
   $errors = [Collections.Generic.List[string]]::new()
   if ($null -eq $Candidate) {
@@ -213,45 +233,105 @@ function Get-M11EvidenceErrors($Candidate) {
   )
   foreach ($field in $numericFields) {
     $property = $Candidate.PSObject.Properties[$field]
-    if ($null -eq $property -or -not (Test-M11Number $property.Value)) {
-      [void]$errors.Add("Evidence '$field' must be a number.")
+    if ($null -eq $property -or
+        -not (Test-M11FiniteNonNegativeNumber $property.Value)) {
+      [void]$errors.Add("Evidence '$field' must be a finite non-negative number.")
     }
   }
   foreach ($field in @('operationIds', 'idempotencyKeyHashes')) {
     $property = $Candidate.PSObject.Properties[$field]
-    if ($null -eq $property -or @($property.Value).Count -eq 0) {
+    if ($null -eq $property -or
+        -not (Test-M11JsonArray $property.Value) -or
+        @($property.Value).Count -eq 0) {
       [void]$errors.Add("Evidence '$field' must be a non-empty array.")
     }
   }
-  if ($null -ne $Candidate.PSObject.Properties['operationIds']) {
-    $ids = @($Candidate.operationIds | ForEach-Object { "$_" })
-    if (@($ids | Where-Object { [string]::IsNullOrWhiteSpace($_) }).Count -gt 0 -or
+  if ($null -ne $Candidate.PSObject.Properties['operationIds'] -and
+      (Test-M11JsonArray $Candidate.operationIds)) {
+    $ids = @($Candidate.operationIds)
+    if (@($ids | Where-Object {
+          $_ -isnot [string] -or [string]::IsNullOrWhiteSpace($_)
+        }).Count -gt 0 -or
         @($ids | Select-Object -Unique).Count -ne $ids.Count) {
-      [void]$errors.Add('Operation IDs must be non-empty and unique.')
+      [void]$errors.Add('Operation IDs must be non-empty unique strings.')
     }
   }
-  if ($null -ne $Candidate.PSObject.Properties['idempotencyKeyHashes']) {
+  if ($null -ne $Candidate.PSObject.Properties['idempotencyKeyHashes'] -and
+      (Test-M11JsonArray $Candidate.idempotencyKeyHashes)) {
     foreach ($hash in @($Candidate.idempotencyKeyHashes)) {
-      if ("$hash" -notmatch '^[0-9a-f]{64}$') {
+      if ($hash -isnot [string] -or $hash -notmatch '^[0-9a-fA-F]{64}$') {
         [void]$errors.Add('Idempotency keys must be represented only by SHA-256 hashes.')
       }
     }
   }
+  if ($null -ne $Candidate.PSObject.Properties['operationIds'] -and
+      $null -ne $Candidate.PSObject.Properties['idempotencyKeyHashes'] -and
+      (Test-M11JsonArray $Candidate.operationIds) -and
+      (Test-M11JsonArray $Candidate.idempotencyKeyHashes) -and
+      @($Candidate.operationIds).Count -ne @($Candidate.idempotencyKeyHashes).Count) {
+    [void]$errors.Add('Operation IDs and idempotency hashes must have equal lengths.')
+  }
   $attachmentHash = $Candidate.PSObject.Properties['attachmentHash']
-  if ($null -eq $attachmentHash -or "$($attachmentHash.Value)" -notmatch '^[0-9a-f]{64}$') {
+  $stagedAttachmentHash = $Candidate.PSObject.Properties['stagedAttachmentHash']
+  if ($null -eq $attachmentHash -or $attachmentHash.Value -isnot [string] -or
+      $attachmentHash.Value -notmatch '^[0-9a-fA-F]{64}$') {
     [void]$errors.Add('Attachment hash must be present as SHA-256 evidence.')
+  }
+  if ($null -eq $stagedAttachmentHash -or
+      $stagedAttachmentHash.Value -isnot [string] -or
+      $stagedAttachmentHash.Value -notmatch '^[0-9a-fA-F]{64}$') {
+    [void]$errors.Add('Staged attachment hash must be present as SHA-256 evidence.')
+  } elseif ($null -ne $attachmentHash -and
+      $attachmentHash.Value -is [string] -and
+      $attachmentHash.Value -ine $stagedAttachmentHash.Value) {
+    [void]$errors.Add('Server attachment hash does not match staged bytes.')
+  }
+  $processStages = $Candidate.PSObject.Properties['processStages']
+  if ($null -eq $processStages -or
+      -not (Test-M11JsonArray $processStages.Value) -or
+      @($processStages.Value).Count -ne 3) {
+    [void]$errors.Add('Process recreation must contain exactly three persisted stages.')
+  } else {
+    $expectedStages = @('seed', 'offline-draft', 'recovery')
+    $processIds = [Collections.Generic.List[int64]]::new()
+    for ($index = 0; $index -lt 3; $index += 1) {
+      $stage = @($processStages.Value)[$index]
+      $name = $stage.PSObject.Properties['stage']
+      $processId = $stage.PSObject.Properties['processId']
+      $startedAt = $stage.PSObject.Properties['startedAt']
+      $parsedTime = [DateTimeOffset]::MinValue
+      if ($null -eq $name -or $name.Value -isnot [string] -or
+          $name.Value -cne $expectedStages[$index] -or
+          $null -eq $processId -or
+          -not (Test-M11FiniteNonNegativeNumber $processId.Value) -or
+          [double]$processId.Value -le 0 -or
+          [double]$processId.Value % 1 -ne 0 -or
+          $null -eq $startedAt -or $startedAt.Value -isnot [string] -or
+          -not [DateTimeOffset]::TryParse($startedAt.Value, [ref]$parsedTime)) {
+        [void]$errors.Add("Process stage '$($expectedStages[$index])' is malformed.")
+      } else {
+        [void]$processIds.Add([int64]$processId.Value)
+      }
+    }
+    if (@($processIds | Select-Object -Unique).Count -ne 3) {
+      [void]$errors.Add('Each persisted stage must run in a distinct app process.')
+    }
   }
   $booleanGroups = @(
     @{ Name = 'cleanup'; Fields = @(
         'accountCacheCleared', 'outboxCleared', 'stagingCleared',
-        'baselineRestored'
+        'stagingDirectoryEmpty', 'baselineRestored'
       ) },
     @{ Name = 'journey'; Fields = @(
         'onlineSeeded', 'cachedInventoryRead', 'cachedReportRead',
-        'cachedDetailRead', 'draftRecovered', 'explicitSyncConfirmed',
+        'cachedDetailRead', 'scannerCallbackCompleted', 'autosaveCompleted',
+        'draftRecovered', 'nativeDatabaseReopened', 'queuedVisible',
+        'explicitSyncConfirmed',
         'unknownResponseProbed', 'idempotentReplaySingleEffect',
         'attachmentDependencyCompleted', 'staleSessionBlocked',
-        'stalePermissionBlocked', 'conflictVisible', 'conflictResolved',
+        'stalePermissionBlocked', 'attentionVisible', 'conflictVisible',
+        'conflictResolved', 'serverAttachmentVerified',
+        'serverLifecycleVerified',
         'logoutCleanupCompleted', 'databaseCorruptionQuarantined'
       ) }
   )
@@ -294,9 +374,32 @@ function Get-M11EvidenceErrors($Candidate) {
     [void]$errors.Add('The idempotent journey must produce exactly one server document.')
   }
   if ($null -ne $Candidate.PSObject.Properties['attachmentCount'] -and
-      (Test-M11Number $Candidate.attachmentCount) -and
+      (Test-M11FiniteNonNegativeNumber $Candidate.attachmentCount) -and
       $Candidate.attachmentCount -lt 1) {
     [void]$errors.Add('Attachment lifecycle evidence is empty.')
+  }
+  if ($null -ne $Candidate.PSObject.Properties['databaseBytes'] -and
+      (Test-M11FiniteNonNegativeNumber $Candidate.databaseBytes) -and
+      $Candidate.databaseBytes -le 0) {
+    [void]$errors.Add('Offline database size must be positive.')
+  }
+  return @($errors)
+}
+
+function Get-M11CommitErrors {
+  $errors = [Collections.Generic.List[string]]::new()
+  foreach ($entry in @(
+      @{ Name = 'frontend'; Observed = $script:frontendCommit; Reported = $script:reportedFrontendCommit },
+      @{ Name = 'backend'; Observed = $script:backendCommit; Reported = $script:reportedBackendCommit }
+    )) {
+    if (-not (Test-M11Commit $entry.Observed)) {
+      [void]$errors.Add("Observed $($entry.Name) commit must be 40 hex characters.")
+    }
+    if (-not (Test-M11Commit $entry.Reported)) {
+      [void]$errors.Add("Reported $($entry.Name) commit must be 40 hex characters.")
+    } elseif ($entry.Observed -cne $entry.Reported) {
+      [void]$errors.Add("Reported $($entry.Name) commit does not match runner HEAD.")
+    }
   }
   return @($errors)
 }
@@ -320,6 +423,12 @@ try {
     $evidence = Get-Content -LiteralPath $FixturePath -Raw | ConvertFrom-Json
     $frontendCommit = (& git -C $repoRoot rev-parse HEAD 2>$null).Trim()
     $backendCommit = 'b' * 40
+    $reportedFrontendCommit = if ([string]::IsNullOrWhiteSpace($TestFrontendCommit)) {
+      $frontendCommit
+    } else { $TestFrontendCommit }
+    $reportedBackendCommit = if ([string]::IsNullOrWhiteSpace($TestBackendCommit)) {
+      $backendCommit
+    } else { $TestBackendCommit }
   }
   foreach ($scenario in $scenarioNames) {
     if ($firstExitCode -ne 0) { break }
@@ -361,8 +470,11 @@ try {
         throw $exception
       }
       $script:childReport = Get-Content -LiteralPath $androidReportPath -Raw | ConvertFrom-Json
-      $script:frontendCommit = [string]$script:childReport.frontendCommit
-      $script:backendCommit = [string]$script:childReport.backendCommit
+      $script:reportedFrontendCommit = $script:childReport.frontendCommit
+      $script:reportedBackendCommit = $script:childReport.backendCommit
+      $script:frontendCommit = (& git -C $repoRoot rev-parse HEAD 2>$null).Trim()
+      $childBackendDir = [string]$script:childReport.backendDir
+      $script:backendCommit = (& git -C $childBackendDir rev-parse HEAD 2>$null).Trim()
       $script:evidence = $script:childReport.e2e
       $script:ownership.backendOwned = [bool]$script:childReport.runtimeOwnedByRun
       $script:ownership.emulatorOwned = [bool]$script:childReport.emulator.owned
@@ -405,7 +517,9 @@ if (-not $cleanup.ok -and $firstExitCode -eq 0) {
   $failedStep = 'cleanup'
 }
 Add-M11Command 'validate-evidence'
-$evidenceErrors = @(Get-M11EvidenceErrors $evidence)
+$evidenceErrors = @(
+  @(Get-M11EvidenceErrors $evidence) + @(Get-M11CommitErrors)
+)
 if ($TestMode -and $FailStep -eq 'validate-evidence' -and $firstExitCode -eq 0) {
   $firstExitCode = 23
   $failedStep = 'validate-evidence'

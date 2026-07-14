@@ -2,11 +2,13 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
+import 'package:flutter/foundation.dart' show debugPrintSynchronously;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:rims_frontend/app.dart';
+import 'package:rims_frontend/features/attachments/presentation/view_models/attachments_view_model.dart';
 import 'package:rims_frontend/features/documents/presentation/view_models/documents_view_model.dart';
 import 'package:rims_frontend/features/inventory/presentation/view_models/inventory_view_model.dart';
 import 'package:rims_frontend/features/offline/data/bootstrap/offline_store_bootstrap.dart';
@@ -29,22 +31,29 @@ void main() {
 
   testWidgets('M11 Android offline synchronization journey', (tester) async {
     expect(RimsE2eConfig.m11Enabled, isTrue);
+    expect(RimsE2eConfig.m11StageOrchestrated, isTrue);
     expect(RimsE2eConfig.m11FaultControlUrl, startsWith('http://10.0.2.2:'));
     expect(RimsE2eConfig.m11FaultControlUrl, endsWith('/__rims_m11'));
 
     await screenshotOnFailure(binding, 'm11-offline-sync-failure', () async {
-      final databaseCorruptionQuarantined = await _verifyCorruptionQuarantine();
+      final checkpointFile = await _checkpointFile();
+      final checkpoint = await _readCheckpoint(checkpointFile);
+      final nextStage = checkpoint?['nextStage']?.toString() ?? 'seed';
       final store = await createOfflineStore();
       final outbox = outboxRepositoryForOfflineStore(store);
-      final runId = DateTime.now().microsecondsSinceEpoch.toString();
+      final runId =
+          checkpoint?['runId']?.toString() ??
+          DateTime.now().microsecondsSinceEpoch.toString();
       final remarks = _JourneyRemarks(runId);
       final operationIds = <String>[];
       final idempotencyHashes = <String>[];
-      var accountId = '';
-      var stockBefore = 0;
+      var accountId = checkpoint?['accountId']?.toString() ?? '';
+      var stockBefore = (checkpoint?['stockBefore'] as num?)?.toInt() ?? 0;
       var stockAfter = 0;
-      var cacheReadLatencyMs = 0;
-      var draftSaveLatencyMs = 0;
+      var cacheReadLatencyMs =
+          (checkpoint?['cacheReadLatencyMs'] as num?)?.toInt() ?? 0;
+      var draftSaveLatencyMs =
+          (checkpoint?['draftSaveLatencyMs'] as num?)?.toInt() ?? 0;
       var processRecoveryLatencyMs = 0;
       var outboxEnqueueLatencyMs = 0;
       var syncTotalMs = 0;
@@ -59,78 +68,148 @@ void main() {
       var conflictResolved = false;
       var logoutCleanupCompleted = false;
       var baselineRestored = false;
+      var scannerCallbackCompleted = false;
+      var autosaveCompleted = false;
+      var nativeDatabaseReopened = false;
+      var queuedVisible = false;
+      var attentionVisible = false;
+      var serverAttachmentVerified = false;
+      var serverLifecycleVerified = false;
+      var stagedAttachmentHash = '';
+      final databaseCorruptionQuarantined =
+          checkpoint?['databaseCorruptionQuarantined'] == true;
 
       try {
-        await _fault('reset');
-        await _pumpApp(tester, store, 'm11-initial');
-        await _normalizeLoggedOutState(tester);
-        await _login(tester);
+        if (nextStage == 'seed') {
+          final corruptionQuarantined = await _verifyCorruptionQuarantine();
+          await _fault('reset');
+          await _pumpApp(tester, store, 'm11-seed');
+          await _normalizeLoggedOutState(tester);
+          await _login(tester);
+          await waitForKey(tester, const Key('bottom-nav-home'));
+          await tapAndSettle(tester, const Key('bottom-nav-inventory'));
+          final inventory = await _viewModel<InventoryViewModel>(tester);
+          await waitUntil(
+            tester,
+            description: 'online inventory seed',
+            condition: () => !inventory.isLoading && inventory.items.isNotEmpty,
+          );
+          await tapAndSettle(tester, const Key('bottom-nav-reports'));
+          final reports = await _viewModel<ReportsViewModel>(tester);
+          await waitUntil(
+            tester,
+            description: 'online report seed',
+            condition: () => !reports.isLoading,
+          );
+          await tapAndSettle(tester, const Key('bottom-nav-documents'));
+          final documents = await _documentsViewModel(tester);
+          await waitUntil(
+            tester,
+            description: 'online document seed',
+            condition: () =>
+                !documents.isLoading && documents.recentDocuments.isNotEmpty,
+          );
+          accountId = documents.accountId!;
+          stockBefore = await _stockQuantity(documents);
+          final cachedDetailId = documents.recentDocuments.first.id;
+          await _openDocumentDetail(tester, cachedDetailId);
+          await tester.pageBack();
+          await settleBounded(tester);
+          await _verifyLocalTransportFaults(tester);
+          await _fault('airplane-mode', {'restoreMs': '3500'});
+          await tester.pump(const Duration(milliseconds: 500));
+          cacheReadLatencyMs = await _verifyCachedReads(
+            tester,
+            cachedDetailId: cachedDetailId,
+          );
+          expect(cacheReadLatencyMs, lessThanOrEqualTo(500));
+          await tester.pump(const Duration(seconds: 4));
+          await _fault('reset');
+          await _writeCheckpoint(checkpointFile, <String, Object?>{
+            'nextStage': 'offline-draft',
+            'runId': runId,
+            'accountId': accountId,
+            'stockBefore': stockBefore,
+            'cacheReadLatencyMs': cacheReadLatencyMs,
+            'databaseCorruptionQuarantined': corruptionQuarantined,
+          });
+          _emitStage('seed');
+          return;
+        }
+
+        if (nextStage == 'offline-draft') {
+          await _fault('unreachable');
+          await _pumpApp(tester, store, 'm11-offline-draft');
+          await waitForKey(tester, const Key('bottom-nav-home'));
+          await tapAndSettle(tester, const Key('bottom-nav-documents'));
+          final documents = await _documentsViewModel(tester);
+          await tapAndSettle(tester, const Key('document-scan-product-button'));
+          await expectText(tester, '需要相机权限才能扫描条码');
+          await tester.tap(find.byKey(const Key('scanner-permission-retry')));
+          await tester.pump();
+          await settleBounded(tester);
+          await waitUntil(
+            tester,
+            description: 'M11 injected scanner callback',
+            condition: () => documents.draftLines.length == 1,
+          );
+          scannerCallbackCompleted = true;
+          await enterText(
+            tester,
+            const Key('document-remark-field'),
+            remarks.queued,
+          );
+          await tester.pump(const Duration(milliseconds: 300));
+          final autosaveWatch = Stopwatch()..start();
+          await _waitForPersistedDraft(
+            tester,
+            documents,
+            accountId: accountId,
+            remark: remarks.queued,
+          );
+          autosaveWatch.stop();
+          draftSaveLatencyMs = autosaveWatch.elapsedMilliseconds;
+          expect(draftSaveLatencyMs, lessThanOrEqualTo(250));
+          autosaveCompleted = true;
+          final draftId = documents.activeDraftId!;
+          final recoveredProductId = documents.draftLines.single.productId;
+          await _writeCheckpoint(checkpointFile, <String, Object?>{
+            ...checkpoint!,
+            'nextStage': 'recovery',
+            'draftId': draftId,
+            'recoveredProductId': recoveredProductId,
+            'draftSaveLatencyMs': draftSaveLatencyMs,
+            'scannerCallbackCompleted': scannerCallbackCompleted,
+            'autosaveCompleted': autosaveCompleted,
+          });
+          _emitStage('offline-draft');
+          return;
+        }
+
+        expect(nextStage, 'recovery');
+        final draftId = checkpoint!['draftId']!.toString();
+        final recoveredProductId = (checkpoint['recoveredProductId'] as num)
+            .toInt();
+        scannerCallbackCompleted =
+            checkpoint['scannerCallbackCompleted'] == true;
+        autosaveCompleted = checkpoint['autosaveCompleted'] == true;
+        await _pumpApp(tester, store, 'm11-recovery');
         await waitForKey(tester, const Key('bottom-nav-home'));
-
-        await tapAndSettle(tester, const Key('bottom-nav-inventory'));
-        final inventory = await _viewModel<InventoryViewModel>(tester);
-        await waitUntil(
+        nativeDatabaseReopened = store is OfflineDatabase;
+        await tapAndSettle(tester, const Key('bottom-nav-profile'));
+        await scrollUntilVisible(
           tester,
-          description: 'online inventory seed',
-          condition: () => !inventory.isLoading && inventory.items.isNotEmpty,
+          const Key('profile-draft-manager-entry'),
         );
-        await tapAndSettle(tester, const Key('bottom-nav-reports'));
-        final reports = await _viewModel<ReportsViewModel>(tester);
-        await waitUntil(
-          tester,
-          description: 'online report seed',
-          condition: () => !reports.isLoading,
-        );
-        await tapAndSettle(tester, const Key('bottom-nav-documents'));
-        var documents = await _documentsViewModel(tester);
-        await waitUntil(
-          tester,
-          description: 'online document seed',
-          condition: () =>
-              !documents.isLoading && documents.recentDocuments.isNotEmpty,
-        );
-        accountId = documents.accountId!;
-        stockBefore = await _stockQuantity(documents);
-        final cachedDetailId = documents.recentDocuments.first.id;
-        await _openDocumentDetail(tester, cachedDetailId);
-        await tester.pageBack();
-        await settleBounded(tester);
-
-        await _verifyLocalTransportFaults(tester);
-
-        await _fault('airplane-mode', {'restoreMs': '3500'});
-        await tester.pump(const Duration(milliseconds: 500));
-        cacheReadLatencyMs = await _verifyCachedReads(
-          tester,
-          cachedDetailId: cachedDetailId,
-        );
-        expect(cacheReadLatencyMs, lessThanOrEqualTo(500));
-        await tester.pump(const Duration(seconds: 4));
-        await _fault('unreachable');
-
-        await _returnToShell(tester);
-        await tapAndSettle(tester, const Key('bottom-nav-documents'));
-        documents = await _documentsViewModel(tester);
-        await _prepareDraft(
-          tester,
-          documents,
-          remark: remarks.queued,
-          withAttachment: false,
-        );
-        final draftId = documents.activeDraftId!;
-        final recoveredProductId = documents.draftLines.single.productId;
-        final saveWatch = Stopwatch()..start();
-        await documents.saveDraft();
-        saveWatch.stop();
-        draftSaveLatencyMs = saveWatch.elapsedMilliseconds;
-        expect(draftSaveLatencyMs, lessThanOrEqualTo(250));
-
+        await tapAndSettle(tester, const Key('profile-draft-manager-entry'));
+        await expectText(tester, '草稿管理');
         final recoveryWatch = Stopwatch()..start();
-        await _pumpApp(tester, store, 'm11-recreated');
-        await waitForKey(tester, const Key('bottom-nav-home'));
-        await tapAndSettle(tester, const Key('bottom-nav-documents'));
-        documents = await _documentsViewModel(tester);
-        expect(await documents.openDraft(draftId), isTrue);
+        await tapFinderAndSettle(
+          tester,
+          find.byTooltip('打开').first,
+          description: 'open persisted draft from draft manager',
+        );
+        var documents = await _documentsViewModel(tester);
         await waitForKey(
           tester,
           Key('document-draft-line-$recoveredProductId'),
@@ -139,14 +218,24 @@ void main() {
         recoveryWatch.stop();
         processRecoveryLatencyMs = recoveryWatch.elapsedMilliseconds;
         expect(processRecoveryLatencyMs, lessThanOrEqualTo(1000));
+        expect(documents.activeDraftId, draftId);
+        expect(documents.remark, remarks.queued);
 
         final beforeQueued = await _operations(outbox, accountId);
-        final enqueueWatch = Stopwatch()..start();
-        final queuedCreate = await _queueCurrentDraft(documents, beforeQueued);
-        enqueueWatch.stop();
-        outboxEnqueueLatencyMs = enqueueWatch.elapsedMilliseconds;
+        final queuedResult = await _queueCurrentDraft(
+          tester,
+          documents,
+          beforeQueued,
+        );
+        final queuedCreate = queuedResult.operation;
+        outboxEnqueueLatencyMs = queuedResult.enqueueLatencyMs;
         expect(outboxEnqueueLatencyMs, lessThanOrEqualTo(250));
         _recordOperation(queuedCreate, operationIds, idempotencyHashes);
+        queuedVisible = await _operationVisibleInSyncCenter(
+          tester,
+          queuedCreate.operationId,
+        );
+        expect(queuedVisible, isTrue);
 
         await _fault('reset');
         final queuedSyncWatch = Stopwatch()..start();
@@ -169,22 +258,11 @@ void main() {
         );
         final beforeUnknown = await _operations(outbox, accountId);
         await _fault('unknown-response');
-        expect(await documents.createDocument(), isFalse);
-        final unknownSnapshot = documents.offlineSubmissionSnapshot;
-        expect(unknownSnapshot, isNotNull);
-        expect(
-          await documents.confirmOfflineSubmission(unknownSnapshot!),
-          isTrue,
-        );
-        final unknownCreate =
-            (await _newOperations(
-              outbox,
-              accountId,
-              beforeUnknown,
-            )).singleWhere(
-              (operation) =>
-                  operation.kind == OutboxOperationKind.documentCreate,
-            );
+        final unknownCreate = (await _queueCurrentDraft(
+          tester,
+          documents,
+          beforeUnknown,
+        )).operation;
         expect(unknownCreate.requiresStatusProbe, isTrue);
         _recordOperation(unknownCreate, operationIds, idempotencyHashes);
         await _fault('reset');
@@ -219,11 +297,13 @@ void main() {
           remark: remarks.attachment,
           withAttachment: true,
         );
+        stagedAttachmentHash = await _singleStagedAttachmentHash();
         final beforeAttachment = await _operations(outbox, accountId);
-        final attachmentCreate = await _queueCurrentDraft(
+        final attachmentCreate = (await _queueCurrentDraft(
+          tester,
           documents,
           beforeAttachment,
-        );
+        )).operation;
         final attachmentGraph = await _newOperations(
           outbox,
           accountId,
@@ -232,8 +312,10 @@ void main() {
         final upload = attachmentGraph.singleWhere(
           (operation) => operation.kind == OutboxOperationKind.attachmentUpload,
         );
-        attachmentHash = upload.payload['expectedSha256']!.toString();
-        attachmentCount = 1;
+        expect(
+          upload.payload['expectedSha256']!.toString(),
+          stagedAttachmentHash,
+        );
         for (final operation in attachmentGraph) {
           _recordOperation(operation, operationIds, idempotencyHashes);
         }
@@ -266,20 +348,52 @@ void main() {
         duplicateSingleEffect = attachmentDocuments.length == 1;
         expect(duplicateSingleEffect, isTrue);
         final created = attachmentDocuments.single;
+        await _openDocumentDetail(tester, created.id);
+        final attachments = await _viewModel<AttachmentsViewModel>(tester);
+        await attachments.load();
+        await waitUntil(
+          tester,
+          description: 'authoritative server attachment',
+          condition: () => !attachments.isLoading,
+        );
+        attachmentCount = attachments.attachments.length;
+        expect(attachmentCount, 1);
+        final serverAttachment = attachments.attachments.single;
+        final downloadedPath =
+            (await attachments.repository.download(serverAttachment)).when(
+              success: (path) => path,
+              failure: (failure) => throw TestFailure(failure.message),
+            );
+        attachmentHash = sha256
+            .convert(await File(downloadedPath).readAsBytes())
+            .toString();
+        serverAttachmentVerified =
+            attachmentHash.toLowerCase() ==
+                stagedAttachmentHash.toLowerCase() &&
+            serverAttachment.fileHash.toLowerCase() ==
+                stagedAttachmentHash.toLowerCase();
+        expect(serverAttachmentVerified, isTrue);
+        await tester.pageBack();
+        await settleBounded(tester);
         await _fault('unreachable');
         final beforeLifecycle = await _operations(outbox, accountId);
-        expect(
-          documents.prepareOfflineLifecycleSubmission(
-            created,
-            OutboxOperationKind.documentComplete,
-          ),
-          isTrue,
+        await _openDocumentDetail(tester, created.id);
+        await scrollUntilVisible(
+          tester,
+          Key('document-complete-${created.id}'),
         );
-        final lifecycleSnapshot = documents.offlineSubmissionSnapshot;
-        expect(lifecycleSnapshot, isNotNull);
-        expect(
-          await documents.confirmOfflineSubmission(lifecycleSnapshot!),
-          isTrue,
+        await tapAndSettle(tester, Key('document-complete-${created.id}'));
+        await expectText(tester, '完成单据');
+        await tapFinderAndSettle(
+          tester,
+          find.widgetWithText(FilledButton, '确认完成'),
+          description: 'confirm lifecycle action',
+        );
+        await expectText(tester, '保存到待同步');
+        await tapFinderAndSettle(
+          tester,
+          find.widgetWithText(FilledButton, '确认保存'),
+          description: 'queue lifecycle action',
         );
         final lifecycleGraph = await _newOperations(
           outbox,
@@ -313,10 +427,11 @@ void main() {
           withAttachment: false,
         );
         final beforeConflict = await _operations(outbox, accountId);
-        final conflictOperation = await _queueCurrentDraft(
+        final conflictOperation = (await _queueCurrentDraft(
+          tester,
           documents,
           beforeConflict,
-        );
+        )).operation;
         _recordOperation(conflictOperation, operationIds, idempotencyHashes);
         await _fault('reset');
         await _fault('server-conflict');
@@ -328,8 +443,16 @@ void main() {
         );
         conflictVisible = conflicted.state == OutboxState.conflict;
         expect(conflictVisible, isTrue);
-        final syncCenter = await _syncCenterViewModel(tester);
-        await syncCenter.discard(conflicted.operationId);
+        attentionVisible = await _operationVisibleInAttention(
+          tester,
+          conflicted.operationId,
+        );
+        expect(attentionVisible, isTrue);
+        await tapFinderAndSettle(
+          tester,
+          find.byTooltip('丢弃记录').first,
+          description: 'discard conflicted operation',
+        );
         conflictResolved = !(await _operations(
           outbox,
           accountId,
@@ -347,7 +470,11 @@ void main() {
           withAttachment: false,
         );
         final beforeStale = await _operations(outbox, accountId);
-        final staleOperation = await _queueCurrentDraft(documents, beforeStale);
+        final staleOperation = (await _queueCurrentDraft(
+          tester,
+          documents,
+          beforeStale,
+        )).operation;
         _recordOperation(staleOperation, operationIds, idempotencyHashes);
         await _fault('reset');
         await _fault('stale-session');
@@ -378,6 +505,13 @@ void main() {
                   operation.operationId == staleOperation.operationId,
             );
         expect(stalePermissionBlocked, isTrue);
+        attentionVisible =
+            attentionVisible &&
+            await _operationVisibleInAttention(
+              tester,
+              staleOperation.operationId,
+            );
+        expect(attentionVisible, isTrue);
         await _fault('reset');
 
         await _returnToShell(tester);
@@ -391,6 +525,13 @@ void main() {
         final transactionCount = documents.transactions
             .where((transaction) => transaction.docId == created.id)
             .length;
+        serverLifecycleVerified =
+            documents.recentDocuments.any(
+              (document) =>
+                  document.id == created.id && document.status == '已完成',
+            ) &&
+            transactionCount == 1;
+        expect(serverLifecycleVerified, isTrue);
         final duplicateDocumentCount =
             <String>[
               remarks.queued,
@@ -416,11 +557,13 @@ void main() {
         await waitForKey(tester, const Key('login-username-field'));
         final ownershipStore = store as OfflineOwnershipStore;
         final cleanupSnapshot = await ownershipStore.inspectAccount(accountId);
+        final stagingDirectoryEmpty = await _stagingDirectoryEmpty();
         logoutCleanupCompleted =
             cleanupSnapshot.cacheEntries == 0 &&
             cleanupSnapshot.drafts == 0 &&
             cleanupSnapshot.outboxOperations == 0 &&
-            cleanupSnapshot.draftAttachmentRequestIds.isEmpty;
+            cleanupSnapshot.draftAttachmentRequestIds.isEmpty &&
+            stagingDirectoryEmpty;
         expect(logoutCleanupCompleted, isTrue);
         await _fault('reset');
         baselineRestored = true;
@@ -440,12 +583,16 @@ void main() {
           'duplicateDocumentCount': duplicateDocumentCount,
           'duplicateInventoryTransactionCount': transactionCount - 1,
           'attachmentHash': attachmentHash,
+          'stagedAttachmentHash': stagedAttachmentHash,
           'attachmentCount': attachmentCount,
           'databaseBytes': databaseBytes,
           'cleanup': <String, bool>{
             'accountCacheCleared': logoutCleanupCompleted,
             'outboxCleared': cleanupSnapshot.outboxOperations == 0,
-            'stagingCleared': cleanupSnapshot.draftAttachmentRequestIds.isEmpty,
+            'stagingCleared':
+                cleanupSnapshot.draftAttachmentRequestIds.isEmpty &&
+                stagingDirectoryEmpty,
+            'stagingDirectoryEmpty': stagingDirectoryEmpty,
             'baselineRestored': baselineRestored,
           },
           'journey': <String, bool>{
@@ -454,10 +601,17 @@ void main() {
             'cachedReportRead': true,
             'cachedDetailRead': true,
             'draftRecovered': true,
+            'scannerCallbackCompleted': scannerCallbackCompleted,
+            'autosaveCompleted': autosaveCompleted,
+            'nativeDatabaseReopened': nativeDatabaseReopened,
+            'queuedVisible': queuedVisible,
+            'attentionVisible': attentionVisible,
             'explicitSyncConfirmed': true,
             'unknownResponseProbed': unknownResponseProbed,
             'idempotentReplaySingleEffect': duplicateSingleEffect,
             'attachmentDependencyCompleted': attachmentDependencyCompleted,
+            'serverAttachmentVerified': serverAttachmentVerified,
+            'serverLifecycleVerified': serverLifecycleVerified,
             'staleSessionBlocked': staleSessionBlocked,
             'stalePermissionBlocked': stalePermissionBlocked,
             'conflictVisible': conflictVisible,
@@ -466,8 +620,12 @@ void main() {
             'databaseCorruptionQuarantined': databaseCorruptionQuarantined,
           },
         };
+        await checkpointFile.delete();
         binding.reportData = evidence;
-        debugPrint('RIMS_E2E_RESULT ${jsonEncode(evidence)}');
+        debugPrintSynchronously(
+          'RIMS_E2E_RESULT ${jsonEncode(evidence)}',
+          wrapWidth: null,
+        );
         await tester.pump(const Duration(seconds: 1));
       } finally {
         try {
@@ -481,6 +639,49 @@ void main() {
       }
     });
   });
+}
+
+Future<File> _checkpointFile() async {
+  final root = await getApplicationSupportDirectory();
+  return File('${root.path}${Platform.pathSeparator}rims_m11_checkpoint.json');
+}
+
+Future<Map<String, dynamic>?> _readCheckpoint(File file) async {
+  if (!await file.exists()) return null;
+  final decoded = jsonDecode(await file.readAsString());
+  if (decoded is! Map<String, dynamic>) {
+    throw const FormatException('M11 checkpoint must be a JSON object.');
+  }
+  return decoded;
+}
+
+Future<void> _writeCheckpoint(
+  File file,
+  Map<String, Object?> checkpoint,
+) async {
+  await file.writeAsString(jsonEncode(checkpoint), flush: true);
+}
+
+void _emitStage(String stage) {
+  debugPrintSynchronously(
+    'RIMS_E2E_STAGE ${jsonEncode(<String, Object?>{'stage': stage, 'processId': pid, 'startedAt': DateTime.now().toUtc().toIso8601String()})}',
+    wrapWidth: null,
+  );
+}
+
+Future<void> _waitForPersistedDraft(
+  WidgetTester tester,
+  DocumentsViewModel documents, {
+  required String accountId,
+  required String remark,
+}) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 2));
+  do {
+    final drafts = await documents.draftRepository!.list(accountId);
+    if (drafts.any((draft) => draft.payload['remark'] == remark)) return;
+    await tester.pump(const Duration(milliseconds: 10));
+  } while (DateTime.now().isBefore(deadline));
+  throw TestFailure('Debounced autosave did not persist the M11 draft.');
 }
 
 final class _JourneyRemarks {
@@ -751,44 +952,128 @@ Future<void> _addProductBySku(
   );
 }
 
-Future<OutboxOperation> _queueCurrentDraft(
+Future<({OutboxOperation operation, int enqueueLatencyMs})> _queueCurrentDraft(
+  WidgetTester tester,
   DocumentsViewModel documents,
   List<OutboxOperation> before,
 ) async {
-  expect(await documents.prepareOfflineSubmission(), isTrue);
-  final snapshot = documents.offlineSubmissionSnapshot;
-  expect(snapshot, isNotNull);
-  expect(await documents.confirmOfflineSubmission(snapshot!), isTrue);
-  final after = await _operations(
-    documents.outboxRepository!,
-    documents.accountId!,
+  await scrollUntilVisible(
+    tester,
+    const Key('document-create-button'),
+    scrollable: find.byKey(const Key('documents-scroll-view')),
   );
+  await tapAndSettle(tester, const Key('document-create-button'));
+  if (find.text('保存到待同步').evaluate().isEmpty) {
+    await waitForKey(tester, const Key('document-create-button'));
+    await tapAndSettle(tester, const Key('document-create-button'));
+  }
+  await expectText(tester, '保存到待同步');
+  final confirm = find.widgetWithText(FilledButton, '确认保存');
+  await waitUntil(
+    tester,
+    description: 'confirm offline queue button',
+    condition: () => confirm.hitTestable().evaluate().isNotEmpty,
+  );
+  final enqueueWatch = Stopwatch()..start();
+  await tester.tap(confirm.hitTestable().first);
+  await tester.pump();
+  List<OutboxOperation> after = const [];
   final previousIds = before.map((operation) => operation.operationId).toSet();
-  return after.singleWhere(
+  final deadline = DateTime.now().add(const Duration(milliseconds: 250));
+  do {
+    after = await _operations(
+      documents.outboxRepository!,
+      documents.accountId!,
+    );
+    if (after.any(
+      (operation) =>
+          !previousIds.contains(operation.operationId) &&
+          operation.kind == OutboxOperationKind.documentCreate,
+    )) {
+      break;
+    }
+    await tester.pump(const Duration(milliseconds: 10));
+  } while (DateTime.now().isBefore(deadline));
+  enqueueWatch.stop();
+  final operation = after.singleWhere(
     (operation) =>
         !previousIds.contains(operation.operationId) &&
         operation.kind == OutboxOperationKind.documentCreate,
   );
+  await settleBounded(tester);
+  return (
+    operation: operation,
+    enqueueLatencyMs: enqueueWatch.elapsedMilliseconds,
+  );
 }
 
 Future<void> _syncOperation(WidgetTester tester, String operationId) async {
-  await _returnToShell(tester);
-  await tapAndSettle(tester, const Key('bottom-nav-profile'));
-  await scrollUntilVisible(tester, const Key('profile-sync-center-entry'));
-  await tapAndSettle(tester, const Key('profile-sync-center-entry'));
+  await _openSyncCenter(tester);
   final viewModel = await _syncCenterViewModel(tester);
   await waitUntil(
     tester,
     description: 'sync center loaded',
     condition: () => !viewModel.isLoading,
   );
-  await viewModel.reviewAndSync(operationId);
+  await expectText(tester, operationId);
+  await tapFinderAndSettle(
+    tester,
+    find.text('复核并同步').first,
+    description: 'review operation $operationId',
+  );
+  await expectText(tester, '复核并同步');
+  await tapFinderAndSettle(
+    tester,
+    find.widgetWithText(FilledButton, '确认同步'),
+    description: 'confirm explicit sync $operationId',
+  );
   await waitUntil(
     tester,
     description: 'sync command completed',
     condition: () => !viewModel.isBusy,
     timeout: const Duration(seconds: 12),
   );
+}
+
+Future<void> _openSyncCenter(WidgetTester tester) async {
+  if (find.text('同步中心').evaluate().isNotEmpty) return;
+  await _returnToShell(tester);
+  await tapAndSettle(tester, const Key('bottom-nav-profile'));
+  await scrollUntilVisible(tester, const Key('profile-sync-center-entry'));
+  await tapAndSettle(tester, const Key('profile-sync-center-entry'));
+  await expectText(tester, '同步中心');
+}
+
+Future<bool> _operationVisibleInSyncCenter(
+  WidgetTester tester,
+  String operationId,
+) async {
+  await _openSyncCenter(tester);
+  await waitUntil(
+    tester,
+    description: 'queued operation visible in Sync Center',
+    condition: () => find.textContaining(operationId).evaluate().isNotEmpty,
+  );
+  return find.textContaining(operationId).evaluate().isNotEmpty &&
+      find.text('复核并同步').evaluate().isNotEmpty;
+}
+
+Future<bool> _operationVisibleInAttention(
+  WidgetTester tester,
+  String operationId,
+) async {
+  await _openSyncCenter(tester);
+  await tapFinderAndSettle(
+    tester,
+    find.textContaining('需处理').first,
+    description: 'open Sync Center attention tab',
+  );
+  await waitUntil(
+    tester,
+    description: 'attention operation visible',
+    condition: () => find.textContaining(operationId).evaluate().isNotEmpty,
+  );
+  return find.textContaining(operationId).evaluate().isNotEmpty;
 }
 
 Future<List<OutboxOperation>> _operations(
@@ -855,6 +1140,35 @@ Future<int> _databaseBytes() async {
     }
   }
   return bytes;
+}
+
+Future<String> _singleStagedAttachmentHash() async {
+  final root = await getApplicationSupportDirectory();
+  final stagingRoot = Directory(
+    '${root.path}${Platform.pathSeparator}rims_attachments',
+  );
+  final files = <File>[];
+  if (await stagingRoot.exists()) {
+    await for (final entity in stagingRoot.list(recursive: true)) {
+      if (entity is File && !entity.path.contains('thumbnails')) {
+        files.add(entity);
+      }
+    }
+  }
+  expect(files, hasLength(1), reason: 'one physical staged attachment');
+  return sha256.convert(await files.single.readAsBytes()).toString();
+}
+
+Future<bool> _stagingDirectoryEmpty() async {
+  final root = await getApplicationSupportDirectory();
+  final stagingRoot = Directory(
+    '${root.path}${Platform.pathSeparator}rims_attachments',
+  );
+  if (!await stagingRoot.exists()) return true;
+  await for (final entity in stagingRoot.list(recursive: true)) {
+    if (entity is File) return false;
+  }
+  return true;
 }
 
 Future<bool> _verifyCorruptionQuarantine() async {

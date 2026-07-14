@@ -1,3 +1,5 @@
+param([switch]$SkipSourceContract)
+
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
@@ -39,7 +41,7 @@ function Invoke-ExpectFailure {
 if (-not (Test-Path -LiteralPath $wrapper -PathType Leaf)) {
   throw "Missing M11 smoke wrapper: $wrapper"
 }
-$wrapperText = Get-Content -LiteralPath $wrapper -Raw
+$wrapperText = Get-Content -LiteralPath $wrapper -Raw -Encoding UTF8
 foreach ($childCleanupGate in @(
     'childReport.baselineRestore.ok',
     'childReport.adbStateRestore.ok',
@@ -52,7 +54,7 @@ foreach ($childCleanupGate in @(
 $integrationTestPath = Join-Path `
   $scriptDir `
   '..\rims_frontend\integration_test\m11_offline_sync_test.dart'
-$integrationTestText = Get-Content -LiteralPath $integrationTestPath -Raw
+$integrationTestText = Get-Content -LiteralPath $integrationTestPath -Raw -Encoding UTF8
 foreach ($faultAction in @(
     'airplane-mode', 'latency', 'packet-loss', 'unreachable', 'wifi-switch',
     'unknown-response', 'duplicate-delivery', 'server-conflict',
@@ -64,10 +66,44 @@ foreach ($faultAction in @(
 }
 $configText = Get-Content `
   -LiteralPath (Join-Path $scriptDir '..\rims_frontend\integration_test\support\rims_e2e_config.dart') `
-  -Raw
+  -Raw `
+  -Encoding UTF8
 Assert-True `
   -Condition ($configText.Contains("bool.fromEnvironment('RIMS_E2E_M11')")) `
   -Message 'M11 fault hooks must default to disabled without an explicit define.'
+Assert-True `
+  -Condition ($configText.Contains("'RIMS_E2E_M11_STAGE'")) `
+  -Message 'M11 process staging must require an explicit test define.'
+if (-not $SkipSourceContract) {
+foreach ($forbiddenJourneyBypass in @(
+    'await documents.saveDraft()',
+    'documents.prepareOfflineSubmission(',
+    'documents.confirmOfflineSubmission(',
+    'viewModel.reviewAndSync(',
+    'syncCenter.discard('
+  )) {
+  Assert-True `
+    -Condition (-not $integrationTestText.Contains($forbiddenJourneyBypass)) `
+    -Message "M11 journey bypasses UI with '$forbiddenJourneyBypass'."
+}
+foreach ($requiredJourneySurface in @(
+    "Key('document-scan-product-button')",
+    "Key('scanner-permission-retry')",
+    "Key('profile-draft-manager-entry')",
+    "Key('document-create-button')",
+    "description: 'confirm offline queue button'",
+    "description: 'review operation `$operationId'",
+    "description: 'confirm explicit sync `$operationId'",
+    "description: 'discard conflicted operation'",
+    'repository.download(',
+    'rims_attachments',
+    "'RIMS_E2E_STAGE `$"
+  )) {
+  Assert-True `
+    -Condition ($integrationTestText.Contains($requiredJourneySurface)) `
+    -Message "M11 journey omitted real surface '$requiredJourneySurface'."
+}
+}
 
 $plan = (& $wrapper `
     -ListPlan `
@@ -153,12 +189,19 @@ try {
     duplicateDocumentCount = 0
     duplicateInventoryTransactionCount = 0
     attachmentHash = ('d' * 64)
+    stagedAttachmentHash = ('d' * 64)
     attachmentCount = 1
     databaseBytes = 1048576
+    processStages = @(
+      [ordered]@{ stage = 'seed'; processId = 101; startedAt = '2026-07-14T00:00:00Z' },
+      [ordered]@{ stage = 'offline-draft'; processId = 202; startedAt = '2026-07-14T00:01:00Z' },
+      [ordered]@{ stage = 'recovery'; processId = 303; startedAt = '2026-07-14T00:02:00Z' }
+    )
     cleanup = [ordered]@{
       accountCacheCleared = $true
       outboxCleared = $true
       stagingCleared = $true
+      stagingDirectoryEmpty = $true
       baselineRestored = $true
     }
     journey = [ordered]@{
@@ -166,15 +209,22 @@ try {
       cachedInventoryRead = $true
       cachedReportRead = $true
       cachedDetailRead = $true
+      scannerCallbackCompleted = $true
+      autosaveCompleted = $true
       draftRecovered = $true
+      nativeDatabaseReopened = $true
+      queuedVisible = $true
       explicitSyncConfirmed = $true
       unknownResponseProbed = $true
       idempotentReplaySingleEffect = $true
       attachmentDependencyCompleted = $true
       staleSessionBlocked = $true
       stalePermissionBlocked = $true
+      attentionVisible = $true
       conflictVisible = $true
       conflictResolved = $true
+      serverAttachmentVerified = $true
+      serverLifecycleVerified = $true
       logoutCleanupCompleted = $true
       databaseCorruptionQuarantined = $true
     }
@@ -300,12 +350,14 @@ try {
     -Message 'Cleanup-only result.'
 
   $gateCases = @(
+    @{ Name = 'negative-cache'; Property = 'cacheReadLatencyMs'; Value = -1 },
     @{ Name = 'cache'; Property = 'cacheReadLatencyMs'; Value = 501 },
     @{ Name = 'draft'; Property = 'draftSaveLatencyMs'; Value = 251 },
     @{ Name = 'recovery'; Property = 'processRecoveryLatencyMs'; Value = 1001 },
     @{ Name = 'enqueue'; Property = 'outboxEnqueueLatencyMs'; Value = 251 },
     @{ Name = 'sync'; Property = 'syncTotalMs'; Value = 10001 },
     @{ Name = 'database'; Property = 'databaseBytes'; Value = 26214401 },
+    @{ Name = 'missing-server-attachment'; Property = 'attachmentCount'; Value = 0 },
     @{ Name = 'documents'; Property = 'duplicateDocumentCount'; Value = 1 },
     @{ Name = 'transactions'; Property = 'duplicateInventoryTransactionCount'; Value = 1 }
   )
@@ -325,6 +377,95 @@ try {
         '-ArtifactRoot', (Join-Path $resolvedTempRoot "invalid-$($case.Name)-artifacts")
       ) | Out-Null
   }
+
+  $scalarOperationsPath = Join-Path $resolvedTempRoot 'scalar-operations.json'
+  $scalarOperations = $fixture | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+  $scalarOperations.operationIds = 123
+  $scalarOperations | ConvertTo-Json -Depth 10 | Set-Content `
+    -LiteralPath $scalarOperationsPath `
+    -Encoding UTF8
+  Invoke-ExpectFailure `
+    -ExpectedExitCode 2 `
+    -Message 'Scalar operation IDs.' `
+    -Arguments @(
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $wrapper,
+      '-AndroidDevice', 'Medium_Phone_API_36.1', '-TestMode',
+      '-FixturePath', $scalarOperationsPath,
+      '-ReportPath', (Join-Path $resolvedTempRoot 'scalar-operations-report.json'),
+      '-ArtifactRoot', (Join-Path $resolvedTempRoot 'scalar-operations-artifacts')
+    ) | Out-Null
+
+  $scalarHashPath = Join-Path $resolvedTempRoot 'scalar-hash.json'
+  $scalarHash = $fixture | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+  $scalarHash.idempotencyKeyHashes = 'a' * 64
+  $scalarHash | ConvertTo-Json -Depth 10 | Set-Content `
+    -LiteralPath $scalarHashPath `
+    -Encoding UTF8
+  Invoke-ExpectFailure `
+    -ExpectedExitCode 2 `
+    -Message 'Scalar idempotency hash.' `
+    -Arguments @(
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $wrapper,
+      '-AndroidDevice', 'Medium_Phone_API_36.1', '-TestMode',
+      '-FixturePath', $scalarHashPath,
+      '-ReportPath', (Join-Path $resolvedTempRoot 'scalar-hash-report.json'),
+      '-ArtifactRoot', (Join-Path $resolvedTempRoot 'scalar-hash-artifacts')
+    ) | Out-Null
+
+  $wrongServerHashPath = Join-Path $resolvedTempRoot 'wrong-server-hash.json'
+  $wrongServerHash = $fixture | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+  $wrongServerHash.attachmentHash = 'e' * 64
+  $wrongServerHash | ConvertTo-Json -Depth 10 | Set-Content `
+    -LiteralPath $wrongServerHashPath `
+    -Encoding UTF8
+  Invoke-ExpectFailure `
+    -ExpectedExitCode 2 `
+    -Message 'Server attachment hash mismatch.' `
+    -Arguments @(
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $wrapper,
+      '-AndroidDevice', 'Medium_Phone_API_36.1', '-TestMode',
+      '-FixturePath', $wrongServerHashPath,
+      '-ReportPath', (Join-Path $resolvedTempRoot 'wrong-server-hash-report.json'),
+      '-ArtifactRoot', (Join-Path $resolvedTempRoot 'wrong-server-hash-artifacts')
+    ) | Out-Null
+
+  $stagingResidualPath = Join-Path $resolvedTempRoot 'staging-residual.json'
+  $stagingResidual = $fixture | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+  $stagingResidual.cleanup.stagingDirectoryEmpty = $false
+  $stagingResidual | ConvertTo-Json -Depth 10 | Set-Content `
+    -LiteralPath $stagingResidualPath `
+    -Encoding UTF8
+  Invoke-ExpectFailure `
+    -ExpectedExitCode 2 `
+    -Message 'Physical staging residue.' `
+    -Arguments @(
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $wrapper,
+      '-AndroidDevice', 'Medium_Phone_API_36.1', '-TestMode',
+      '-FixturePath', $stagingResidualPath,
+      '-ReportPath', (Join-Path $resolvedTempRoot 'staging-residual-report.json'),
+      '-ArtifactRoot', (Join-Path $resolvedTempRoot 'staging-residual-artifacts')
+    ) | Out-Null
+
+  Invoke-ExpectFailure `
+    -ExpectedExitCode 2 `
+    -Message 'Malformed frontend commit.' `
+    -Arguments @(
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $wrapper,
+      '-AndroidDevice', 'Medium_Phone_API_36.1', '-TestMode',
+      '-FixturePath', $fixturePath, '-TestFrontendCommit', 'bad-commit',
+      '-ReportPath', (Join-Path $resolvedTempRoot 'bad-commit-report.json'),
+      '-ArtifactRoot', (Join-Path $resolvedTempRoot 'bad-commit-artifacts')
+    ) | Out-Null
+  Invoke-ExpectFailure `
+    -ExpectedExitCode 2 `
+    -Message 'Mismatched frontend commit.' `
+    -Arguments @(
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $wrapper,
+      '-AndroidDevice', 'Medium_Phone_API_36.1', '-TestMode',
+      '-FixturePath', $fixturePath, '-TestFrontendCommit', ('a' * 40),
+      '-ReportPath', (Join-Path $resolvedTempRoot 'mismatch-commit-report.json'),
+      '-ArtifactRoot', (Join-Path $resolvedTempRoot 'mismatch-commit-artifacts')
+    ) | Out-Null
 
   $wrongTypes = $fixture | ConvertTo-Json -Depth 8 | ConvertFrom-Json
   $wrongTypes.cacheReadLatencyMs = '120'

@@ -29,6 +29,9 @@ abstract final class RimsE2eConfig {
     defaultValue: 'provider-file',
   );
   static const bool m11Enabled = bool.fromEnvironment('RIMS_E2E_M11');
+  static const bool m11StageOrchestrated = bool.fromEnvironment(
+    'RIMS_E2E_M11_STAGE',
+  );
   static const String m11FaultControlUrl = String.fromEnvironment(
     'RIMS_E2E_M11_FAULT_CONTROL_URL',
   );

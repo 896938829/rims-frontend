@@ -16,6 +16,13 @@ param(
   [ValidateSet('pre-existing', 'controller-started')]
   [string]$TestEmulatorOwnership = 'pre-existing',
   [switch]$TestPreExistingRuntime,
+  [ValidateSet('stopped', 'healthy-pre-existing', 'stale')]
+  [string]$TestRuntimeState = 'stopped',
+  [ValidateSet('none', 'nonzero', 'throw')]
+  [string]$TestAdbFailure = 'none',
+  [string]$TestMarkerFixturePath,
+  [ValidateSet('Result', 'Stage')]
+  [string]$TestExpectedMarker = 'Result',
   [string]$CleanupRecordPath,
   [string]$M11CommandRecordPath,
   [ValidateSet('baseline', 'field-operations', 'offline-sync')]
@@ -63,10 +70,14 @@ if ([string]::IsNullOrWhiteSpace($AndroidDevice)) {
   } else { 'none detected' }
   throw "Configure -AndroidDevice or RIMS_ANDROID_DEVICE with an installed AVD name. Available AVDs: $availableText. Online devices: $onlineText."
 }
-if ($TestMode -and [string]::IsNullOrWhiteSpace($FailStep)) {
+if ($TestMode -and
+    [string]::IsNullOrWhiteSpace($FailStep) -and
+    [string]::IsNullOrWhiteSpace($TestMarkerFixturePath)) {
   throw 'TestMode requires an explicit FailStep.'
 }
-if ($TestMode -and $FailStep -notin @(
+if ($TestMode -and
+    -not [string]::IsNullOrWhiteSpace($FailStep) -and
+    $FailStep -notin @(
     @($stepNames | Where-Object { $_ -ne 'write-report' }) + 'baseline-restore'
   )) {
   throw "TestMode FailStep must be one of: $(@(@($stepNames | Where-Object { $_ -ne 'write-report' }) + 'baseline-restore') -join ', ')."
@@ -100,10 +111,15 @@ $fieldDefines = if ($Phase -eq 'field-operations') {
 $offlineDefines = if ($Phase -eq 'offline-sync') {
   @(
     '--dart-define=RIMS_E2E_M11=true',
+    '--dart-define=RIMS_E2E_M11_STAGE=true',
     "--dart-define=RIMS_E2E_M11_FAULT_CONTROL_URL=http://10.0.2.2:$FaultProxyPort/__rims_m11",
     '--dart-define=RIMS_E2E_FIELD_OPERATIONS=true',
+    '--dart-define=RIMS_E2E_BARCODE=M10-ACTIVE-001',
     '--dart-define=RIMS_E2E_PICKED_FILE=m11-offline-attachment'
   )
+} else { @() }
+$offlineRunnerArguments = if ($Phase -eq 'offline-sync') {
+  @('--no-uninstall')
 } else { @() }
 $failureArtifactNames = @(
   'device-screenshot',
@@ -130,7 +146,8 @@ $plan = [pscustomobject][ordered]@{
   e2eResultMarker = 'RIMS_E2E_RESULT'
   artifactDirectory = 'per-run-unique'
   command = @(
-    'flutter', 'test', '--no-pub',
+    'flutter', 'test', '--no-pub'
+  ) + $offlineRunnerArguments + @(
     $integrationTestPath,
     '-d', '<resolved-serial>',
     "--dart-define=API_BASE_URL=$apiBaseUrl"
@@ -169,6 +186,9 @@ $plan = [pscustomobject][ordered]@{
       controlPath = '/__rims_m11'
     }
   } else { $null }
+  processStages = if ($Phase -eq 'offline-sync') {
+    @('seed', 'offline-draft', 'recovery')
+  } else { @() }
   cleanup = [pscustomobject][ordered]@{
     preExistingDevice = 'preserve'
     controllerStartedDevice = 'stop-only-on-pid-and-start-time-match'
@@ -241,10 +261,12 @@ $failedStep = $null
 $startedAt = [DateTimeOffset]::Now
 $androidSerial = $null
 $emulatorOwned = $false
+$emulatorOwnedByRun = $false
 $emulatorIdentity = $null
 $fixtureCounts = $null
 $e2eData = $null
 $runtimeOwnedByRun = $false
+$runtimeDisposition = 'unknown'
 $fixturesMutated = $false
 $hostBridgeProcess = $null
 $hostBridgeIdentity = $null
@@ -297,6 +319,11 @@ $adbStateRestore = [pscustomobject][ordered]@{
   error = ''
 }
 $faultProxyCleanup = [pscustomobject][ordered]@{
+  attempted = $false
+  ok = $true
+  error = ''
+}
+$faultControl = [pscustomobject][ordered]@{
   attempted = $false
   ok = $true
   error = ''
@@ -385,7 +412,7 @@ function Get-CurrentAndroidRuntime {
   $script:emulatorIdentity = [pscustomobject][ordered]@{
     avdName = [string]$state.emulator.avdName
     serial = $script:androidSerial
-    owned = $script:emulatorOwned
+    owned = $script:emulatorOwnedByRun
     windowsPid = $state.emulator.windowsPid
     windowsProcessStartTimeUtc = $state.emulator.windowsProcessStartTimeUtc
   }
@@ -403,6 +430,71 @@ function Invoke-Adb {
     -FilePath $adb `
     -Arguments $Arguments `
     -TimeoutSeconds $TimeoutSeconds
+}
+
+function Resolve-RimsAndroidSmokeRuntimeDisposition {
+  param(
+    [bool]$StateExists,
+    [bool]$RequestMatches,
+    [bool]$Healthy
+  )
+  if (-not $StateExists) { return 'start' }
+  if ($RequestMatches -and $Healthy) { return 'reuse' }
+  return 'reject'
+}
+
+function Get-TestRuntimeDisposition {
+  $state = if ($TestPreExistingRuntime) { 'healthy-pre-existing' } else { $TestRuntimeState }
+  return Resolve-RimsAndroidSmokeRuntimeDisposition `
+    -StateExists:($state -ne 'stopped') `
+    -RequestMatches:($state -eq 'healthy-pre-existing') `
+    -Healthy:($state -eq 'healthy-pre-existing')
+}
+
+function ConvertFrom-RimsStrictE2eMarker {
+  param(
+    [Parameter(Mandatory = $true)][string]$OutputText,
+    [Parameter(Mandatory = $true)][ValidateSet('Result', 'Stage')]
+    [string]$ExpectedMarker
+  )
+  $marker = if ($ExpectedMarker -eq 'Result') {
+    'RIMS_E2E_RESULT'
+  } else { 'RIMS_E2E_STAGE' }
+  $markerLines = @($OutputText -split '\r?\n' | Where-Object {
+      $_ -match "^\s*$marker(?:\s|$)"
+    })
+  if ($markerLines.Count -ne 1) {
+    throw "Expected exactly one $marker marker, found $($markerLines.Count)."
+  }
+  $line = [string]$markerLines[0]
+  if ($line -notmatch "^\s*$marker\s+(?<json>\{.*\})\s*$") {
+    throw "$marker marker must contain exactly one JSON object."
+  }
+  try {
+    $decoded = $Matches.json | ConvertFrom-Json -ErrorAction Stop
+  } catch {
+    throw "$marker marker contains invalid JSON."
+  }
+  if ($null -eq $decoded -or $decoded -is [Array] -or
+      $decoded -is [string] -or $decoded -is [ValueType] -or
+      @($decoded.PSObject.Properties).Count -eq 0) {
+    throw "$marker payload must be a non-empty JSON object."
+  }
+  return $decoded
+}
+
+if ($TestMode -and -not [string]::IsNullOrWhiteSpace($TestMarkerFixturePath)) {
+  try {
+    $fixtureText = Get-Content -LiteralPath $TestMarkerFixturePath -Raw
+    $parsedMarker = ConvertFrom-RimsStrictE2eMarker `
+      -OutputText $fixtureText `
+      -ExpectedMarker $TestExpectedMarker
+    Write-Output ($parsedMarker | ConvertTo-Json -Depth 20 -Compress)
+    exit 0
+  } catch {
+    [Console]::Error.WriteLine($_.Exception.Message)
+    exit 1
+  }
 }
 
 function Add-M11Command {
@@ -436,6 +528,17 @@ function Start-M11FaultProxy {
       controlPath = '/__rims_m11'
     }
     Add-M11Command "start-owned-fault-proxy:$FaultProxyPort"
+    if ($TestAdbFailure -ne 'none') {
+      $script:faultControl.attempted = $true
+      $script:faultControl.ok = $false
+      $script:faultControl.error = if ($TestAdbFailure -eq 'nonzero') {
+        'Injected ADB exit 17 with stderr.'
+      } else { 'Injected ADB executor exception.' }
+      Add-M11Command 'control-airplane-mode:false'
+      Throw-AndroidChildFailure `
+        -Message $script:faultControl.error `
+        -ExitCode $(if ($TestAdbFailure -eq 'nonzero') { 31 } else { 32 })
+    }
     return
   }
   $script:initialAirplaneMode = Get-M11AdbText @(
@@ -564,23 +667,28 @@ public static class RimsM11FaultProxy {
         case "server-conflict": mode = "server-conflict-next"; break;
       }
     }
-    if (waitForNetworkActions) WaitForNetworkActions();
-    if (action == "airplane-mode") {
-      ScheduleNetworkAction(
-        "shell cmd connectivity airplane-mode enable",
-        "shell cmd connectivity airplane-mode disable",
-        ParseInt(Query(path, "restoreMs"), 3000));
-    } else if (action == "wifi-switch") {
-      ScheduleNetworkAction(
-        "shell svc wifi disable",
-        "shell svc wifi enable",
-        ParseInt(Query(path, "restoreMs"), 1500));
+    try {
+      if (waitForNetworkActions) WaitForNetworkActions();
+      if (action == "airplane-mode") {
+        StartNetworkAction(
+          "shell cmd connectivity airplane-mode enable",
+          "shell cmd connectivity airplane-mode disable",
+          ParseInt(Query(path, "restoreMs"), 3000));
+      } else if (action == "wifi-switch") {
+        StartNetworkAction(
+          "shell svc wifi disable",
+          "shell svc wifi enable",
+          ParseInt(Query(path, "restoreMs"), 1500));
+      }
+      string current;
+      int currentDelay;
+      lock (Gate) { current = mode; currentDelay = delayMs; }
+      WriteJson(stream, 200, "OK", "{\"ok\":true,\"mode\":\"" +
+        current + "\",\"delayMs\":" + currentDelay + "}");
+    } catch (Exception error) {
+      Log("control-adb-error " + error.GetType().Name + " " + error.Message);
+      WriteJson(stream, 500, "ADB Failure", "{\"ok\":false,\"error\":\"adb-command-failed\"}");
     }
-    string current;
-    int currentDelay;
-    lock (Gate) { current = mode; currentDelay = delayMs; }
-    WriteJson(stream, 200, "OK", "{\"ok\":true,\"mode\":\"" +
-      current + "\",\"delayMs\":" + currentDelay + "}");
   }
 
   static void Forward(byte[] request, NetworkStream destination) {
@@ -678,8 +786,9 @@ public static class RimsM11FaultProxy {
     return int.TryParse(value, out parsed) ? parsed : fallback;
   }
 
-  static void ScheduleNetworkAction(
+  static void StartNetworkAction(
       string faultArguments, string restoreArguments, int restoreMs) {
+    RunAdb(faultArguments);
     int generation;
     lock (Gate) {
       generation = ++networkGeneration;
@@ -687,10 +796,10 @@ public static class RimsM11FaultProxy {
     }
     Task.Run(async () => {
       try {
-        if (!await DelayWhileCurrent(generation, 150)) return;
-        RunAdb(faultArguments);
         if (!await DelayWhileCurrent(generation, restoreMs)) return;
         RunAdb(restoreArguments);
+      } catch (Exception error) {
+        Log("adb-restore-error " + error.GetType().Name + " " + error.Message);
       } finally {
         lock (Gate) activeNetworkActions--;
       }
@@ -718,20 +827,27 @@ public static class RimsM11FaultProxy {
   }
 
   static void RunAdb(string arguments) {
-    try {
-      var info = new ProcessStartInfo(adb, "-s \"" + serial + "\" " + arguments) {
-        UseShellExecute = false, CreateNoWindow = true,
-        RedirectStandardOutput = true, RedirectStandardError = true
-      };
-      using (var process = Process.Start(info)) {
-        if (!process.WaitForExit(30000)) {
-          process.Kill();
-          process.WaitForExit();
-          throw new TimeoutException("adb network command timed out");
-        }
-        Log("adb exit=" + process.ExitCode + " args=" + arguments);
+    var info = new ProcessStartInfo(adb, "-s \"" + serial + "\" " + arguments) {
+      UseShellExecute = false, CreateNoWindow = true,
+      RedirectStandardOutput = true, RedirectStandardError = true
+    };
+    using (var process = Process.Start(info)) {
+      if (process == null) throw new InvalidOperationException("adb process did not start");
+      var stdoutTask = process.StandardOutput.ReadToEndAsync();
+      var stderrTask = process.StandardError.ReadToEndAsync();
+      if (!process.WaitForExit(30000)) {
+        process.Kill();
+        process.WaitForExit();
+        throw new TimeoutException("adb network command timed out");
       }
-    } catch (Exception error) { Log("adb-error " + error.Message); }
+      var stdout = stdoutTask.Result.Trim();
+      var stderr = stderrTask.Result.Trim();
+      Log("adb exit=" + process.ExitCode + " args=" + arguments);
+      if (process.ExitCode != 0) {
+        throw new InvalidOperationException("adb network command failed exit=" +
+          process.ExitCode + " stdout=" + stdout + " stderr=" + stderr);
+      }
+    }
   }
 
   static void Log(string line) {
@@ -844,7 +960,9 @@ function Invoke-AndroidFlutterTest {
     throw 'flutter was not found on PATH.'
   }
   $flutterArguments = @(
-    'test', '--no-pub', $integrationTestPath,
+    'test', '--no-pub'
+  ) + $offlineRunnerArguments + @(
+    $integrationTestPath,
     '-d', $androidSerial,
     "--dart-define=API_BASE_URL=$apiBaseUrl"
   ) + $fieldDefines + $offlineDefines
@@ -865,7 +983,21 @@ function Invoke-AndroidFlutterTest {
     [void]$process.Start()
     $outputTask = $process.StandardOutput.ReadToEndAsync()
     $errorTask = $process.StandardError.ReadToEndAsync()
-    $timedOut = -not $process.WaitForExit(1200 * 1000)
+    $deviceProcessId = $null
+    $deadline = [DateTime]::UtcNow.AddSeconds(1200)
+    while (-not $process.HasExited -and [DateTime]::UtcNow -lt $deadline) {
+      if ($Phase -eq 'offline-sync' -and $null -eq $deviceProcessId) {
+        $pidResult = Invoke-Adb `
+          -Arguments @('-s', $androidSerial, 'shell', 'pidof', 'com.example.rims_frontend') `
+          -TimeoutSeconds 5
+        $pidText = ([string]$pidResult.StandardOutput).Trim()
+        if ($pidResult.ExitCode -eq 0 -and $pidText -match '^\d+$') {
+          $deviceProcessId = [int64]$pidText
+        }
+      }
+      [void]$process.WaitForExit(100)
+    }
+    $timedOut = -not $process.HasExited
     if ($timedOut) {
       Stop-RimsProcessTree -Process $process
     }
@@ -884,6 +1016,7 @@ function Invoke-AndroidFlutterTest {
       ExitCode = $exitCode
       TimedOut = $timedOut
       ProcessId = $process.Id
+      DeviceProcessId = $deviceProcessId
       StandardOutput = $standardOutput
       StandardError = $standardError
     }
@@ -891,6 +1024,112 @@ function Invoke-AndroidFlutterTest {
     $process.Dispose()
   }
 }
+
+
+function Stop-M11StageProcess {
+  param([string]$Stage)
+  Add-M11Command "force-stop:$Stage"
+  [void](Get-M11AdbText @('shell', 'am', 'force-stop', 'com.example.rims_frontend'))
+  Add-M11Command "confirm-stopped:$Stage"
+  $deadline = [DateTime]::UtcNow.AddSeconds(15)
+  do {
+    $pidResult = Invoke-Adb `
+      -Arguments @('-s', $androidSerial, 'shell', 'pidof', 'com.example.rims_frontend') `
+      -TimeoutSeconds 5
+    $pidText = ([string]$pidResult.StandardOutput).Trim()
+    if ([string]::IsNullOrWhiteSpace($pidText)) { return }
+    if ($pidResult.ExitCode -ne 0) {
+      throw "ADB pid confirmation failed for stage '$Stage': $($pidResult.StandardError)"
+    }
+    Start-Sleep -Milliseconds 100
+  } while ([DateTime]::UtcNow -lt $deadline)
+  throw "Android app process remained alive after force-stop for stage '$Stage'."
+}
+
+function Invoke-M11ProcessStages {
+  $stageNames = @('seed', 'offline-draft', 'recovery')
+  Add-M11Command 'prepare-clean-app-data'
+  if ($TestMode) {
+    foreach ($stage in $stageNames) {
+      Add-M11Command "run-stage:$stage"
+      Add-M11Command "capture-pid:$stage"
+      Add-M11Command "force-stop:$stage"
+      Add-M11Command "confirm-stopped:$stage"
+    }
+    return
+  }
+
+  $packagePath = Invoke-Adb `
+    -Arguments @('-s', $androidSerial, 'shell', 'pm', 'path', 'com.example.rims_frontend')
+  if ($packagePath.ExitCode -eq 0 -and
+      -not [string]::IsNullOrWhiteSpace([string]$packagePath.StandardOutput)) {
+    $clearResult = Invoke-Adb `
+      -Arguments @('-s', $androidSerial, 'shell', 'pm', 'clear', 'com.example.rims_frontend')
+    if ($clearResult.ExitCode -ne 0 -or
+        ([string]$clearResult.StandardOutput).Trim() -ne 'Success') {
+      throw "Failed to clear prior M11 app data: $($clearResult.StandardError)"
+    }
+  }
+
+  $processStages = [Collections.Generic.List[object]]::new()
+  foreach ($stage in $stageNames) {
+    Add-M11Command "run-stage:$stage"
+    $stageStartedAt = [DateTimeOffset]::UtcNow
+    $stageFailure = $null
+    try {
+      $execution = Invoke-AndroidFlutterTest
+      @(
+        "===== stage $stage stdout =====",
+        $execution.StandardOutput,
+        "===== stage $stage stderr =====",
+        $execution.StandardError
+      ) | Add-Content -LiteralPath $flutterOutputPath -Encoding UTF8
+      if ($execution.ExitCode -ne 0) {
+        Throw-AndroidChildFailure `
+          -Message "Android M11 stage '$stage' failed: $(Get-RimsExternalCommandSummary -Result $execution)" `
+          -ExitCode $execution.ExitCode
+      }
+      Add-M11Command "capture-pid:$stage"
+      if ($null -eq $execution.DeviceProcessId) {
+        throw "M11 stage '$stage' had no observable app process while Flutter was running."
+      }
+      $devicePid = [int64]$execution.DeviceProcessId
+      if ($stage -ne 'recovery') {
+        $marker = ConvertFrom-RimsStrictE2eMarker `
+          -OutputText ([string]$execution.StandardOutput) `
+          -ExpectedMarker Stage
+        if ([string]$marker.stage -ne $stage -or [int64]$marker.processId -ne $devicePid) {
+          throw "M11 stage marker identity mismatch for '$stage'."
+        }
+      } else {
+        $script:e2eData = ConvertFrom-RimsStrictE2eMarker `
+          -OutputText ([string]$execution.StandardOutput) `
+          -ExpectedMarker Result
+      }
+      [void]$processStages.Add([pscustomobject][ordered]@{
+          stage = $stage
+          processId = $devicePid
+          startedAt = $stageStartedAt.ToString('o')
+        })
+    } catch {
+      $stageFailure = $_
+    } finally {
+      try {
+        Stop-M11StageProcess -Stage $stage
+      } catch {
+        if ($null -eq $stageFailure) { $stageFailure = $_ }
+      }
+    }
+    if ($null -ne $stageFailure) { throw $stageFailure }
+  }
+  if ($null -eq $script:e2eData) { throw 'M11 recovery stage omitted result evidence.' }
+  $script:e2eData | Add-Member `
+    -MemberType NoteProperty `
+    -Name processStages `
+    -Value @($processStages) `
+    -Force
+}
+
 
 function Test-WindowsHealthzOnce {
   try {
@@ -1263,8 +1502,10 @@ function Restore-AndroidBaseline {
     }
   }
   if ($TestMode) {
-    $action = if ($TestPreExistingRuntime) {
+    $action = if ($script:runtimeDisposition -in @('reuse', 'reject')) {
       'preserve-runtime'
+    } elseif ($script:runtimeOwnedByRun) {
+      'stop-owned-runtime'
     } elseif ($TestEmulatorOwnership -eq 'controller-started') {
       'stop-exact'
     } else { 'preserve' }
@@ -1319,6 +1560,17 @@ function Restore-AndroidBaseline {
     } catch {
       [void]$cleanupErrors.Add("fixture reset: $($_.Exception.Message)")
     }
+  } elseif ($script:emulatorOwnedByRun) {
+    try {
+      $state = Read-RimsRuntimeState -Paths $runtimePaths
+      $emulatorCleanup = Stop-RimsOwnedEmulator -State $state
+      if (-not $emulatorCleanup.ok) { throw $emulatorCleanup.detail }
+      $state.emulator = $null
+      $state.target = 'none'
+      Write-RimsRuntimeState -Paths $runtimePaths -State $state
+    } catch {
+      [void]$cleanupErrors.Add("owned emulator: $($_.Exception.Message)")
+    }
   }
   $script:baselineRestore.ok = $cleanupErrors.Count -eq 0
   $script:baselineRestore.error = $cleanupErrors -join '; '
@@ -1342,7 +1594,9 @@ function Write-AndroidReport {
     finishedAt = [DateTimeOffset]::Now.ToString('o')
     frontendCommit = $frontendCommit
     backendCommit = $backendCommit
+    backendDir = $BackendDir
     runtimeOwnedByRun = [bool]$script:runtimeOwnedByRun
+    runtimeDisposition = $script:runtimeDisposition
     androidDevice = $AndroidDevice
     androidSerial = $script:androidSerial
     apiBaseUrl = $apiBaseUrl
@@ -1353,6 +1607,7 @@ function Write-AndroidReport {
     hostBridgeCleanup = $hostBridgeCleanup
     faultProxy = $script:faultProxyIdentity
     faultProxyCleanup = $faultProxyCleanup
+    faultControl = $faultControl
     adbStateRestore = $adbStateRestore
     baselineRestore = $baselineRestore
     artifactCollection = $artifactCollection
@@ -1396,24 +1651,39 @@ try {
   foreach ($name in $stepNames) {
     if ($name -eq 'write-report') { break }
     if ($firstExitCode -ne 0) { break }
-    if ($TestMode -and $name -eq 'up-android' -and -not $TestPreExistingRuntime) {
-      $androidSerial = 'emulator-5554'
-      $emulatorOwned = $TestEmulatorOwnership -eq 'controller-started'
-      $runtimeOwnedByRun = $true
-      $emulatorIdentity = [pscustomobject][ordered]@{
-        avdName = $AndroidDevice
-        serial = $androidSerial
-        owned = $emulatorOwned
-        windowsPid = if ($emulatorOwned) { 4242 } else { $null }
-        windowsProcessStartTimeUtc = if ($emulatorOwned) {
-          '2026-07-12T00:00:00Z'
-        } else { $null }
+    if ($TestMode -and $name -eq 'up-android') {
+      $runtimeDisposition = Get-TestRuntimeDisposition
+      if ($runtimeDisposition -eq 'reject') {
+        $script:firstExitCode = 1
+        $script:failedStep = 'up-android'
+      } else {
+        $androidSerial = 'emulator-5554'
+        $runtimeOwnedByRun = $runtimeDisposition -eq 'start'
+        $emulatorOwnedByRun = $runtimeOwnedByRun -and $TestEmulatorOwnership -eq 'controller-started'
+        $emulatorOwned = $emulatorOwnedByRun
+        $emulatorIdentity = [pscustomobject][ordered]@{
+          avdName = $AndroidDevice
+          serial = $androidSerial
+          owned = $emulatorOwned
+          windowsPid = if ($emulatorOwned) { 4242 } else { $null }
+          windowsProcessStartTimeUtc = if ($emulatorOwned) {
+            '2026-07-12T00:00:00Z'
+          } else { $null }
+        }
       }
     }
     if ($TestMode -and
         $name -eq 'android-integration-test' -and
         $Phase -eq 'offline-sync') {
-      Start-M11FaultProxy
+      try {
+        Start-M11FaultProxy
+        Invoke-M11ProcessStages
+      } catch {
+        $script:firstExitCode = if ($_.Exception.Data.Contains('ExitCode')) {
+          [int]$_.Exception.Data['ExitCode']
+        } else { 1 }
+        $script:failedStep = 'android-integration-test'
+      }
     }
     $action = switch ($name) {
       'doctor-android' {
@@ -1428,10 +1698,23 @@ try {
       }
       'up-android' {
         {
-          if (Test-Path -LiteralPath $runtimePaths.state) {
-            throw 'Managed runtime state already exists; run down before Android smoke.'
+          $existingState = Read-RimsRuntimeState -Paths $runtimePaths
+          $stateExists = $null -ne $existingState
+          $hadEmulator = $stateExists -and $null -ne $existingState.emulator
+          $requestMatches = $stateExists -and (Test-RimsRuntimeRequestMatchesState `
+              -State $existingState `
+              -BackendDir $BackendDir `
+              -BackendWorkspaceRoot $BackendWorkspaceRoot `
+              -BackendPort $BackendPort)
+          $healthy = $stateExists -and $requestMatches -and (Test-WindowsHealthzOnce)
+          $script:runtimeDisposition = Resolve-RimsAndroidSmokeRuntimeDisposition `
+            -StateExists:$stateExists `
+            -RequestMatches:$requestMatches `
+            -Healthy:$healthy
+          if ($script:runtimeDisposition -eq 'reject') {
+            throw 'Managed runtime state is stale, unhealthy, or does not match the requested backend identity.'
           }
-          $script:runtimeOwnedByRun = $true
+          $script:runtimeOwnedByRun = $script:runtimeDisposition -eq 'start'
           $arguments = @(
             '-Command', 'up', '-Target', 'none',
             '-BackendDir', $BackendDir,
@@ -1448,6 +1731,8 @@ try {
               -Paths $runtimePaths `
               -AndroidDevice $AndroidDevice)
           Get-CurrentAndroidRuntime
+          $script:emulatorOwnedByRun = $script:emulatorOwned -and -not $hadEmulator
+          $script:emulatorIdentity.owned = $script:emulatorOwnedByRun
         }
       }
       'reset-fixtures' {
@@ -1481,6 +1766,10 @@ try {
           [void](Invoke-Adb -Arguments @('-s', $androidSerial, 'logcat', '-c'))
           Invoke-FieldOperationsDeviceSetup
           Start-FieldPermissionGrantHelper
+          if ($Phase -eq 'offline-sync') {
+            Invoke-M11ProcessStages
+            return
+          }
           $execution = Invoke-AndroidFlutterTest
           @($execution.StandardOutput, $execution.StandardError) | Set-Content `
             -LiteralPath $flutterOutputPath `
@@ -1497,16 +1786,13 @@ try {
               -Message "Android integration test failed: $(Get-RimsExternalCommandSummary -Result $execution)" `
               -ExitCode $execution.ExitCode
           }
-          $resultLine = @(([string]$execution.StandardOutput -split '\r?\n') |
-              Where-Object { $_ -match '^RIMS_E2E_RESULT\s+\{' } |
-              Select-Object -Last 1)
-          if ($resultLine.Count -eq 0 -or
-              $resultLine[0] -notmatch '^RIMS_E2E_RESULT\s+(?<json>\{.*\})$') {
-            Throw-AndroidChildFailure `
-              -Message 'Android integration test omitted RIMS_E2E_RESULT data.' `
-              -ExitCode 1
+          try {
+            $script:e2eData = ConvertFrom-RimsStrictE2eMarker `
+              -OutputText ([string]$execution.StandardOutput) `
+              -ExpectedMarker Result
+          } catch {
+            Throw-AndroidChildFailure -Message $_.Exception.Message -ExitCode 1
           }
-          $script:e2eData = $Matches.json | ConvertFrom-Json
         }
       }
       'runtime-status' {

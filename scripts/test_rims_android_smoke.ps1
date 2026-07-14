@@ -163,19 +163,81 @@ if (@($offlinePlan.command | Where-Object {
 }
 foreach ($cancellationContract in @(
     'networkGeneration',
-    'WaitForNetworkActions'
+    'WaitForNetworkActions',
+    'throw new InvalidOperationException("adb network command failed',
+    'WriteJson(stream, 500, "ADB Failure", "{\"ok\":false',
+    'RunAdb(faultArguments);'
   )) {
   if (-not $androidWrapperText.Contains($cancellationContract)) {
     throw "M11 fault proxy omitted cancellation contract '$cancellationContract'."
   }
 }
+if ($androidWrapperText.Contains('catch (Exception error) { Log("adb-error')) {
+  throw 'M11 fault proxy still swallows ADB exceptions.'
+}
+$proxySourceMatch = [regex]::Match(
+  $androidWrapperText,
+  '(?s)public static class RimsM11FaultProxy \{.*?\r?\n\}\r?\n''@'
+)
+if (-not $proxySourceMatch.Success) {
+  throw 'M11 fault proxy C# source could not be extracted for execution tests.'
+}
+$proxySource = @'
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.IO;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+'@ + "`n" + ($proxySourceMatch.Value -replace "\r?\n'@$", '')
+Add-Type -TypeDefinition $proxySource
+$proxyType = [RimsM11FaultProxy]
+$bindingFlags = [Reflection.BindingFlags]'NonPublic,Static'
+$runAdb = $proxyType.GetMethod('RunAdb', $bindingFlags)
+$proxyType.GetField('serial', $bindingFlags).SetValue($null, 'emulator-self-test')
+$proxyLog = Join-Path ([IO.Path]::GetTempPath()) ('rims-m11-adb-' + [guid]::NewGuid().ToString('N') + '.log')
+$proxyType.GetField('logPath', $bindingFlags).SetValue($null, $proxyLog)
+try {
+  foreach ($adbExecutable in @(
+      (Join-Path $env:SystemRoot 'System32\where.exe'),
+      (Join-Path ([IO.Path]::GetTempPath()) 'missing-rims-adb.exe')
+    )) {
+    $proxyType.GetField('adb', $bindingFlags).SetValue($null, $adbExecutable)
+    $threw = $false
+    try {
+      [void]$runAdb.Invoke($null, @('shell svc wifi disable'))
+    } catch {
+      $threw = $true
+    }
+    if (-not $threw) {
+      throw "Production RunAdb accepted failing executable '$adbExecutable'."
+    }
+  }
+} finally {
+  Remove-Item -LiteralPath $proxyLog -Force -ErrorAction SilentlyContinue
+}
 foreach ($define in @(
     '--dart-define=RIMS_E2E_M11=true',
-    '--dart-define=RIMS_E2E_M11_FAULT_CONTROL_URL=http://10.0.2.2:18081/__rims_m11'
+    '--dart-define=RIMS_E2E_M11_STAGE=true',
+    '--dart-define=RIMS_E2E_M11_FAULT_CONTROL_URL=http://10.0.2.2:18081/__rims_m11',
+    '--dart-define=RIMS_E2E_BARCODE=M10-ACTIVE-001'
   )) {
   if (@($offlinePlan.command | Where-Object { $_ -eq $define }).Count -ne 1) {
     throw "M11 Android command omitted '$define'."
   }
+}
+if (@($offlinePlan.command | Where-Object { $_ -eq '--no-uninstall' }).Count -ne 1) {
+  throw 'M11 Android command must preserve app data between process stages.'
+}
+Assert-Equal `
+  -Actual (@($offlinePlan.processStages) -join '|') `
+  -Expected 'seed|offline-draft|recovery' `
+  -Message 'M11 persisted process stages.'
+if ($androidWrapperText.Contains('Select-Object -Last 1')) {
+  throw 'Android marker parser still accepts the last injected result.'
 }
 Assert-Equal `
   -Actual (@($offlinePlan.deviceActions) -join '|') `
@@ -250,6 +312,50 @@ $tempRoot = Join-Path `
   ('rims-android-smoke-test-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $tempRoot | Out-Null
 try {
+  $markerCases = @(
+    @{ Name = 'missing'; Lines = @('ordinary output'); Exit = 1 },
+    @{ Name = 'duplicate'; Lines = @(
+        'RIMS_E2E_RESULT {"ok":true}',
+        'RIMS_E2E_RESULT {"ok":true}'
+      ); Exit = 1 },
+    @{ Name = 'valid-malformed'; Lines = @(
+        'RIMS_E2E_RESULT {"ok":true}',
+        'RIMS_E2E_RESULT {broken'
+      ); Exit = 1 },
+    @{ Name = 'malformed'; Lines = @('RIMS_E2E_RESULT {broken'); Exit = 1 },
+    @{ Name = 'trailing'; Lines = @(
+        'RIMS_E2E_RESULT {"ok":true} injected'
+      ); Exit = 1 },
+    @{ Name = 'non-object'; Lines = @('RIMS_E2E_RESULT [1,2]'); Exit = 1 },
+    @{ Name = 'valid'; Lines = @('RIMS_E2E_RESULT {"ok":true}'); Exit = 0 }
+  )
+  foreach ($markerCase in $markerCases) {
+    $markerPath = Join-Path $tempRoot "marker-$($markerCase.Name).log"
+    $markerCase.Lines | Set-Content -LiteralPath $markerPath -Encoding UTF8
+    $previousPreference = $ErrorActionPreference
+    $ErrorActionPreference = 'Continue'
+    try {
+      $markerOutput = @(& powershell.exe `
+          -NoProfile `
+          -ExecutionPolicy Bypass `
+          -File $wrapper `
+          -AndroidDevice 'Medium_Phone_API_36.1' `
+          -TestMode `
+          -TestMarkerFixturePath $markerPath `
+          -TestExpectedMarker Result 2>&1)
+      $markerExit = $LASTEXITCODE
+    } finally {
+      $ErrorActionPreference = $previousPreference
+    }
+    Assert-Equal `
+      -Actual $markerExit `
+      -Expected $markerCase.Exit `
+      -Message "Strict marker case '$($markerCase.Name)'."
+    if ($markerExit -ne 0 -and ($markerOutput -join ' ') -match 'ok.:true') {
+      throw "Rejected marker '$($markerCase.Name)' leaked accepted evidence."
+    }
+  }
+
   foreach ($invalidFailStep in @('not-a-step', 'write-report')) {
     $invalidReport = Join-Path $tempRoot "invalid-$invalidFailStep.json"
     $previousPreference = $ErrorActionPreference
@@ -297,6 +403,27 @@ try {
     -Actual (Get-Content -LiteralPath $existingRuntimeCleanup -Raw).Trim() `
     -Expected 'preserve-runtime' `
     -Message 'Pre-existing managed runtime cleanup policy.'
+
+  foreach ($runtimeCase in @(
+      [pscustomobject]@{ State = 'healthy-pre-existing'; Exit = 23; Disposition = 'reuse'; Cleanup = 'preserve-runtime' },
+      [pscustomobject]@{ State = 'stale'; Exit = 1; Disposition = 'reject'; Cleanup = 'preserve-runtime' },
+      [pscustomobject]@{ State = 'stopped'; Exit = 23; Disposition = 'start'; Cleanup = 'stop-owned-runtime' }
+    )) {
+    $runtimeReportPath = Join-Path $tempRoot "runtime-$($runtimeCase.State).json"
+    $runtimeCleanupPath = Join-Path $tempRoot "runtime-$($runtimeCase.State)-cleanup.txt"
+    & $wrapper `
+      -AndroidDevice 'Medium_Phone_API_36.1' `
+      -TestMode `
+      -TestRuntimeState $runtimeCase.State `
+      -FailStep 'android-integration-test' `
+      -ReportPath $runtimeReportPath `
+      -ArtifactRoot (Join-Path $tempRoot "runtime-$($runtimeCase.State)-artifacts") `
+      -CleanupRecordPath $runtimeCleanupPath
+    Assert-Equal -Actual $LASTEXITCODE -Expected $runtimeCase.Exit -Message "Runtime $($runtimeCase.State) exit."
+    $runtimeReport = Get-Content -LiteralPath $runtimeReportPath -Raw | ConvertFrom-Json
+    Assert-Equal -Actual $runtimeReport.runtimeDisposition -Expected $runtimeCase.Disposition -Message "Runtime $($runtimeCase.State) disposition."
+    Assert-Equal -Actual (Get-Content -LiteralPath $runtimeCleanupPath -Raw).Trim() -Expected $runtimeCase.Cleanup -Message "Runtime $($runtimeCase.State) cleanup."
+  }
 
   $restoreReportPath = Join-Path $tempRoot 'restore-failure-report.json'
   $restoreArtifactRoot = Join-Path $tempRoot 'restore-failure-artifacts'
@@ -360,9 +487,7 @@ try {
         throw "Failure artifact '$artifactName' was not captured."
       }
     }
-    $expectedCleanup = if ($ownership -eq 'pre-existing') {
-      'preserve'
-    } else { 'stop-exact' }
+    $expectedCleanup = 'stop-owned-runtime'
     Assert-Equal `
       -Actual (Get-Content -LiteralPath $cleanupRecord -Raw).Trim() `
       -Expected $expectedCleanup `
@@ -388,7 +513,7 @@ try {
   $offlineCommands = Get-Content -LiteralPath $offlineRecordPath -Raw | ConvertFrom-Json
   Assert-Equal `
     -Actual (@($offlineCommands) -join '|') `
-    -Expected 'snapshot-airplane-mode|snapshot-wifi|start-owned-fault-proxy:18081|reset-fault-proxy|restore-airplane-mode|restore-wifi|stop-owned-fault-proxy' `
+    -Expected 'snapshot-airplane-mode|snapshot-wifi|start-owned-fault-proxy:18081|prepare-clean-app-data|run-stage:seed|capture-pid:seed|force-stop:seed|confirm-stopped:seed|run-stage:offline-draft|capture-pid:offline-draft|force-stop:offline-draft|confirm-stopped:offline-draft|run-stage:recovery|capture-pid:recovery|force-stop:recovery|confirm-stopped:recovery|reset-fault-proxy|restore-airplane-mode|restore-wifi|stop-owned-fault-proxy' `
     -Message 'M11 fault proxy and ADB restoration order.'
   Assert-Equal `
     -Actual $offlineReport.failedStep `
@@ -418,6 +543,36 @@ try {
     -Actual $offlineReport.faultProxyCleanup.ok `
     -Expected $true `
     -Message 'M11 proxy cleanup result.'
+
+  foreach ($adbCase in @(
+      [pscustomobject]@{ Name = 'nonzero'; Exit = 31 },
+      [pscustomobject]@{ Name = 'throw'; Exit = 32 }
+    )) {
+    $adbReportPath = Join-Path $tempRoot "adb-$($adbCase.Name)-report.json"
+    $adbRecordPath = Join-Path $tempRoot "adb-$($adbCase.Name)-commands.json"
+    & $wrapper `
+      -AndroidDevice 'Medium_Phone_API_36.1' `
+      -Phase 'offline-sync' `
+      -TestMode `
+      -TestAdbFailure $adbCase.Name `
+      -FailStep 'android-integration-test' `
+      -ReportPath $adbReportPath `
+      -ArtifactRoot (Join-Path $tempRoot "adb-$($adbCase.Name)-artifacts") `
+      -M11CommandRecordPath $adbRecordPath
+    Assert-Equal -Actual $LASTEXITCODE -Expected $adbCase.Exit -Message "ADB $($adbCase.Name) first exit."
+    $adbReport = Get-Content -LiteralPath $adbReportPath -Raw | ConvertFrom-Json
+    $adbCommands = Get-Content -LiteralPath $adbRecordPath -Raw | ConvertFrom-Json
+    Assert-Equal -Actual $adbReport.faultControl.ok -Expected $false -Message "ADB $($adbCase.Name) control response."
+    Assert-Equal -Actual $adbReport.failedStep -Expected 'android-integration-test' -Message "ADB $($adbCase.Name) failed step."
+    Assert-Equal -Actual $adbReport.adbStateRestore.attempted -Expected $true -Message "ADB $($adbCase.Name) restore attempt."
+    foreach ($requiredAdbCommand in @(
+        'control-airplane-mode:false', 'restore-airplane-mode', 'restore-wifi'
+      )) {
+      if (-not (@($adbCommands) -contains $requiredAdbCommand)) {
+        throw "ADB $($adbCase.Name) omitted '$requiredAdbCommand'."
+      }
+    }
+  }
 } finally {
   Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
