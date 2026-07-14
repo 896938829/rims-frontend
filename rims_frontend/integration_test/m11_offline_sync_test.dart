@@ -476,6 +476,7 @@ void main() {
         final beforeLifecycle = await _operations(outbox, accountId);
         await _openDocumentDetail(tester, lifecycleDraft.id);
         await _fault('unreachable');
+        await _openDocumentDetail(tester, lifecycleDraft.id);
         await scrollUntilVisible(
           tester,
           Key('document-complete-${lifecycleDraft.id}'),
@@ -1172,20 +1173,30 @@ Future<int> _verifyCachedReads(
 
 Future<void> _openDocumentDetail(WidgetTester tester, int documentId) async {
   final key = Key('document-list-item-$documentId');
-  await scrollUntilVisible(
-    tester,
-    key,
-    scrollable: find.byKey(const Key('documents-scroll-view')),
-  );
-  await tester.tap(find.byKey(key));
-  await tester.pump();
-  await waitUntil(
-    tester,
-    description: 'document detail $documentId',
-    condition: () =>
-        find.byKey(const Key('document-detail-loading')).evaluate().isEmpty &&
-        find.byKey(const Key('document-detail-error')).evaluate().isEmpty,
-  );
+  final close = find.byKey(const Key('document-detail-close-button'));
+  final loading = find.byKey(const Key('document-detail-loading'));
+  final error = find.byKey(const Key('document-detail-error'));
+  final deadline = DateTime.now().add(const Duration(seconds: 12));
+  do {
+    if (close.evaluate().isNotEmpty) {
+      if (error.evaluate().isNotEmpty) {
+        throw TestFailure(
+          'Document detail $documentId failed: '
+          '${tester.widget<Text>(error.first).data}',
+        );
+      }
+      if (loading.evaluate().isEmpty) return;
+    } else {
+      await scrollUntilVisible(
+        tester,
+        key,
+        scrollable: find.byKey(const Key('documents-scroll-view')),
+      );
+      await tester.tap(find.byKey(key));
+    }
+    await tester.pump(const Duration(milliseconds: 100));
+  } while (DateTime.now().isBefore(deadline));
+  throw TestFailure('Timed out recovering document detail $documentId.');
 }
 
 Future<void> _closeDocumentDetail(WidgetTester tester) async {
