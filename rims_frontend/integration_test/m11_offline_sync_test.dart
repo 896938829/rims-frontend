@@ -23,6 +23,7 @@ import 'package:rims_frontend/features/offline/presentation/view_models/sync_cen
 import 'package:rims_frontend/features/reports/presentation/view_models/reports_view_model.dart';
 
 import 'support/m11_fault_control.dart';
+import 'support/m11_journey_fixtures.dart';
 import 'support/rims_e2e_config.dart';
 import 'support/rims_e2e_driver.dart';
 
@@ -62,6 +63,7 @@ void main() {
       final operationIds = <String>[];
       final idempotencyHashes = <String>[];
       var accountId = checkpoint?['accountId']?.toString() ?? '';
+      var salesProductSku = checkpoint?['salesProductSku']?.toString() ?? '';
       var stockBefore = (checkpoint?['stockBefore'] as num?)?.toInt() ?? 0;
       var stockAfter = 0;
       var cacheReadLatencyMs =
@@ -118,6 +120,7 @@ void main() {
             description: 'online inventory seed',
             condition: () => !inventory.isLoading && inventory.items.isNotEmpty,
           );
+          salesProductSku = selectM11SalesFixture(inventory.items).sku;
           final barcodeSeed = await inventory.lookupBarcode(
             RimsE2eConfig.injectedBarcode,
           );
@@ -142,7 +145,10 @@ void main() {
                 !documents.isLoading && documents.recentDocuments.isNotEmpty,
           );
           accountId = documents.accountId!;
-          stockBefore = await _stockQuantity(documents);
+          stockBefore = await _stockQuantity(documents, {
+            RimsE2eConfig.fixtureProductCode,
+            salesProductSku,
+          });
           final cachedDetailId = documents.recentDocuments.first.id;
           await _openDocumentDetail(tester, cachedDetailId);
           await _closeDocumentDetail(tester);
@@ -160,6 +166,7 @@ void main() {
             'nextStage': 'offline-draft',
             'runId': runId,
             'accountId': accountId,
+            'salesProductSku': salesProductSku,
             'stockBefore': stockBefore,
             'cacheReadLatencyMs': cacheReadLatencyMs,
             'databaseCorruptionQuarantined': corruptionQuarantined,
@@ -293,6 +300,7 @@ void main() {
         await _prepareDraft(
           tester,
           documents,
+          sku: salesProductSku,
           remark: remarks.unknown,
           withAttachment: false,
         );
@@ -362,6 +370,7 @@ void main() {
         await _prepareDraft(
           tester,
           documents,
+          sku: salesProductSku,
           remark: remarks.attachment,
           withAttachment: true,
         );
@@ -489,6 +498,7 @@ void main() {
         await _prepareDraft(
           tester,
           documents,
+          sku: salesProductSku,
           remark: remarks.conflict,
           withAttachment: false,
         );
@@ -532,6 +542,7 @@ void main() {
         await _prepareDraft(
           tester,
           documents,
+          sku: salesProductSku,
           remark: remarks.replacementConflict,
           withAttachment: false,
         );
@@ -623,6 +634,7 @@ void main() {
         await _prepareDraft(
           tester,
           documents,
+          sku: salesProductSku,
           remark: remarks.staleContext,
           withAttachment: false,
         );
@@ -675,7 +687,10 @@ void main() {
         await tapAndSettle(tester, const Key('bottom-nav-documents'));
         documents = await _documentsViewModel(tester);
         await documents.load();
-        stockAfter = await _stockQuantity(documents);
+        stockAfter = await _stockQuantity(documents, {
+          RimsE2eConfig.fixtureProductCode,
+          salesProductSku,
+        });
         final successfulRemarks = <String>[
           remarks.queued,
           remarks.unknown,
@@ -1138,10 +1153,11 @@ Future<void> _closeDocumentDetail(WidgetTester tester) async {
 Future<void> _prepareDraft(
   WidgetTester tester,
   DocumentsViewModel documents, {
+  required String sku,
   required String remark,
   required bool withAttachment,
 }) async {
-  await _addProductBySku(tester, documents, RimsE2eConfig.fixtureProductCode);
+  await _addProductBySku(tester, documents, sku);
   await enterText(tester, const Key('document-remark-field'), remark);
   if (withAttachment) {
     await scrollUntilVisible(
@@ -1413,16 +1429,22 @@ void _recordOperation(
   hashes.add(sha256.convert(utf8.encode(operation.idempotencyKey)).toString());
 }
 
-Future<int> _stockQuantity(DocumentsViewModel documents) async {
-  final result = await documents.inventoryRepository!.listInventory(
-    keyword: RimsE2eConfig.fixtureProductCode,
-  );
-  return result.when(
-    success: (page) => page.items
-        .singleWhere((item) => item.sku == RimsE2eConfig.fixtureProductCode)
-        .stockQuantity,
-    failure: (failure) => throw TestFailure(failure.message),
-  );
+Future<int> _stockQuantity(
+  DocumentsViewModel documents,
+  Set<String> skus,
+) async {
+  var total = 0;
+  for (final sku in skus) {
+    final result = await documents.inventoryRepository!.listInventory(
+      keyword: sku,
+    );
+    total += result.when(
+      success: (page) =>
+          page.items.singleWhere((item) => item.sku == sku).stockQuantity,
+      failure: (failure) => throw TestFailure(failure.message),
+    );
+  }
+  return total;
 }
 
 Future<int> _databaseBytes() async {
