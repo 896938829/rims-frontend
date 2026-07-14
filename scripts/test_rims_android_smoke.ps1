@@ -385,13 +385,19 @@ if ($backendSeedText.Contains('mapfile -t reset_object_keys < <(') -or
 foreach ($cancellationContract in @(
     'networkGeneration',
     'WaitForNetworkActions',
+    'ScheduleNetworkAction',
+    'TaskCompletionSource<bool>',
+    'completeNetworkAction(true);',
     'throw new InvalidOperationException("adb network command failed',
     'WriteJson(stream, 500, "ADB Failure", "{\"ok\":false',
     'RunAdb(faultArguments);'
   )) {
   if (-not $androidWrapperText.Contains($cancellationContract)) {
     throw "M11 fault proxy omitted cancellation contract '$cancellationContract'."
-  }
+    }
+}
+if ($androidWrapperText.Contains('DelayWhileCurrent(generation, 100)')) {
+  throw 'M11 fault proxy still relies on a timing delay instead of an explicit response barrier.'
 }
 if ($androidWrapperText.Contains('catch (Exception error) { Log("adb-error')) {
   throw 'M11 fault proxy still swallows ADB exceptions.'

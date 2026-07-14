@@ -1104,15 +1104,16 @@ public static class RimsM11FaultProxy {
         case "server-conflict": mode = "server-conflict-next"; break;
       }
     }
+    Action<bool> completeNetworkAction = null;
     try {
       if (waitForNetworkActions) WaitForNetworkActions();
       if (action == "airplane-mode") {
-        StartNetworkAction(
+        completeNetworkAction = ScheduleNetworkAction(
           "shell cmd connectivity airplane-mode enable",
           "shell cmd connectivity airplane-mode disable",
           ParseInt(Query(path, "restoreMs"), 3000));
       } else if (action == "wifi-switch") {
-        StartNetworkAction(
+        completeNetworkAction = ScheduleNetworkAction(
           "shell svc wifi disable",
           "shell svc wifi enable",
           ParseInt(Query(path, "restoreMs"), 1500));
@@ -1141,7 +1142,9 @@ public static class RimsM11FaultProxy {
         "\",\"unknownRequestFingerprintHash\":\"" + requestFingerprintHash +
         "\",\"unknownSameTargetReplayObserved\":" +
         (sameTarget ? "true" : "false") + "}");
+      if (completeNetworkAction != null) completeNetworkAction(true);
     } catch (Exception error) {
+      if (completeNetworkAction != null) completeNetworkAction(false);
       Log("control-adb-error " + error.GetType().Name + " " + error.Message);
       WriteJson(stream, 500, "ADB Failure", "{\"ok\":false,\"error\":\"adb-command-failed\"}");
     }
@@ -1421,24 +1424,38 @@ public static class RimsM11FaultProxy {
     return int.TryParse(value, out parsed) ? parsed : fallback;
   }
 
-  static void StartNetworkAction(
+  static Action<bool> ScheduleNetworkAction(
       string faultArguments, string restoreArguments, int restoreMs) {
-    RunAdb(faultArguments);
+    var startSignal = new TaskCompletionSource<bool>();
     int generation;
     lock (Gate) {
       generation = ++networkGeneration;
       activeNetworkActions++;
     }
     Task.Run(async () => {
+      var faultApplied = false;
       try {
+        if (!await startSignal.Task) return;
+        lock (Gate) if (generation != networkGeneration) return;
+        RunAdb(faultArguments);
+        faultApplied = true;
         if (!await DelayWhileCurrent(generation, restoreMs)) return;
         RunAdb(restoreArguments);
+        faultApplied = false;
       } catch (Exception error) {
         Log("adb-restore-error " + error.GetType().Name + " " + error.Message);
       } finally {
+        if (faultApplied) {
+          try {
+            RunAdb(restoreArguments);
+          } catch (Exception error) {
+            Log("adb-cancel-restore-error " + error.GetType().Name + " " + error.Message);
+          }
+        }
         lock (Gate) activeNetworkActions--;
       }
     });
+    return applyFault => startSignal.TrySetResult(applyFault);
   }
 
   static async Task<bool> DelayWhileCurrent(int generation, int milliseconds) {
