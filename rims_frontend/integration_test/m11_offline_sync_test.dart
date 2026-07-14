@@ -1452,6 +1452,7 @@ Future<SyncCenterViewModel> _waitForOperationInSyncCenter(
           tester.widget<AnimatedBuilder>(viewModelFinder.first).animation
               as SyncCenterViewModel;
       if (!viewModel.isLoading &&
+          !viewModel.isBusy &&
           find.textContaining(operationId).evaluate().isNotEmpty) {
         return viewModel;
       }
@@ -1471,11 +1472,7 @@ Future<bool> _operationVisibleInAttention(
     find.textContaining('需处理').first,
     description: 'open Sync Center attention tab',
   );
-  await waitUntil(
-    tester,
-    description: 'attention operation visible',
-    condition: () => find.textContaining(operationId).evaluate().isNotEmpty,
-  );
+  await _waitForOperationInSyncCenter(tester, operationId);
   return find.textContaining(operationId).evaluate().isNotEmpty;
 }
 
@@ -1489,11 +1486,7 @@ Future<bool> _operationVisibleInWaiting(
     find.textContaining('等待').first,
     description: 'open Sync Center waiting tab',
   );
-  await waitUntil(
-    tester,
-    description: 'replacement operation visible in waiting tab',
-    condition: () => find.textContaining(operationId).evaluate().isNotEmpty,
-  );
+  await _waitForOperationInSyncCenter(tester, operationId);
   return find.textContaining(operationId).evaluate().isNotEmpty &&
       find.text('复核并同步').evaluate().isNotEmpty;
 }
