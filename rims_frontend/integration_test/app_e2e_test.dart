@@ -148,6 +148,9 @@ void main() {
         debugPrint('RIMS_E2E_RESULT ${jsonEncode(reportData)}');
         await tester.pump(const Duration(seconds: 1));
         await settleBounded(tester);
+        FocusManager.instance.primaryFocus?.unfocus();
+        FocusManager.instance.applyFocusChangesIfNeeded();
+        await tester.pump();
       },
     );
   });
