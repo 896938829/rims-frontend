@@ -1922,14 +1922,17 @@ function Test-EmulatorHealthz {
     "toybox wget -q -O - '$healthUrl'",
     "(echo -e 'GET /healthz HTTP/1.0\r\nHost: 10.0.2.2\r\nConnection: close\r\n\r\n'; sleep 2) | toybox nc -w 5 10.0.2.2 $emulatorBackendPort"
   )
-  foreach ($command in $commands) {
-    $execution = Invoke-Adb `
-      -Arguments @('-s', $androidSerial, 'shell', $command) `
-      -TimeoutSeconds 15
-    $response = "$($execution.StandardOutput)`n$($execution.StandardError)"
-    if ($response -match '(?i)(?:HTTP/\d(?:\.\d)?\s+200\b|"status"\s*:\s*"ok")') {
-      return
+  for ($attempt = 1; $attempt -le 10; $attempt += 1) {
+    foreach ($command in $commands) {
+      $execution = Invoke-Adb `
+        -Arguments @('-s', $androidSerial, 'shell', $command) `
+        -TimeoutSeconds 15
+      $response = "$($execution.StandardOutput)`n$($execution.StandardError)"
+      if ($response -match '(?i)(?:HTTP/\d(?:\.\d)?\s+200\b|"status"\s*:\s*"ok")') {
+        return
+      }
     }
+    Start-Sleep -Seconds 1
   }
   throw "Emulator '$androidSerial' could not reach $healthUrl."
 }

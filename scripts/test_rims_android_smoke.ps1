@@ -41,6 +41,14 @@ foreach ($healthRetryContract in @(
     throw "Android WSL health probe omitted bounded retry contract '$healthRetryContract'."
   }
 }
+foreach ($emulatorHealthRetryContract in @(
+    'for ($attempt = 1; $attempt -le 10; $attempt += 1)',
+    'Start-Sleep -Seconds 1'
+  )) {
+  if (-not $androidWrapperText.Contains($emulatorHealthRetryContract)) {
+    throw "Android emulator health probe omitted bounded retry contract '$emulatorHealthRetryContract'."
+  }
+}
 $localRuntimeCalls = [regex]::Matches(
   $androidWrapperText,
   'Invoke-LocalRuntime\s+-Arguments'
