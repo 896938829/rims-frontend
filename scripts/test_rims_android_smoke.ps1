@@ -755,6 +755,28 @@ foreach ($define in @(
 if (@($offlinePlan.command | Where-Object { $_ -eq '--no-uninstall' }).Count -ne 1) {
   throw 'M11 Android command must preserve app data between process stages.'
 }
+foreach ($stageContract in @(
+    'param([string]$ProcessStage)',
+    '"--dart-define=RIMS_E2E_M11_PROCESS_STAGE=$ProcessStage"',
+    'Invoke-AndroidFlutterTest -ProcessStage $stage'
+  )) {
+  if (-not $androidWrapperText.Contains($stageContract)) {
+    throw "M11 Android orchestration omitted host stage contract '$stageContract'."
+  }
+}
+$m11IntegrationText = Get-Content -LiteralPath `
+  (Join-Path $repoRoot 'rims_frontend\integration_test\m11_offline_sync_test.dart') `
+  -Raw `
+  -Encoding UTF8
+foreach ($checkpointContract in @(
+    'RimsE2eConfig.m11ProcessStage',
+    "expectedStage == 'seed' && await checkpointFile.exists()",
+    'expect(nextStage, expectedStage'
+  )) {
+  if (-not $m11IntegrationText.Contains($checkpointContract)) {
+    throw "M11 integration omitted checkpoint stage contract '$checkpointContract'."
+  }
+}
 Assert-Equal `
   -Actual (@($offlinePlan.processStages) -join '|') `
   -Expected 'seed|offline-draft|recovery' `

@@ -40,9 +40,19 @@ void main() {
       const processRecoveryBoundary =
           'integration-entry-before-native-drift-open';
       final processRecoveryWatch = Stopwatch()..start();
+      final expectedStage = RimsE2eConfig.m11ProcessStage;
+      expect(const {
+        'seed',
+        'offline-draft',
+        'recovery',
+      }, contains(expectedStage));
       final checkpointFile = await _checkpointFile();
+      if (expectedStage == 'seed' && await checkpointFile.exists()) {
+        await checkpointFile.delete();
+      }
       final checkpoint = await _readCheckpoint(checkpointFile);
       final nextStage = checkpoint?['nextStage']?.toString() ?? 'seed';
+      expect(nextStage, expectedStage);
       final store = await createOfflineStore();
       final outbox = outboxRepositoryForOfflineStore(store);
       final runId =

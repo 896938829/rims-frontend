@@ -1625,17 +1625,22 @@ function Restore-M11FaultHarness {
 }
 
 function Invoke-AndroidFlutterTest {
+  param([string]$ProcessStage)
   $flutter = Resolve-RimsCommandPath -Name 'flutter'
   if ([string]::IsNullOrWhiteSpace($flutter)) {
     throw 'flutter was not found on PATH.'
   }
+  $processStageDefine = if ($Phase -eq 'offline-sync' -and
+      -not [string]::IsNullOrWhiteSpace($ProcessStage)) {
+    @("--dart-define=RIMS_E2E_M11_PROCESS_STAGE=$ProcessStage")
+  } else { @() }
   $flutterArguments = @(
     'test', '--no-pub'
   ) + $offlineRunnerArguments + @(
     $integrationTestPath,
     '-d', $androidSerial,
     "--dart-define=API_BASE_URL=$apiBaseUrl"
-  ) + $fieldDefines + $offlineDefines
+  ) + $fieldDefines + $offlineDefines + $processStageDefine
   $flutterCommand = (@($flutter) + $flutterArguments | ForEach-Object {
       ConvertTo-RimsWindowsCommandLineArgument -Value "$_"
     }) -join ' '
@@ -1747,7 +1752,7 @@ function Invoke-M11ProcessStages {
     $stageStartedAt = [DateTimeOffset]::UtcNow
     $stageFailure = $null
     try {
-      $execution = Invoke-AndroidFlutterTest
+      $execution = Invoke-AndroidFlutterTest -ProcessStage $stage
       @(
         "===== stage $stage stdout =====",
         $execution.StandardOutput,

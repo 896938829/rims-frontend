@@ -32,6 +32,9 @@ abstract final class RimsE2eConfig {
   static const bool m11StageOrchestrated = bool.fromEnvironment(
     'RIMS_E2E_M11_STAGE',
   );
+  static const String m11ProcessStage = String.fromEnvironment(
+    'RIMS_E2E_M11_PROCESS_STAGE',
+  );
   static const String m11FaultControlUrl = String.fromEnvironment(
     'RIMS_E2E_M11_FAULT_CONTROL_URL',
   );
