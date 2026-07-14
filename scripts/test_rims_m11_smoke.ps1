@@ -371,6 +371,22 @@ try {
       $recoveryStart -gt $draftManagerFrame -and
       $draftOpenCommand -gt $recoveryStart) `
     -Message 'Recovery timing must begin after the draft manager frame and before the open command.'
+  $recoveredDraft = $integrationText.IndexOf(
+    'expect(documents.remark, remarks.queued);'
+  )
+  $initialQueue = $integrationText.IndexOf(
+    'final queuedResult = await _queueCurrentDraft(',
+    $recoveredDraft
+  )
+  $initialQueueFault = $integrationText.IndexOf(
+    "await _fault('unreachable');",
+    $recoveredDraft
+  )
+  Assert-True `
+    -Condition ($recoveredDraft -ge 0 -and
+      $initialQueueFault -gt $recoveredDraft -and
+      $initialQueue -gt $initialQueueFault) `
+    -Message 'The first reviewed queue flow must make the API unreachable before enqueue.'
 
   $validNetworkEvidence = [ordered]@{
     backendTargetPort = 18080

@@ -258,6 +258,7 @@ void main() {
         expect(documents.activeDraftId, draftId);
         expect(documents.remark, remarks.queued);
 
+        await _fault('unreachable');
         final beforeQueued = await _operations(outbox, accountId);
         final queuedResult = await _queueCurrentDraft(
           tester,
