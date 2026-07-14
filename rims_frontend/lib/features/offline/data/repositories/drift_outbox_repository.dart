@@ -141,25 +141,25 @@ final class DriftOutboxRepository implements OutboxRepository {
           }
         }
 
-        for (final operation in graph.operations) {
-          await _insertOperation(
-            operation,
-            const {},
-            payloads[operation.operationId]!,
-          );
-        }
-        for (final entry in graph.dependencies.entries) {
-          for (final dependency in entry.value) {
-            await database
-                .into(database.offlineOutboxDependencies)
-                .insert(
-                  OfflineOutboxDependenciesCompanion.insert(
-                    operationId: entry.key,
-                    dependencyId: dependency,
-                  ),
-                );
+        await database.batch((batch) {
+          for (final operation in graph.operations) {
+            batch.insert(
+              database.offlineOutboxOperations,
+              _operationCompanion(operation, payloads[operation.operationId]!),
+            );
           }
-        }
+          for (final entry in graph.dependencies.entries) {
+            for (final dependency in entry.value) {
+              batch.insert(
+                database.offlineOutboxDependencies,
+                OfflineOutboxDependenciesCompanion.insert(
+                  operationId: entry.key,
+                  dependencyId: dependency,
+                ),
+              );
+            }
+          }
+        });
         return graph.operations;
       });
       return Success(List.unmodifiable(stored));
@@ -1552,27 +1552,7 @@ SELECT 1 AS found FROM ancestors WHERE operation_id = ? LIMIT 1
   ) async {
     await database
         .into(database.offlineOutboxOperations)
-        .insert(
-          OfflineOutboxOperationsCompanion.insert(
-            operationId: operation.operationId,
-            idempotencyKey: operation.idempotencyKey,
-            accountId: operation.accountId,
-            warehouseId: operation.warehouseId,
-            operationKind: operation.kind.wireValue,
-            payload: payloadJson,
-            operationState: operation.state.wireValue,
-            createdAt: operation.createdAt.toUtc(),
-            updatedAt: Value(operation.updatedAt.toUtc()),
-            confirmedAt: Value(operation.confirmedAt?.toUtc()),
-            nextAttemptAt: Value(operation.nextAttemptAt?.toUtc()),
-            attemptCount: Value(operation.attemptCount),
-            lastFailureCode: Value(operation.lastFailureCode),
-            replacementOf: Value(operation.replacementOf),
-            reviewStamp: Value(operation.reviewStamp),
-            requiresStatusProbe: Value(operation.requiresStatusProbe),
-            syncingStartedAt: Value(operation.syncingStartedAt?.toUtc()),
-          ),
-        );
+        .insert(_operationCompanion(operation, payloadJson));
     for (final dependency in dependencies) {
       await database
           .into(database.offlineOutboxDependencies)
@@ -1583,6 +1563,31 @@ SELECT 1 AS found FROM ancestors WHERE operation_id = ? LIMIT 1
             ),
           );
     }
+  }
+
+  OfflineOutboxOperationsCompanion _operationCompanion(
+    OutboxOperation operation,
+    String payloadJson,
+  ) {
+    return OfflineOutboxOperationsCompanion.insert(
+      operationId: operation.operationId,
+      idempotencyKey: operation.idempotencyKey,
+      accountId: operation.accountId,
+      warehouseId: operation.warehouseId,
+      operationKind: operation.kind.wireValue,
+      payload: payloadJson,
+      operationState: operation.state.wireValue,
+      createdAt: operation.createdAt.toUtc(),
+      updatedAt: Value(operation.updatedAt.toUtc()),
+      confirmedAt: Value(operation.confirmedAt?.toUtc()),
+      nextAttemptAt: Value(operation.nextAttemptAt?.toUtc()),
+      attemptCount: Value(operation.attemptCount),
+      lastFailureCode: Value(operation.lastFailureCode),
+      replacementOf: Value(operation.replacementOf),
+      reviewStamp: Value(operation.reviewStamp),
+      requiresStatusProbe: Value(operation.requiresStatusProbe),
+      syncingStartedAt: Value(operation.syncingStartedAt?.toUtc()),
+    );
   }
 
   Future<bool> _compareAndSetState(
