@@ -624,6 +624,22 @@ Assert-Equal `
   ) `
   -Expected $true `
   -Message 'Server conflict targets the next idempotent mutation.'
+foreach ($faultMode in @('stale-session-next', 'stale-permission-next')) {
+  Assert-Equal `
+    -Actual $shouldConsumeNext.Invoke(
+      $null,
+      [object[]]@($faultMode, $backgroundRequest)
+    ) `
+    -Expected $false `
+    -Message "$faultMode skips background reads without an idempotency key."
+  Assert-Equal `
+    -Actual $shouldConsumeNext.Invoke(
+      $null,
+      [object[]]@($faultMode, $idempotentMutation)
+    ) `
+    -Expected $true `
+    -Message "$faultMode targets the next idempotent mutation."
+}
 
 function Reset-UnknownObservation {
   foreach ($fieldName in @(

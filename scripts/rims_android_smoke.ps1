@@ -1079,7 +1079,9 @@ public static class RimsM11FaultProxy {
 
   static bool ShouldConsumeNext(string active, byte[] request) {
     if (active != "duplicate-delivery-next" &&
-        active != "server-conflict-next") return true;
+        active != "server-conflict-next" &&
+        active != "stale-session-next" &&
+        active != "stale-permission-next") return true;
     return HeaderValue(request, "Idempotency-Key").Length > 0;
   }
 
