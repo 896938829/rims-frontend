@@ -406,6 +406,13 @@ if (-not $proxySourceMatch.Value.Contains(
   )) {
   throw 'M11 fault proxy listener is not exclusively owned by its recorded process.'
 }
+if (-not $proxySourceMatch.Value.Contains(
+    'if (active == "unreachable") return;'
+  ) -or $proxySourceMatch.Value.Contains(
+    'WriteJson(client.GetStream(), 503, "Service Unavailable"'
+  )) {
+  throw 'M11 unreachable fault must close the transport without returning HTTP 503.'
+}
 $proxySource = @'
 using System;
 using System.Collections.Generic;

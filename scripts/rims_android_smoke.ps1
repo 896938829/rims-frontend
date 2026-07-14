@@ -1045,11 +1045,7 @@ public static class RimsM11FaultProxy {
         ObserveUnknownRequest(request, path, active);
         Log("request mode=" + active + " path=" + RedactPath(path));
         if (active == "packet-loss-next") return;
-        if (active == "unreachable") {
-          WriteJson(client.GetStream(), 503, "Service Unavailable",
-            "{\"ok\":false,\"fault\":\"unreachable\"}");
-          return;
-        }
+        if (active == "unreachable") return;
         if (active == "stale-session-next") {
           WriteJson(client.GetStream(), 401, "Unauthorized",
             "{\"code\":\"AUTHENTICATION_REQUIRED\",\"message\":\"Injected stale session\"}");
