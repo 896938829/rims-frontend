@@ -348,6 +348,14 @@ try {
         'unknownResponseProbed = unknownCreate.requiresStatusProbe;'
       )) `
     -Message 'Unknown response evidence still trusts the preloaded operation flag.'
+  Assert-True `
+    -Condition $integrationText.Contains('find.byType(SyncCenterPage)') `
+    -Message 'Sync Center navigation must identify the actual page type.'
+  Assert-True `
+    -Condition (-not $integrationText.Contains(
+        "if (find.text('同步中心').evaluate().isNotEmpty) return;"
+      )) `
+    -Message 'Sync Center navigation must not confuse the Profile entry label with the page.'
   $autosaveStart = $integrationText.IndexOf('final autosaveWatch = Stopwatch()..start();')
   $autosaveMutation = $integrationText.IndexOf(
     "const Key('document-remark-field')"

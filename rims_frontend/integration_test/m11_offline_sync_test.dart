@@ -18,6 +18,7 @@ import 'package:rims_frontend/features/offline/domain/entities/outbox_operation.
 import 'package:rims_frontend/features/offline/domain/repositories/outbox_repository.dart';
 import 'package:rims_frontend/features/offline/domain/services/offline_ownership_service.dart';
 import 'package:rims_frontend/features/offline/domain/services/offline_store.dart';
+import 'package:rims_frontend/features/offline/presentation/pages/sync_center_page.dart';
 import 'package:rims_frontend/features/offline/presentation/view_models/sync_center_view_model.dart';
 import 'package:rims_frontend/features/reports/presentation/view_models/reports_view_model.dart';
 
@@ -1258,7 +1259,7 @@ Future<void> _syncOperation(WidgetTester tester, String operationId) async {
 }
 
 Future<void> _openSyncCenter(WidgetTester tester) async {
-  if (find.text('同步中心').evaluate().isNotEmpty) return;
+  if (find.byType(SyncCenterPage).evaluate().isNotEmpty) return;
   await _returnToShell(tester);
   await tapAndSettle(tester, const Key('bottom-nav-profile'));
   await scrollUntilVisible(tester, const Key('profile-sync-center-entry'));
