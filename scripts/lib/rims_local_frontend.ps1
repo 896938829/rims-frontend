@@ -27,6 +27,9 @@ function New-FlutterLaunchSpec {
     [int]$TlsPort = 8443,
     [AllowNull()]
     [AllowEmptyString()]
+    [string]$TlsSpkiPin,
+    [AllowNull()]
+    [AllowEmptyString()]
     [string]$AndroidSerial
   )
 
@@ -36,6 +39,10 @@ function New-FlutterLaunchSpec {
   if ($Target -eq 'android' -and
       -not (Test-RimsFrontendIdentifier -Value $AndroidSerial)) {
     throw 'Android serial contains unsupported command characters.'
+  }
+  if ($UseLocalTls -and $Target -eq 'web' -and
+      -not (Test-RimsLocalTlsSpkiPin -Pin $TlsSpkiPin)) {
+    throw 'Web local TLS requires a valid SHA-256 SPKI pin.'
   }
 
   $allowLocalHttp = if ($UseLocalTls) { 'false' } else { 'true' }
@@ -50,12 +57,13 @@ function New-FlutterLaunchSpec {
   } else {
     "http://10.0.2.2:$BackendPort/api/v1"
   }
+  $webDevice = if ($UseLocalTls) { 'chrome' } else { 'web-server' }
   $arguments = if ($Target -eq 'web') {
-    @(
+    $webArguments = @(
       'run',
       '--no-pub',
       '-d',
-      'web-server',
+      $webDevice,
       '--web-hostname',
       '127.0.0.1',
       '--web-port',
@@ -64,6 +72,10 @@ function New-FlutterLaunchSpec {
       "--dart-define=ALLOW_LOCAL_HTTP=$allowLocalHttp",
       "--dart-define=API_BASE_URL=$apiBaseUrl"
     )
+    if ($UseLocalTls) {
+      $webArguments += "--web-browser-flag=--ignore-certificate-errors-spki-list=$TlsSpkiPin"
+    }
+    $webArguments
   } else {
     @(
       'run',
@@ -78,6 +90,7 @@ function New-FlutterLaunchSpec {
   }
   return [pscustomobject][ordered]@{
     target = $Target
+    deviceId = if ($Target -eq 'web') { $webDevice } else { $AndroidSerial }
     workingDirectory = $FrontendDirectory
     arguments = [object[]]$arguments
     url = if ($Target -eq 'web') {
@@ -857,7 +870,8 @@ function Start-RimsManagedFrontend {
     [Parameter(Mandatory = $true)][int]$FrontendPort,
     [AllowNull()][AllowEmptyString()][string]$AndroidDevice,
     [switch]$UseLocalTls,
-    [ValidateRange(1, 65535)][int]$TlsPort = 8443
+    [ValidateRange(1, 65535)][int]$TlsPort = 8443,
+    [AllowNull()][AllowEmptyString()][string]$TlsSpkiPin
   )
 
   $frontendDirectory = Join-Path $State.frontendPath 'rims_frontend'
@@ -921,7 +935,8 @@ function Start-RimsManagedFrontend {
       -FrontendPort $FrontendPort `
       -AndroidSerial $serial `
       -UseLocalTls:$UseLocalTls `
-      -TlsPort $TlsPort
+      -TlsPort $TlsPort `
+      -TlsSpkiPin $TlsSpkiPin
     $flutter = Resolve-RimsCommandPath -Name 'flutter'
     if ([string]::IsNullOrWhiteSpace($flutter)) {
       throw 'flutter was not found on PATH.'
@@ -942,7 +957,7 @@ function Start-RimsManagedFrontend {
       appStarted = $false
       stdoutLogPath = $frontendPaths.stdoutLog
       stderrLogPath = $frontendPaths.stderrLog
-      commandSummary = "flutter run -d $(if ($Target -eq 'web') { 'web-server' } else { $serial })"
+      commandSummary = "flutter run -d $($launchSpec.deviceId)"
     }
     $outcome = Invoke-RimsFrontendLaunchStateMachine `
       -State $State `

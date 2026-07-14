@@ -526,8 +526,9 @@ function Invoke-RimsLocalLogsUnlocked {
       required = $false
       detail = 'Returned bounded sanitized local HTTPS proxy log tails.'
       remediation = ''
-      stdoutLogPath = $tlsPaths.proxyStdoutLog
-      stderrLogPath = $tlsPaths.proxyStderrLog
+      logCategory = 'localTlsProxy'
+      stdoutLogId = 'local-tls-proxy-stdout'
+      stderrLogId = 'local-tls-proxy-stderr'
       stdoutTail = $tlsStdout
       stderrTail = $tlsStderr
     }
@@ -1557,7 +1558,11 @@ function Invoke-RimsLocalUpUnlocked {
             -FrontendPort $FrontendPort `
             -AndroidDevice $AndroidDevice `
             -UseLocalTls:$UseLocalTls `
-            -TlsPort $tlsPort
+            -TlsPort $tlsPort `
+            -TlsSpkiPin ([string](Get-RimsObjectPropertyValue `
+                -Value (Get-RimsObjectPropertyValue -Value $state -Name 'localTls') `
+                -Name 'serverSpkiSha256' `
+                -DefaultValue ''))
           $result.components += New-RimsLocalComponent `
             -Name 'frontend' `
             -Ok $frontendStarted.ok `
@@ -1912,6 +1917,10 @@ function Invoke-RimsLocalUpUnlocked {
       -Target $Target `
       -EmulatorState $newState.emulator
     if (-not $tlsStarted.ok) {
+      if ($null -ne (Get-RimsObjectPropertyValue -Value $tlsStarted -Name 'state')) {
+        $newState.localTls = $tlsStarted.state
+        Write-RimsRuntimeState -Paths $paths -State $newState
+      }
       $result.components += New-RimsLocalComponent `
         -Name 'localTls' `
         -Ok $false `
@@ -1944,7 +1953,13 @@ function Invoke-RimsLocalUpUnlocked {
       -FrontendPort $FrontendPort `
       -AndroidDevice $AndroidDevice `
       -UseLocalTls:$UseLocalTls `
-      -TlsPort $tlsPort
+      -TlsPort $tlsPort `
+      -TlsSpkiPin $(if ($UseLocalTls) {
+          [string](Get-RimsObjectPropertyValue `
+            -Value $newState.localTls `
+            -Name 'serverSpkiSha256' `
+            -DefaultValue '')
+        } else { '' })
     $result.components += New-RimsLocalComponent `
       -Name 'frontend' `
       -Ok $frontendStarted.ok `
@@ -1999,12 +2014,19 @@ function Invoke-RimsLocalResetUnlocked {
     [AllowEmptyString()]
     [string]$BackendWorkspaceRoot,
     [Parameter(Mandatory = $true)]
-    [int]$BackendPort
+    [int]$BackendPort,
+    [switch]$UseLocalTls
   )
 
   $result = New-RimsLocalResult -Command 'reset'
   $paths = Get-RimsRuntimePaths -ScriptDirectory $ScriptDirectory
   $result.components += New-RimsRuntimePathsComponent -Paths $paths
+  if ($UseLocalTls) {
+    $result.errors = @(
+      'Reset has no runtime transport mode; -UseLocalTls is not valid for reset.'
+    )
+    return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+  }
   if ($Target -ne 'none') {
     $result.errors = @('Reset requires -Target none and does not launch a frontend.')
     return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
@@ -2121,7 +2143,8 @@ function Invoke-RimsLocalRestartUnlocked {
     [AllowNull()]
     [AllowEmptyString()]
     [string]$AndroidDevice,
-    [switch]$IncludeDependencies
+    [switch]$IncludeDependencies,
+    [switch]$UseLocalTls
   )
 
   $result = New-RimsLocalResult -Command 'restart'
@@ -2130,6 +2153,15 @@ function Invoke-RimsLocalRestartUnlocked {
     -BackendDir $BackendDir `
     -BackendWorkspaceRoot $BackendWorkspaceRoot
   $state = Read-RimsRuntimeState -Paths $paths
+  if ($null -ne $state -and
+      -not (Test-RimsLocalTlsModeMatchesState `
+        -State $state `
+        -UseLocalTls:$UseLocalTls)) {
+    $result.errors = @(
+      'Restart -UseLocalTls must exactly match the transport mode recorded in state.json.'
+    )
+    return Complete-RimsLocalResult -Result $result -Ok $false -ExitCode 1
+  }
   if ($null -eq $state -or
       -not $resolved.success -or
       -not (Test-RimsStateOwnsAnyBackendProcess -State $state) -or
@@ -2165,7 +2197,8 @@ function Invoke-RimsLocalRestartUnlocked {
     -BackendDir $resolved.backendPath `
     -BackendWorkspaceRoot $resolved.workspacePath `
     -BackendPort $BackendPort `
-    -IncludeDependencies:$IncludeDependencies
+    -IncludeDependencies:$IncludeDependencies `
+    -UseLocalTls:$UseLocalTls
   if (-not $down.ok) {
     $result.components = @($down.components)
     $result.errors = @($down.errors)
@@ -2180,7 +2213,8 @@ function Invoke-RimsLocalRestartUnlocked {
     -BackendPort $BackendPort `
     -FrontendPort $FrontendPort `
     -AndroidDevice $AndroidDevice `
-    -IncludeDependencies:$IncludeDependencies
+    -IncludeDependencies:$IncludeDependencies `
+    -UseLocalTls:$UseLocalTls
   $result.components = @($up.components)
   $result.errors = @($up.errors)
   return Complete-RimsLocalResult `
@@ -2408,7 +2442,8 @@ function Invoke-RimsLocalReset {
     [AllowEmptyString()]
     [string]$BackendWorkspaceRoot,
     [Parameter(Mandatory = $true)]
-    [int]$BackendPort
+    [int]$BackendPort,
+    [switch]$UseLocalTls
   )
 
   $paths = Get-RimsRuntimePaths -ScriptDirectory $ScriptDirectory
@@ -2449,7 +2484,8 @@ function Invoke-RimsLocalRestart {
     [AllowNull()]
     [AllowEmptyString()]
     [string]$AndroidDevice,
-    [switch]$IncludeDependencies
+    [switch]$IncludeDependencies,
+    [switch]$UseLocalTls
   )
 
   $paths = Get-RimsRuntimePaths -ScriptDirectory $ScriptDirectory

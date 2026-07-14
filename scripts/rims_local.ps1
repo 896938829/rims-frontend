@@ -221,7 +221,8 @@ if ($Command -in @('up', 'status', 'health', 'logs', 'restart', 'reset', 'down')
           -BackendDir $BackendDir `
           -BackendWorkspaceRoot $BackendWorkspaceRoot `
           -BackendPort $BackendPort `
-          -IncludeDependencies:$IncludeDependencies
+          -IncludeDependencies:$IncludeDependencies `
+          -UseLocalTls:$UseLocalTls
         break
       }
       'logs' {
@@ -239,7 +240,8 @@ if ($Command -in @('up', 'status', 'health', 'logs', 'restart', 'reset', 'down')
           -BackendPort $BackendPort `
           -FrontendPort $FrontendPort `
           -AndroidDevice $AndroidDevice `
-          -IncludeDependencies:$IncludeDependencies
+          -IncludeDependencies:$IncludeDependencies `
+          -UseLocalTls:$UseLocalTls
         break
       }
       'reset' {
@@ -248,7 +250,8 @@ if ($Command -in @('up', 'status', 'health', 'logs', 'restart', 'reset', 'down')
           -ScriptDirectory $scriptDir `
           -BackendDir $BackendDir `
           -BackendWorkspaceRoot $BackendWorkspaceRoot `
-          -BackendPort $BackendPort
+          -BackendPort $BackendPort `
+          -UseLocalTls:$UseLocalTls
         break
       }
       'down' {

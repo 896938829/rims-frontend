@@ -23,7 +23,65 @@ try {
   Assert-True `
     -Value $localCommand.Parameters.ContainsKey('UseLocalTls') `
     -Message 'The local command wrapper did not declare -UseLocalTls.'
+  foreach ($lifecycleCommand in @(
+      'Invoke-RimsLocalHealth',
+      'Invoke-RimsLocalRestart',
+      'Invoke-RimsLocalReset'
+    )) {
+    Assert-True `
+      -Value (Get-Command $lifecycleCommand).Parameters.ContainsKey('UseLocalTls') `
+      -Message "$lifecycleCommand does not explicitly handle -UseLocalTls."
+  }
+  $plainRecordedState = [pscustomobject]@{ localTls = $null }
+  $tlsRecordedState = [pscustomobject]@{ localTls = [pscustomobject]@{ workspaceId = 'fake' } }
+  Assert-True `
+    -Value (Test-RimsLocalTlsModeMatchesState -State $tlsRecordedState -UseLocalTls) `
+    -Message 'Restart TLS mode rejected matching recorded TLS state.'
+  Assert-False `
+    -Value (Test-RimsLocalTlsModeMatchesState -State $tlsRecordedState) `
+    -Message 'Restart silently downgraded recorded TLS state.'
+  Assert-False `
+    -Value (Test-RimsLocalTlsModeMatchesState -State $plainRecordedState -UseLocalTls) `
+    -Message 'Restart silently upgraded a recorded HTTP state.'
+  $resetTls = Invoke-RimsLocalResetUnlocked `
+    -Target none `
+    -ScriptDirectory $scriptDir `
+    -BackendDir '' `
+    -BackendWorkspaceRoot '' `
+    -BackendPort 8080 `
+    -UseLocalTls
+  Assert-False `
+    -Value $resetTls.ok `
+    -Message 'Reset silently ignored -UseLocalTls.'
+  Assert-True `
+    -Value (($resetTls.errors -join ' ').Contains('UseLocalTls')) `
+    -Message 'Reset TLS rejection did not explain the inconsistent option.'
   $repositoryTlsPaths = Get-RimsLocalTlsPaths -ScriptDirectory $scriptDir
+  $wrapperSource = [IO.File]::ReadAllText((Join-Path $scriptDir 'rims_local.ps1'))
+  foreach ($forwardingPattern in @(
+      '''health''[\s\S]*?-UseLocalTls:\$UseLocalTls',
+      '''restart''[\s\S]*?-UseLocalTls:\$UseLocalTls',
+      '''reset''[\s\S]*?-UseLocalTls:\$UseLocalTls'
+    )) {
+    Assert-True `
+      -Value ([regex]::IsMatch($wrapperSource, $forwardingPattern)) `
+      -Message 'The CLI wrapper silently dropped -UseLocalTls for a lifecycle command.'
+  }
+  $readmeSource = [IO.File]::ReadAllText((Join-Path $repositoryTlsPaths.repositoryRoot 'README.md'))
+  Assert-True `
+    -Value ($readmeSource.Contains('10.0.2.2') -and $readmeSource.Contains('host loopback')) `
+    -Message 'README does not explain the Android emulator special alias to host loopback.'
+  Assert-True `
+    -Value ($readmeSource.Contains('SPKI') -and $readmeSource.Contains('temporary Chrome')) `
+    -Message 'README does not explain isolated Web SPKI trust.'
+  $tlsLibrarySource = [IO.File]::ReadAllText((Join-Path $scriptDir 'lib\rims_local_tls.ps1'))
+  Assert-True `
+    -Value ($tlsLibrarySource.Contains("'-pubkey'") -and
+      $tlsLibrarySource.Contains('BEGIN PUBLIC KEY')) `
+    -Message 'SPKI calculation does not use WSL OpenSSL public-key output.'
+  Assert-False `
+    -Value $tlsLibrarySource.Contains('ExportSubjectPublicKeyInfo') `
+    -Message 'SPKI calculation depends on a PowerShell 7-only key export API.'
   $debugManifestPath = Join-Path `
     $repositoryTlsPaths.repositoryRoot `
     'rims_frontend\android\app\src\debug\AndroidManifest.xml'
@@ -58,13 +116,31 @@ try {
     -Value $legacyTlsSmokeResult.ok `
     -Message 'Legacy TLS smoke emitted successful HTTP evidence.'
 
+  $webSpkiPin = [Convert]::ToBase64String([byte[]](0..31))
+  $missingWebPinRejected = $false
+  try {
+    [void](New-FlutterLaunchSpec `
+        -Target web `
+        -FrontendDirectory (Join-Path $workspaceA 'rims_frontend') `
+        -BackendPort 8080 `
+        -FrontendPort 8091 `
+        -UseLocalTls `
+        -TlsPort 8443)
+  } catch {
+    $missingWebPinRejected = $true
+  }
+  Assert-True `
+    -Value $missingWebPinRejected `
+    -Message 'TLS Web launch accepted a missing SPKI pin.'
+
   $webLaunch = New-FlutterLaunchSpec `
     -Target web `
     -FrontendDirectory (Join-Path $workspaceA 'rims_frontend') `
     -BackendPort 8080 `
     -FrontendPort 8091 `
     -UseLocalTls `
-    -TlsPort 8443
+    -TlsPort 8443 `
+    -TlsSpkiPin $webSpkiPin
   Assert-Contains `
     -Collection $webLaunch.arguments `
     -Expected '--dart-define=ALLOW_LOCAL_HTTP=false' `
@@ -73,6 +149,28 @@ try {
     -Collection $webLaunch.arguments `
     -Expected '--dart-define=API_BASE_URL=https://localhost:8443/api/v1' `
     -Message 'TLS Web launch did not use the owned HTTPS proxy.'
+  Assert-Contains `
+    -Collection $webLaunch.arguments `
+    -Expected "--web-browser-flag=--ignore-certificate-errors-spki-list=$webSpkiPin" `
+    -Message 'TLS Web launch did not scope temporary Chrome trust to the server SPKI pin.'
+  $tlsWebDeviceIndex = [Array]::IndexOf([object[]]$webLaunch.arguments, '-d')
+  Assert-Equal `
+    -Actual $webLaunch.arguments[$tlsWebDeviceIndex + 1] `
+    -Expected 'chrome' `
+    -Message 'TLS Web launch did not isolate SPKI trust in Flutter temporary Chrome.'
+  Assert-False `
+    -Value (@($webLaunch.arguments) -contains '--web-browser-flag=--ignore-certificate-errors') `
+    -Message 'TLS Web launch used an unconstrained certificate-error bypass.'
+  $httpWebLaunch = New-FlutterLaunchSpec `
+    -Target web `
+    -FrontendDirectory (Join-Path $workspaceA 'rims_frontend') `
+    -BackendPort 8080 `
+    -FrontendPort 8091
+  $httpWebDeviceIndex = [Array]::IndexOf([object[]]$httpWebLaunch.arguments, '-d')
+  Assert-Equal `
+    -Actual $httpWebLaunch.arguments[$httpWebDeviceIndex + 1] `
+    -Expected 'web-server' `
+    -Message 'Legacy local HTTP Web launch no longer uses its explicit web-server device.'
   $androidLaunch = New-FlutterLaunchSpec `
     -Target android `
     -FrontendDirectory (Join-Path $workspaceA 'rims_frontend') `
@@ -156,8 +254,13 @@ try {
       }
       return [pscustomobject]@{ exitCode = 0; stdout = ''; stderr = '' }
     } `
-    -FingerprintAction { param($path) return ('AA' * 32) }
+    -FingerprintAction { param($path) return ('AA' * 32) } `
+    -SpkiPinAction { param($path) return $webSpkiPin }
   Assert-True -Value $certificateResult.ok -Message 'Fake certificate generation failed.'
+  Assert-Equal `
+    -Actual $certificateResult.serverSpkiSha256 `
+    -Expected $webSpkiPin `
+    -Message 'Server certificate evidence omitted its SHA-256 SPKI pin.'
   Assert-True `
     -Value ($opensslCalls.Count -ge 2) `
     -Message 'Certificate generation did not invoke the fake OpenSSL boundary.'
@@ -187,6 +290,7 @@ try {
       return [pscustomobject]@{ exitCode = 0; stdout = ''; stderr = '' }
     } `
     -FingerprintAction { param($path) return ('AA' * 32) } `
+    -SpkiPinAction { param($path) return $webSpkiPin } `
     -CertificateValidationAction {
       param($certificatePath, $caPath, $hostName)
       return [pscustomobject]@{ ok = $true }
@@ -261,6 +365,12 @@ try {
   Assert-True `
     -Value $proxyScriptText.Contains('EphemeralKeySet') `
     -Message 'TLS proxy did not keep imported PFX keys ephemeral.'
+  Assert-True `
+    -Value $proxyScriptText.Contains('[Net.IPAddress]::Loopback') `
+    -Message 'TLS proxy did not bind exclusively to host loopback.'
+  Assert-False `
+    -Value $proxyScriptText.Contains('[Net.IPAddress]::Any') `
+    -Message 'TLS proxy exposed its listener beyond host loopback.'
   Assert-Equal -Actual $proxy.state.port -Expected 8443 -Message 'TLS port evidence changed.'
   Assert-Equal -Actual $proxy.state.windowsPid -Expected 4242 -Message 'TLS PID was not recorded.'
   Assert-Equal `
@@ -283,6 +393,85 @@ try {
   Assert-False `
     -Value $wrongCommand.ok `
     -Message 'TLS ownership accepted the wrong command line.'
+
+  $pidMismatch = Test-RimsLocalTlsProxyOwnership `
+    -TlsState $proxy.state `
+    -TlsPaths $pathsA `
+    -ProcessOwnershipAction {
+      param($state)
+      return [pscustomobject]@{ ok = $false; pidMatches = $false; startTimeMatches = $true }
+    }
+  Assert-False -Value $pidMismatch.ok -Message 'TLS ownership accepted a PID mismatch.'
+  Assert-True `
+    -Value $pidMismatch.detail.Contains('PID') `
+    -Message 'TLS PID mismatch evidence was not specific.'
+  $startTimeMismatch = Test-RimsLocalTlsProxyOwnership `
+    -TlsState $proxy.state `
+    -TlsPaths $pathsA `
+    -ProcessOwnershipAction {
+      param($state)
+      return [pscustomobject]@{ ok = $false; pidMatches = $true; startTimeMatches = $false }
+    }
+  Assert-False `
+    -Value $startTimeMismatch.ok `
+    -Message 'TLS ownership accepted a process start-time mismatch.'
+  Assert-True `
+    -Value $startTimeMismatch.detail.Contains('start time') `
+    -Message 'TLS process start-time mismatch evidence was not specific.'
+  $ownershipPortMismatch = Test-RimsLocalTlsProxyOwnership `
+    -TlsState $proxy.state `
+    -TlsPaths $pathsA `
+    -ProcessOwnershipAction { param($state) return $true } `
+    -PortOwnershipAction { param($port, $processId) return $false }
+  Assert-False `
+    -Value $ownershipPortMismatch.ok `
+    -Message 'TLS ownership accepted a port mismatch.'
+  $markerMismatch = Test-RimsLocalTlsProxyOwnership `
+    -TlsState $proxy.state `
+    -TlsPaths $pathsA `
+    -ProcessOwnershipAction { param($state) return $true } `
+    -PortOwnershipAction { param($port, $processId) return $true } `
+    -CommandLineAction { param($processId) return "powershell $($pathsA.proxyScript)" }
+  Assert-False `
+    -Value $markerMismatch.ok `
+    -Message 'TLS ownership accepted a missing workspace marker.'
+  $scriptPathMismatch = Test-RimsLocalTlsProxyOwnership `
+    -TlsState $proxy.state `
+    -TlsPaths $pathsA `
+    -ProcessOwnershipAction { param($state) return $true } `
+    -PortOwnershipAction { param($port, $processId) return $true } `
+    -CommandLineAction { param($processId) return "powershell C:\other\proxy.ps1 $($proxy.state.ownershipMarker)" }
+  Assert-False `
+    -Value $scriptPathMismatch.ok `
+    -Message 'TLS ownership accepted the wrong proxy script path.'
+
+  $failedProxyStop = Start-RimsLocalTlsProxy `
+    -TlsPaths $pathsA `
+    -BackendPort 8080 `
+    -TlsPort 8443 `
+    -PortListeningAction { param($port) return $false } `
+    -StartProcessAction {
+      param($spec)
+      return [pscustomobject]@{
+        windowsPid = $proxy.state.windowsPid
+        windowsProcessStartTimeUtc = $proxy.state.windowsProcessStartTimeUtc
+        commandLine = $spec.commandLine
+      }
+    } `
+    -ReadinessAction { param($state) return $false } `
+    -PortOwnershipAction { param($port, $processId) return $true } `
+    -StopAction {
+      param($state)
+      return [pscustomobject]@{ ok = $false; detail = 'fake proxy stop failure' }
+    }
+  Assert-False -Value $failedProxyStop.ok -Message 'Proxy readiness failure was hidden.'
+  Assert-True `
+    -Value $failedProxyStop.cleanupPending `
+    -Message 'Proxy stop failure was not marked pending.'
+  Assert-Equal `
+    -Actual $failedProxyStop.state.windowsPid `
+    -Expected $proxy.state.windowsPid `
+    -Message 'Proxy stop failure lost PID ownership state.'
 
   $ownedEmulator = [pscustomobject]@{
     serial = 'emulator-5556'
@@ -313,21 +502,29 @@ try {
   $removedOwnedTrust = Remove-RimsAndroidUserCa `
     -TrustState $installed.state `
     -EmulatorState $ownedEmulator `
+    -TlsPaths $pathsA `
     -EmulatorOwnershipAction { param($state) return $true } `
+    -FingerprintAction { param($path) return ('AA' * 32) } `
     -AdbAction {
       param($serial, $arguments)
       [void]$adbCalls.Add(($arguments -join ' '))
+      if ($arguments[0] -eq 'pull') {
+        [IO.File]::WriteAllText([string]$arguments[2], 'fake remote CA')
+      }
       return [pscustomobject]@{ exitCode = 0; stdout = ''; stderr = '' }
     }
   Assert-True `
     -Value $removedOwnedTrust.ok `
     -Message 'Controller-installed Android CA removal failed.'
   Assert-Equal `
-    -Actual $adbCalls.Count `
-    -Expected 1 `
-    -Message 'Owned Android CA removal crossed the ADB boundary more than once.'
+    -Actual ($adbCalls -join '|') `
+    -Expected "root|shell test -f $($installed.state.remotePath)|pull $($installed.state.remotePath) $($pathsA.root)\android-remove-ca.pem|shell rm -f $($installed.state.remotePath)" `
+    -Message 'Owned Android CA removal did not verify and remove the exact recorded certificate.'
   Assert-True `
-    -Value $adbCalls[0].Contains($installed.state.remotePath) `
+    -Value (-not (Test-Path -LiteralPath (Join-Path $pathsA.root 'android-remove-ca.pem'))) `
+    -Message 'Android CA removal left its temporary pulled certificate.'
+  Assert-True `
+    -Value $adbCalls[$adbCalls.Count - 1].Contains($installed.state.remotePath) `
     -Message 'Owned Android CA removal did not use the exact recorded path.'
 
   $adbCalls.Clear()
@@ -353,6 +550,7 @@ try {
   $preserved = Remove-RimsAndroidUserCa `
     -TrustState $preExisting.state `
     -EmulatorState $ownedEmulator `
+    -TlsPaths $pathsA `
     -EmulatorOwnershipAction { param($state) return $true } `
     -AdbAction {
       param($serial, $arguments)
@@ -364,6 +562,200 @@ try {
     -Actual $adbCalls.Count `
     -Expected 0 `
     -Message 'Down removed trust that pre-existed the controller.'
+
+  $wrongSerialEmulator = [pscustomobject]@{
+    serial = 'emulator-5558'
+    avdName = 'Medium_Phone_API_36.1'
+    windowsPid = 5252
+    windowsProcessStartTimeUtc = $fakeStartedAt
+  }
+  $wrongSerialCalls = 0
+  $wrongSerialRemoval = Remove-RimsAndroidUserCa `
+    -TrustState $installed.state `
+    -EmulatorState $wrongSerialEmulator `
+    -TlsPaths $pathsA `
+    -EmulatorOwnershipAction { param($state) return $true } `
+    -AdbAction {
+      param($serial, $arguments)
+      $script:wrongSerialCalls++
+      return [pscustomobject]@{ exitCode = 0; stdout = ''; stderr = '' }
+    }
+  Assert-False `
+    -Value $wrongSerialRemoval.ok `
+    -Message 'Android CA removal accepted a different owned emulator serial.'
+  Assert-Equal `
+    -Actual $wrongSerialCalls `
+    -Expected 0 `
+    -Message 'Wrong-serial Android CA removal crossed the ADB boundary.'
+
+  $replacementCalls = New-Object 'Collections.Generic.List[string]'
+  $replacementRemoval = Remove-RimsAndroidUserCa `
+    -TrustState $installed.state `
+    -EmulatorState $ownedEmulator `
+    -TlsPaths $pathsA `
+    -EmulatorOwnershipAction { param($state) return $true } `
+    -FingerprintAction { param($path) return ('BB' * 32) } `
+    -AdbAction {
+      param($serial, $arguments)
+      [void]$replacementCalls.Add(($arguments -join ' '))
+      if ($arguments[0] -eq 'pull') {
+        [IO.File]::WriteAllText([string]$arguments[2], 'replacement CA')
+      }
+      return [pscustomobject]@{ exitCode = 0; stdout = ''; stderr = '' }
+    }
+  Assert-False `
+    -Value $replacementRemoval.ok `
+    -Message 'Android CA removal deleted a remotely replaced certificate.'
+  Assert-True `
+    -Value $replacementRemoval.cleanupPending `
+    -Message 'Remote Android CA replacement did not retain cleanup state.'
+  Assert-False `
+    -Value (@($replacementCalls) -contains "shell rm -f $($installed.state.remotePath)") `
+    -Message 'Remote Android CA replacement was deleted.'
+  Assert-False `
+    -Value (Test-Path -LiteralPath (Join-Path $pathsA.root 'android-remove-ca.pem')) `
+    -Message 'Remote replacement verification left its pulled temporary file.'
+
+  $installMutations = @(
+    'root',
+    "push $($pathsA.caCertificate) /data/local/tmp/rims-$($pathsA.workspaceId)-ca.pem",
+    'shell mkdir -p /data/misc/user/0/cacerts-added',
+    "shell cp /data/local/tmp/rims-$($pathsA.workspaceId)-ca.pem $($installed.state.remotePath)",
+    "shell chmod 644 $($installed.state.remotePath)",
+    "shell chown system:system $($installed.state.remotePath)",
+    "shell restorecon $($installed.state.remotePath)",
+    "shell rm -f /data/local/tmp/rims-$($pathsA.workspaceId)-ca.pem"
+  )
+  for ($failedMutation = 0; $failedMutation -lt $installMutations.Count; $failedMutation++) {
+    $mutationCalls = New-Object 'Collections.Generic.List[string]'
+    $script:mutationFailedOnce = $false
+    $mutationFailure = Install-RimsAndroidUserCa `
+      -TlsPaths $pathsA `
+      -EmulatorState $ownedEmulator `
+      -CaFingerprintSha256 ('AA' * 32) `
+      -EmulatorOwnershipAction { param($state) return $true } `
+      -TrustQueryAction { param($serial, $fingerprint) return $false } `
+      -AdbAction {
+        param($serial, $arguments)
+        $commandText = $arguments -join ' '
+        [void]$mutationCalls.Add($commandText)
+        if (-not $script:mutationFailedOnce -and
+            $commandText -eq $installMutations[$failedMutation]) {
+          $script:mutationFailedOnce = $true
+          return [pscustomobject]@{ exitCode = 1; stdout = ''; stderr = 'fake ADB mutation failure' }
+        }
+        return [pscustomobject]@{ exitCode = 0; stdout = ''; stderr = '' }
+      }
+    Assert-False `
+      -Value $mutationFailure.ok `
+      -Message "Android install mutation '$($installMutations[$failedMutation])' failure was hidden."
+    Assert-True `
+      -Value (@($mutationCalls) -contains "shell rm -f /data/local/tmp/rims-$($pathsA.workspaceId)-ca.pem") `
+      -Message "Android install mutation '$($installMutations[$failedMutation])' did not compensate its temp file."
+    if ($failedMutation -ge 3) {
+      Assert-True `
+        -Value (@($mutationCalls) -contains "shell rm -f $($installed.state.remotePath)") `
+        -Message "Android install mutation '$($installMutations[$failedMutation])' did not compensate attempted remote trust."
+    }
+    Assert-False `
+      -Value $mutationFailure.cleanupPending `
+      -Message "Successful Android compensation '$($installMutations[$failedMutation])' remained pending."
+  }
+
+  $script:compensationPrimaryCall = 0
+  $failedCompensation = Install-RimsAndroidUserCa `
+    -TlsPaths $pathsA `
+    -EmulatorState $ownedEmulator `
+    -CaFingerprintSha256 ('AA' * 32) `
+    -EmulatorOwnershipAction { param($state) return $true } `
+    -TrustQueryAction { param($serial, $fingerprint) return $false } `
+    -AdbAction {
+      param($serial, $arguments)
+      $isRemoval = $arguments[0] -eq 'shell' -and $arguments[1] -eq 'rm'
+      if ($isRemoval) {
+        return [pscustomobject]@{ exitCode = 1; stdout = ''; stderr = 'fake compensation failure' }
+      }
+      $script:compensationPrimaryCall++
+      if ($script:compensationPrimaryCall -eq 5) {
+        return [pscustomobject]@{ exitCode = 1; stdout = ''; stderr = 'fake chmod failure' }
+      }
+      return [pscustomobject]@{ exitCode = 0; stdout = ''; stderr = '' }
+    }
+  Assert-False -Value $failedCompensation.ok -Message 'Android compensation failure was hidden.'
+  Assert-True `
+    -Value $failedCompensation.cleanupPending `
+    -Message 'Android compensation failure was not marked pending.'
+  Assert-True `
+    -Value $failedCompensation.state.installedByController `
+    -Message 'Android compensation failure lost owned trust state.'
+  Assert-Equal `
+    -Actual $failedCompensation.state.serial `
+    -Expected $ownedEmulator.serial `
+    -Message 'Android compensation failure lost the exact emulator serial.'
+
+  $unownedAdbCalls = 0
+  $unownedInstall = Install-RimsAndroidUserCa `
+    -TlsPaths $pathsA `
+    -EmulatorState $ownedEmulator `
+    -CaFingerprintSha256 ('AA' * 32) `
+    -EmulatorOwnershipAction { param($state) return $false } `
+    -AdbAction {
+      param($serial, $arguments)
+      $script:unownedAdbCalls++
+      return [pscustomobject]@{ exitCode = 0; stdout = ''; stderr = '' }
+    }
+  Assert-False `
+    -Value $unownedInstall.ok `
+    -Message 'Android CA install accepted an unowned emulator.'
+  Assert-Equal `
+    -Actual $unownedAdbCalls `
+    -Expected 0 `
+    -Message 'Unowned Android CA install crossed the ADB boundary.'
+
+  foreach ($removeFailureCommand in @('root', 'query', 'pull', 'remove')) {
+    $removeTrustState = [pscustomobject]@{
+      serial = $ownedEmulator.serial
+      fingerprintSha256 = ('AA' * 32)
+      subjectHash = $installed.state.subjectHash
+      remotePath = $installed.state.remotePath
+      preExisting = $false
+      installedByController = $true
+      cleanupPending = $false
+    }
+    $removeFailure = Remove-RimsAndroidUserCa `
+      -TrustState $removeTrustState `
+      -EmulatorState $ownedEmulator `
+      -TlsPaths $pathsA `
+      -EmulatorOwnershipAction { param($state) return $true } `
+      -FingerprintAction { param($path) return ('AA' * 32) } `
+      -AdbAction {
+        param($serial, $arguments)
+        $commandKind = if ($arguments[0] -eq 'root') {
+          'root'
+        } elseif ($arguments[0] -eq 'pull') {
+          [IO.File]::WriteAllText([string]$arguments[2], 'pulled CA')
+          'pull'
+        } elseif ($arguments[0] -eq 'shell' -and $arguments[1] -eq 'test') {
+          'query'
+        } else {
+          'remove'
+        }
+        if ($commandKind -eq $removeFailureCommand) {
+          $exitCode = if ($commandKind -eq 'query') { 2 } else { 1 }
+          return [pscustomobject]@{ exitCode = $exitCode; stdout = ''; stderr = 'fake remove failure' }
+        }
+        return [pscustomobject]@{ exitCode = 0; stdout = ''; stderr = '' }
+      }
+    Assert-False `
+      -Value $removeFailure.ok `
+      -Message "Android CA $removeFailureCommand failure was hidden."
+    Assert-True `
+      -Value $removeFailure.cleanupPending `
+      -Message "Android CA $removeFailureCommand failure lost cleanup state."
+    Assert-False `
+      -Value (Test-Path -LiteralPath (Join-Path $pathsA.root 'android-remove-ca.pem')) `
+      -Message "Android CA $removeFailureCommand failure left its pulled temporary file."
+  }
   $preservedTlsState = [pscustomobject]@{
     localTls = [pscustomobject]@{
       proxy = $null
@@ -469,6 +861,265 @@ try {
     -Actual $certificateCleanupCalls `
     -Expected 0 `
     -Message 'TLS evidence was deleted after unowned-listener refusal.'
+
+  foreach ($failedStep in 1..4) {
+    $stepWorkspace = Join-Path $testRoot "openssl-step-$failedStep"
+    [void][IO.Directory]::CreateDirectory((Join-Path $stepWorkspace 'scripts'))
+    $stepPaths = Get-RimsLocalTlsPaths -ScriptDirectory (Join-Path $stepWorkspace 'scripts')
+    $script:tlsOpenSslCall = 0
+    $stepFailure = New-RimsLocalTlsCertificates `
+      -TlsPaths $stepPaths `
+      -OpenSslAction {
+        param($arguments, $invocationPaths)
+        $script:tlsOpenSslCall++
+        [IO.File]::WriteAllText(
+          (Join-Path $invocationPaths.root "partial-$script:tlsOpenSslCall"),
+          'partial'
+        )
+        if ($script:tlsOpenSslCall -eq $failedStep) {
+          return [pscustomobject]@{ exitCode = 1; stdout = ''; stderr = 'fake OpenSSL failure' }
+        }
+        return [pscustomobject]@{ exitCode = 0; stdout = ''; stderr = '' }
+      }
+    Assert-False `
+      -Value $stepFailure.ok `
+      -Message "OpenSSL step $failedStep failure was hidden."
+    Assert-False `
+      -Value (Test-Path -LiteralPath $stepPaths.root) `
+      -Message "OpenSSL step $failedStep left partial TLS material."
+  }
+
+  $requiredMaterialNames = @(
+    'caPrivateKey',
+    'caCertificate',
+    'serverPrivateKey',
+    'serverCertificate',
+    'serverPfx'
+  )
+  foreach ($missingName in $requiredMaterialNames) {
+    $missingWorkspace = Join-Path $testRoot "missing-$missingName"
+    [void][IO.Directory]::CreateDirectory((Join-Path $missingWorkspace 'scripts'))
+    $missingPaths = Get-RimsLocalTlsPaths -ScriptDirectory (Join-Path $missingWorkspace 'scripts')
+    $missingResult = New-RimsLocalTlsCertificates `
+      -TlsPaths $missingPaths `
+      -OpenSslAction {
+        param($arguments, $invocationPaths)
+        foreach ($materialName in $requiredMaterialNames) {
+          if ($materialName -ne $missingName) {
+            [IO.File]::WriteAllText([string]$invocationPaths.$materialName, 'partial')
+          }
+        }
+        return [pscustomobject]@{ exitCode = 0; stdout = ''; stderr = '' }
+      }
+    Assert-False `
+      -Value $missingResult.ok `
+      -Message "Missing required TLS material '$missingName' was accepted."
+    Assert-False `
+      -Value (Test-Path -LiteralPath $missingPaths.root) `
+      -Message "Missing required TLS material '$missingName' left partial files."
+  }
+
+  $cleanupWorkspace = Join-Path $testRoot 'cleanup-pending'
+  [void][IO.Directory]::CreateDirectory((Join-Path $cleanupWorkspace 'scripts'))
+  $cleanupPaths = Get-RimsLocalTlsPaths -ScriptDirectory (Join-Path $cleanupWorkspace 'scripts')
+  $cleanupFailure = New-RimsLocalTlsCertificates `
+    -TlsPaths $cleanupPaths `
+    -OpenSslAction {
+      param($arguments, $invocationPaths)
+      [IO.File]::WriteAllText((Join-Path $invocationPaths.root 'partial'), 'partial')
+      return [pscustomobject]@{ exitCode = 1; stdout = ''; stderr = 'fake generation failure' }
+    } `
+    -CleanupAction {
+      param($paths)
+      return [pscustomobject]@{ ok = $false; detail = 'fake cleanup failure' }
+    }
+  Assert-False -Value $cleanupFailure.ok -Message 'Certificate cleanup failure was hidden.'
+  Assert-True `
+    -Value $cleanupFailure.cleanupPending `
+    -Message 'Certificate cleanup failure was not marked pending.'
+  Assert-True `
+    -Value $cleanupFailure.state.cleanupPending `
+    -Message 'Certificate cleanup failure did not return persistent partial state.'
+  Assert-Equal `
+    -Actual $cleanupFailure.state.root `
+    -Expected $cleanupPaths.root `
+    -Message 'Certificate partial state lost its deterministic cleanup root.'
+
+  $certificatePartial = [pscustomobject]@{
+    workspaceId = $pathsA.workspaceId
+    root = $pathsA.root
+    certificateCreated = $true
+    proxy = $null
+    androidTrust = $null
+    cleanupPending = $true
+  }
+  $failedCertificateUp = Invoke-RimsLocalTlsUp `
+    -TlsPaths $pathsA `
+    -BackendPort 8080 `
+    -TlsPort 8443 `
+    -Target none `
+    -CertificateAction {
+      param($paths)
+      return [pscustomobject]@{
+        ok = $false
+        detail = 'fake certificate cleanup pending'
+        cleanupPending = $true
+        state = $certificatePartial
+      }
+    }
+  Assert-True `
+    -Value $failedCertificateUp.cleanupPending `
+    -Message 'TLS up lost certificate cleanup-pending evidence.'
+  Assert-Equal `
+    -Actual $failedCertificateUp.state.root `
+    -Expected $pathsA.root `
+    -Message 'TLS up lost certificate partial state.'
+  $partialTlsComponent = New-RimsLocalTlsComponent `
+    -State ([pscustomobject]@{ localTls = $certificatePartial }) `
+    -TlsPaths $pathsA `
+    -Required $true
+  Assert-False `
+    -Value $partialTlsComponent.ok `
+    -Message 'TLS status reported cleanup-pending partial state as healthy.'
+  Assert-True `
+    -Value $partialTlsComponent.cleanupPending `
+    -Message 'TLS status omitted cleanup-pending partial-state evidence.'
+
+  $successfulCertificateState = [pscustomobject]@{
+    ok = $true
+    created = $true
+    caCertificatePath = $pathsA.caCertificate
+    serverCertificatePath = $pathsA.serverCertificate
+    caFingerprintSha256 = ('AA' * 32)
+    serverFingerprintSha256 = ('BB' * 32)
+    serverSpkiSha256 = $webSpkiPin
+    caSubjectHash = '0123abcd'
+    requiredSans = @('localhost', '127.0.0.1', '10.0.2.2')
+  }
+  $failedProxyUp = Invoke-RimsLocalTlsUp `
+    -TlsPaths $pathsA `
+    -BackendPort 8080 `
+    -TlsPort 8443 `
+    -Target none `
+    -CertificateAction { param($paths) return $successfulCertificateState } `
+    -ProxyStartAction {
+      param($paths, $backendPort, $tlsPort)
+      return [pscustomobject]@{
+        ok = $false
+        detail = 'fake proxy cleanup pending'
+        cleanupPending = $true
+        state = $proxy.state
+      }
+    } `
+    -CertificateCleanupAction {
+      param($paths)
+      return [pscustomobject]@{ ok = $false; detail = 'fake certificate cleanup failure' }
+    }
+  Assert-True `
+    -Value $failedProxyUp.cleanupPending `
+    -Message 'TLS up lost proxy cleanup-pending evidence.'
+  Assert-Equal `
+    -Actual $failedProxyUp.state.proxy.windowsPid `
+    -Expected $proxy.state.windowsPid `
+    -Message 'TLS up lost proxy ownership partial state.'
+
+  $partialTrust = [pscustomobject]@{
+    serial = $ownedEmulator.serial
+    fingerprintSha256 = ('AA' * 32)
+    remotePath = $installed.state.remotePath
+    installedByController = $true
+    cleanupPending = $true
+  }
+  $failedTrustUp = Invoke-RimsLocalTlsUp `
+    -TlsPaths $pathsA `
+    -BackendPort 8080 `
+    -TlsPort 8443 `
+    -Target android `
+    -EmulatorState $ownedEmulator `
+    -CertificateAction { param($paths) return $successfulCertificateState } `
+    -ProxyStartAction {
+      param($paths, $backendPort, $tlsPort)
+      return [pscustomobject]@{ ok = $true; state = $proxy.state }
+    } `
+    -TrustInstallAction {
+      param($paths, $emulator, $fingerprint, $subjectHash)
+      return [pscustomobject]@{
+        ok = $false
+        detail = 'fake trust cleanup pending'
+        cleanupPending = $true
+        state = $partialTrust
+      }
+    } `
+    -ProxyStopAction {
+      param($state)
+      return [pscustomobject]@{ ok = $false; detail = 'fake proxy stop failure' }
+    } `
+    -CertificateCleanupAction {
+      param($paths)
+      return [pscustomobject]@{ ok = $false; detail = 'fake certificate cleanup failure' }
+    }
+  Assert-True `
+    -Value $failedTrustUp.cleanupPending `
+    -Message 'TLS up ignored failed trust/proxy/certificate compensation.'
+  Assert-Equal `
+    -Actual $failedTrustUp.state.androidTrust.serial `
+    -Expected $ownedEmulator.serial `
+    -Message 'TLS up lost Android trust partial state.'
+  Assert-Equal `
+    -Actual $failedTrustUp.state.proxy.windowsPid `
+    -Expected $proxy.state.windowsPid `
+    -Message 'TLS up lost proxy state after trust compensation failed.'
+
+  $tlsComponentState = [pscustomobject]@{
+    localTls = [pscustomobject]@{
+      workspaceId = $pathsA.workspaceId
+      port = 8443
+      caFingerprintSha256 = ('AA' * 32)
+      serverFingerprintSha256 = ('BB' * 32)
+      serverSpkiSha256 = $webSpkiPin
+      requiredSans = @('localhost')
+      proxy = $proxy.state
+      serverCertificatePath = $pathsA.serverCertificate
+      caCertificatePath = $pathsA.caCertificate
+    }
+  }
+  $tlsComponent = New-RimsLocalTlsComponent `
+    -State $tlsComponentState `
+    -TlsPaths $pathsA `
+    -Required $true `
+    -OwnershipAction { param($state, $paths) return [pscustomobject]@{ ok = $true; detail = 'owned' } } `
+    -CertificateAction { param($state) return [pscustomobject]@{ ok = $true; detail = 'valid' } }
+  $tlsComponentJson = $tlsComponent | ConvertTo-Json -Depth 8
+  Assert-Equal `
+    -Actual $tlsComponent.serverSpkiSha256 `
+    -Expected $webSpkiPin `
+    -Message 'Public TLS evidence omitted the server SPKI pin.'
+  foreach ($privateEvidence in @(
+      $pathsA.root,
+      $pathsA.caCertificate,
+      $pathsA.serverCertificate,
+      $pathsA.serverPrivateKey
+    )) {
+    Assert-False `
+      -Value $tlsComponentJson.Contains($privateEvidence) `
+      -Message 'Public TLS evidence exposed an absolute TLS material path.'
+  }
+
+  $lifecycleSource = [IO.File]::ReadAllText((Join-Path $scriptDir 'lib\rims_local_lifecycle.ps1'))
+  Assert-False `
+    -Value $lifecycleSource.Contains('stdoutLogPath = $tlsPaths.proxyStdoutLog') `
+    -Message 'Local TLS logs expose an absolute stdout path in JSON evidence.'
+  Assert-False `
+    -Value $lifecycleSource.Contains('stderrLogPath = $tlsPaths.proxyStderrLog') `
+    -Message 'Local TLS logs expose an absolute stderr path in JSON evidence.'
+  $failedTlsBranch = [regex]::Match(
+    $lifecycleSource,
+    'if \(-not \$tlsStarted\.ok\) \{(?<body>[\s\S]*?)return Complete-RimsFailedUpResult'
+  )
+  Assert-True -Value $failedTlsBranch.Success -Message 'TLS failed-up lifecycle branch was not found.'
+  Assert-True `
+    -Value $failedTlsBranch.Groups['body'].Value.Contains('$newState.localTls = $tlsStarted.state') `
+    -Message 'TLS failed-up lifecycle does not persist returned partial cleanup state.'
 
   Write-Host 'Local TLS runtime test passed.'
 } finally {
