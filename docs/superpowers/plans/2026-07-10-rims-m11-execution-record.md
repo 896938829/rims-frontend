@@ -263,6 +263,25 @@ counts, encrypted storage ownership, cleanup, and baseline restore are read.
 
 ## Final Android State Evidence
 
+## Task 16 Local Fault Harness And Android Acceptance Evidence
+
+| Probe | Observed result |
+| --- | --- |
+| RED | wrapper, review, and quality probes exposed missing process recreation, narrowed latency windows, unverified status replay, network-route spoofing, non-default-port loss, reset data loss, stale cleanup ownership, and storage rollback orphan races before the final implementation |
+| Fault matrix | M11-only hooks cover airplane mode, latency, unreachable/packet loss, Wi-Fi restoration, process recreation, stale session/permission, unknown delivery, duplicate replay, conflict, database corruption, and first-failure cleanup |
+| Process recovery | Android stages use real force-stop/relaunch boundaries, reopen Drift, drive scanner callback and 300 ms autosave, then measure recovery from the integration entry through navigation until the draft is visible |
+| Network chain | dynamic owned fault proxy and host bridge prove `emulator -> 127.0.0.1 proxy -> 127.0.0.1 bridge -> ::1 verified WSL backend`; child and aggregate reports share strict address, PID/start-time, port, route, and backend-identity validation |
+| Idempotency | the proxy observes the real status probe and replay request; evidence binds HTTP method, normalized target, body fingerprint, operation ID, and hashed idempotency key and requires exactly one document and inventory transaction |
+| Performance | evidence enforces cached content <= 500 ms, full debounced draft persistence <= 250 ms, process recovery <= 1,000 ms, enqueue <= 250 ms, confirmed sync <= 10,000 ms excluding injected delay, and database size <= 25 MiB |
+| Evidence types | child and aggregate validators reject fractional/string counts, malformed commits/hashes, missing cleanup Booleans, wrong network addresses, swapped routes, and duplicate document/transaction effects |
+| Baseline reset | backend fixture reset is namespace-scoped, serialized, and failure-safe; DB rows and physical attachments use durable claim/version leases, completed tombstones, path/active-reference guards, and strict zero pending cleanup evidence |
+| Storage cleanup | uploads and replacements register durable cleanup before storage writes; prepare tokens gate metadata commits, maintenance uses atomic `SKIP LOCKED` claims with leases/version fencing, and completed tombstones prevent stale workers from deleting newly bound objects |
+| Capacity | M9 fixture and generic storage tombstones emit counts and configured limits; any incomplete generic storage cleanup causes reset failure rather than a false clean baseline |
+| Backend | final Task 16 backend HEAD `64826d2`; `bash scripts/test_m9_dev_seed.sh` PASS against PostgreSQL; `go test ./... -count=1` PASS; migrations 15-17 upgrade and repeat safely |
+| Frontend | final Task 16 frontend HEAD `2624cf4`; M11, Android, and M10 wrapper self-tests PASS; strict analyze PASS; full Flutter suite PASS (1208 tests); M11 integration debug APK builds |
+| Review | repeated specification and quality reviews drove all reported P0/P1/P2 fixes; final main-agent code audit and fresh gates found no remaining Task 16 P0/P1/P2 |
+| Boundary | real stopped-state AVD/backend acceptance and report inspection remain Task 17 and are not claimed by wrapper self-tests or APK compilation |
+
 | Evidence | Observed result |
 | --- | --- |
 

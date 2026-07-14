@@ -674,15 +674,15 @@ feat: surface offline and stale state
 - Create: `scripts/test_rims_m11_smoke.ps1`
 - Modify: `scripts/test_rims_android_smoke.ps1`
 
-- [ ] **Step 1: Write wrapper self-tests for airplane mode, latency, packet loss/unreachable API, Wi-Fi switch, process recreation, stale session, stale permission, duplicate delivery, server conflict, database corruption, and first-failure cleanup.**
+- [x] **Step 1: Write wrapper self-tests for airplane mode, latency, packet loss/unreachable API, Wi-Fi switch, process recreation, stale session, stale permission, duplicate delivery, server conflict, database corruption, and first-failure cleanup.**
 
-- [ ] **Step 2: Add deterministic local-only fault hooks.**
+- [x] **Step 2: Add deterministic local-only fault hooks.**
 
 Hooks are enabled only by explicit M11 test defines. Production builds retain
 real connectivity and persistence. Network faults operate on the owned host
 bridge/backend fault proxy and are always restored in `finally`.
 
-- [ ] **Step 3: Implement Android journey.**
+- [x] **Step 3: Implement Android journey.**
 
 ```text
 online seed -> cache reads -> airplane mode -> cached inventory/report/detail
@@ -695,7 +695,7 @@ server conflict -> visible conflict -> discard or create replacement operation
 logout -> account cache/outbox/staging cleanup -> baseline restore
 ```
 
-- [ ] **Step 4: Emit strict result evidence.**
+- [x] **Step 4: Emit strict result evidence.**
 
 Record cache read latency, draft save latency, process recovery latency, outbox
 enqueue latency, sync total, operation IDs, idempotency keys (hashed in logs),
@@ -707,7 +707,7 @@ draft visible <= 1,000 ms after app frame; enqueue <= 250 ms; local confirmed
 sync <= 10,000 ms excluding intentional fault delay; database <= 25 MiB for M11
 fixtures; zero duplicate documents or inventory transactions.
 
-- [ ] **Step 5: Run self-tests and commit.**
+- [x] **Step 5: Run self-tests and commit.**
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test_rims_m11_smoke.ps1
