@@ -79,14 +79,21 @@ abstract final class ApiUrlPolicy {
     if (normalized == 'localhost' || normalized.endsWith('.localhost')) {
       return true;
     }
-    if (normalized == '::1') return true;
-    if (normalized.startsWith('fc') || normalized.startsWith('fd')) return true;
-    if (normalized.startsWith('::ffff:')) {
-      return _isAllowedLocalIPv4(_parseIPv4(normalized.substring(7)));
+    final ipv6 = _parseIPv6(normalized);
+    if (ipv6 != null) {
+      return _isAllowedLocalIPv6(ipv6);
     }
 
     final octets = _parseIPv4(normalized);
     return _isAllowedLocalIPv4(octets);
+  }
+
+  static bool _isAllowedLocalIPv6(List<int> bytes) {
+    if (_isIPv6Loopback(bytes) || (bytes[0] & 0xfe) == 0xfc) {
+      return true;
+    }
+    final mappedIPv4 = _mappedIPv4(bytes);
+    return _isAllowedLocalIPv4(mappedIPv4);
   }
 
   static bool _isAllowedLocalIPv4(List<int>? octets) {
@@ -101,16 +108,14 @@ abstract final class ApiUrlPolicy {
 
   static bool _isNonPublicTarget(String host) {
     final normalized = _normalizeHost(host);
-    if (normalized.contains(':')) {
+    if (_isAllowedLocalTarget(normalized)) {
       return true;
     }
-    if (_isAllowedLocalTarget(normalized) ||
-        normalized == '::' ||
-        normalized.startsWith('fe8') ||
-        normalized.startsWith('fe9') ||
-        normalized.startsWith('fea') ||
-        normalized.startsWith('feb')) {
-      return true;
+    final ipv6 = _parseIPv6(normalized);
+    if (ipv6 != null) {
+      return ipv6.every((byte) => byte == 0) ||
+          (ipv6[0] == 0xfe && (ipv6[1] & 0xc0) == 0x80) ||
+          ipv6[0] == 0xff;
     }
     final octets = _parseIPv4(normalized);
     if (octets == null) return false;
@@ -156,5 +161,27 @@ abstract final class ApiUrlPolicy {
       octets.add(octet);
     }
     return octets;
+  }
+
+  static List<int>? _parseIPv6(String host) {
+    if (!host.contains(':')) return null;
+    try {
+      return Uri.parseIPv6Address(host);
+    } on FormatException {
+      return null;
+    }
+  }
+
+  static bool _isIPv6Loopback(List<int> bytes) {
+    return bytes.take(15).every((byte) => byte == 0) && bytes[15] == 1;
+  }
+
+  static List<int>? _mappedIPv4(List<int> bytes) {
+    if (!bytes.take(10).every((byte) => byte == 0) ||
+        bytes[10] != 0xff ||
+        bytes[11] != 0xff) {
+      return null;
+    }
+    return bytes.sublist(12);
   }
 }

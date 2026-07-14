@@ -55,6 +55,12 @@ void main() {
             url: 'https://api.rims.example/api/v1',
             allowLocalHttp: false,
           ),
+          (
+            name: 'production public IPv6 HTTPS',
+            environment: AppEnvironment.production,
+            url: 'https://[2001:4860:4860::8888]/api/v1',
+            allowLocalHttp: false,
+          ),
         ];
 
     for (final entry in cases) {
@@ -103,6 +109,12 @@ void main() {
             name: 'public development HTTP target',
             environment: AppEnvironment.development,
             url: 'http://example.com:8080/api/v1',
+            allowLocalHttp: true,
+          ),
+          (
+            name: 'public hostname beginning with ULA prefix letters',
+            environment: AppEnvironment.development,
+            url: 'http://fd.example.com:18080/api/v1',
             allowLocalHttp: true,
           ),
           (
