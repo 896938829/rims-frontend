@@ -964,12 +964,26 @@ Future<void> _pumpApp(
 }
 
 Future<void> _normalizeLoggedOutState(WidgetTester tester) async {
+  DateTime? enabledLoginSince;
   await waitUntil(
     tester,
-    description: 'login form or restored shell',
-    condition: () =>
-        find.byKey(const Key('login-username-field')).evaluate().isNotEmpty ||
-        find.byKey(const Key('bottom-nav-home')).evaluate().isNotEmpty,
+    description: 'enabled login form or restored shell',
+    condition: () {
+      if (find.byKey(const Key('bottom-nav-home')).evaluate().isNotEmpty) {
+        return true;
+      }
+      final username = find.byKey(const Key('login-username-field'));
+      final enabled =
+          username.evaluate().isNotEmpty &&
+          tester.widget<TextField>(username).enabled == true;
+      if (!enabled) {
+        enabledLoginSince = null;
+        return false;
+      }
+      enabledLoginSince ??= DateTime.now();
+      return DateTime.now().difference(enabledLoginSince!) >=
+          const Duration(seconds: 1);
+    },
   );
   if (find.byKey(const Key('bottom-nav-home')).evaluate().isEmpty) return;
   await tapAndSettle(tester, const Key('bottom-nav-profile'));
