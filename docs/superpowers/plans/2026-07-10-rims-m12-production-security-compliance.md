@@ -65,17 +65,17 @@ Run architecture test and `git diff --check`. Commit: `docs: inventory M12 secur
 - Modify: backend `.env.example`
 - Modify: backend `internal/app/app.go`
 
-- [ ] **Step 1: Write RED profile table tests**
+- [x] **Step 1: Write RED profile table tests**
 
 Cover `dev -> development`, four valid profiles, unknown rejection, non-local HTTP public URL, wildcard CORS, disabled DB TLS, auto migration, short/common JWT/data keys, public Swagger/uploads, empty/invalid trusted proxies, invalid token TTLs, and unsafe log format.
 
 Define typed `Environment` with `IsLocal()`, `Config.ValidateSecurity()`, and a secret-free `SecuritySummary`.
 
-- [ ] **Step 2: Implement config**
+- [x] **Step 2: Implement config**
 
 Add `PUBLIC_BASE_URL`, `JWT_ISSUER`, `JWT_AUDIENCE`, `JWT_ACCESS_MINUTES`, `REFRESH_TOKEN_DAYS`, `AUTH_PEPPER`, `DATA_ENCRYPTION_KEY`, `TRUSTED_PROXY_CIDRS`, `SWAGGER_ENABLED`, `PUBLIC_UPLOADS_ENABLED`, `REQUIRE_HTTPS`, `PASSWORD_LOCK_MINUTES`, and `LOGIN_HISTORY_DAYS`. Unknown or unsafe non-local values fail before DB/router/listener creation.
 
-- [ ] **Step 3: Verify and commit**
+- [x] **Step 3: Verify and commit**
 
 Run `go test ./internal/config ./internal/app -count=1`, `go test ./...`, `go vet ./...`, and diff check. Commit: `feat: enforce backend environment security`.
 
