@@ -112,7 +112,7 @@ try {
 '@
     [IO.File]::WriteAllText($lockProbeScript, $probeSource)
     $probe = Invoke-RimsExternalCommand `
-      -FilePath (Join-Path $PSHOME 'powershell.exe') `
+      -FilePath (Get-Process -Id $PID).Path `
       -Arguments @(
         '-NoProfile',
         '-ExecutionPolicy',

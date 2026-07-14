@@ -389,6 +389,9 @@ function Resolve-RimsNormalizedPath {
     if ($Path.IndexOf([char]0) -ge 0) {
       throw 'Path contains a NUL character.'
     }
+    if ($Path.IndexOfAny([char[]]@('<', '>', '"', '|')) -ge 0) {
+      throw 'Path contains a reserved Windows path character.'
+    }
     return [pscustomobject][ordered]@{
       success = $true
       path = [IO.Path]::GetFullPath($Path)

@@ -380,7 +380,7 @@ function Start-TestSleepProcess {
   )
 
   $process = Start-Process `
-    -FilePath (Join-Path $PSHOME 'powershell.exe') `
+    -FilePath (Get-Process -Id $PID).Path `
     -ArgumentList @(
       '-NoProfile',
       '-Command',

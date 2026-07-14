@@ -8,6 +8,17 @@ function Test-RimsNetworkInteger {
     $Value -is [int64] -or $Value -is [uint64]
 }
 
+function Test-RimsNetworkTimestamp {
+  param($Value)
+  if ($Value -is [DateTime] -or $Value -is [DateTimeOffset]) {
+    return $true
+  }
+  $parsed = [DateTimeOffset]::MinValue
+  return $Value -is [string] -and
+    -not [string]::IsNullOrWhiteSpace($Value) -and
+    [DateTimeOffset]::TryParse($Value, [ref]$parsed)
+}
+
 function Get-RimsNetworkProperty {
   param($Candidate, [Parameter(Mandatory = $true)][string]$Name)
   if ($null -eq $Candidate -or $Candidate -is [string] -or
@@ -84,10 +95,8 @@ function Get-NetworkEvidenceErrors {
     $start = Get-RimsNetworkProperty `
       -Candidate $identity `
       -Name 'windowsProcessStartTimeUtc'
-    $parsedStart = [DateTimeOffset]::MinValue
-    if ($null -eq $start -or $start.Value -isnot [string] -or
-        [string]::IsNullOrWhiteSpace($start.Value) -or
-        -not [DateTimeOffset]::TryParse($start.Value, [ref]$parsedStart)) {
+    if ($null -eq $start -or
+        -not (Test-RimsNetworkTimestamp $start.Value)) {
       [void]$errors.Add("Network evidence '$name.windowsProcessStartTimeUtc' must be a parseable timestamp.")
     }
   }

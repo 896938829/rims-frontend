@@ -7,25 +7,33 @@ function Get-RimsOwnedProcess {
   $rawProcessId = Get-RimsObjectPropertyValue `
     -Value $State `
     -Name 'windowsPid'
-  $rawStartTime = [string](Get-RimsObjectPropertyValue `
+  $rawStartTime = Get-RimsObjectPropertyValue `
       -Value $State `
       -Name 'windowsProcessStartTimeUtc' `
-      -DefaultValue '')
+      -DefaultValue ''
   $processId = 0
   if (-not [int]::TryParse([string]$rawProcessId, [ref]$processId) -or
-      $processId -le 0 -or
-      [string]::IsNullOrWhiteSpace($rawStartTime)) {
+      $processId -le 0 -or $null -eq $rawStartTime -or
+      ($rawStartTime -is [string] -and
+        [string]::IsNullOrWhiteSpace($rawStartTime))) {
     return $null
   }
 
-  $expectedStartTime = [DateTime]::MinValue
-  if (-not [DateTime]::TryParse(
-      $rawStartTime,
-      [Globalization.CultureInfo]::InvariantCulture,
-      [Globalization.DateTimeStyles]::RoundtripKind,
-      [ref]$expectedStartTime
-    )) {
-    return $null
+  $expectedStartTime = if ($rawStartTime -is [DateTimeOffset]) {
+    $rawStartTime.UtcDateTime
+  } elseif ($rawStartTime -is [DateTime]) {
+    $rawStartTime.ToUniversalTime()
+  } else {
+    $parsedStartTime = [DateTime]::MinValue
+    if (-not [DateTime]::TryParse(
+        [string]$rawStartTime,
+        [Globalization.CultureInfo]::InvariantCulture,
+        [Globalization.DateTimeStyles]::RoundtripKind,
+        [ref]$parsedStartTime
+      )) {
+      return $null
+    }
+    $parsedStartTime
   }
 
   $process = Get-Process -Id $processId -ErrorAction SilentlyContinue

@@ -26,6 +26,17 @@ function Test-StrictInteger {
     $Value -is [int64] -or $Value -is [uint64]
 }
 
+function Test-StrictTimestamp {
+  param($Value)
+  if ($Value -is [DateTime] -or $Value -is [DateTimeOffset]) {
+    return $true
+  }
+  $parsed = [DateTimeOffset]::MinValue
+  return $Value -is [string] -and
+    -not [string]::IsNullOrWhiteSpace($Value) -and
+    [DateTimeOffset]::TryParse($Value, [ref]$parsed)
+}
+
 function Assert-StrictNetworkEvidence {
   param($Evidence, [string]$Message)
   Assert-True -Condition ($null -ne $Evidence) -Message "$Message Network evidence is missing."
@@ -39,16 +50,11 @@ function Assert-StrictNetworkEvidence {
   }
   foreach ($identityName in @('hostBridge', 'faultProxy')) {
     $identity = $Evidence.$identityName
-    $parsedStart = [DateTimeOffset]::MinValue
     Assert-True `
       -Condition ($null -ne $identity -and $identity.owned -is [bool] -and
         $identity.owned -and (Test-StrictInteger $identity.windowsPid) -and
         $identity.windowsPid -gt 0 -and
-        $identity.windowsProcessStartTimeUtc -is [string] -and
-        [DateTimeOffset]::TryParse(
-          $identity.windowsProcessStartTimeUtc,
-          [ref]$parsedStart
-        )) `
+        (Test-StrictTimestamp $identity.windowsProcessStartTimeUtc)) `
       -Message "$Message '$identityName' identity is malformed."
   }
   Assert-Equal -Actual $Evidence.hostBridge.listenPort -Expected $Evidence.ownedBridgePort -Message "$Message host bridge listen port."

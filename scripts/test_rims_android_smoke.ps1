@@ -20,6 +20,9 @@ $webWrapperText = Get-Content `
   -LiteralPath (Join-Path $scriptDir 'rims_web_e2e.ps1') `
   -Raw
 $androidWrapperText = Get-Content -LiteralPath $wrapper -Raw
+if ($androidWrapperText.Contains("Join-Path `$PSHOME 'powershell.exe'")) {
+  throw 'Android smoke must launch child processes with the current PowerShell host.'
+}
 $localRuntimeCalls = [regex]::Matches(
   $androidWrapperText,
   'Invoke-LocalRuntime\s+-Arguments'
@@ -52,6 +55,17 @@ function Test-StrictInteger {
     $Value -is [int64] -or $Value -is [uint64]
 }
 
+function Test-StrictTimestamp {
+  param($Value)
+  if ($Value -is [DateTime] -or $Value -is [DateTimeOffset]) {
+    return $true
+  }
+  $parsed = [DateTimeOffset]::MinValue
+  return $Value -is [string] -and
+    -not [string]::IsNullOrWhiteSpace($Value) -and
+    [DateTimeOffset]::TryParse($Value, [ref]$parsed)
+}
+
 function Assert-StrictNetworkEvidence {
   param($Evidence, [string]$Message)
   if ($null -eq $Evidence) { throw "$Message Network evidence is missing." }
@@ -75,13 +89,7 @@ function Assert-StrictNetworkEvidence {
         $identity.windowsPid -le 0) {
       throw "$Message '$identityName' identity is malformed."
     }
-    $parsedStart = [DateTimeOffset]::MinValue
-    if ($identity.windowsProcessStartTimeUtc -isnot [string] -or
-        [string]::IsNullOrWhiteSpace($identity.windowsProcessStartTimeUtc) -or
-        -not [DateTimeOffset]::TryParse(
-          $identity.windowsProcessStartTimeUtc,
-          [ref]$parsedStart
-        )) {
+    if (-not (Test-StrictTimestamp $identity.windowsProcessStartTimeUtc)) {
       throw "$Message '$identityName' start time is malformed."
     }
   }
@@ -934,7 +942,7 @@ $fixtureSource
   Set-Content -LiteralPath $fixtureHelper -Value $fixtureHelperBody -Encoding UTF8
   $fixtureStartedAt = [DateTimeOffset]::UtcNow
   $fixtureProcess = Start-Process `
-    -FilePath (Join-Path $PSHOME 'powershell.exe') `
+    -FilePath (Get-Process -Id $PID).Path `
     -ArgumentList @(
       '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $fixtureHelper,
       '-Port', "$occupiedBackendPort", '-ReadyPath', $fixtureReady,

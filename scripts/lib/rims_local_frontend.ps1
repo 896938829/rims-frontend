@@ -552,7 +552,7 @@ exit $code
   try {
     $env:RIMS_FLUTTER_LAUNCH = $payload64
     $process = Start-Process `
-      -FilePath (Join-Path $PSHOME 'powershell.exe') `
+      -FilePath (Get-Process -Id $PID).Path `
       -ArgumentList @('-NoProfile', '-EncodedCommand', $encoded) `
       -WorkingDirectory $LaunchSpec.workingDirectory `
       -RedirectStandardOutput $FrontendPaths.stdoutLog `
@@ -678,7 +678,7 @@ function Start-RimsHiddenEmulatorLauncher {
   try {
     $env:RIMS_EMULATOR_LAUNCH = $payload64
     $process = Start-Process `
-      -FilePath (Join-Path $PSHOME 'powershell.exe') `
+      -FilePath (Get-Process -Id $PID).Path `
       -ArgumentList @('-NoProfile', '-EncodedCommand', $encoded) `
       -RedirectStandardOutput $FrontendPaths.emulatorStdoutLog `
       -RedirectStandardError $FrontendPaths.emulatorStderrLog `

@@ -5,11 +5,15 @@ function Test-RimsPowerShellComponent {
   } else {
     'Desktop'
   }
-  $ok = $edition -eq 'Desktop' -and $version -ge [version]'5.1'
+  $runsOnWindows = [Environment]::OSVersion.Platform -eq [PlatformID]::Win32NT
+  $ok = $runsOnWindows -and (
+    ($edition -eq 'Desktop' -and $version -ge [version]'5.1') -or
+    ($edition -eq 'Core' -and $version -ge [version]'7.0')
+  )
   $remediation = if ($ok) {
     ''
   } else {
-    'Run this script with Windows PowerShell 5.1 (powershell.exe).'
+    'Run this script on Windows with Windows PowerShell 5.1+ or PowerShell 7+.'
   }
   return New-RimsLocalComponent `
     -Name 'powershell' `

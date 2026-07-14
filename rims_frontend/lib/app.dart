@@ -35,12 +35,9 @@ import 'features/documents/domain/repositories/documents_repository.dart';
 import 'features/inventory/data/datasources/inventory_remote_datasource.dart';
 import 'features/inventory/data/repositories/inventory_repository_impl.dart';
 import 'features/inventory/domain/repositories/inventory_repository.dart';
+import 'features/offline/data/bootstrap/offline_runtime_bindings.dart';
 import 'features/offline/domain/services/offline_store.dart';
-import 'features/offline/data/database/offline_database.dart';
-import 'features/offline/data/database/offline_database_factory.dart';
 import 'features/offline/data/datasources/operation_status_remote_datasource.dart';
-import 'features/offline/data/repositories/drift_outbox_repository.dart';
-import 'features/offline/data/repositories/memory_outbox_repository.dart';
 import 'features/offline/data/services/connectivity_network_status_service.dart';
 import 'features/offline/data/services/attachment_outbox_handler.dart';
 import 'features/offline/data/services/document_outbox_handler.dart';
@@ -60,7 +57,6 @@ import 'features/offline/domain/services/network_status_service.dart';
 import 'features/offline/domain/services/attachment_staging_protection.dart';
 import 'features/offline/domain/services/outbox_executor.dart';
 import 'features/offline/domain/services/outbox_permission_policy.dart';
-import 'features/offline/domain/services/outbox_state_machine.dart';
 import 'features/offline/domain/services/offline_ownership_service.dart';
 import 'features/offline/domain/services/offline_write_barrier.dart';
 import 'features/reports/data/datasources/reports_remote_datasource.dart';
@@ -159,13 +155,11 @@ final class _MainAppState extends State<MainApp> {
     }
     final databaseKeyManager =
         widget.offlineDatabaseKeyManager ??
-        (widget.offlineStore is OfflineDatabase
-            ? OfflineDatabaseKeyRotator(
-                readKey: _secureStorage.readOfflineDatabaseKey,
-                writeKey: _secureStorage.saveOfflineDatabaseKey,
-                rekey: (widget.offlineStore as OfflineDatabase).rekey,
-              )
-            : MemoryOfflineDatabaseKeyManager());
+        createOfflineDatabaseKeyManager(
+          store: widget.offlineStore,
+          readKey: _secureStorage.readOfflineDatabaseKey,
+          writeKey: _secureStorage.saveOfflineDatabaseKey,
+        );
     _offlineOwnershipService = OfflineOwnershipService(
       store: ownershipStore as OfflineOwnershipStore,
       files: _attachmentStagingStore,
@@ -438,14 +432,5 @@ final class _MainAppState extends State<MainApp> {
 }
 
 OutboxRepository outboxRepositoryForOfflineStore(OfflineStore store) {
-  if (store is OutboxRepositoryOwner) {
-    return (store as OutboxRepositoryOwner).outboxRepository;
-  }
-  if (store is OfflineDatabase) {
-    return DriftOutboxRepository(
-      database: store,
-      stateMachine: OutboxStateMachine(),
-    );
-  }
-  return MemoryOutboxRepository(stateMachine: OutboxStateMachine());
+  return createOutboxRepository(store);
 }

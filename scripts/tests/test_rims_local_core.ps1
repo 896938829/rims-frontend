@@ -12,7 +12,7 @@ try {
     @'
 param([string]$MarkerPath)
 $child = Start-Process `
-  -FilePath (Join-Path $PSHOME 'powershell.exe') `
+  -FilePath (Get-Process -Id $PID).Path `
   -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 30') `
   -WindowStyle Hidden `
   -PassThru

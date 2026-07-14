@@ -6,6 +6,17 @@ function Test-RimsM11StrictInteger {
     $Value -is [int64] -or $Value -is [uint64]
 }
 
+function Test-RimsM11Timestamp {
+  param($Value)
+  if ($Value -is [DateTime] -or $Value -is [DateTimeOffset]) {
+    return $true
+  }
+  $parsed = [DateTimeOffset]::MinValue
+  return $Value -is [string] -and
+    -not [string]::IsNullOrWhiteSpace($Value) -and
+    [DateTimeOffset]::TryParse($Value, [ref]$parsed)
+}
+
 function Get-RimsM11DiscreteEvidenceErrors {
   param($Candidate)
   $errors = [Collections.Generic.List[string]]::new()

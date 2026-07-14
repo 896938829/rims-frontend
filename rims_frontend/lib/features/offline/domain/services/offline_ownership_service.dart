@@ -2,6 +2,7 @@ import 'dart:async';
 
 import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
+import 'offline_content_revision.dart';
 
 enum OfflineOwnershipReason {
   logout,
@@ -1926,12 +1927,7 @@ final class _OwnershipSnapshot {
 }
 
 String _stableRevision(Iterable<String> values) {
-  var hash = 0xcbf29ce484222325;
-  for (final codeUnit in values.join('\n').codeUnits) {
-    hash ^= codeUnit;
-    hash = (hash * 0x100000001b3) & 0x7fffffffffffffff;
-  }
-  return hash.toRadixString(16).padLeft(16, '0');
+  return canonicalOfflineContentDigest(values.toList()).substring(0, 16);
 }
 
 bool _sameCommandCounts(

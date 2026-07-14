@@ -1507,7 +1507,7 @@ $source
     '-Adb', $adb, '-Serial', $androidSerial, '-LogPath', $faultProxyLogPath
   ) | ForEach-Object { ConvertTo-RimsWindowsCommandLineArgument -Value "$_" }
   $script:faultProxyProcess = Start-Process `
-    -FilePath (Join-Path $PSHOME 'powershell.exe') `
+    -FilePath (Get-Process -Id $PID).Path `
     -ArgumentList ($helperArguments -join ' ') `
     -WindowStyle Hidden `
     -PassThru
@@ -1851,7 +1851,7 @@ public static class RimsAndroidHostBridge {
     [Text.Encoding]::Unicode.GetBytes($launcher)
   )
   $script:hostBridgeProcess = Start-Process `
-    -FilePath (Join-Path $PSHOME 'powershell.exe') `
+    -FilePath (Get-Process -Id $PID).Path `
     -ArgumentList @('-NoProfile', '-EncodedCommand', $encoded) `
     -WindowStyle Hidden `
     -PassThru
@@ -2120,7 +2120,7 @@ exit 124
     ConvertTo-RimsWindowsCommandLineArgument -Value "$_"
   }
   $script:fieldPermissionHelper = Start-Process `
-    -FilePath (Join-Path $PSHOME 'powershell.exe') `
+    -FilePath (Get-Process -Id $PID).Path `
     -ArgumentList ($helperArguments -join ' ') `
     -WindowStyle Hidden `
     -PassThru

@@ -365,14 +365,13 @@ function Get-M11EvidenceErrors($Candidate) {
       $name = $stage.PSObject.Properties['stage']
       $processId = $stage.PSObject.Properties['processId']
       $startedAt = $stage.PSObject.Properties['startedAt']
-      $parsedTime = [DateTimeOffset]::MinValue
       if ($null -eq $name -or $name.Value -isnot [string] -or
           $name.Value -cne $expectedStages[$index] -or
           $null -eq $processId -or
           -not (Test-RimsM11StrictInteger $processId.Value) -or
           $processId.Value -le 0 -or
-          $null -eq $startedAt -or $startedAt.Value -isnot [string] -or
-          -not [DateTimeOffset]::TryParse($startedAt.Value, [ref]$parsedTime)) {
+          $null -eq $startedAt -or
+          -not (Test-RimsM11Timestamp $startedAt.Value)) {
         [void]$errors.Add("Process stage '$($expectedStages[$index])' is malformed.")
       } else {
         [void]$processIds.Add([int64]$processId.Value)

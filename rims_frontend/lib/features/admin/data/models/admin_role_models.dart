@@ -110,14 +110,16 @@ List<int> _readPermissionIds(Map<dynamic, dynamic> json) {
 }
 
 List<int> _readPermissionIdList(Iterable<Object?> values) {
-  return values.map((value) {
-    final parsed = _readIntValue(value);
-    if (parsed != null) {
-      return parsed;
-    }
+  return values
+      .map((value) {
+        final parsed = _readIntValue(value);
+        if (parsed != null) {
+          return parsed;
+        }
 
-    throw const FormatException('Invalid role response');
-  }).toList(growable: false);
+        throw const FormatException('Invalid role response');
+      })
+      .toList(growable: false);
 }
 
 int? _readInt(Map<dynamic, dynamic> json, List<String> keys) {
