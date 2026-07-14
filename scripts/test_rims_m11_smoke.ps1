@@ -64,6 +64,13 @@ foreach ($faultAction in @(
     -Condition ($integrationTestText.Contains("_fault('$faultAction'")) `
     -Message "M11 Android journey omitted fault action '$faultAction'."
 }
+Assert-True `
+  -Condition ($integrationTestText.Contains("M9-E2E:M11:`$runId:")) `
+  -Message 'M11 records must use the M9 reset namespace.'
+$m11NamespaceSample = 'M9-E2E:M11:self-test:queued'
+Assert-True `
+  -Condition ($m11NamespaceSample -like 'M9-E2E:*') `
+  -Message 'M11 namespace must match the M9 reset wildcard.'
 $configText = Get-Content `
   -LiteralPath (Join-Path $scriptDir '..\rims_frontend\integration_test\support\rims_e2e_config.dart') `
   -Raw `
@@ -95,6 +102,11 @@ foreach ($requiredJourneySurface in @(
     "description: 'review operation `$operationId'",
     "description: 'confirm explicit sync `$operationId'",
     "description: 'discard conflicted operation'",
+    "description: 'open replacement conflict dialog'",
+    'widget.decoration?.labelText ==',
+    "description: 'confirm conflict replacement'",
+    'expect(replacement.replacementOf, replacementConflict.operationId);',
+    '_recordOperation(replacement, operationIds, idempotencyHashes)',
     'repository.download(',
     'rims_attachments',
     "'RIMS_E2E_STAGE `$"
@@ -223,6 +235,8 @@ try {
       attentionVisible = $true
       conflictVisible = $true
       conflictResolved = $true
+      conflictReplacementCreated = $true
+      conflictReplacementVisible = $true
       serverAttachmentVerified = $true
       serverLifecycleVerified = $true
       logoutCleanupCompleted = $true

@@ -330,7 +330,8 @@ function Get-M11EvidenceErrors($Candidate) {
         'unknownResponseProbed', 'idempotentReplaySingleEffect',
         'attachmentDependencyCompleted', 'staleSessionBlocked',
         'stalePermissionBlocked', 'attentionVisible', 'conflictVisible',
-        'conflictResolved', 'serverAttachmentVerified',
+        'conflictResolved', 'conflictReplacementCreated',
+        'conflictReplacementVisible', 'serverAttachmentVerified',
         'serverLifecycleVerified',
         'logoutCleanupCompleted', 'databaseCorruptionQuarantined'
       ) }

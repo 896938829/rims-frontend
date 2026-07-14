@@ -20,6 +20,10 @@ param(
   [string]$TestRuntimeState = 'stopped',
   [ValidateSet('none', 'nonzero', 'throw')]
   [string]$TestAdbFailure = 'none',
+  [ValidateSet('none', 'initial', 'final')]
+  [string]$TestFixtureResetFailure = 'none',
+  [switch]$TestFixtureBaselineMismatch,
+  [switch]$TestBridgeFailure,
   [string]$TestMarkerFixturePath,
   [ValidateSet('Result', 'Stage')]
   [string]$TestExpectedMarker = 'Result',
@@ -297,6 +301,9 @@ $baselineRestore = [pscustomobject][ordered]@{
   attempted = $false
   ok = $false
   error = ''
+  resetAttempted = $false
+  resetOk = $false
+  verified = $false
 }
 $hostBridgeCleanup = [pscustomobject][ordered]@{
   attempted = $false
@@ -500,6 +507,302 @@ if ($TestMode -and -not [string]::IsNullOrWhiteSpace($TestMarkerFixturePath)) {
 function Add-M11Command {
   param([string]$Name)
   if ($Phase -eq 'offline-sync') { [void]$script:m11Commands.Add($Name) }
+}
+
+function Get-TestFixtureSnapshot {
+  return [pscustomobject][ordered]@{
+    ok = $true
+    detail = ''
+    database = 'appdb'
+    products = 45
+    operatorUsers = 1
+    warehouses = 1
+    operatorBindings = 2
+    inventories = 90
+    nonStandardInventories = 25
+    documents = 15
+    transactions = 15
+    fixtureStockQuantity = 4095
+    namespaceDocuments = 0
+    namespaceTransactions = 0
+    namespaceAttachments = 0
+    namespaceAttachmentFiles = 0
+    fixtureAttachments = 0
+  }
+}
+
+function Get-RimsAndroidFixtureSnapshotFromOutput {
+  param([Parameter(Mandatory = $true)][string]$Output)
+
+  $resetMarkerLines = @($Output -split '\r?\n' | Where-Object {
+      $_ -match '^RIMS_M9_RESET_COUNTS(?:\s|$)'
+    })
+  if ($resetMarkerLines.Count -ne 1 -or
+      $resetMarkerLines[0] -notmatch '^RIMS_M9_RESET_COUNTS\s+(?<json>\{.*\})\s*$') {
+    throw 'Reset evidence must emit exactly one strict counts marker.'
+  }
+  try {
+    $resetEvidence = $Matches.json | ConvertFrom-Json -ErrorAction Stop
+  } catch {
+    throw 'Reset evidence counts marker contains invalid JSON.'
+  }
+  foreach ($name in @(
+      'namespaceDocuments', 'namespaceTransactions', 'namespaceAttachments'
+    )) {
+    $property = $resetEvidence.PSObject.Properties[$name]
+    if ($null -eq $property -or $property.Value -isnot [ValueType] -or
+        [double]$property.Value % 1 -ne 0 -or [int64]$property.Value -ne 0) {
+      throw "Reset evidence left nonzero '$name'."
+    }
+  }
+  $markerLines = @($Output -split '\r?\n' | Where-Object {
+      $_ -match '^RIMS_M9_FIXTURE_COUNTS(?:\s|$)'
+    })
+  if ($markerLines.Count -ne 1 -or
+      $markerLines[0] -notmatch '^RIMS_M9_FIXTURE_COUNTS\s+(?<json>\{.*\})\s*$') {
+    throw 'Fixture reset must emit exactly one strict counts marker.'
+  }
+  try {
+    $parsed = $Matches.json | ConvertFrom-Json -ErrorAction Stop
+  } catch {
+    throw 'Fixture reset counts marker contains invalid JSON.'
+  }
+  $requiredCounts = @(
+    'products', 'operatorUsers', 'warehouses', 'operatorBindings',
+    'inventories', 'nonStandardInventories', 'documents', 'transactions',
+    'fixtureStockQuantity', 'namespaceDocuments', 'namespaceTransactions',
+    'namespaceAttachments', 'namespaceAttachmentFiles', 'fixtureAttachments'
+  )
+  if ($null -eq $parsed.PSObject.Properties['database'] -or
+      $parsed.database -isnot [string] -or
+      [string]::IsNullOrWhiteSpace($parsed.database)) {
+    throw 'Fixture reset database evidence is missing.'
+  }
+  foreach ($name in $requiredCounts) {
+    $property = $parsed.PSObject.Properties[$name]
+    if ($null -eq $property -or $property.Value -isnot [ValueType] -or
+        [double]::IsNaN([double]$property.Value) -or
+        [double]::IsInfinity([double]$property.Value) -or
+        [double]$property.Value -lt 0 -or
+        [double]$property.Value % 1 -ne 0) {
+      throw "Fixture reset evidence '$name' must be a non-negative integer."
+    }
+  }
+  foreach ($name in @(
+      'namespaceDocuments', 'namespaceTransactions',
+      'namespaceAttachments', 'namespaceAttachmentFiles'
+    )) {
+    if ([int64]$parsed.$name -ne 0) {
+      throw "Fixture reset left nonzero '$name'."
+    }
+  }
+  if ([int64]$parsed.fixtureStockQuantity -le 0) {
+    throw 'Fixture stock baseline must be positive.'
+  }
+  return [pscustomobject][ordered]@{
+    ok = $true
+    detail = ''
+    database = [string]$parsed.database
+    products = [int64]$parsed.products
+    operatorUsers = [int64]$parsed.operatorUsers
+    warehouses = [int64]$parsed.warehouses
+    operatorBindings = [int64]$parsed.operatorBindings
+    inventories = [int64]$parsed.inventories
+    nonStandardInventories = [int64]$parsed.nonStandardInventories
+    documents = [int64]$parsed.documents
+    transactions = [int64]$parsed.transactions
+    fixtureStockQuantity = [int64]$parsed.fixtureStockQuantity
+    namespaceDocuments = [int64]$parsed.namespaceDocuments
+    namespaceTransactions = [int64]$parsed.namespaceTransactions
+    namespaceAttachments = [int64]$parsed.namespaceAttachments
+    namespaceAttachmentFiles = [int64]$parsed.namespaceAttachmentFiles
+    fixtureAttachments = [int64]$parsed.fixtureAttachments
+  }
+}
+
+function Invoke-AndroidFixtureReset {
+  param([Parameter(Mandatory = $true)][ValidateSet('initial', 'final')][string]$Purpose)
+
+  Add-M11Command "reset-fixtures-$Purpose"
+  if ($TestMode) {
+    if ($TestFixtureResetFailure -eq $Purpose) {
+      throw "Injected $Purpose fixture reset failure."
+    }
+    $snapshot = Get-TestFixtureSnapshot
+    if ($Purpose -eq 'final' -and $TestFixtureBaselineMismatch) {
+      $snapshot.fixtureStockQuantity++
+    }
+    return $snapshot
+  }
+  $wslWorkspace = ConvertTo-RimsWslPath -WindowsPath $BackendWorkspaceRoot
+  $execution = Invoke-WslBackendCommand `
+    -Command 'RIMS_ALLOW_DEV_SEED=1 RIMS_WORKSPACE_ROOT="$1" bash scripts/m9_dev_seed.sh --reset' `
+    -CommandArguments @($wslWorkspace)
+  if ($execution.ExitCode -ne 0) {
+    Throw-AndroidChildFailure `
+      -Message "Fixture reset failed: $(Get-RimsExternalCommandSummary -Result $execution)" `
+      -ExitCode $execution.ExitCode
+  }
+  return Get-RimsAndroidFixtureSnapshotFromOutput `
+    -Output ([string]$execution.StandardOutput)
+}
+
+function Test-RimsFixtureBaselineMatches {
+  param(
+    [Parameter(Mandatory = $true)][psobject]$Expected,
+    [Parameter(Mandatory = $true)][psobject]$Actual
+  )
+  foreach ($name in @(
+      'database', 'products', 'operatorUsers', 'warehouses',
+      'operatorBindings', 'inventories', 'nonStandardInventories',
+      'documents', 'transactions', 'fixtureStockQuantity',
+      'namespaceDocuments', 'namespaceTransactions', 'namespaceAttachments',
+      'namespaceAttachmentFiles', 'fixtureAttachments'
+    )) {
+    if ($Expected.$name -ne $Actual.$name) { return $false }
+  }
+  return $true
+}
+
+function Test-WslBackendHealthz {
+  try {
+    $execution = Invoke-WslBackendCommand `
+      -Command 'curl --noproxy "*" --fail --silent --show-error --max-time 5 "http://[::1]:$1/healthz" >/dev/null' `
+      -CommandArguments @("$BackendPort")
+    return $execution.ExitCode -eq 0
+  } catch {
+    return $false
+  }
+}
+
+function Initialize-AndroidRuntime {
+  Add-M11Command 'inspect-runtime-state'
+  if (-not $TestMode) {
+    $existingState = Read-RimsRuntimeState -Paths $runtimePaths
+    $stateExists = $null -ne $existingState
+    $hadEmulator = $stateExists -and $null -ne $existingState.emulator
+    if ($stateExists) {
+      Add-M11Command 'validate-runtime-identity'
+      $requestMatches = Test-RimsRuntimeRequestMatchesState `
+        -State $existingState `
+        -BackendDir $BackendDir `
+        -BackendWorkspaceRoot $BackendWorkspaceRoot `
+        -BackendPort $BackendPort
+      if (-not $requestMatches -or
+          -not (Test-RimsStateOwnsAnyBackendProcess -State $existingState)) {
+        $script:runtimeDisposition = 'reject'
+        throw 'Managed runtime state is stale or does not match the requested backend identity.'
+      }
+      $state = $existingState
+      $script:runtimeDisposition = 'reuse'
+    } else {
+      Add-M11Command "start-owned-backend:$BackendPort"
+      $script:runtimeDisposition = 'start'
+      $script:runtimeOwnedByRun = $true
+      $arguments = @(
+        '-Command', 'up', '-Target', 'none',
+        '-BackendDir', $BackendDir,
+        '-BackendWorkspaceRoot', $BackendWorkspaceRoot
+      )
+      if ($IncludeDependencies) { $arguments += '-IncludeDependencies' }
+      [void](Invoke-LocalRuntime -Arguments $arguments -TimeoutSeconds 600)
+      $state = Read-RimsRuntimeState -Paths $runtimePaths
+      if ($null -eq $state) {
+        throw 'Backend startup did not persist managed runtime state.'
+      }
+      Add-M11Command 'validate-runtime-identity'
+      if (-not (Test-RimsRuntimeRequestMatchesState `
+            -State $state `
+            -BackendDir $BackendDir `
+            -BackendWorkspaceRoot $BackendWorkspaceRoot `
+            -BackendPort $BackendPort) -or
+          -not (Test-RimsStateOwnsAnyBackendProcess -State $state)) {
+        throw 'Started backend identity does not match its managed state.'
+      }
+    }
+    if (-not (Test-WslBackendHealthz)) {
+      if (-not $script:runtimeOwnedByRun) {
+        $script:runtimeDisposition = 'reject'
+      }
+      throw 'Managed WSL backend is not healthy on IPv6 loopback.'
+    }
+    Add-M11Command 'health-wsl-ipv6-runtime'
+    try {
+      if (-not (Test-WindowsHealthzOnce)) {
+        Add-M11Command 'windows-health-unavailable-before-bridge'
+      }
+      Start-AndroidHostBridge
+      if ($null -ne $script:hostBridgeIdentity) {
+        Add-M11Command "start-owned-host-bridge:$BackendPort"
+      } else {
+        Add-M11Command 'reuse-windows-backend-health'
+      }
+      if (-not (Test-WindowsHealthzOnce)) {
+        throw 'Windows backend health remained unavailable after host bridge setup.'
+      }
+      Add-M11Command 'health-windows-after-bridge'
+    } catch {
+      if (-not $script:runtimeOwnedByRun) {
+        $script:runtimeDisposition = 'reject'
+      }
+      throw
+    }
+    [void](Resolve-RimsAndroidRuntime `
+        -State $state `
+        -Paths $runtimePaths `
+        -AndroidDevice $AndroidDevice)
+    Get-CurrentAndroidRuntime
+    $script:emulatorOwnedByRun = $script:emulatorOwned -and -not $hadEmulator
+    $script:emulatorIdentity.owned = $script:emulatorOwnedByRun
+    return
+  }
+
+  $state = if ($TestPreExistingRuntime) {
+    'healthy-pre-existing'
+  } else { $TestRuntimeState }
+  if ($state -eq 'stale') {
+    Add-M11Command 'validate-runtime-identity'
+    $script:runtimeDisposition = 'reject'
+    throw 'Managed runtime identity is stale or does not match the request.'
+  }
+  if ($state -eq 'stopped') {
+    Add-M11Command "start-owned-backend:$BackendPort"
+    $script:runtimeDisposition = 'start'
+    $script:runtimeOwnedByRun = $true
+  } else {
+    $script:runtimeDisposition = 'reuse'
+  }
+  Add-M11Command 'validate-runtime-identity'
+  Add-M11Command 'health-wsl-ipv6-runtime'
+  Add-M11Command 'windows-health-unavailable-before-bridge'
+  Add-M11Command "start-owned-host-bridge:$BackendPort"
+  $script:hostBridgeIdentity = [pscustomobject][ordered]@{
+    owned = $true
+    windowsPid = 4444
+    windowsProcessStartTimeUtc = '2026-07-14T00:00:00Z'
+    listenAddress = '127.0.0.1'
+    listenPort = $BackendPort
+    upstreamAddress = '::1'
+    upstreamPort = $BackendPort
+  }
+  if ($TestBridgeFailure) {
+    $script:runtimeDisposition = if ($script:runtimeOwnedByRun) { 'start' } else { 'reject' }
+    throw 'Injected Android host bridge failure.'
+  }
+  Add-M11Command 'health-windows-after-bridge'
+  $script:androidSerial = 'emulator-5554'
+  $script:emulatorOwnedByRun = $script:runtimeOwnedByRun -and
+    $TestEmulatorOwnership -eq 'controller-started'
+  $script:emulatorOwned = $script:emulatorOwnedByRun
+  $script:emulatorIdentity = [pscustomobject][ordered]@{
+    avdName = $AndroidDevice
+    serial = $script:androidSerial
+    owned = $script:emulatorOwnedByRun
+    windowsPid = if ($script:emulatorOwnedByRun) { 4242 } else { $null }
+    windowsProcessStartTimeUtc = if ($script:emulatorOwnedByRun) {
+      '2026-07-12T00:00:00Z'
+    } else { $null }
+  }
 }
 
 function Get-M11AdbText {
@@ -1502,6 +1805,32 @@ function Restore-AndroidBaseline {
     }
   }
   if ($TestMode) {
+    $cleanupErrors = [Collections.Generic.List[string]]::new()
+    if ($script:fixturesMutated) {
+      $script:baselineRestore.resetAttempted = $true
+      try {
+        $restored = Invoke-AndroidFixtureReset -Purpose final
+        $script:baselineRestore.resetOk = $true
+        if (-not (Test-RimsFixtureBaselineMatches `
+              -Expected $script:fixtureCounts `
+              -Actual $restored)) {
+          throw 'Fixture reset did not restore the recorded baseline.'
+        }
+        Add-M11Command 'verify-fixture-baseline'
+        $script:baselineRestore.verified = $true
+      } catch {
+        [void]$cleanupErrors.Add("fixture reset: $($_.Exception.Message)")
+      }
+    } else {
+      $script:baselineRestore.resetOk = $true
+      $script:baselineRestore.verified = $true
+    }
+    if ($null -ne $script:hostBridgeIdentity -and
+        $script:hostBridgeIdentity.owned) {
+      $script:hostBridgeCleanup.attempted = $true
+      Add-M11Command 'stop-owned-host-bridge'
+      $script:hostBridgeCleanup.ok = $true
+    }
     $action = if ($script:runtimeDisposition -in @('reuse', 'reject')) {
       'preserve-runtime'
     } elseif ($script:runtimeOwnedByRun) {
@@ -1509,18 +1838,20 @@ function Restore-AndroidBaseline {
     } elseif ($TestEmulatorOwnership -eq 'controller-started') {
       'stop-exact'
     } else { 'preserve' }
+    Add-M11Command $action
     if ($CleanupRecordPath) {
       Set-Content -LiteralPath $CleanupRecordPath -Value $action -Encoding ASCII
     }
     if ($FailStep -eq 'baseline-restore') {
-      $script:baselineRestore.ok = $false
-      $script:baselineRestore.error = 'Injected baseline restore failure.'
+      [void]$cleanupErrors.Add('Injected baseline restore failure.')
+    }
+    $script:baselineRestore.ok = $cleanupErrors.Count -eq 0
+    $script:baselineRestore.error = $cleanupErrors -join '; '
+    if (-not $script:baselineRestore.ok) {
       if ($script:firstExitCode -eq 0) {
         $script:firstExitCode = 23
         $script:failedStep = 'baseline-restore'
       }
-    } else {
-      $script:baselineRestore.ok = $true
     }
     return
   }
@@ -1534,6 +1865,25 @@ function Restore-AndroidBaseline {
     Remove-FieldOperationsProvider
   } catch {
     [void]$cleanupErrors.Add("field provider: $($_.Exception.Message)")
+  }
+  if ($script:fixturesMutated) {
+    $script:baselineRestore.resetAttempted = $true
+    try {
+      $restored = Invoke-AndroidFixtureReset -Purpose final
+      $script:baselineRestore.resetOk = $true
+      if (-not (Test-RimsFixtureBaselineMatches `
+            -Expected $script:fixtureCounts `
+            -Actual $restored)) {
+        throw 'Fixture reset did not restore the recorded baseline.'
+      }
+      Add-M11Command 'verify-fixture-baseline'
+      $script:baselineRestore.verified = $true
+    } catch {
+      [void]$cleanupErrors.Add("fixture reset: $($_.Exception.Message)")
+    }
+  } else {
+    $script:baselineRestore.resetOk = $true
+    $script:baselineRestore.verified = $true
   }
   try {
     Stop-AndroidHostBridge
@@ -1550,15 +1900,6 @@ function Restore-AndroidBaseline {
           ))
     } catch {
       [void]$cleanupErrors.Add("runtime down: $($_.Exception.Message)")
-    }
-    try {
-      [void](Invoke-LocalRuntime -Arguments @(
-            '-Command', 'reset', '-Target', 'none',
-            '-BackendDir', $BackendDir,
-            '-BackendWorkspaceRoot', $BackendWorkspaceRoot
-          ))
-    } catch {
-      [void]$cleanupErrors.Add("fixture reset: $($_.Exception.Message)")
     }
   } elseif ($script:emulatorOwnedByRun) {
     try {
@@ -1652,24 +1993,36 @@ try {
     if ($name -eq 'write-report') { break }
     if ($firstExitCode -ne 0) { break }
     if ($TestMode -and $name -eq 'up-android') {
-      $runtimeDisposition = Get-TestRuntimeDisposition
-      if ($runtimeDisposition -eq 'reject') {
+      try {
+        Initialize-AndroidRuntime
+      } catch {
         $script:firstExitCode = 1
         $script:failedStep = 'up-android'
-      } else {
-        $androidSerial = 'emulator-5554'
-        $runtimeOwnedByRun = $runtimeDisposition -eq 'start'
-        $emulatorOwnedByRun = $runtimeOwnedByRun -and $TestEmulatorOwnership -eq 'controller-started'
-        $emulatorOwned = $emulatorOwnedByRun
-        $emulatorIdentity = [pscustomobject][ordered]@{
-          avdName = $AndroidDevice
-          serial = $androidSerial
-          owned = $emulatorOwned
-          windowsPid = if ($emulatorOwned) { 4242 } else { $null }
-          windowsProcessStartTimeUtc = if ($emulatorOwned) {
-            '2026-07-12T00:00:00Z'
-          } else { $null }
-        }
+        [void]$script:steps.Add([pscustomobject][ordered]@{
+            name = 'up-android'
+            ok = $false
+            exitCode = 1
+            durationMs = 0
+            detail = $_.Exception.Message
+          })
+        continue
+      }
+    }
+    if ($TestMode -and $name -eq 'reset-fixtures') {
+      $script:fixturesMutated = $true
+      try {
+        $script:fixtureCounts = Invoke-AndroidFixtureReset -Purpose initial
+      } catch {
+        $script:firstExitCode = 1
+        $script:failedStep = 'reset-fixtures'
+        [void]$script:steps.Add([pscustomobject][ordered]@{
+            name = 'reset-fixtures'
+            ok = $false
+            exitCode = 1
+            durationMs = 0
+            detail = $_.Exception.Message
+          })
+        continue
       }
     }
     if ($TestMode -and
@@ -1697,64 +2050,18 @@ try {
         }
       }
       'up-android' {
-        {
-          $existingState = Read-RimsRuntimeState -Paths $runtimePaths
-          $stateExists = $null -ne $existingState
-          $hadEmulator = $stateExists -and $null -ne $existingState.emulator
-          $requestMatches = $stateExists -and (Test-RimsRuntimeRequestMatchesState `
-              -State $existingState `
-              -BackendDir $BackendDir `
-              -BackendWorkspaceRoot $BackendWorkspaceRoot `
-              -BackendPort $BackendPort)
-          $healthy = $stateExists -and $requestMatches -and (Test-WindowsHealthzOnce)
-          $script:runtimeDisposition = Resolve-RimsAndroidSmokeRuntimeDisposition `
-            -StateExists:$stateExists `
-            -RequestMatches:$requestMatches `
-            -Healthy:$healthy
-          if ($script:runtimeDisposition -eq 'reject') {
-            throw 'Managed runtime state is stale, unhealthy, or does not match the requested backend identity.'
-          }
-          $script:runtimeOwnedByRun = $script:runtimeDisposition -eq 'start'
-          $arguments = @(
-            '-Command', 'up', '-Target', 'none',
-            '-BackendDir', $BackendDir,
-            '-BackendWorkspaceRoot', $BackendWorkspaceRoot
-          )
-          if ($IncludeDependencies) { $arguments += '-IncludeDependencies' }
-          [void](Invoke-LocalRuntime -Arguments $arguments -TimeoutSeconds 600)
-          $state = Read-RimsRuntimeState -Paths $runtimePaths
-          if ($null -eq $state) {
-            throw 'Backend startup did not persist managed runtime state.'
-          }
-          [void](Resolve-RimsAndroidRuntime `
-              -State $state `
-              -Paths $runtimePaths `
-              -AndroidDevice $AndroidDevice)
-          Get-CurrentAndroidRuntime
-          $script:emulatorOwnedByRun = $script:emulatorOwned -and -not $hadEmulator
-          $script:emulatorIdentity.owned = $script:emulatorOwnedByRun
-        }
+        { Initialize-AndroidRuntime }
       }
       'reset-fixtures' {
         {
-          $wslWorkspace = ConvertTo-RimsWslPath -WindowsPath $BackendWorkspaceRoot
-          $execution = Invoke-WslBackendCommand `
-            -Command 'RIMS_ALLOW_DEV_SEED=1 RIMS_WORKSPACE_ROOT="$1" bash scripts/m9_dev_seed.sh --reset' `
-            -CommandArguments @($wslWorkspace)
-          $counts = Get-RimsM9FixtureCountsFromOutput `
-            -Output ([string]$execution.StandardOutput)
-          if (-not $counts.ok) {
-            Throw-AndroidChildFailure -Message $counts.detail -ExitCode 1
-          }
-          $script:fixtureCounts = $counts
           $script:fixturesMutated = $true
+          $script:fixtureCounts = Invoke-AndroidFixtureReset -Purpose initial
         }
       }
       'windows-healthz' {
         {
-          Start-AndroidHostBridge
           if (-not (Test-WindowsHealthzOnce)) {
-            throw 'Windows backend health remained unavailable after host bridge setup.'
+            throw 'Windows backend health is unavailable after host bridge setup.'
           }
         }
       }

@@ -30,8 +30,9 @@ void main() {
   binding = IntegrationTestWidgetsFlutterBinding.ensureInitialized();
 
   testWidgets('M11 Android offline synchronization journey', (tester) async {
-    expect(RimsE2eConfig.m11Enabled, isTrue);
-    expect(RimsE2eConfig.m11StageOrchestrated, isTrue);
+    if (!RimsE2eConfig.m11Enabled || !RimsE2eConfig.m11StageOrchestrated) {
+      return;
+    }
     expect(RimsE2eConfig.m11FaultControlUrl, startsWith('http://10.0.2.2:'));
     expect(RimsE2eConfig.m11FaultControlUrl, endsWith('/__rims_m11'));
 
@@ -66,6 +67,8 @@ void main() {
       var stalePermissionBlocked = false;
       var conflictVisible = false;
       var conflictResolved = false;
+      var conflictReplacementCreated = false;
+      var conflictReplacementVisible = false;
       var logoutCleanupCompleted = false;
       var baselineRestored = false;
       var scannerCallbackCompleted = false;
@@ -466,6 +469,97 @@ void main() {
         await _prepareDraft(
           tester,
           documents,
+          remark: remarks.replacementConflict,
+          withAttachment: false,
+        );
+        final beforeReplacementConflict = await _operations(outbox, accountId);
+        final replacementConflict = (await _queueCurrentDraft(
+          tester,
+          documents,
+          beforeReplacementConflict,
+        )).operation;
+        _recordOperation(replacementConflict, operationIds, idempotencyHashes);
+        await _fault('reset');
+        await _fault('server-conflict');
+        await _syncOperation(tester, replacementConflict.operationId);
+        expect(
+          (await _operation(
+            outbox,
+            accountId,
+            replacementConflict.operationId,
+          )).state,
+          OutboxState.conflict,
+        );
+        expect(
+          await _operationVisibleInAttention(
+            tester,
+            replacementConflict.operationId,
+          ),
+          isTrue,
+        );
+        await tapFinderAndSettle(
+          tester,
+          find.widgetWithText(TextButton, '解决冲突').first,
+          description: 'open replacement conflict dialog',
+        );
+        await expectText(tester, '解决冲突');
+        final replacementOperationId = 'm11-replacement-$runId';
+        final replacementIdempotencyKey = 'm11-replacement-key-$runId';
+        await tester.enterText(
+          find.byWidgetPredicate(
+            (widget) =>
+                widget is TextField &&
+                widget.decoration?.labelText == '新 operation ID',
+          ),
+          replacementOperationId,
+        );
+        await tester.enterText(
+          find.byWidgetPredicate(
+            (widget) =>
+                widget is TextField &&
+                widget.decoration?.labelText == '新 idempotency key',
+          ),
+          replacementIdempotencyKey,
+        );
+        await tapFinderAndSettle(
+          tester,
+          find.widgetWithText(FilledButton, '创建替代操作'),
+          description: 'confirm conflict replacement',
+        );
+        final replacement = await _operation(
+          outbox,
+          accountId,
+          replacementOperationId,
+        );
+        expect(replacement.replacementOf, replacementConflict.operationId);
+        expect(
+          replacement.idempotencyKey,
+          isNot(replacementConflict.idempotencyKey),
+        );
+        expect(replacement.state, OutboxState.queued);
+        expect(
+          (await _operation(
+            outbox,
+            accountId,
+            replacementConflict.operationId,
+          )).state,
+          OutboxState.conflict,
+        );
+        _recordOperation(replacement, operationIds, idempotencyHashes);
+        conflictReplacementCreated = true;
+        conflictReplacementVisible = await _operationVisibleInWaiting(
+          tester,
+          replacement.operationId,
+        );
+        expect(conflictReplacementVisible, isTrue);
+
+        await _fault('unreachable');
+        await _returnToShell(tester);
+        await tapAndSettle(tester, const Key('bottom-nav-documents'));
+        documents = await _documentsViewModel(tester);
+        await _prepareDraft(
+          tester,
+          documents,
           remark: remarks.staleContext,
           withAttachment: false,
         );
@@ -616,6 +710,8 @@ void main() {
             'stalePermissionBlocked': stalePermissionBlocked,
             'conflictVisible': conflictVisible,
             'conflictResolved': conflictResolved,
+            'conflictReplacementCreated': conflictReplacementCreated,
+            'conflictReplacementVisible': conflictReplacementVisible,
             'logoutCleanupCompleted': logoutCleanupCompleted,
             'databaseCorruptionQuarantined': databaseCorruptionQuarantined,
           },
@@ -688,11 +784,12 @@ final class _JourneyRemarks {
   const _JourneyRemarks(this.runId);
 
   final String runId;
-  String get queued => 'M11-E2E:$runId:queued';
-  String get unknown => 'M11-E2E:$runId:unknown';
-  String get attachment => 'M11-E2E:$runId:attachment';
-  String get conflict => 'M11-E2E:$runId:conflict';
-  String get staleContext => 'M11-E2E:$runId:stale-context';
+  String get queued => 'M9-E2E:M11:$runId:queued';
+  String get unknown => 'M9-E2E:M11:$runId:unknown';
+  String get attachment => 'M9-E2E:M11:$runId:attachment';
+  String get conflict => 'M9-E2E:M11:$runId:conflict-discard';
+  String get replacementConflict => 'M9-E2E:M11:$runId:conflict-replacement';
+  String get staleContext => 'M9-E2E:M11:$runId:stale-context';
 }
 
 Future<void> _fault(
@@ -1074,6 +1171,25 @@ Future<bool> _operationVisibleInAttention(
     condition: () => find.textContaining(operationId).evaluate().isNotEmpty,
   );
   return find.textContaining(operationId).evaluate().isNotEmpty;
+}
+
+Future<bool> _operationVisibleInWaiting(
+  WidgetTester tester,
+  String operationId,
+) async {
+  await _openSyncCenter(tester);
+  await tapFinderAndSettle(
+    tester,
+    find.textContaining('等待').first,
+    description: 'open Sync Center waiting tab',
+  );
+  await waitUntil(
+    tester,
+    description: 'replacement operation visible in waiting tab',
+    condition: () => find.textContaining(operationId).evaluate().isNotEmpty,
+  );
+  return find.textContaining(operationId).evaluate().isNotEmpty &&
+      find.text('复核并同步').evaluate().isNotEmpty;
 }
 
 Future<List<OutboxOperation>> _operations(

@@ -20,6 +20,15 @@ $webWrapperText = Get-Content `
   -LiteralPath (Join-Path $scriptDir 'rims_web_e2e.ps1') `
   -Raw
 $androidWrapperText = Get-Content -LiteralPath $wrapper -Raw
+foreach ($resetEvidenceContract in @(
+    'RIMS_M9_RESET_COUNTS',
+    'Reset evidence must emit exactly one strict counts marker.',
+    "Reset evidence left nonzero '`$name'."
+  )) {
+  if (-not $androidWrapperText.Contains($resetEvidenceContract)) {
+    throw "Android baseline parser omitted '$resetEvidenceContract'."
+  }
+}
 if (-not $localText.Contains("'rims_android_smoke.ps1'")) {
   throw 'rims_local smoke does not delegate to the Android wrapper.'
 }
@@ -160,6 +169,44 @@ if (@($offlinePlan.command | Where-Object {
       $_ -eq 'integration_test/m11_offline_sync_test.dart'
     }).Count -ne 1) {
   throw 'M11 Android command omitted the offline-sync integration test.'
+}
+$repoRoot = (Resolve-Path -LiteralPath (Join-Path $scriptDir '..')).Path
+$gitCommonDir = (& git -C $repoRoot rev-parse --git-common-dir).Trim()
+if (-not [IO.Path]::IsPathRooted($gitCommonDir)) {
+  $gitCommonDir = [IO.Path]::GetFullPath((Join-Path $repoRoot $gitCommonDir))
+}
+$frontendRepository = Split-Path -Parent $gitCommonDir
+$frontendBranch = (& git -C $repoRoot branch --show-current).Trim()
+$backendSeedCandidates = @(Get-ChildItem `
+    -LiteralPath (Join-Path $frontendRepository '.worktrees') `
+    -Directory `
+    -ErrorAction SilentlyContinue | ForEach-Object {
+      Join-Path $_.FullName 'rims-goProgect\scripts\m9_dev_seed.sh'
+    } | Where-Object {
+      Test-Path -LiteralPath $_ -PathType Leaf
+    } | Where-Object {
+      (& git -C (Split-Path -Parent (Split-Path -Parent $_)) branch --show-current 2>$null).Trim() -eq $frontendBranch
+    })
+if ($backendSeedCandidates.Count -ne 1) {
+  throw "Expected one matching backend seed script, found $($backendSeedCandidates.Count)."
+}
+$backendSeedText = Get-Content -LiteralPath $backendSeedCandidates[0] -Raw
+foreach ($resetContract in @(
+    "remark LIKE 'M9-E2E:%'",
+    'DELETE FROM file_attachments',
+    "'namespaceDocuments'",
+    "'namespaceTransactions'",
+    "'namespaceAttachments'",
+    "'namespaceAttachmentFiles'",
+    "'fixtureStockQuantity'"
+    'reset_object_key_output="$('
+  )) {
+  if (-not $backendSeedText.Contains($resetContract)) {
+    throw "M9 reset omitted M11 baseline contract '$resetContract'."
+  }
+}
+if ($backendSeedText.Contains('mapfile -t reset_object_keys < <(')) {
+  throw 'M9 reset attachment query failure is hidden by process substitution.'
 }
 foreach ($cancellationContract in @(
     'networkGeneration',
@@ -413,6 +460,7 @@ try {
     $runtimeCleanupPath = Join-Path $tempRoot "runtime-$($runtimeCase.State)-cleanup.txt"
     & $wrapper `
       -AndroidDevice 'Medium_Phone_API_36.1' `
+      -BackendPort 18080 `
       -TestMode `
       -TestRuntimeState $runtimeCase.State `
       -FailStep 'android-integration-test' `
@@ -423,6 +471,133 @@ try {
     $runtimeReport = Get-Content -LiteralPath $runtimeReportPath -Raw | ConvertFrom-Json
     Assert-Equal -Actual $runtimeReport.runtimeDisposition -Expected $runtimeCase.Disposition -Message "Runtime $($runtimeCase.State) disposition."
     Assert-Equal -Actual (Get-Content -LiteralPath $runtimeCleanupPath -Raw).Trim() -Expected $runtimeCase.Cleanup -Message "Runtime $($runtimeCase.State) cleanup."
+  }
+
+  foreach ($runtimeBaselineCase in @(
+      [pscustomobject]@{
+        Name = 'pre-existing-mutated'
+        State = 'healthy-pre-existing'
+        RuntimeAction = 'preserve-runtime'
+      },
+      [pscustomobject]@{
+        Name = 'stopped-mutated'
+        State = 'stopped'
+        RuntimeAction = 'stop-owned-runtime'
+      }
+    )) {
+    $runtimeReportPath = Join-Path $tempRoot "$($runtimeBaselineCase.Name)-report.json"
+    $runtimeRecordPath = Join-Path $tempRoot "$($runtimeBaselineCase.Name)-commands.json"
+    $runtimeCleanupPath = Join-Path $tempRoot "$($runtimeBaselineCase.Name)-cleanup.txt"
+    & $wrapper `
+      -AndroidDevice 'Medium_Phone_API_36.1' `
+      -BackendPort 18080 `
+      -Phase 'offline-sync' `
+      -TestMode `
+      -TestRuntimeState $runtimeBaselineCase.State `
+      -FailStep 'android-integration-test' `
+      -ReportPath $runtimeReportPath `
+      -ArtifactRoot (Join-Path $tempRoot "$($runtimeBaselineCase.Name)-artifacts") `
+      -CleanupRecordPath $runtimeCleanupPath `
+      -M11CommandRecordPath $runtimeRecordPath
+    Assert-Equal -Actual $LASTEXITCODE -Expected 23 -Message "$($runtimeBaselineCase.Name) first exit."
+    $runtimeReport = Get-Content -LiteralPath $runtimeReportPath -Raw | ConvertFrom-Json
+    $runtimeCommands = @(Get-Content -LiteralPath $runtimeRecordPath -Raw |
+        ConvertFrom-Json | ForEach-Object { $_ })
+    foreach ($requiredCommand in @(
+        'inspect-runtime-state',
+        'validate-runtime-identity',
+        'health-wsl-ipv6-runtime',
+        'windows-health-unavailable-before-bridge',
+        'start-owned-host-bridge:18080',
+        'health-windows-after-bridge',
+        'reset-fixtures-initial',
+        'reset-fixtures-final',
+        'verify-fixture-baseline'
+      )) {
+      if (-not ($runtimeCommands -contains $requiredCommand)) {
+        throw "$($runtimeBaselineCase.Name) omitted '$requiredCommand'."
+      }
+    }
+    if ($runtimeCommands.IndexOf('start-owned-host-bridge:18080') -gt
+        $runtimeCommands.IndexOf('health-windows-after-bridge')) {
+      throw "$($runtimeBaselineCase.Name) checked Windows health before its owned bridge."
+    }
+    Assert-Equal -Actual $runtimeReport.baselineRestore.resetAttempted -Expected $true -Message "$($runtimeBaselineCase.Name) reset attempt."
+    Assert-Equal -Actual $runtimeReport.baselineRestore.resetOk -Expected $true -Message "$($runtimeBaselineCase.Name) reset result."
+    Assert-Equal -Actual $runtimeReport.baselineRestore.verified -Expected $true -Message "$($runtimeBaselineCase.Name) baseline verification."
+    Assert-Equal -Actual (Get-Content -LiteralPath $runtimeCleanupPath -Raw).Trim() -Expected $runtimeBaselineCase.RuntimeAction -Message "$($runtimeBaselineCase.Name) process cleanup."
+  }
+
+  $resetFailureReportPath = Join-Path $tempRoot 'final-reset-failure-report.json'
+  $resetFailureRecordPath = Join-Path $tempRoot 'final-reset-failure-commands.json'
+  & $wrapper `
+    -AndroidDevice 'Medium_Phone_API_36.1' `
+    -BackendPort 18080 `
+    -Phase 'offline-sync' `
+    -TestMode `
+    -TestRuntimeState 'healthy-pre-existing' `
+    -TestFixtureResetFailure 'final' `
+    -FailStep 'android-integration-test' `
+    -ReportPath $resetFailureReportPath `
+    -ArtifactRoot (Join-Path $tempRoot 'final-reset-failure-artifacts') `
+    -M11CommandRecordPath $resetFailureRecordPath
+  Assert-Equal -Actual $LASTEXITCODE -Expected 23 -Message 'Final reset must preserve the journey failure.'
+  $resetFailureReport = Get-Content -LiteralPath $resetFailureReportPath -Raw | ConvertFrom-Json
+  $resetFailureCommands = @(Get-Content -LiteralPath $resetFailureRecordPath -Raw |
+      ConvertFrom-Json | ForEach-Object { $_ })
+  Assert-Equal -Actual $resetFailureReport.failedStep -Expected 'android-integration-test' -Message 'Final reset first failure.'
+  Assert-Equal -Actual $resetFailureReport.baselineRestore.ok -Expected $false -Message 'Final reset cleanup evidence.'
+  if (-not ($resetFailureCommands -contains 'reset-fixtures-final') -or
+      ($resetFailureCommands -contains 'verify-fixture-baseline')) {
+    throw 'Failed final reset must be attempted and must not claim post-verification.'
+  }
+
+  $mismatchReportPath = Join-Path $tempRoot 'baseline-mismatch-report.json'
+  $mismatchRecordPath = Join-Path $tempRoot 'baseline-mismatch-commands.json'
+  & $wrapper `
+    -AndroidDevice 'Medium_Phone_API_36.1' `
+    -BackendPort 18080 `
+    -Phase 'offline-sync' `
+    -TestMode `
+    -TestRuntimeState 'healthy-pre-existing' `
+    -TestFixtureBaselineMismatch `
+    -FailStep 'android-integration-test' `
+    -ReportPath $mismatchReportPath `
+    -ArtifactRoot (Join-Path $tempRoot 'baseline-mismatch-artifacts') `
+    -M11CommandRecordPath $mismatchRecordPath
+  Assert-Equal -Actual $LASTEXITCODE -Expected 23 -Message 'Baseline mismatch must preserve the journey failure.'
+  $mismatchReport = Get-Content -LiteralPath $mismatchReportPath -Raw | ConvertFrom-Json
+  $mismatchCommands = @(Get-Content -LiteralPath $mismatchRecordPath -Raw |
+      ConvertFrom-Json | ForEach-Object { $_ })
+  Assert-Equal -Actual $mismatchReport.baselineRestore.resetOk -Expected $true -Message 'Mismatch reset command result.'
+  Assert-Equal -Actual $mismatchReport.baselineRestore.verified -Expected $false -Message 'Mismatch post-verification.'
+  Assert-Equal -Actual $mismatchReport.baselineRestore.ok -Expected $false -Message 'Mismatch baseline result.'
+  if ($mismatchCommands -contains 'verify-fixture-baseline') {
+    throw 'Mismatched fixture counts claimed baseline verification.'
+  }
+
+  $bridgeFailureReportPath = Join-Path $tempRoot 'bridge-failure-report.json'
+  $bridgeFailureRecordPath = Join-Path $tempRoot 'bridge-failure-commands.json'
+  & $wrapper `
+    -AndroidDevice 'Medium_Phone_API_36.1' `
+    -BackendPort 18080 `
+    -Phase 'offline-sync' `
+    -TestMode `
+    -TestRuntimeState 'healthy-pre-existing' `
+    -TestBridgeFailure `
+    -FailStep 'android-integration-test' `
+    -ReportPath $bridgeFailureReportPath `
+    -ArtifactRoot (Join-Path $tempRoot 'bridge-failure-artifacts') `
+    -M11CommandRecordPath $bridgeFailureRecordPath
+  Assert-Equal -Actual $LASTEXITCODE -Expected 1 -Message 'Bridge failure exit.'
+  $bridgeFailureReport = Get-Content -LiteralPath $bridgeFailureReportPath -Raw | ConvertFrom-Json
+  $bridgeFailureCommands = @(Get-Content -LiteralPath $bridgeFailureRecordPath -Raw |
+      ConvertFrom-Json | ForEach-Object { $_ })
+  Assert-Equal -Actual $bridgeFailureReport.runtimeDisposition -Expected 'reject' -Message 'Bridge failure disposition.'
+  foreach ($command in @('start-owned-host-bridge:18080', 'stop-owned-host-bridge', 'preserve-runtime')) {
+    if (-not ($bridgeFailureCommands -contains $command)) {
+      throw "Bridge failure cleanup omitted '$command'."
+    }
   }
 
   $restoreReportPath = Join-Path $tempRoot 'restore-failure-report.json'
@@ -513,7 +688,7 @@ try {
   $offlineCommands = Get-Content -LiteralPath $offlineRecordPath -Raw | ConvertFrom-Json
   Assert-Equal `
     -Actual (@($offlineCommands) -join '|') `
-    -Expected 'snapshot-airplane-mode|snapshot-wifi|start-owned-fault-proxy:18081|prepare-clean-app-data|run-stage:seed|capture-pid:seed|force-stop:seed|confirm-stopped:seed|run-stage:offline-draft|capture-pid:offline-draft|force-stop:offline-draft|confirm-stopped:offline-draft|run-stage:recovery|capture-pid:recovery|force-stop:recovery|confirm-stopped:recovery|reset-fault-proxy|restore-airplane-mode|restore-wifi|stop-owned-fault-proxy' `
+    -Expected 'inspect-runtime-state|start-owned-backend:18080|validate-runtime-identity|health-wsl-ipv6-runtime|windows-health-unavailable-before-bridge|start-owned-host-bridge:18080|health-windows-after-bridge|reset-fixtures-initial|snapshot-airplane-mode|snapshot-wifi|start-owned-fault-proxy:18081|prepare-clean-app-data|run-stage:seed|capture-pid:seed|force-stop:seed|confirm-stopped:seed|run-stage:offline-draft|capture-pid:offline-draft|force-stop:offline-draft|confirm-stopped:offline-draft|run-stage:recovery|capture-pid:recovery|force-stop:recovery|confirm-stopped:recovery|reset-fault-proxy|restore-airplane-mode|restore-wifi|stop-owned-fault-proxy|reset-fixtures-final|verify-fixture-baseline|stop-owned-host-bridge|stop-owned-runtime' `
     -Message 'M11 fault proxy and ADB restoration order.'
   Assert-Equal `
     -Actual $offlineReport.failedStep `
