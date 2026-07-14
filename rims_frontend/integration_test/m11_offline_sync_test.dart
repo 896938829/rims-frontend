@@ -479,7 +479,7 @@ void main() {
         await _tapDocumentDetailAction(
           tester,
           lifecycleDraft.id,
-          Key('document-complete-${lifecycleDraft.id}'),
+          Key('document-detail-complete-${lifecycleDraft.id}'),
         );
         await expectText(tester, '完成单据');
         await tapFinderAndSettle(

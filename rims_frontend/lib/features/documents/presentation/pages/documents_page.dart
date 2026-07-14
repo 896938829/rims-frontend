@@ -900,6 +900,7 @@ final class _DocumentDetailActions extends StatelessWidget {
     final actions = <Widget>[
       if (viewModel.canCompleteDocument(document))
         _DocumentDetailActionButton(
+          key: Key('document-detail-complete-${document.id}'),
           label: viewModel.canSubmitAuthoritatively ? '完成单据' : '复核完成并保存待同步',
           icon: Icons.check_circle_outline,
           isBusy: viewModel.isCompletingDocument(document),
@@ -919,6 +920,7 @@ final class _DocumentDetailActions extends StatelessWidget {
         ),
       if (viewModel.canConfirmStocktakeDocument(document))
         _DocumentDetailActionButton(
+          key: Key('document-detail-confirm-${document.id}'),
           label: viewModel.canSubmitAuthoritatively ? '确认盘点差异' : '复核确认并保存待同步',
           icon: Icons.fact_check_outlined,
           isBusy: viewModel.isCompletingDocument(document),
@@ -938,6 +940,7 @@ final class _DocumentDetailActions extends StatelessWidget {
         ),
       if (viewModel.canSettleStocktakeDocument(document))
         _DocumentDetailActionButton(
+          key: Key('document-detail-settle-${document.id}'),
           label: viewModel.canSubmitAuthoritatively ? '结转盘点差异' : '复核结转并保存待同步',
           icon: Icons.done_all_outlined,
           isBusy: viewModel.isCompletingDocument(document),
@@ -997,6 +1000,7 @@ final class _DocumentDetailActions extends StatelessWidget {
 
 final class _DocumentDetailActionButton extends StatelessWidget {
   const _DocumentDetailActionButton({
+    super.key,
     required this.label,
     required this.icon,
     required this.isBusy,
