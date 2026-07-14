@@ -644,6 +644,7 @@ final class _LogoutCardState extends State<_LogoutCard> {
   }
 
   Future<void> _requestLogout(BuildContext context) async {
+    final requestLogout = widget.onLogoutRequested;
     final choice = await showDialog<DraftRetentionChoice>(
       context: context,
       builder: (context) => AlertDialog(
@@ -669,13 +670,15 @@ final class _LogoutCardState extends State<_LogoutCard> {
         ],
       ),
     );
-    if (choice == null || !mounted) return;
-    setState(() {
-      _isRunning = true;
-      _failureMessage = null;
-    });
+    if (choice == null || requestLogout == null) return;
+    if (mounted) {
+      setState(() {
+        _isRunning = true;
+        _failureMessage = null;
+      });
+    }
     try {
-      final report = await widget.onLogoutRequested?.call(choice);
+      final report = await requestLogout(choice);
       if (!mounted || report == null || report.completed) return;
       setState(() {
         _failureMessage = report.failures

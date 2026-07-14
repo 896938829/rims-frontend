@@ -492,6 +492,35 @@ void main() {
     });
 
     test(
+      'mutation quiescence timeout fails closed instead of hanging',
+      () async {
+        final participant = _BlockingMutationParticipant();
+        final fixture = _Fixture(
+          participant: participant,
+          mutationQuiescenceTimeout: const Duration(milliseconds: 10),
+        );
+
+        final report = await fixture.service.apply(
+          const OfflineOwnershipIntent.logout(accountId: '7'),
+        );
+
+        expect(report.completed, isFalse);
+        expect(
+          report.failures,
+          contains(
+            isA<OfflineOwnershipFailure>().having(
+              (failure) => failure.step,
+              'step',
+              OfflineOwnershipStep.mutationQuiescence,
+            ),
+          ),
+        );
+        expect(fixture.store.clearAccountCalls, isEmpty);
+        expect(fixture.service.canSync('7'), isFalse);
+      },
+    );
+
+    test(
       'logout account switch and permission refresh drain active mutations before cleanup',
       () async {
         final intents = <OfflineOwnershipIntent>[
@@ -1158,6 +1187,7 @@ final class _Fixture {
     _FakeOwnedScans? scans,
     bool keyRotationFails = false,
     OfflineMutationParticipant? participant,
+    Duration mutationQuiescenceTimeout = const Duration(seconds: 30),
   }) : store = store ?? _FakeOwnershipStore(),
        files = files ?? _FakeOwnedFiles(),
        scans = scans ?? _FakeOwnedScans() {
@@ -1171,6 +1201,7 @@ final class _Fixture {
       scans: this.scans,
       reviews: reviews,
       databaseKeys: keys,
+      mutationQuiescenceTimeout: mutationQuiescenceTimeout,
     );
     if (participant != null) service.attachMutationParticipant(participant);
   }

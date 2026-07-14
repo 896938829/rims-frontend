@@ -22,7 +22,9 @@ final class OfflineWriteBlockedException implements Exception {
 }
 
 final class OfflineWriteBarrier
-    implements OfflineScopedMutationPermitParticipant {
+    implements
+        OfflineScopedMutationPermitParticipant,
+        OfflineMutationDiagnostics {
   final Map<String, Set<Object>> _accountBlocks = {};
   final Set<Object> _globalBlocks = {};
   final Map<String, int> _activeByAccount = {};
@@ -135,6 +137,20 @@ final class OfflineWriteBarrier
     }
     _signalStateChange();
     return _OfflineWriteBarrierBlock(this, scope, blockId);
+  }
+
+  @override
+  String describeMutationState(OfflineMutationScope scope) {
+    final activeAccounts = scope.allAccounts
+        ? Map<String, int>.from(_activeByAccount)
+        : {
+            for (final accountId in scope.resolvedAccountIds)
+              if ((_activeByAccount[accountId] ?? 0) > 0)
+                accountId: _activeByAccount[accountId]!,
+          };
+    return 'globalBlocks=${_globalBlocks.length}, '
+        'accountBlocks=${_blockingIdsForAccounts(scope.resolvedAccountIds).length}, '
+        'activeGlobal=$_activeGlobal, activeAccounts=$activeAccounts';
   }
 
   @override

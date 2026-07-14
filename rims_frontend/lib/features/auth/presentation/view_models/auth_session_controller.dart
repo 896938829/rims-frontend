@@ -499,7 +499,6 @@ final class AuthSessionController extends ChangeNotifier {
             ),
           );
     if (report != null && !report.completed) return report;
-    await authRepository.logout();
     _session = null;
     _credentialsInvalidated = true;
     _restoreFailure = null;
@@ -508,6 +507,7 @@ final class AuthSessionController extends ChangeNotifier {
     _clearSourceMetadata();
     _publishOwnershipChanges(previous, _session);
     notifyListeners();
+    await authRepository.logout();
     return report;
   }
 

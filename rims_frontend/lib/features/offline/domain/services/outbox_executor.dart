@@ -145,7 +145,10 @@ abstract interface class OutboxExecutorPort {
 }
 
 final class OutboxExecutor
-    implements OutboxExecutorPort, OfflineMutationParticipant {
+    implements
+        OutboxExecutorPort,
+        OfflineMutationParticipant,
+        OfflineMutationDiagnostics {
   OutboxExecutor({
     required this.repository,
     required this.networkStatusService,
@@ -199,6 +202,12 @@ final class OutboxExecutor
     _mutationBlocks.add(block);
     return block;
   }
+
+  @override
+  String describeMutationState(OfflineMutationScope scope) =>
+      'blocks=${_mutationBlocks.length}, isExecuting=$_isExecuting, '
+      'activeAccount=$_activeAccountId, '
+      'scopeActive=${_activeAccountId != null && scope.contains(_activeAccountId!)}';
 
   @override
   Future<OutboxExecutionReport> execute(OutboxReview requestedReview) {

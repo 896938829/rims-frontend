@@ -324,6 +324,10 @@ abstract interface class OfflineMutationParticipant {
   OfflineMutationBlock blockMutations(OfflineMutationScope scope);
 }
 
+abstract interface class OfflineMutationDiagnostics {
+  String describeMutationState(OfflineMutationScope scope);
+}
+
 final class OfflineMutationAcquisitionException extends StateError {
   OfflineMutationAcquisitionException._({
     required this.acquisitionCause,
@@ -400,13 +404,22 @@ final class OfflineOwnershipService
     required this.reviews,
     required this.databaseKeys,
     Iterable<OfflineMutationParticipant> mutationParticipants = const [],
-  }) : _mutationParticipants = [...mutationParticipants];
+    this.mutationQuiescenceTimeout = const Duration(seconds: 15),
+  }) : _mutationParticipants = [...mutationParticipants] {
+    if (mutationQuiescenceTimeout <= Duration.zero) {
+      throw ArgumentError.value(
+        mutationQuiescenceTimeout,
+        'mutationQuiescenceTimeout',
+      );
+    }
+  }
 
   final OfflineOwnershipStore store;
   final OfflineOwnedFileStore files;
   final OfflineOwnedScanStore scans;
   final OfflineReviewInvalidator reviews;
   final OfflineDatabaseKeyManager databaseKeys;
+  final Duration mutationQuiescenceTimeout;
   final List<OfflineMutationParticipant> _mutationParticipants;
   final Map<String, Map<_OwnershipBlockKey, Map<int, List<_ParticipantBlock>>>>
   _retainedMutationBlocks = {};
@@ -442,6 +455,18 @@ final class OfflineOwnershipService
   bool canAccessOfflineData(String accountId) => !_isBlocked(accountId);
 
   int get debugOrphanedMutationBlockCount => _orphanedMutationBlocks.length;
+
+  List<String> debugMutationStates(String accountId) {
+    final scope = OfflineMutationScope.account(accountId);
+    return List.unmodifiable([
+      for (final participant in _mutationParticipants)
+        if (participant case final OfflineMutationDiagnostics diagnostics)
+          '${participant.runtimeType}: '
+              '${diagnostics.describeMutationState(scope)}'
+        else
+          '${participant.runtimeType}: diagnostics unavailable',
+    ]);
+  }
 
   int get debugGenerationMetadataEntryCount {
     int countNested(Map<String, Map<_OwnershipBlockKey, int>> values) =>
@@ -955,7 +980,9 @@ final class OfflineOwnershipService
     await _step(
       OfflineOwnershipStep.mutationQuiescence,
       'Unable to wait for active offline writes to finish.',
-      () => Future.wait(blocks.map((entry) => entry.block.waitForQuiescence())),
+      () => Future.wait(
+        blocks.map((entry) => entry.block.waitForQuiescence()),
+      ).timeout(mutationQuiescenceTimeout),
       failures,
     );
   }

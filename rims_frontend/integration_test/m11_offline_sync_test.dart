@@ -787,19 +787,37 @@ void main() {
         await scrollUntilVisible(tester, const Key('profile-logout-button'));
         await tapAndSettle(tester, const Key('profile-logout-button'));
         await tapAndSettle(tester, const Key('profile-logout-delete-drafts'));
-        await waitUntil(
-          tester,
-          description: 'logout ownership cleanup',
-          condition: () =>
-              !sessionController.isAuthenticated ||
-              sessionController.ownershipFailure != null,
-          timeout: const Duration(seconds: 30),
-        );
+        try {
+          await waitUntil(
+            tester,
+            description: 'logout ownership cleanup',
+            condition: () =>
+                !sessionController.isAuthenticated ||
+                sessionController.ownershipFailure != null,
+            timeout: const Duration(seconds: 30),
+          );
+        } on TestFailure {
+          final mutationStates = shell.offlineOwnershipService
+              ?.debugMutationStates(
+                sessionController.currentUser!.id.toString(),
+              );
+          throw TestFailure(
+            'Timed out waiting for logout ownership cleanup. '
+            'mutationStates=$mutationStates, '
+            'ownershipFailure=${sessionController.ownershipFailure}, '
+            'lastOwnershipReport=${sessionController.lastOwnershipReport}',
+          );
+        }
         if (sessionController.isAuthenticated) {
           final report = sessionController.lastOwnershipReport;
+          final mutationStates = shell.offlineOwnershipService
+              ?.debugMutationStates(
+                sessionController.currentUser!.id.toString(),
+              );
           throw TestFailure(
             'Logout ownership cleanup failed: '
             '${sessionController.ownershipFailure?.message ?? 'unknown'}; '
+            'mutationStates=$mutationStates; '
             'steps=${report?.failures.map((failure) => '${failure.step.name}:${failure.message}').join('|') ?? 'none'}',
           );
         }

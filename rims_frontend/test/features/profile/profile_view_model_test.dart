@@ -556,6 +556,56 @@ void main() {
       expect(calls, 2);
     },
   );
+
+  testWidgets(
+    'confirmed logout survives profile disposal while the dialog is open',
+    (tester) async {
+      var showProfile = true;
+      var calls = 0;
+      late StateSetter setHostState;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: StatefulBuilder(
+            builder: (context, setState) {
+              setHostState = setState;
+              return Scaffold(
+                body: showProfile
+                    ? ProfilePage(
+                        user: _ordinaryUser,
+                        warehouse: _warehouse,
+                        onLogoutRequested: (choice) async {
+                          calls += 1;
+                          return OfflineOwnershipReport(
+                            reason: OfflineOwnershipReason.logout,
+                            accountId: '2',
+                            executedCounts: const OfflineOwnershipCounts(),
+                            failures: const [],
+                          );
+                        },
+                      )
+                    : const SizedBox.shrink(),
+              );
+            },
+          ),
+        ),
+      );
+
+      await tester.scrollUntilVisible(
+        find.byKey(const Key('profile-logout-button')),
+        300,
+        scrollable: find.byType(Scrollable).first,
+      );
+      await tester.tap(find.byKey(const Key('profile-logout-button')));
+      await tester.pumpAndSettle();
+
+      setHostState(() => showProfile = false);
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('profile-logout-delete-drafts')));
+      await tester.pumpAndSettle();
+
+      expect(calls, 1);
+    },
+  );
 }
 
 const _adminUser = AppUser(
