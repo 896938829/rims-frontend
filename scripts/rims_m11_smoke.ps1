@@ -287,6 +287,12 @@ function Get-M11EvidenceErrors($Candidate) {
       $unknownHash.Value -notmatch '^[0-9a-fA-F]{64}$') {
     [void]$errors.Add('Unknown-response idempotency evidence must be a SHA-256 hash.')
   }
+  $requestFingerprint = $Candidate.PSObject.Properties['unknownRequestFingerprintHash']
+  if ($null -eq $requestFingerprint -or
+      $requestFingerprint.Value -isnot [string] -or
+      $requestFingerprint.Value -cnotmatch '^[0-9a-f]{64}$') {
+    [void]$errors.Add('Unknown-response request evidence must be a lowercase SHA-256 fingerprint.')
+  }
   $sameTarget = $Candidate.PSObject.Properties['unknownSameTargetReplayObserved']
   if ($null -eq $sameTarget -or $sameTarget.Value -isnot [bool] -or
       -not $sameTarget.Value) {

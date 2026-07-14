@@ -269,6 +269,7 @@ try {
     unknownStatusProbeCount = 1
     unknownReplayRequestCount = 2
     unknownIdempotencyKeyHash = ('b' * 64)
+    unknownRequestFingerprintHash = ('e' * 64)
     unknownSameTargetReplayObserved = $true
     expectedStockDecrease = 2
     observedStockDecrease = 2
@@ -327,6 +328,7 @@ try {
       'integration-entry-before-native-drift-open',
       'unknownStatusProbeCount',
       'unknownReplayRequestCount',
+      'unknownRequestFingerprintHash',
       'unknownSameTargetReplayObserved',
       'expectedStockDecrease',
       'observedStockDecrease'
@@ -749,6 +751,23 @@ try {
       '-FixturePath', $scalarHashPath,
       '-ReportPath', (Join-Path $resolvedTempRoot 'scalar-hash-report.json'),
       '-ArtifactRoot', (Join-Path $resolvedTempRoot 'scalar-hash-artifacts')
+    ) | Out-Null
+
+  $badFingerprintPath = Join-Path $resolvedTempRoot 'bad-request-fingerprint.json'
+  $badFingerprint = $fixture | ConvertTo-Json -Depth 10 | ConvertFrom-Json
+  $badFingerprint.unknownRequestFingerprintHash = 'raw-request-payload'
+  $badFingerprint | ConvertTo-Json -Depth 10 | Set-Content `
+    -LiteralPath $badFingerprintPath `
+    -Encoding UTF8
+  Invoke-ExpectFailure `
+    -ExpectedExitCode 2 `
+    -Message 'Unsafe request fingerprint.' `
+    -Arguments @(
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $wrapper,
+      '-AndroidDevice', 'Medium_Phone_API_36.1', '-TestMode',
+      '-FixturePath', $badFingerprintPath,
+      '-ReportPath', (Join-Path $resolvedTempRoot 'bad-request-fingerprint-report.json'),
+      '-ArtifactRoot', (Join-Path $resolvedTempRoot 'bad-request-fingerprint-artifacts')
     ) | Out-Null
 
   $wrongServerHashPath = Join-Path $resolvedTempRoot 'wrong-server-hash.json'

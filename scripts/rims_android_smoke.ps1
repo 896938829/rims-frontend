@@ -989,8 +989,12 @@ public static class RimsM11FaultProxy {
   static int unknownStatusProbeCount = 0;
   static int unknownReplayRequestCount = 0;
   static string unknownIdempotencyKeyHash = "";
-  static string unknownPayloadHash = "";
+  static string unknownRequestFingerprintHash = "";
   static bool unknownSameTargetReplayObserved = false;
+  static int requestReadTimeoutMs = 5000;
+  const int UpstreamIoTimeoutMs = 10000;
+  const int MaxHeaderBytes = 64 * 1024;
+  const int MaxBodyBytes = 8 * 1024 * 1024;
 
   public static void Run(int listenPort, int ownedBridgePort, string adbPath,
       string deviceSerial, string outputPath) {
@@ -1011,6 +1015,9 @@ public static class RimsM11FaultProxy {
   static void Handle(TcpClient client) {
     using (client) {
       try {
+        client.NoDelay = true;
+        client.ReceiveTimeout = requestReadTimeoutMs;
+        client.SendTimeout = requestReadTimeoutMs;
         var request = ReadRequest(client.GetStream());
         if (request == null) return;
         var header = Encoding.ASCII.GetString(request, 0,
@@ -1090,7 +1097,7 @@ public static class RimsM11FaultProxy {
           unknownStatusProbeCount = 0;
           unknownReplayRequestCount = 0;
           unknownIdempotencyKeyHash = "";
-          unknownPayloadHash = "";
+          unknownRequestFingerprintHash = "";
           unknownSameTargetReplayObserved = false;
           break;
         case "duplicate-delivery": mode = "duplicate-delivery-next"; break;
@@ -1115,6 +1122,7 @@ public static class RimsM11FaultProxy {
       int probeCount;
       int replayCount;
       string keyHash;
+      string requestFingerprintHash;
       bool sameTarget;
       lock (Gate) {
         current = mode;
@@ -1122,6 +1130,7 @@ public static class RimsM11FaultProxy {
         probeCount = unknownStatusProbeCount;
         replayCount = unknownReplayRequestCount;
         keyHash = unknownIdempotencyKeyHash;
+        requestFingerprintHash = unknownRequestFingerprintHash;
         sameTarget = unknownSameTargetReplayObserved;
       }
       WriteJson(stream, 200, "OK", "{\"ok\":true,\"mode\":\"" +
@@ -1129,6 +1138,7 @@ public static class RimsM11FaultProxy {
         ",\"unknownStatusProbeCount\":" + probeCount +
         ",\"unknownReplayRequestCount\":" + replayCount +
         ",\"unknownIdempotencyKeyHash\":\"" + keyHash +
+        "\",\"unknownRequestFingerprintHash\":\"" + requestFingerprintHash +
         "\",\"unknownSameTargetReplayObserved\":" +
         (sameTarget ? "true" : "false") + "}");
     } catch (Exception error) {
@@ -1139,7 +1149,12 @@ public static class RimsM11FaultProxy {
 
   static void Forward(byte[] request, NetworkStream destination) {
     using (var upstream = ConnectUpstream()) {
+      upstream.ReceiveTimeout = UpstreamIoTimeoutMs;
+      upstream.SendTimeout = UpstreamIoTimeoutMs;
       var stream = upstream.GetStream();
+      stream.ReadTimeout = UpstreamIoTimeoutMs;
+      stream.WriteTimeout = UpstreamIoTimeoutMs;
+      if (destination != null) destination.WriteTimeout = UpstreamIoTimeoutMs;
       var normalized = ForceConnectionClose(request);
       stream.Write(normalized, 0, normalized.Length);
       var buffer = new byte[32768];
@@ -1152,8 +1167,16 @@ public static class RimsM11FaultProxy {
 
   static TcpClient ConnectUpstream() {
     var ownedBridge = new TcpClient(AddressFamily.InterNetwork);
-    ownedBridge.Connect(IPAddress.Loopback, upstreamPort);
-    return ownedBridge;
+    try {
+      var connect = ownedBridge.ConnectAsync(IPAddress.Loopback, upstreamPort);
+      if (!connect.Wait(UpstreamIoTimeoutMs)) {
+        throw new TimeoutException("owned bridge connection timed out");
+      }
+      return ownedBridge;
+    } catch {
+      ownedBridge.Dispose();
+      throw;
+    }
   }
 
   static void ObserveUnknownRequest(byte[] request, string path, string active) {
@@ -1171,18 +1194,18 @@ public static class RimsM11FaultProxy {
     var key = HeaderValue(request, "Idempotency-Key");
     if (key.Length == 0) return;
     var keyHash = Sha256Hex(key);
-    var payloadHash = RequestPayloadHash(request);
+    var requestFingerprintHash = RequestFingerprintHash(request, path);
     lock (Gate) {
       if (active == "unknown-response-next") {
         unknownIdempotencyKeyHash = keyHash;
-        unknownPayloadHash = payloadHash;
+        unknownRequestFingerprintHash = requestFingerprintHash;
         unknownReplayRequestCount = 1;
         return;
       }
       if (unknownIdempotencyKeyHash.Length > 0 &&
           keyHash == unknownIdempotencyKeyHash) {
         unknownReplayRequestCount++;
-        if (payloadHash == unknownPayloadHash) {
+        if (requestFingerprintHash == unknownRequestFingerprintHash) {
           unknownSameTargetReplayObserved = true;
         }
       }
@@ -1212,12 +1235,59 @@ public static class RimsM11FaultProxy {
     return "";
   }
 
-  static string RequestPayloadHash(byte[] request) {
+  static string RequestFingerprintHash(byte[] request, string target) {
     var end = FindHeaderEnd(request);
-    if (end < 0 || end + 4 >= request.Length) return Sha256Hex("");
-    using (var sha = SHA256.Create()) {
-      return Hex(sha.ComputeHash(request, end + 4, request.Length - end - 4));
+    if (end < 0) throw new InvalidDataException("request header is incomplete");
+    var firstLineEnd = Array.IndexOf(request, (byte)13);
+    if (firstLineEnd <= 0 || firstLineEnd + 1 >= request.Length ||
+        request[firstLineEnd + 1] != 10) {
+      throw new InvalidDataException("request line is invalid");
     }
+    var firstLine = Encoding.ASCII.GetString(request, 0, firstLineEnd);
+    var parts = firstLine.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+    if (parts.Length < 2) throw new InvalidDataException("request line is invalid");
+    var method = parts[0].ToUpperInvariant();
+    if (!String.Equals(parts[1], target, StringComparison.Ordinal)) {
+      throw new InvalidDataException("request target observation is inconsistent");
+    }
+    var normalizedTarget = NormalizeRequestTarget(parts[1]);
+    var prefix = Encoding.UTF8.GetBytes(method + "\n" + normalizedTarget + "\n");
+    var bodyOffset = end + 4;
+    var bodyLength = Math.Max(0, request.Length - bodyOffset);
+    var fingerprint = new byte[prefix.Length + bodyLength];
+    Buffer.BlockCopy(prefix, 0, fingerprint, 0, prefix.Length);
+    if (bodyLength > 0) {
+      Buffer.BlockCopy(request, bodyOffset, fingerprint, prefix.Length, bodyLength);
+    }
+    using (var sha = SHA256.Create()) {
+      return Hex(sha.ComputeHash(fingerprint));
+    }
+  }
+
+  static string NormalizeRequestTarget(string target) {
+    if (String.IsNullOrWhiteSpace(target) || !target.StartsWith("/", StringComparison.Ordinal) ||
+        target.IndexOf('#') >= 0) {
+      throw new InvalidDataException("request target is invalid");
+    }
+    var queryIndex = target.IndexOf('?');
+    var rawPath = queryIndex < 0 ? target : target.Substring(0, queryIndex);
+    var segments = rawPath.Split('/');
+    for (var i = 0; i < segments.Length; i++) {
+      segments[i] = Uri.EscapeDataString(Uri.UnescapeDataString(segments[i]));
+    }
+    var normalizedPath = String.Join("/", segments);
+    if (queryIndex < 0 || queryIndex == target.Length - 1) return normalizedPath;
+    var normalizedPairs = new List<string>();
+    foreach (var pair in target.Substring(queryIndex + 1).Split('&')) {
+      var separator = pair.IndexOf('=');
+      var key = separator < 0 ? pair : pair.Substring(0, separator);
+      var value = separator < 0 ? "" : pair.Substring(separator + 1);
+      normalizedPairs.Add(
+        Uri.EscapeDataString(Uri.UnescapeDataString(key)) + "=" +
+        Uri.EscapeDataString(Uri.UnescapeDataString(value)));
+    }
+    normalizedPairs.Sort(StringComparer.Ordinal);
+    return normalizedPath + "?" + String.Join("&", normalizedPairs);
   }
 
   static string Sha256Hex(string value) {
@@ -1232,33 +1302,82 @@ public static class RimsM11FaultProxy {
     return builder.ToString();
   }
 
-  static byte[] ReadRequest(NetworkStream stream) {
-    var data = new List<byte>();
-    var one = new byte[1];
-    while (FindHeaderEnd(data.ToArray()) < 0) {
-      if (stream.Read(one, 0, 1) == 0) return null;
-      data.Add(one[0]);
-      if (data.Count > 1024 * 1024) throw new InvalidDataException("header too large");
+  static byte[] ReadRequest(Stream stream) {
+    var deadline = Stopwatch.StartNew();
+    using (var data = new MemoryStream()) {
+      var buffer = new byte[8192];
+      var headerEnd = -1;
+      var searchFrom = 0;
+      while (headerEnd < 0) {
+        var remainingHeader = MaxHeaderBytes - (int)data.Length;
+        if (remainingHeader <= 0) throw new InvalidDataException("header too large");
+        var read = ReadWithDeadline(
+          stream, buffer, 0, Math.Min(buffer.Length, remainingHeader), deadline);
+        if (read == 0) {
+          if (data.Length == 0) return null;
+          throw new InvalidDataException("request header is incomplete");
+        }
+        data.Write(buffer, 0, read);
+        var bytes = data.GetBuffer();
+        headerEnd = FindHeaderEnd(bytes, (int)data.Length, searchFrom);
+        searchFrom = Math.Max(0, (int)data.Length - 3);
+      }
+
+      var headerBytes = headerEnd + 4;
+      if (headerBytes > MaxHeaderBytes) throw new InvalidDataException("header too large");
+      var header = Encoding.ASCII.GetString(data.GetBuffer(), 0, headerEnd);
+      var contentLength = 0;
+      var contentLengthSeen = false;
+      foreach (var line in header.Split(new[] { "\r\n" }, StringSplitOptions.None)) {
+        if (line.StartsWith("Transfer-Encoding:", StringComparison.OrdinalIgnoreCase)) {
+          throw new InvalidDataException("transfer encoding is not supported");
+        }
+        if (!line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase)) continue;
+        if (contentLengthSeen) throw new InvalidDataException("duplicate content length");
+        contentLengthSeen = true;
+        var rawLength = line.Substring(line.IndexOf(':') + 1).Trim();
+        if (!Int32.TryParse(
+              rawLength,
+              System.Globalization.NumberStyles.None,
+              System.Globalization.CultureInfo.InvariantCulture,
+              out contentLength) || contentLength < 0) {
+          throw new InvalidDataException("invalid content length");
+        }
+        if (contentLength > MaxBodyBytes) throw new InvalidDataException("body too large");
+      }
+
+      var totalBytes = headerBytes + contentLength;
+      while (data.Length < totalBytes) {
+        var remaining = totalBytes - (int)data.Length;
+        var read = ReadWithDeadline(
+          stream, buffer, 0, Math.Min(buffer.Length, remaining), deadline);
+        if (read == 0) throw new InvalidDataException("request body is incomplete");
+        data.Write(buffer, 0, read);
+      }
+      var request = new byte[totalBytes];
+      Buffer.BlockCopy(data.GetBuffer(), 0, request, 0, totalBytes);
+      return request;
     }
-    var bytes = data.ToArray();
-    var headerEnd = FindHeaderEnd(bytes);
-    var header = Encoding.ASCII.GetString(bytes, 0, headerEnd + 4);
-    var contentLength = 0;
-    foreach (var line in header.Split(new[] { "\r\n" }, StringSplitOptions.None)) {
-      if (line.StartsWith("Content-Length:", StringComparison.OrdinalIgnoreCase))
-        int.TryParse(line.Substring(line.IndexOf(':') + 1).Trim(), out contentLength);
+  }
+
+  static int ReadWithDeadline(Stream stream, byte[] buffer, int offset, int count,
+      Stopwatch deadline) {
+    var remainingMs = requestReadTimeoutMs - (int)deadline.ElapsedMilliseconds;
+    if (remainingMs <= 0) throw new TimeoutException("request read timed out");
+    if (stream.CanTimeout) stream.ReadTimeout = Math.Max(1, remainingMs);
+    var read = stream.Read(buffer, offset, count);
+    if (deadline.ElapsedMilliseconds > requestReadTimeoutMs) {
+      throw new TimeoutException("request read timed out");
     }
-    while (data.Count < headerEnd + 4 + contentLength) {
-      var buffer = new byte[Math.Min(32768, headerEnd + 4 + contentLength - data.Count)];
-      var read = stream.Read(buffer, 0, buffer.Length);
-      if (read == 0) break;
-      for (var i = 0; i < read; i++) data.Add(buffer[i]);
-    }
-    return data.ToArray();
+    return read;
   }
 
   static int FindHeaderEnd(byte[] data) {
-    for (var i = 0; i + 3 < data.Length; i++)
+    return FindHeaderEnd(data, data.Length, 0);
+  }
+
+  static int FindHeaderEnd(byte[] data, int count, int start) {
+    for (var i = Math.Max(0, start); i + 3 < count; i++)
       if (data[i] == 13 && data[i + 1] == 10 && data[i + 2] == 13 && data[i + 3] == 10) return i;
     return -1;
   }

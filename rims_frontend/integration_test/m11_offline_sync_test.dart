@@ -70,6 +70,7 @@ void main() {
       var unknownStatusProbeCount = 0;
       var unknownReplayRequestCount = 0;
       var unknownIdempotencyKeyHash = '';
+      var unknownRequestFingerprintHash = '';
       var unknownSameTargetReplayObserved = false;
       var duplicateSingleEffect = false;
       var attachmentDependencyCompleted = false;
@@ -321,6 +322,8 @@ void main() {
             (unknownStatusAfter['unknownReplayRequestCount'] as num).toInt();
         unknownIdempotencyKeyHash =
             unknownStatusAfter['unknownIdempotencyKeyHash'].toString();
+        unknownRequestFingerprintHash =
+            unknownStatusAfter['unknownRequestFingerprintHash'].toString();
         unknownSameTargetReplayObserved =
             unknownStatusAfter['unknownSameTargetReplayObserved'] == true;
         final expectedUnknownKeyHash = sha256
@@ -330,6 +333,7 @@ void main() {
             unknownStatusProbeCount > 0 &&
             unknownReplayRequestCount >= 2 &&
             unknownIdempotencyKeyHash == expectedUnknownKeyHash &&
+            RegExp(r'^[0-9a-f]{64}$').hasMatch(unknownRequestFingerprintHash) &&
             unknownSameTargetReplayObserved &&
             current.operationId == unknownCreate.operationId &&
             current.idempotencyKey == unknownCreate.idempotencyKey;
@@ -750,6 +754,7 @@ void main() {
           'unknownStatusProbeCount': unknownStatusProbeCount,
           'unknownReplayRequestCount': unknownReplayRequestCount,
           'unknownIdempotencyKeyHash': unknownIdempotencyKeyHash,
+          'unknownRequestFingerprintHash': unknownRequestFingerprintHash,
           'unknownSameTargetReplayObserved': unknownSameTargetReplayObserved,
           'stockBefore': stockBefore,
           'stockAfter': stockAfter,

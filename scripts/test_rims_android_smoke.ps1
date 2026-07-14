@@ -330,14 +330,16 @@ foreach ($resetContract in @(
     "'namespaceAttachments'",
     "'namespaceAttachmentFiles'",
     "'fixtureStockQuantity'"
-    'reset_object_key_output="$('
+    'RIMS_M9_RESET_OBJECT_KEY '
+    'CREATE TEMP TABLE m9_reset_attachment_keys'
   )) {
   if (-not $backendSeedText.Contains($resetContract)) {
     throw "M9 reset omitted M11 baseline contract '$resetContract'."
   }
 }
-if ($backendSeedText.Contains('mapfile -t reset_object_keys < <(')) {
-  throw 'M9 reset attachment query failure is hidden by process substitution.'
+if ($backendSeedText.Contains('mapfile -t reset_object_keys < <(') -or
+    $backendSeedText.Contains('reset_object_key_output="$(')) {
+  throw 'M9 reset attachment query failure is hidden by command substitution.'
 }
 foreach ($cancellationContract in @(
     'networkGeneration',
@@ -362,7 +364,7 @@ if (-not $proxySourceMatch.Success) {
 }
 if ($proxySourceMatch.Value.Contains('AddressFamily.InterNetworkV6') -or
     -not $proxySourceMatch.Value.Contains(
-      'ownedBridge.Connect(IPAddress.Loopback, upstreamPort);'
+      'ownedBridge.ConnectAsync(IPAddress.Loopback, upstreamPort);'
     )) {
   throw 'M11 fault proxy still has an ambiguous upstream fallback.'
 }
@@ -382,17 +384,238 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-'@ + "`n" + ($proxySourceMatch.Value -replace "\r?\n'@$", '')
+'@ + "`n" + ($proxySourceMatch.Value -replace "\r?\n'@$", '') + "`n" + @'
+public sealed class RimsM11SlowReadStream : Stream {
+  readonly byte[] data;
+  readonly int delayMs;
+  int offset;
+
+  public RimsM11SlowReadStream(byte[] source, int readDelayMs) {
+    data = source;
+    delayMs = readDelayMs;
+  }
+
+  public override int Read(byte[] buffer, int bufferOffset, int count) {
+    Thread.Sleep(delayMs);
+    if (offset >= data.Length) return 0;
+    buffer[bufferOffset] = data[offset++];
+    return 1;
+  }
+
+  public override bool CanRead { get { return true; } }
+  public override bool CanSeek { get { return false; } }
+  public override bool CanWrite { get { return false; } }
+  public override long Length { get { return data.Length; } }
+  public override long Position {
+    get { return offset; }
+    set { throw new NotSupportedException(); }
+  }
+  public override void Flush() { }
+  public override long Seek(long value, SeekOrigin origin) { throw new NotSupportedException(); }
+  public override void SetLength(long value) { throw new NotSupportedException(); }
+  public override void Write(byte[] buffer, int bufferOffset, int count) {
+    throw new NotSupportedException();
+  }
+}
+'@
 Add-Type -TypeDefinition $proxySource
 $proxyType = [RimsM11FaultProxy]
 $bindingFlags = [Reflection.BindingFlags]'NonPublic,Static'
 $runAdb = $proxyType.GetMethod('RunAdb', $bindingFlags)
 $observeUnknown = $proxyType.GetMethod('ObserveUnknownRequest', $bindingFlags)
 $redactPath = $proxyType.GetMethod('RedactPath', $bindingFlags)
+$readRequest = $proxyType.GetMethod('ReadRequest', $bindingFlags)
+if ($null -eq $readRequest -or
+    $readRequest.GetParameters()[0].ParameterType -ne [IO.Stream]) {
+  throw 'Fault proxy request reader is not a deterministically injectable Stream reader.'
+}
+
+function Assert-FaultProxyReadThrows {
+  param(
+    [Parameter(Mandatory = $true)][IO.Stream]$Stream,
+    [Parameter(Mandatory = $true)][string]$Message
+  )
+
+  $threw = $false
+  try {
+    [void]$readRequest.Invoke($null, [object[]]@($Stream))
+  } catch {
+    $threw = $true
+  } finally {
+    $Stream.Dispose()
+  }
+  if (-not $threw) {
+    throw $Message
+  }
+}
+
+$normalProbeBytes = [Text.Encoding]::ASCII.GetBytes(
+  "GET /health HTTP/1.1`r`nHost: localhost`r`n`r`n"
+)
+$normalProbeStream = [IO.MemoryStream]::new($normalProbeBytes)
+try {
+  $normalRead = [byte[]]$readRequest.Invoke(
+    $null,
+    [object[]]@($normalProbeStream)
+  )
+} finally {
+  $normalProbeStream.Dispose()
+}
+Assert-Equal `
+  -Actual ([Text.Encoding]::ASCII.GetString($normalRead)) `
+  -Expected ([Text.Encoding]::ASCII.GetString($normalProbeBytes)) `
+  -Message 'Fault proxy normal bounded request read.'
+Assert-FaultProxyReadThrows `
+  -Stream ([IO.MemoryStream]::new([Text.Encoding]::ASCII.GetBytes(
+      "POST / HTTP/1.1`r`nContent-Length: -1`r`n`r`n"
+    ))) `
+  -Message 'Fault proxy accepted a negative Content-Length.'
+Assert-FaultProxyReadThrows `
+  -Stream ([IO.MemoryStream]::new([Text.Encoding]::ASCII.GetBytes(
+      "POST / HTTP/1.1`r`nContent-Length: 8388609`r`n`r`n"
+    ))) `
+  -Message 'Fault proxy accepted an oversized request body.'
+$oversizedHeader = 'GET / HTTP/1.1' + "`r`nX-Fill: " + ('x' * 65536)
+Assert-FaultProxyReadThrows `
+  -Stream ([IO.MemoryStream]::new([Text.Encoding]::ASCII.GetBytes($oversizedHeader))) `
+  -Message 'Fault proxy accepted an oversized unterminated header.'
+$readTimeoutField = $proxyType.GetField('requestReadTimeoutMs', $bindingFlags)
+if ($null -eq $readTimeoutField) {
+  throw 'Fault proxy omitted the deterministic request read timeout.'
+}
+$originalReadTimeout = $readTimeoutField.GetValue($null)
+$slowReadWatch = [Diagnostics.Stopwatch]::StartNew()
+try {
+  $readTimeoutField.SetValue($null, 50)
+  Assert-FaultProxyReadThrows `
+    -Stream ([RimsM11SlowReadStream]::new($normalProbeBytes, 100)) `
+    -Message 'Fault proxy accepted a slow client beyond its read deadline.'
+} finally {
+  $readTimeoutField.SetValue($null, $originalReadTimeout)
+  $slowReadWatch.Stop()
+}
+if ($slowReadWatch.ElapsedMilliseconds -gt 2000) {
+  throw 'Fault proxy slow-client timeout was not deterministic.'
+}
+foreach ($acceptLoopContract in @(
+    'Task.Run(() => Handle(client));',
+    'catch (Exception error) {',
+    'Log("proxy-error "'
+  )) {
+  if (-not $proxySourceMatch.Value.Contains($acceptLoopContract)) {
+    throw "Fault proxy accept loop omitted isolation contract '$acceptLoopContract'."
+  }
+}
 $unknownKey = 'M11-self-test-idempotency-key'
 $unknownBody = '{"remark":"M9-E2E:M11:self-test:unknown"}'
-$unknownRequestText = "POST /api/v1/documents HTTP/1.1`r`nHost: localhost`r`nIdempotency-Key: $unknownKey`r`nContent-Length: $([Text.Encoding]::UTF8.GetByteCount($unknownBody))`r`n`r`n$unknownBody"
-$unknownRequest = [Text.Encoding]::UTF8.GetBytes($unknownRequestText)
+
+function New-FaultProxyRequest {
+  param(
+    [Parameter(Mandatory = $true)][string]$Method,
+    [Parameter(Mandatory = $true)][string]$Target,
+    [Parameter(Mandatory = $true)][string]$IdempotencyKey,
+    [Parameter(Mandatory = $true)][string]$Body
+  )
+
+  $requestText = "$Method $Target HTTP/1.1`r`nHost: localhost`r`nIdempotency-Key: $IdempotencyKey`r`nContent-Length: $([Text.Encoding]::UTF8.GetByteCount($Body))`r`n`r`n$Body"
+  return ,([Text.Encoding]::UTF8.GetBytes($requestText))
+}
+
+function Reset-UnknownObservation {
+  foreach ($fieldName in @(
+      'unknownStatusProbeCount',
+      'unknownReplayRequestCount',
+      'unknownIdempotencyKeyHash',
+      'unknownPayloadHash',
+      'unknownRequestFingerprintHash',
+      'unknownSameTargetReplayObserved'
+    )) {
+    $field = $proxyType.GetField($fieldName, $bindingFlags)
+    if ($null -eq $field) {
+      continue
+    }
+    if ($field.FieldType -eq [bool]) {
+      $field.SetValue($null, $false)
+    } elseif ($field.FieldType -eq [int]) {
+      $field.SetValue($null, 0)
+    } else {
+      $field.SetValue($null, '')
+    }
+  }
+}
+
+function Assert-UnknownReplayTarget {
+  param(
+    [Parameter(Mandatory = $true)][string]$InitialMethod,
+    [Parameter(Mandatory = $true)][string]$InitialTarget,
+    [Parameter(Mandatory = $true)][string]$ReplayMethod,
+    [Parameter(Mandatory = $true)][string]$ReplayTarget,
+    [Parameter(Mandatory = $true)][bool]$Expected,
+    [Parameter(Mandatory = $true)][string]$Message
+  )
+
+  Reset-UnknownObservation
+  $initialRequest = New-FaultProxyRequest `
+    -Method $InitialMethod `
+    -Target $InitialTarget `
+    -IdempotencyKey $unknownKey `
+    -Body $unknownBody
+  $replayRequest = New-FaultProxyRequest `
+    -Method $ReplayMethod `
+    -Target $ReplayTarget `
+    -IdempotencyKey $unknownKey `
+    -Body $unknownBody
+  $initialArguments = [object[]]::new(3)
+  $initialArguments[0] = $initialRequest
+  $initialArguments[1] = $InitialTarget
+  $initialArguments[2] = 'unknown-response-next'
+  [void]$observeUnknown.Invoke($null, $initialArguments)
+  $replayArguments = [object[]]::new(3)
+  $replayArguments[0] = $replayRequest
+  $replayArguments[1] = $ReplayTarget
+  $replayArguments[2] = 'normal'
+  [void]$observeUnknown.Invoke($null, $replayArguments)
+  Assert-Equal `
+    -Actual $proxyType.GetField('unknownSameTargetReplayObserved', $bindingFlags).GetValue($null) `
+    -Expected $Expected `
+    -Message $Message
+}
+
+Assert-UnknownReplayTarget `
+  -InitialMethod 'POST' `
+  -InitialTarget '/api/v1/documents?a=1&b=2' `
+  -ReplayMethod 'GET' `
+  -ReplayTarget '/api/v1/documents?a=1&b=2' `
+  -Expected $false `
+  -Message 'Fault proxy rejects same-body replay with a different method.'
+Assert-UnknownReplayTarget `
+  -InitialMethod 'POST' `
+  -InitialTarget '/api/v1/documents?a=1&b=2' `
+  -ReplayMethod 'POST' `
+  -ReplayTarget '/api/v1/other?a=1&b=2' `
+  -Expected $false `
+  -Message 'Fault proxy rejects same-body replay against a different path.'
+Assert-UnknownReplayTarget `
+  -InitialMethod 'POST' `
+  -InitialTarget '/api/v1/documents?a=1&b=2' `
+  -ReplayMethod 'POST' `
+  -ReplayTarget '/api/v1/documents?a=1&b=3' `
+  -Expected $false `
+  -Message 'Fault proxy rejects same-body replay with a different query.'
+Assert-UnknownReplayTarget `
+  -InitialMethod 'POST' `
+  -InitialTarget '/api/v1/documents?b=2&a=1' `
+  -ReplayMethod 'post' `
+  -ReplayTarget '/api/v1/documents?a=1&b=2' `
+  -Expected $true `
+  -Message 'Fault proxy accepts an equivalent normalized request target.'
+
+Reset-UnknownObservation
+$unknownRequest = New-FaultProxyRequest `
+  -Method 'POST' `
+  -Target '/api/v1/documents' `
+  -IdempotencyKey $unknownKey `
+  -Body $unknownBody
 $statusPath = "/api/v1/operations/idempotency/$([Uri]::EscapeDataString($unknownKey))"
 $statusRequest = [Text.Encoding]::ASCII.GetBytes(
   "GET $statusPath HTTP/1.1`r`nHost: localhost`r`n`r`n"
@@ -433,6 +656,17 @@ Assert-Equal `
   -Actual $proxyType.GetField('unknownIdempotencyKeyHash', $bindingFlags).GetValue($null) `
   -Expected $expectedUnknownHash `
   -Message 'Fault proxy idempotency hash.'
+$fingerprintField = $proxyType.GetField('unknownRequestFingerprintHash', $bindingFlags)
+if ($null -eq $fingerprintField) {
+  throw 'Fault proxy omitted the safe replay request fingerprint evidence.'
+}
+$requestFingerprintHash = [string]$fingerprintField.GetValue($null)
+if ($requestFingerprintHash -cnotmatch '^[0-9a-f]{64}$') {
+  throw 'Fault proxy replay request fingerprint is not a lowercase SHA-256 hash.'
+}
+if ($androidWrapperText.Contains('"unknownPayloadHash"')) {
+  throw 'Fault proxy exposes a body-only replay hash instead of a target-bound fingerprint.'
+}
 $redactedStatusPath = [string]$redactPath.Invoke($null, @($statusPath))
 if ($redactedStatusPath.Contains($unknownKey) -or
     -not $redactedStatusPath.Contains($expectedUnknownHash)) {
