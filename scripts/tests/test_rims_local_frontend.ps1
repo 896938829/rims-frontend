@@ -208,11 +208,23 @@ if (-not $emulatorLauncherScript.Contains('-WindowStyle Hidden')) {
 if (-not $emulatorLauncherScript.Contains("'-no-window'")) {
   throw 'Gated emulator launcher does not pass -no-window to the emulator child.'
 }
+if (-not $emulatorLauncherScript.Contains("'-no-snapshot-load'")) {
+  throw 'Gated emulator launcher must cold-load controller-owned AVD state.'
+}
 if (-not $emulatorLauncherScript.Contains('WaitForExit')) {
   throw 'Gated emulator launcher does not wait for its emulator child.'
 }
 if ($emulatorLauncherScript.Contains('& $p.executable -avd $p.avdName')) {
   throw 'Gated emulator launcher still invokes emulator.exe directly.'
+}
+$bootReadinessSource = (Get-Item 'Function:\Wait-RimsAndroidBootCompleted').ScriptBlock.ToString()
+foreach ($readinessContract in @(
+    "'shell', 'service', 'check', 'activity'",
+    "'shell', 'cmd', 'package', 'path', 'android'"
+  )) {
+  if (-not $bootReadinessSource.Contains($readinessContract)) {
+    throw "Android boot readiness omitted '$readinessContract'."
+  }
 }
 
 $noneRejected = $false

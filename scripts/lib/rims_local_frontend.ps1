@@ -281,11 +281,27 @@ function Wait-RimsAndroidBootCompleted {
     $completed = if ($null -ne $ProbeAction) {
       [bool](& $ProbeAction $AdbExecutable $Serial)
     } else {
-      $result = Invoke-RimsExternalCommand `
+      $bootResult = Invoke-RimsExternalCommand `
         -FilePath $AdbExecutable `
         -Arguments @('-s', $Serial, 'shell', 'getprop', 'sys.boot_completed') `
         -TimeoutSeconds 15
-      $result.ExitCode -eq 0 -and $result.StandardOutput.Trim() -eq '1'
+      if ($bootResult.ExitCode -ne 0 -or
+          $bootResult.StandardOutput.Trim() -ne '1') {
+        $false
+      } else {
+        $activityResult = Invoke-RimsExternalCommand `
+          -FilePath $AdbExecutable `
+          -Arguments @('-s', $Serial, 'shell', 'service', 'check', 'activity') `
+          -TimeoutSeconds 15
+        $packageResult = Invoke-RimsExternalCommand `
+          -FilePath $AdbExecutable `
+          -Arguments @('-s', $Serial, 'shell', 'cmd', 'package', 'path', 'android') `
+          -TimeoutSeconds 15
+        $activityResult.ExitCode -eq 0 -and
+          $activityResult.StandardOutput -match '(?m)^Service activity: found\s*$' -and
+          $packageResult.ExitCode -eq 0 -and
+          $packageResult.StandardOutput -match '(?m)^package:.+\s*$'
+      }
     }
     if ($completed) {
       return $true
@@ -653,7 +669,7 @@ while(-not (Test-Path -LiteralPath $p.gate -PathType Leaf)){
   if((Get-Date)-ge $limit){exit 124}
   Start-Sleep -Milliseconds 50
 }
-$child=Start-Process -FilePath $p.executable -ArgumentList @('-avd',$p.avdName,'-no-window') -WindowStyle Hidden -PassThru
+$child=Start-Process -FilePath $p.executable -ArgumentList @('-avd',$p.avdName,'-no-window','-no-snapshot-load') -WindowStyle Hidden -PassThru
 $child.WaitForExit()
 exit $child.ExitCode
 '@
