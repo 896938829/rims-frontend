@@ -38,8 +38,7 @@ void main() {
     expect(RimsE2eConfig.m11FaultControlUrl, endsWith('/__rims_m11'));
 
     await screenshotOnFailure(binding, 'm11-offline-sync-failure', () async {
-      const processRecoveryBoundary =
-          'draft-manager-frame-before-open-command';
+      const processRecoveryBoundary = 'draft-manager-frame-before-open-command';
       final expectedStage = RimsE2eConfig.m11ProcessStage;
       expect(const {
         'seed',
@@ -1231,14 +1230,7 @@ Future<({OutboxOperation operation, int enqueueLatencyMs})> _queueCurrentDraft(
 }
 
 Future<void> _syncOperation(WidgetTester tester, String operationId) async {
-  await _openSyncCenter(tester);
-  final viewModel = await _syncCenterViewModel(tester);
-  await waitUntil(
-    tester,
-    description: 'sync center loaded',
-    condition: () => !viewModel.isLoading,
-  );
-  await expectText(tester, operationId);
+  final viewModel = await _waitForOperationInSyncCenter(tester, operationId);
   await tapFinderAndSettle(
     tester,
     find.text('复核并同步').first,
@@ -1275,14 +1267,36 @@ Future<bool> _operationVisibleInSyncCenter(
   WidgetTester tester,
   String operationId,
 ) async {
-  await _openSyncCenter(tester);
-  await waitUntil(
-    tester,
-    description: 'queued operation visible in Sync Center',
-    condition: () => find.textContaining(operationId).evaluate().isNotEmpty,
-  );
+  await _waitForOperationInSyncCenter(tester, operationId);
   return find.textContaining(operationId).evaluate().isNotEmpty &&
       find.text('复核并同步').evaluate().isNotEmpty;
+}
+
+Future<SyncCenterViewModel> _waitForOperationInSyncCenter(
+  WidgetTester tester,
+  String operationId,
+) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 12));
+  do {
+    if (find.byType(SyncCenterPage).evaluate().isEmpty) {
+      await _openSyncCenter(tester);
+    }
+    final viewModelFinder = find.byWidgetPredicate(
+      (widget) =>
+          widget is AnimatedBuilder && widget.animation is SyncCenterViewModel,
+    );
+    if (viewModelFinder.evaluate().isNotEmpty) {
+      final viewModel =
+          tester.widget<AnimatedBuilder>(viewModelFinder.first).animation
+              as SyncCenterViewModel;
+      if (!viewModel.isLoading &&
+          find.textContaining(operationId).evaluate().isNotEmpty) {
+        return viewModel;
+      }
+    }
+    await tester.pump(const Duration(milliseconds: 100));
+  } while (DateTime.now().isBefore(deadline));
+  throw TestFailure('Timed out recovering Sync Center operation $operationId.');
 }
 
 Future<bool> _operationVisibleInAttention(

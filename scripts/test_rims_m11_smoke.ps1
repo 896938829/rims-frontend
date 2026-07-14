@@ -364,6 +364,14 @@ try {
         "await expectText(tester, '同步中心');"
       )) `
     -Message 'Sync Center navigation completion must not use the ambiguous entry label.'
+  Assert-True `
+    -Condition $integrationText.Contains('_waitForOperationInSyncCenter') `
+    -Message 'Operation lookup must recover when router refresh removes Sync Center.'
+  Assert-True `
+    -Condition (-not $integrationText.Contains(
+        'await expectText(tester, operationId);'
+      )) `
+    -Message 'Operation lookup must not wait passively after Sync Center is removed.'
   $autosaveStart = $integrationText.IndexOf('final autosaveWatch = Stopwatch()..start();')
   $autosaveMutation = $integrationText.IndexOf(
     "const Key('document-remark-field')"
