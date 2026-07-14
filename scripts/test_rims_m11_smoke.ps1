@@ -266,6 +266,15 @@ try {
     stagedAttachmentHash = ('d' * 64)
     attachmentCount = 1
     databaseBytes = 1048576
+    unknownStatusProbeCount = 1
+    unknownReplayRequestCount = 2
+    unknownIdempotencyKeyHash = ('b' * 64)
+    unknownSameTargetReplayObserved = $true
+    expectedStockDecrease = 2
+    observedStockDecrease = 2
+    draftAutosaveDebounceMs = 300
+    draftAutosaveEndToEndMs = 380
+    processRecoveryBoundary = 'integration-entry-before-native-drift-open'
     processStages = @(
       [ordered]@{ stage = 'seed'; processId = 101; startedAt = '2026-07-14T00:00:00Z' },
       [ordered]@{ stage = 'offline-draft'; processId = 202; startedAt = '2026-07-14T00:01:00Z' },
@@ -308,6 +317,43 @@ try {
   $fixture | ConvertTo-Json -Depth 8 | Set-Content `
     -LiteralPath $fixturePath `
     -Encoding UTF8
+
+  $integrationText = Get-Content `
+    -LiteralPath (Join-Path $scriptDir '..\rims_frontend\integration_test\m11_offline_sync_test.dart') `
+    -Raw
+  foreach ($journeyContract in @(
+      'draftAutosaveDebounceMs',
+      'draftAutosaveEndToEndMs',
+      'integration-entry-before-native-drift-open',
+      'unknownStatusProbeCount',
+      'unknownReplayRequestCount',
+      'unknownSameTargetReplayObserved',
+      'expectedStockDecrease',
+      'observedStockDecrease'
+    )) {
+    Assert-True `
+      -Condition $integrationText.Contains($journeyContract) `
+      -Message "M11 integration evidence omitted '$journeyContract'."
+  }
+  Assert-True `
+    -Condition (-not $integrationText.Contains(
+        'unknownResponseProbed = unknownCreate.requiresStatusProbe;'
+      )) `
+    -Message 'Unknown response evidence still trusts the preloaded operation flag.'
+  $autosaveStart = $integrationText.IndexOf('final autosaveWatch = Stopwatch()..start();')
+  $autosaveMutation = $integrationText.IndexOf(
+    "const Key('document-remark-field')"
+  )
+  Assert-True `
+    -Condition ($autosaveStart -ge 0 -and $autosaveStart -lt $autosaveMutation) `
+    -Message 'Autosave timing must begin before the form mutation.'
+  $recoveryStart = $integrationText.IndexOf(
+    "integration-entry-before-native-drift-open"
+  )
+  $storeOpen = $integrationText.IndexOf('final store = await createOfflineStore();')
+  Assert-True `
+    -Condition ($recoveryStart -ge 0 -and $recoveryStart -lt $storeOpen) `
+    -Message 'Recovery timing must begin before native Drift reopen.'
 
   $validNetworkEvidence = [ordered]@{
     backendTargetPort = 18080
@@ -627,13 +673,38 @@ try {
     @{ Name = 'database'; Property = 'databaseBytes'; Value = 26214401 },
     @{ Name = 'missing-server-attachment'; Property = 'attachmentCount'; Value = 0 },
     @{ Name = 'documents'; Property = 'duplicateDocumentCount'; Value = 1 },
-    @{ Name = 'transactions'; Property = 'duplicateInventoryTransactionCount'; Value = 1 }
+    @{ Name = 'transactions'; Property = 'duplicateInventoryTransactionCount'; Value = 1 },
+    @{ Name = 'stock-double'; Property = 'stockBefore'; Value = [double]100.0; RawJson = '100.0' },
+    @{ Name = 'documents-double'; Property = 'serverDocumentCount'; Value = [double]1.0; RawJson = '1.0' },
+    @{ Name = 'attachment-decimal'; Property = 'attachmentCount'; Value = [decimal]1.5 },
+    @{ Name = 'database-fraction'; Property = 'databaseBytes'; Value = [double]1048576.5 },
+    @{ Name = 'transactions-fraction'; Property = 'duplicateInventoryTransactionCount'; Value = [double]0.5 }
   )
   foreach ($case in $gateCases) {
     $invalid = $fixture | ConvertTo-Json -Depth 8 | ConvertFrom-Json
-    $invalid.($case.Property) = $case.Value
+    $invalid.PSObject.Properties.Remove($case.Property)
+    $invalid | Add-Member `
+      -MemberType NoteProperty `
+      -Name $case.Property `
+      -Value $case.Value
     $invalidPath = Join-Path $resolvedTempRoot "invalid-$($case.Name).json"
-    $invalid | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $invalidPath -Encoding UTF8
+    $invalidJson = $invalid | ConvertTo-Json -Depth 8
+    if ($case.ContainsKey('RawJson')) {
+      $invalidJson = [regex]::Replace(
+        $invalidJson,
+        "(`"$([regex]::Escape($case.Property))`"\s*:\s*)[^,}`r`n]+",
+        { param($match) $match.Groups[1].Value + $case.RawJson }
+      )
+    }
+    $invalidJson | Set-Content -LiteralPath $invalidPath -Encoding UTF8
+    if ($case.Name -eq 'stock-double') {
+      $roundTripStock = (Get-Content -LiteralPath $invalidPath -Raw |
+          ConvertFrom-Json).stockBefore
+      Assert-True `
+        -Condition ($roundTripStock -is [double] -or
+          $roundTripStock -is [decimal]) `
+        -Message "stock-double fixture lost its non-integer JSON type: $($roundTripStock.GetType().FullName)."
+    }
     Invoke-ExpectFailure `
       -ExpectedExitCode 2 `
       -Message "Threshold gate '$($case.Name)'." `

@@ -26,6 +26,7 @@ param(
   [switch]$TestBridgeFailure,
   [switch]$TestOwnedNetworkHarness,
   [string]$TestNetworkEvidenceFixturePath,
+  [string]$TestM11EvidenceFixturePath,
   [string]$TestMarkerFixturePath,
   [ValidateSet('Result', 'Stage')]
   [string]$TestExpectedMarker = 'Result',
@@ -122,7 +123,8 @@ if ([string]::IsNullOrWhiteSpace($AndroidDevice)) {
 if ($TestMode -and
     [string]::IsNullOrWhiteSpace($FailStep) -and
     [string]::IsNullOrWhiteSpace($TestMarkerFixturePath) -and
-    [string]::IsNullOrWhiteSpace($TestNetworkEvidenceFixturePath)) {
+    [string]::IsNullOrWhiteSpace($TestNetworkEvidenceFixturePath) -and
+    [string]::IsNullOrWhiteSpace($TestM11EvidenceFixturePath)) {
   throw 'TestMode requires an explicit FailStep.'
 }
 if ($TestMode -and
@@ -287,6 +289,7 @@ $localScript = Join-Path $scriptDir 'rims_local.ps1'
 $commonScript = Join-Path $scriptDir 'lib\rims_local_common.ps1'
 . $commonScript
 . (Join-Path $scriptDir 'lib\rims_network_evidence.ps1')
+. (Join-Path $scriptDir 'lib\rims_m11_evidence.ps1')
 
 $runtimePaths = Get-RimsRuntimePaths -ScriptDirectory $scriptDir
 $logRoot = $runtimePaths.logs
@@ -389,6 +392,7 @@ $faultProxyIdentity = $null
 $routeValidation = $null
 $networkEvidence = $null
 $networkEvidenceErrors = @()
+$m11EvidenceErrors = @()
 $m11Commands = [Collections.Generic.List[string]]::new()
 $initialAirplaneMode = $null
 $initialWifiEnabled = $null
@@ -787,7 +791,8 @@ function Initialize-AndroidRuntime {
       $arguments = @(
         '-Command', 'up', '-Target', 'none',
         '-BackendDir', $BackendDir,
-        '-BackendWorkspaceRoot', $BackendWorkspaceRoot
+        '-BackendWorkspaceRoot', $BackendWorkspaceRoot,
+        '-BackendPort', $BackendPort
       )
       if ($IncludeDependencies) { $arguments += '-IncludeDependencies' }
       [void](Invoke-LocalRuntime -Arguments $arguments -TimeoutSeconds 600)
@@ -966,6 +971,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -980,6 +986,11 @@ public static class RimsM11FaultProxy {
   static int upstreamPort;
   static int networkGeneration = 0;
   static int activeNetworkActions = 0;
+  static int unknownStatusProbeCount = 0;
+  static int unknownReplayRequestCount = 0;
+  static string unknownIdempotencyKeyHash = "";
+  static string unknownPayloadHash = "";
+  static bool unknownSameTargetReplayObserved = false;
 
   public static void Run(int listenPort, int ownedBridgePort, string adbPath,
       string deviceSerial, string outputPath) {
@@ -1020,7 +1031,8 @@ public static class RimsM11FaultProxy {
           if (active.EndsWith("-next", StringComparison.Ordinal)) mode = "normal";
         }
         if (activeDelay > 0) Thread.Sleep(activeDelay);
-        Log("request mode=" + active + " path=" + path);
+        ObserveUnknownRequest(request, path, active);
+        Log("request mode=" + active + " path=" + RedactPath(path));
         if (active == "packet-loss-next") return;
         if (active == "unreachable") {
           WriteJson(client.GetStream(), 503, "Service Unavailable",
@@ -1073,7 +1085,14 @@ public static class RimsM11FaultProxy {
         case "unreachable-off": mode = "normal"; break;
         case "stale-session": mode = "stale-session-next"; break;
         case "stale-permission": mode = "stale-permission-next"; break;
-        case "unknown-response": mode = "unknown-response-next"; break;
+        case "unknown-response":
+          mode = "unknown-response-next";
+          unknownStatusProbeCount = 0;
+          unknownReplayRequestCount = 0;
+          unknownIdempotencyKeyHash = "";
+          unknownPayloadHash = "";
+          unknownSameTargetReplayObserved = false;
+          break;
         case "duplicate-delivery": mode = "duplicate-delivery-next"; break;
         case "server-conflict": mode = "server-conflict-next"; break;
       }
@@ -1093,9 +1112,25 @@ public static class RimsM11FaultProxy {
       }
       string current;
       int currentDelay;
-      lock (Gate) { current = mode; currentDelay = delayMs; }
+      int probeCount;
+      int replayCount;
+      string keyHash;
+      bool sameTarget;
+      lock (Gate) {
+        current = mode;
+        currentDelay = delayMs;
+        probeCount = unknownStatusProbeCount;
+        replayCount = unknownReplayRequestCount;
+        keyHash = unknownIdempotencyKeyHash;
+        sameTarget = unknownSameTargetReplayObserved;
+      }
       WriteJson(stream, 200, "OK", "{\"ok\":true,\"mode\":\"" +
-        current + "\",\"delayMs\":" + currentDelay + "}");
+        current + "\",\"delayMs\":" + currentDelay +
+        ",\"unknownStatusProbeCount\":" + probeCount +
+        ",\"unknownReplayRequestCount\":" + replayCount +
+        ",\"unknownIdempotencyKeyHash\":\"" + keyHash +
+        "\",\"unknownSameTargetReplayObserved\":" +
+        (sameTarget ? "true" : "false") + "}");
     } catch (Exception error) {
       Log("control-adb-error " + error.GetType().Name + " " + error.Message);
       WriteJson(stream, 500, "ADB Failure", "{\"ok\":false,\"error\":\"adb-command-failed\"}");
@@ -1119,6 +1154,82 @@ public static class RimsM11FaultProxy {
     var ownedBridge = new TcpClient(AddressFamily.InterNetwork);
     ownedBridge.Connect(IPAddress.Loopback, upstreamPort);
     return ownedBridge;
+  }
+
+  static void ObserveUnknownRequest(byte[] request, string path, string active) {
+    if (IsStatusProbe(path)) {
+      var probeHash = Sha256Hex(Uri.UnescapeDataString(
+        path.Substring(path.LastIndexOf('/') + 1).Split('?')[0]));
+      lock (Gate) {
+        if (unknownIdempotencyKeyHash.Length > 0 &&
+            probeHash == unknownIdempotencyKeyHash) {
+          unknownStatusProbeCount++;
+        }
+      }
+      return;
+    }
+    var key = HeaderValue(request, "Idempotency-Key");
+    if (key.Length == 0) return;
+    var keyHash = Sha256Hex(key);
+    var payloadHash = RequestPayloadHash(request);
+    lock (Gate) {
+      if (active == "unknown-response-next") {
+        unknownIdempotencyKeyHash = keyHash;
+        unknownPayloadHash = payloadHash;
+        unknownReplayRequestCount = 1;
+        return;
+      }
+      if (unknownIdempotencyKeyHash.Length > 0 &&
+          keyHash == unknownIdempotencyKeyHash) {
+        unknownReplayRequestCount++;
+        if (payloadHash == unknownPayloadHash) {
+          unknownSameTargetReplayObserved = true;
+        }
+      }
+    }
+  }
+
+  static bool IsStatusProbe(string path) {
+    return path.StartsWith("/api/v1/operations/idempotency/",
+      StringComparison.Ordinal);
+  }
+
+  static string RedactPath(string path) {
+    if (!IsStatusProbe(path)) return path;
+    var key = Uri.UnescapeDataString(
+      path.Substring(path.LastIndexOf('/') + 1).Split('?')[0]);
+    return "/api/v1/operations/idempotency/<sha256:" + Sha256Hex(key) + ">";
+  }
+
+  static string HeaderValue(byte[] request, string name) {
+    var end = FindHeaderEnd(request);
+    if (end < 0) return "";
+    var header = Encoding.ASCII.GetString(request, 0, end);
+    foreach (var line in header.Split(new[] { "\r\n" }, StringSplitOptions.None)) {
+      if (line.StartsWith(name + ":", StringComparison.OrdinalIgnoreCase))
+        return line.Substring(line.IndexOf(':') + 1).Trim();
+    }
+    return "";
+  }
+
+  static string RequestPayloadHash(byte[] request) {
+    var end = FindHeaderEnd(request);
+    if (end < 0 || end + 4 >= request.Length) return Sha256Hex("");
+    using (var sha = SHA256.Create()) {
+      return Hex(sha.ComputeHash(request, end + 4, request.Length - end - 4));
+    }
+  }
+
+  static string Sha256Hex(string value) {
+    using (var sha = SHA256.Create()) {
+      return Hex(sha.ComputeHash(Encoding.UTF8.GetBytes(value)));
+    }
+  }
+
+  static string Hex(byte[] bytes) {
+    var builder = new StringBuilder(bytes.Length * 2);
+    foreach (var value in bytes) builder.Append(value.ToString("x2"));
+    return builder.ToString();
   }
 
   static byte[] ReadRequest(NetworkStream stream) {
@@ -2055,6 +2166,7 @@ function Restore-AndroidBaseline {
             '-Command', 'down', '-Target', 'android',
             '-BackendDir', $BackendDir,
             '-BackendWorkspaceRoot', $BackendWorkspaceRoot,
+            '-BackendPort', $BackendPort,
             '-AndroidDevice', $AndroidDevice
           ))
     } catch {
@@ -2110,6 +2222,7 @@ function Write-AndroidReport {
     routeValidation = $script:routeValidation
     networkEvidence = $script:networkEvidence
     networkEvidenceErrors = @($script:networkEvidenceErrors)
+    m11EvidenceErrors = @($script:m11EvidenceErrors)
     emulator = $script:emulatorIdentity
     fixtureCounts = $script:fixtureCounts
     e2e = $script:e2eData
@@ -2214,6 +2327,7 @@ try {
                 '-Command', 'doctor', '-Target', 'android', '-Output', 'Json',
                 '-BackendDir', $BackendDir,
                 '-BackendWorkspaceRoot', $BackendWorkspaceRoot,
+                '-BackendPort', $BackendPort,
                 '-AndroidDevice', $AndroidDevice
               ))
         }
@@ -2280,6 +2394,7 @@ try {
                 '-Command', 'status', '-Target', 'android', '-Output', 'Json',
                 '-BackendDir', $BackendDir,
                 '-BackendWorkspaceRoot', $BackendWorkspaceRoot,
+                '-BackendPort', $BackendPort,
                 '-AndroidDevice', $AndroidDevice
               ))
         }
@@ -2301,6 +2416,28 @@ try {
 }
 
 if ($Phase -eq 'offline-sync') {
+  if (-not [string]::IsNullOrWhiteSpace($TestM11EvidenceFixturePath)) {
+    try {
+      $script:e2eData = Get-Content `
+        -LiteralPath $TestM11EvidenceFixturePath `
+        -Raw | ConvertFrom-Json -ErrorAction Stop
+    } catch {
+      $script:m11EvidenceErrors = @(
+        "M11 evidence could not be parsed: $($_.Exception.Message)"
+      )
+    }
+  }
+  if ($null -ne $script:e2eData) {
+    $script:m11EvidenceErrors = @(
+      @($script:m11EvidenceErrors) +
+      @(Get-RimsM11DiscreteEvidenceErrors -Candidate $script:e2eData)
+    )
+  }
+  if ($script:m11EvidenceErrors.Count -gt 0 -and
+      $script:firstExitCode -eq 0) {
+    $script:firstExitCode = 2
+    $script:failedStep = 'validate-m11-evidence'
+  }
   try {
     $script:networkEvidence = if (-not [string]::IsNullOrWhiteSpace(
         $TestNetworkEvidenceFixturePath

@@ -20,6 +20,18 @@ $webWrapperText = Get-Content `
   -LiteralPath (Join-Path $scriptDir 'rims_web_e2e.ps1') `
   -Raw
 $androidWrapperText = Get-Content -LiteralPath $wrapper -Raw
+$localRuntimeCalls = [regex]::Matches(
+  $androidWrapperText,
+  'Invoke-LocalRuntime\s+-Arguments'
+).Count
+$localRuntimeBackendPorts = [regex]::Matches(
+  $androidWrapperText,
+  '''-BackendPort'',\s*\$BackendPort'
+).Count
+Assert-Equal `
+  -Actual $localRuntimeBackendPorts `
+  -Expected $localRuntimeCalls `
+  -Message 'Every rims_local invocation must carry the requested BackendPort.'
 $windowsHealthAction = [regex]::Match(
   $androidWrapperText,
   "'windows-healthz'\s*\{\s*\{(?<body>.*?)\r?\n\s*\}\s*\}\s*'emulator-healthz'",
@@ -366,6 +378,7 @@ using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -374,6 +387,57 @@ Add-Type -TypeDefinition $proxySource
 $proxyType = [RimsM11FaultProxy]
 $bindingFlags = [Reflection.BindingFlags]'NonPublic,Static'
 $runAdb = $proxyType.GetMethod('RunAdb', $bindingFlags)
+$observeUnknown = $proxyType.GetMethod('ObserveUnknownRequest', $bindingFlags)
+$redactPath = $proxyType.GetMethod('RedactPath', $bindingFlags)
+$unknownKey = 'M11-self-test-idempotency-key'
+$unknownBody = '{"remark":"M9-E2E:M11:self-test:unknown"}'
+$unknownRequestText = "POST /api/v1/documents HTTP/1.1`r`nHost: localhost`r`nIdempotency-Key: $unknownKey`r`nContent-Length: $([Text.Encoding]::UTF8.GetByteCount($unknownBody))`r`n`r`n$unknownBody"
+$unknownRequest = [Text.Encoding]::UTF8.GetBytes($unknownRequestText)
+$statusPath = "/api/v1/operations/idempotency/$([Uri]::EscapeDataString($unknownKey))"
+$statusRequest = [Text.Encoding]::ASCII.GetBytes(
+  "GET $statusPath HTTP/1.1`r`nHost: localhost`r`n`r`n"
+)
+$unknownObserveArguments = [object[]]::new(3)
+$unknownObserveArguments[0] = $unknownRequest
+$unknownObserveArguments[1] = '/api/v1/documents'
+$unknownObserveArguments[2] = 'unknown-response-next'
+[void]$observeUnknown.Invoke($null, $unknownObserveArguments)
+$statusObserveArguments = [object[]]::new(3)
+$statusObserveArguments[0] = $statusRequest
+$statusObserveArguments[1] = $statusPath
+$statusObserveArguments[2] = 'normal'
+[void]$observeUnknown.Invoke($null, $statusObserveArguments)
+$unknownObserveArguments[2] = 'normal'
+[void]$observeUnknown.Invoke($null, $unknownObserveArguments)
+$sha = [Security.Cryptography.SHA256]::Create()
+try {
+  $expectedUnknownHash = -join ($sha.ComputeHash(
+      [Text.Encoding]::UTF8.GetBytes($unknownKey)
+    ) | ForEach-Object { $_.ToString('x2') })
+} finally {
+  $sha.Dispose()
+}
+Assert-Equal `
+  -Actual $proxyType.GetField('unknownStatusProbeCount', $bindingFlags).GetValue($null) `
+  -Expected 1 `
+  -Message 'Fault proxy status probe observation.'
+Assert-Equal `
+  -Actual $proxyType.GetField('unknownReplayRequestCount', $bindingFlags).GetValue($null) `
+  -Expected 2 `
+  -Message 'Fault proxy same-key replay observation.'
+Assert-Equal `
+  -Actual $proxyType.GetField('unknownSameTargetReplayObserved', $bindingFlags).GetValue($null) `
+  -Expected $true `
+  -Message 'Fault proxy same-target replay observation.'
+Assert-Equal `
+  -Actual $proxyType.GetField('unknownIdempotencyKeyHash', $bindingFlags).GetValue($null) `
+  -Expected $expectedUnknownHash `
+  -Message 'Fault proxy idempotency hash.'
+$redactedStatusPath = [string]$redactPath.Invoke($null, @($statusPath))
+if ($redactedStatusPath.Contains($unknownKey) -or
+    -not $redactedStatusPath.Contains($expectedUnknownHash)) {
+  throw 'Fault proxy status path redaction leaked or omitted idempotency evidence.'
+}
 $proxyType.GetField('serial', $bindingFlags).SetValue($null, 'emulator-self-test')
 $proxyLog = Join-Path ([IO.Path]::GetTempPath()) ('rims-m11-adb-' + [guid]::NewGuid().ToString('N') + '.log')
 $proxyType.GetField('logPath', $bindingFlags).SetValue($null, $proxyLog)
@@ -750,6 +814,67 @@ $fixtureSource
   }
   if (-not (Test-LoopbackPortClosed -Port $networkReport.faultProxyPort)) {
     throw 'Owned fault proxy listener remained after cleanup.'
+  }
+
+  $childNetworkPath = Join-Path $tempRoot 'child-valid-network.json'
+  $networkReport.networkEvidence | ConvertTo-Json -Depth 12 | Set-Content `
+    -LiteralPath $childNetworkPath `
+    -Encoding UTF8
+  $validChildEvidence = [ordered]@{
+    stockBefore = 100
+    stockAfter = 97
+    serverDocumentCount = 1
+    duplicateDocumentCount = 0
+    duplicateInventoryTransactionCount = 0
+    attachmentCount = 1
+    databaseBytes = 1048576
+    unknownStatusProbeCount = 1
+    unknownReplayRequestCount = 2
+    expectedStockDecrease = 3
+    observedStockDecrease = 3
+  }
+  foreach ($childCase in @(
+      @{ Name = 'stock-double'; Property = 'stockBefore'; Value = [double]100.0; RawJson = '100.0' },
+      @{ Name = 'attachment-decimal'; Property = 'attachmentCount'; Value = [decimal]1.5 },
+      @{ Name = 'database-fraction'; Property = 'databaseBytes'; Value = [double]1048576.5 }
+    )) {
+    $invalidChild = $validChildEvidence | ConvertTo-Json | ConvertFrom-Json
+    $invalidChild.PSObject.Properties.Remove($childCase.Property)
+    $invalidChild | Add-Member `
+      -MemberType NoteProperty `
+      -Name $childCase.Property `
+      -Value $childCase.Value
+    $invalidChildPath = Join-Path $tempRoot "child-$($childCase.Name).json"
+    $invalidChildJson = $invalidChild | ConvertTo-Json
+    if ($childCase.ContainsKey('RawJson')) {
+      $invalidChildJson = [regex]::Replace(
+        $invalidChildJson,
+        "(`"$([regex]::Escape($childCase.Property))`"\s*:\s*)[^,}`r`n]+",
+        { param($match) $match.Groups[1].Value + $childCase.RawJson }
+      )
+    }
+    $invalidChildJson | Set-Content `
+      -LiteralPath $invalidChildPath `
+      -Encoding UTF8
+    $invalidChildReportPath = Join-Path $tempRoot "child-$($childCase.Name)-report.json"
+    $invalidChildRecordPath = Join-Path $tempRoot "child-$($childCase.Name)-commands.json"
+    & $wrapper `
+      -AndroidDevice 'Medium_Phone_API_36.1' `
+      -Phase 'offline-sync' `
+      -BackendPort $occupiedBackendPort `
+      -FaultProxyPort $networkFaultProxyPort `
+      -TestMode `
+      -TestNetworkEvidenceFixturePath $childNetworkPath `
+      -TestM11EvidenceFixturePath $invalidChildPath `
+      -ReportPath $invalidChildReportPath `
+      -ArtifactRoot (Join-Path $tempRoot "child-$($childCase.Name)-artifacts") `
+      -M11CommandRecordPath $invalidChildRecordPath
+    Assert-Equal -Actual $LASTEXITCODE -Expected 2 -Message "Android child integer gate '$($childCase.Name)'."
+    $invalidChildReport = Get-Content -LiteralPath $invalidChildReportPath -Raw |
+      ConvertFrom-Json
+    Assert-Equal -Actual $invalidChildReport.ok -Expected $false -Message "Android child integer report '$($childCase.Name)'."
+    Assert-Equal -Actual $invalidChildReport.failedStep -Expected 'validate-m11-evidence' -Message "Android child integer failed step '$($childCase.Name)'."
+    Assert-Equal -Actual $invalidChildReport.baselineRestore.ok -Expected $true -Message "Android child integer cleanup '$($childCase.Name)'."
   }
 
   $networkMutationCases = @(

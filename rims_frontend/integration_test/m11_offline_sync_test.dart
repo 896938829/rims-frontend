@@ -37,6 +37,9 @@ void main() {
     expect(RimsE2eConfig.m11FaultControlUrl, endsWith('/__rims_m11'));
 
     await screenshotOnFailure(binding, 'm11-offline-sync-failure', () async {
+      const processRecoveryBoundary =
+          'integration-entry-before-native-drift-open';
+      final processRecoveryWatch = Stopwatch()..start();
       final checkpointFile = await _checkpointFile();
       final checkpoint = await _readCheckpoint(checkpointFile);
       final nextStage = checkpoint?['nextStage']?.toString() ?? 'seed';
@@ -55,12 +58,19 @@ void main() {
           (checkpoint?['cacheReadLatencyMs'] as num?)?.toInt() ?? 0;
       var draftSaveLatencyMs =
           (checkpoint?['draftSaveLatencyMs'] as num?)?.toInt() ?? 0;
+      var draftAutosaveEndToEndMs =
+          (checkpoint?['draftAutosaveEndToEndMs'] as num?)?.toInt() ?? 0;
+      const draftAutosaveDebounceMs = 300;
       var processRecoveryLatencyMs = 0;
       var outboxEnqueueLatencyMs = 0;
       var syncTotalMs = 0;
       var attachmentHash = '';
       var attachmentCount = 0;
       var unknownResponseProbed = false;
+      var unknownStatusProbeCount = 0;
+      var unknownReplayRequestCount = 0;
+      var unknownIdempotencyKeyHash = '';
+      var unknownSameTargetReplayObserved = false;
       var duplicateSingleEffect = false;
       var attachmentDependencyCompleted = false;
       var staleSessionBlocked = false;
@@ -157,21 +167,31 @@ void main() {
             condition: () => documents.draftLines.length == 1,
           );
           scannerCallbackCompleted = true;
+          final autosaveWatch = Stopwatch()..start();
           await enterText(
             tester,
             const Key('document-remark-field'),
             remarks.queued,
           );
-          await tester.pump(const Duration(milliseconds: 300));
-          final autosaveWatch = Stopwatch()..start();
-          await _waitForPersistedDraft(
+          final autosavePumpedMs = await _waitForPersistedDraft(
             tester,
             documents,
             accountId: accountId,
             remark: remarks.queued,
           );
           autosaveWatch.stop();
-          draftSaveLatencyMs = autosaveWatch.elapsedMilliseconds;
+          draftAutosaveEndToEndMs = _max(
+            autosaveWatch.elapsedMilliseconds,
+            autosavePumpedMs,
+          );
+          expect(
+            draftAutosaveEndToEndMs,
+            greaterThanOrEqualTo(draftAutosaveDebounceMs),
+          );
+          draftSaveLatencyMs = _max(
+            0,
+            draftAutosaveEndToEndMs - draftAutosaveDebounceMs,
+          );
           expect(draftSaveLatencyMs, lessThanOrEqualTo(250));
           autosaveCompleted = true;
           final draftId = documents.activeDraftId!;
@@ -182,6 +202,7 @@ void main() {
             'draftId': draftId,
             'recoveredProductId': recoveredProductId,
             'draftSaveLatencyMs': draftSaveLatencyMs,
+            'draftAutosaveEndToEndMs': draftAutosaveEndToEndMs,
             'scannerCallbackCompleted': scannerCallbackCompleted,
             'autosaveCompleted': autosaveCompleted,
           });
@@ -206,7 +227,6 @@ void main() {
         );
         await tapAndSettle(tester, const Key('profile-draft-manager-entry'));
         await expectText(tester, '草稿管理');
-        final recoveryWatch = Stopwatch()..start();
         await tapFinderAndSettle(
           tester,
           find.byTooltip('打开').first,
@@ -218,8 +238,8 @@ void main() {
           Key('document-draft-line-$recoveredProductId'),
           timeout: const Duration(seconds: 1),
         );
-        recoveryWatch.stop();
-        processRecoveryLatencyMs = recoveryWatch.elapsedMilliseconds;
+        processRecoveryWatch.stop();
+        processRecoveryLatencyMs = processRecoveryWatch.elapsedMilliseconds;
         expect(processRecoveryLatencyMs, lessThanOrEqualTo(1000));
         expect(documents.activeDraftId, draftId);
         expect(documents.remark, remarks.queued);
@@ -267,7 +287,12 @@ void main() {
           beforeUnknown,
         )).operation;
         expect(unknownCreate.requiresStatusProbe, isTrue);
+        expect(
+          (unknownCreate.payload['request'] as Map)['remark'],
+          remarks.unknown,
+        );
         _recordOperation(unknownCreate, operationIds, idempotencyHashes);
+        final unknownStatusBefore = await _fault('status');
         await _fault('reset');
         final unknownSyncWatch = Stopwatch()..start();
         await _syncOperation(tester, unknownCreate.operationId);
@@ -288,7 +313,27 @@ void main() {
           );
         }
         expect(current.state, OutboxState.succeeded);
-        unknownResponseProbed = unknownCreate.requiresStatusProbe;
+        final unknownStatusAfter = await _fault('status');
+        unknownStatusProbeCount =
+            (unknownStatusAfter['unknownStatusProbeCount'] as num).toInt() -
+            (unknownStatusBefore['unknownStatusProbeCount'] as num).toInt();
+        unknownReplayRequestCount =
+            (unknownStatusAfter['unknownReplayRequestCount'] as num).toInt();
+        unknownIdempotencyKeyHash =
+            unknownStatusAfter['unknownIdempotencyKeyHash'].toString();
+        unknownSameTargetReplayObserved =
+            unknownStatusAfter['unknownSameTargetReplayObserved'] == true;
+        final expectedUnknownKeyHash = sha256
+            .convert(utf8.encode(unknownCreate.idempotencyKey))
+            .toString();
+        unknownResponseProbed =
+            unknownStatusProbeCount > 0 &&
+            unknownReplayRequestCount >= 2 &&
+            unknownIdempotencyKeyHash == expectedUnknownKeyHash &&
+            unknownSameTargetReplayObserved &&
+            current.operationId == unknownCreate.operationId &&
+            current.idempotencyKey == unknownCreate.idempotencyKey;
+        expect(unknownResponseProbed, isTrue);
 
         await _fault('unreachable');
         await _returnToShell(tester);
@@ -348,8 +393,7 @@ void main() {
         final attachmentDocuments = documents.recentDocuments
             .where((document) => document.remark == remarks.attachment)
             .toList();
-        duplicateSingleEffect = attachmentDocuments.length == 1;
-        expect(duplicateSingleEffect, isTrue);
+        expect(attachmentDocuments, hasLength(1));
         final created = attachmentDocuments.single;
         await _openDocumentDetail(tester, created.id);
         final attachments = await _viewModel<AttachmentsViewModel>(tester);
@@ -613,33 +657,62 @@ void main() {
         documents = await _documentsViewModel(tester);
         await documents.load();
         stockAfter = await _stockQuantity(documents);
+        final successfulRemarks = <String>[
+          remarks.queued,
+          remarks.unknown,
+          remarks.attachment,
+        ];
+        final successfulDocuments = successfulRemarks.map((remark) {
+          return documents.recentDocuments.singleWhere(
+            (document) => document.remark == remark,
+          );
+        }).toList();
+        final unknownDocument = successfulDocuments.singleWhere(
+          (document) => document.remark == remarks.unknown,
+        );
+        final transactionCounts = <int, int>{
+          for (final document in successfulDocuments)
+            document.id: documents.transactions
+                .where((transaction) => transaction.docId == document.id)
+                .length,
+        };
         final serverDocumentCount = documents.recentDocuments
             .where((document) => document.remark == remarks.unknown)
             .length;
-        final transactionCount = documents.transactions
-            .where((transaction) => transaction.docId == created.id)
-            .length;
+        final unknownTransactionCount = transactionCounts[unknownDocument.id]!;
+        const expectedStockDecrease = 3;
+        final observedStockDecrease = stockBefore - stockAfter;
+        duplicateSingleEffect =
+            serverDocumentCount == 1 &&
+            unknownTransactionCount == 1 &&
+            unknownDocument.remark ==
+                (unknownCreate.payload['request'] as Map)['remark'];
+        expect(duplicateSingleEffect, isTrue);
+        expect(observedStockDecrease, expectedStockDecrease);
         serverLifecycleVerified =
             documents.recentDocuments.any(
               (document) =>
                   document.id == created.id && document.status == '已完成',
             ) &&
-            transactionCount == 1;
+            transactionCounts[created.id] == 1;
         expect(serverLifecycleVerified, isTrue);
-        final duplicateDocumentCount =
-            <String>[
-              remarks.queued,
-              remarks.unknown,
-              remarks.attachment,
-            ].fold<int>(0, (duplicates, remark) {
-              final count = documents.recentDocuments
-                  .where((document) => document.remark == remark)
-                  .length;
+        final duplicateDocumentCount = successfulRemarks.fold<int>(0, (
+          duplicates,
+          remark,
+        ) {
+          final count = documents.recentDocuments
+              .where((document) => document.remark == remark)
+              .length;
+          return duplicates + (count > 1 ? count - 1 : 0);
+        });
+        final duplicateInventoryTransactionCount = transactionCounts.values
+            .fold<int>(0, (duplicates, count) {
               return duplicates + (count > 1 ? count - 1 : 0);
             });
         expect(serverDocumentCount, 1);
         expect(duplicateDocumentCount, 0);
-        expect(transactionCount, 1);
+        expect(transactionCounts.values, everyElement(1));
+        expect(duplicateInventoryTransactionCount, 0);
         expect(syncTotalMs, lessThanOrEqualTo(10000));
 
         final databaseBytes = await _databaseBytes();
@@ -665,17 +738,27 @@ void main() {
         final evidence = <String, Object?>{
           'cacheReadLatencyMs': cacheReadLatencyMs,
           'draftSaveLatencyMs': draftSaveLatencyMs,
+          'draftAutosaveDebounceMs': draftAutosaveDebounceMs,
+          'draftAutosaveEndToEndMs': draftAutosaveEndToEndMs,
           'processRecoveryLatencyMs': processRecoveryLatencyMs,
+          'processRecoveryBoundary': processRecoveryBoundary,
           'outboxEnqueueLatencyMs': outboxEnqueueLatencyMs,
           'syncTotalMs': syncTotalMs,
           'intentionalFaultDelayMs': 3500,
           'operationIds': operationIds,
           'idempotencyKeyHashes': idempotencyHashes,
+          'unknownStatusProbeCount': unknownStatusProbeCount,
+          'unknownReplayRequestCount': unknownReplayRequestCount,
+          'unknownIdempotencyKeyHash': unknownIdempotencyKeyHash,
+          'unknownSameTargetReplayObserved': unknownSameTargetReplayObserved,
           'stockBefore': stockBefore,
           'stockAfter': stockAfter,
+          'expectedStockDecrease': expectedStockDecrease,
+          'observedStockDecrease': observedStockDecrease,
           'serverDocumentCount': serverDocumentCount,
           'duplicateDocumentCount': duplicateDocumentCount,
-          'duplicateInventoryTransactionCount': transactionCount - 1,
+          'duplicateInventoryTransactionCount':
+              duplicateInventoryTransactionCount,
           'attachmentHash': attachmentHash,
           'stagedAttachmentHash': stagedAttachmentHash,
           'attachmentCount': attachmentCount,
@@ -765,17 +848,21 @@ void _emitStage(String stage) {
   );
 }
 
-Future<void> _waitForPersistedDraft(
+Future<int> _waitForPersistedDraft(
   WidgetTester tester,
   DocumentsViewModel documents, {
   required String accountId,
   required String remark,
 }) async {
   final deadline = DateTime.now().add(const Duration(seconds: 2));
+  var pumpedMs = 0;
   do {
     final drafts = await documents.draftRepository!.list(accountId);
-    if (drafts.any((draft) => draft.payload['remark'] == remark)) return;
+    if (drafts.any((draft) => draft.payload['remark'] == remark)) {
+      return pumpedMs;
+    }
     await tester.pump(const Duration(milliseconds: 10));
+    pumpedMs += 10;
   } while (DateTime.now().isBefore(deadline));
   throw TestFailure('Debounced autosave did not persist the M11 draft.');
 }
@@ -792,7 +879,7 @@ final class _JourneyRemarks {
   String get staleContext => 'M9-E2E:M11:$runId:stale-context';
 }
 
-Future<void> _fault(
+Future<Map<String, dynamic>> _fault(
   String action, [
   Map<String, String> parameters = const {},
 ]) async {
@@ -810,6 +897,7 @@ Future<void> _fault(
     }
     final result = jsonDecode(body) as Map<String, dynamic>;
     expect(result['ok'], isTrue, reason: 'fault control $action');
+    return result;
   } finally {
     client.close(force: true);
   }

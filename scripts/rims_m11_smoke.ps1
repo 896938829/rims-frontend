@@ -36,6 +36,8 @@ param(
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
+. (Join-Path $PSScriptRoot 'lib\rims_m11_evidence.ps1')
+
 $scenarioNames = @(
   'airplane-mode',
   'latency',
@@ -244,9 +246,7 @@ function Get-M11EvidenceErrors($Candidate) {
   $numericFields = @(
     'cacheReadLatencyMs', 'draftSaveLatencyMs',
     'processRecoveryLatencyMs', 'outboxEnqueueLatencyMs', 'syncTotalMs',
-    'intentionalFaultDelayMs', 'stockBefore', 'stockAfter',
-    'serverDocumentCount', 'duplicateDocumentCount',
-    'duplicateInventoryTransactionCount', 'attachmentCount', 'databaseBytes'
+    'intentionalFaultDelayMs'
   )
   foreach ($field in $numericFields) {
     $property = $Candidate.PSObject.Properties[$field]
@@ -254,6 +254,43 @@ function Get-M11EvidenceErrors($Candidate) {
         -not (Test-M11FiniteNonNegativeNumber $property.Value)) {
       [void]$errors.Add("Evidence '$field' must be a finite non-negative number.")
     }
+  }
+  foreach ($error in @(Get-RimsM11DiscreteEvidenceErrors -Candidate $Candidate)) {
+    [void]$errors.Add($error)
+  }
+  foreach ($field in @('draftAutosaveDebounceMs', 'draftAutosaveEndToEndMs')) {
+    $property = $Candidate.PSObject.Properties[$field]
+    if ($null -eq $property -or
+        -not (Test-RimsM11StrictInteger $property.Value) -or
+        $property.Value -lt 0) {
+      [void]$errors.Add("Evidence '$field' must be a non-negative JSON integer.")
+    }
+  }
+  if ($null -ne $Candidate.PSObject.Properties['draftAutosaveDebounceMs'] -and
+      $null -ne $Candidate.PSObject.Properties['draftAutosaveEndToEndMs'] -and
+      (Test-RimsM11StrictInteger $Candidate.draftAutosaveDebounceMs) -and
+      (Test-RimsM11StrictInteger $Candidate.draftAutosaveEndToEndMs) -and
+      ($Candidate.draftAutosaveDebounceMs -ne 300 -or
+       $Candidate.draftAutosaveEndToEndMs -lt
+       $Candidate.draftAutosaveDebounceMs)) {
+    [void]$errors.Add('Autosave timing must include the full 300 ms debounce window.')
+  }
+  $recoveryBoundary = $Candidate.PSObject.Properties['processRecoveryBoundary']
+  if ($null -eq $recoveryBoundary -or
+      $recoveryBoundary.Value -isnot [string] -or
+      $recoveryBoundary.Value -cne
+      'integration-entry-before-native-drift-open') {
+    [void]$errors.Add('Process recovery boundary must begin before native Drift reopen.')
+  }
+  $unknownHash = $Candidate.PSObject.Properties['unknownIdempotencyKeyHash']
+  if ($null -eq $unknownHash -or $unknownHash.Value -isnot [string] -or
+      $unknownHash.Value -notmatch '^[0-9a-fA-F]{64}$') {
+    [void]$errors.Add('Unknown-response idempotency evidence must be a SHA-256 hash.')
+  }
+  $sameTarget = $Candidate.PSObject.Properties['unknownSameTargetReplayObserved']
+  if ($null -eq $sameTarget -or $sameTarget.Value -isnot [bool] -or
+      -not $sameTarget.Value) {
+    [void]$errors.Add('Unknown-response replay must prove the same target payload.')
   }
   foreach ($field in @('operationIds', 'idempotencyKeyHashes')) {
     $property = $Candidate.PSObject.Properties[$field]
@@ -288,6 +325,12 @@ function Get-M11EvidenceErrors($Candidate) {
       @($Candidate.operationIds).Count -ne @($Candidate.idempotencyKeyHashes).Count) {
     [void]$errors.Add('Operation IDs and idempotency hashes must have equal lengths.')
   }
+  if ($null -ne $unknownHash -and $unknownHash.Value -is [string] -and
+      $null -ne $Candidate.PSObject.Properties['idempotencyKeyHashes'] -and
+      (Test-M11JsonArray $Candidate.idempotencyKeyHashes) -and
+      @($Candidate.idempotencyKeyHashes) -notcontains $unknownHash.Value) {
+    [void]$errors.Add('Unknown-response hash is not tied to a reported operation.')
+  }
   $attachmentHash = $Candidate.PSObject.Properties['attachmentHash']
   $stagedAttachmentHash = $Candidate.PSObject.Properties['stagedAttachmentHash']
   if ($null -eq $attachmentHash -or $attachmentHash.Value -isnot [string] -or
@@ -320,9 +363,8 @@ function Get-M11EvidenceErrors($Candidate) {
       if ($null -eq $name -or $name.Value -isnot [string] -or
           $name.Value -cne $expectedStages[$index] -or
           $null -eq $processId -or
-          -not (Test-M11FiniteNonNegativeNumber $processId.Value) -or
-          [double]$processId.Value -le 0 -or
-          [double]$processId.Value % 1 -ne 0 -or
+          -not (Test-RimsM11StrictInteger $processId.Value) -or
+          $processId.Value -le 0 -or
           $null -eq $startedAt -or $startedAt.Value -isnot [string] -or
           -not [DateTimeOffset]::TryParse($startedAt.Value, [ref]$parsedTime)) {
         [void]$errors.Add("Process stage '$($expectedStages[$index])' is malformed.")
@@ -400,6 +442,24 @@ function Get-M11EvidenceErrors($Candidate) {
       (Test-M11FiniteNonNegativeNumber $Candidate.databaseBytes) -and
       $Candidate.databaseBytes -le 0) {
     [void]$errors.Add('Offline database size must be positive.')
+  }
+  if ($null -ne $Candidate.PSObject.Properties['unknownStatusProbeCount'] -and
+      (Test-RimsM11StrictInteger $Candidate.unknownStatusProbeCount) -and
+      $Candidate.unknownStatusProbeCount -lt 1) {
+    [void]$errors.Add('No real unknown-response status probe was observed.')
+  }
+  if ($null -ne $Candidate.PSObject.Properties['unknownReplayRequestCount'] -and
+      (Test-RimsM11StrictInteger $Candidate.unknownReplayRequestCount) -and
+      $Candidate.unknownReplayRequestCount -lt 2) {
+    [void]$errors.Add('Same-key request replay was not observed.')
+  }
+  if ($null -ne $Candidate.PSObject.Properties['expectedStockDecrease'] -and
+      $null -ne $Candidate.PSObject.Properties['observedStockDecrease'] -and
+      (Test-RimsM11StrictInteger $Candidate.expectedStockDecrease) -and
+      (Test-RimsM11StrictInteger $Candidate.observedStockDecrease) -and
+      ($Candidate.expectedStockDecrease -le 0 -or
+       $Candidate.expectedStockDecrease -ne $Candidate.observedStockDecrease)) {
+    [void]$errors.Add('Observed stock delta does not match the expected fixture effect.')
   }
   return @($errors)
 }
