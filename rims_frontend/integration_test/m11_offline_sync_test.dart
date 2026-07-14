@@ -876,7 +876,9 @@ Future<int> _waitForPersistedDraft(
   required String remark,
 }) async {
   final deadline = DateTime.now().add(const Duration(seconds: 2));
-  var pumpedMs = 0;
+  const debounce = Duration(milliseconds: 300);
+  await tester.pump(debounce);
+  var pumpedMs = debounce.inMilliseconds;
   do {
     final drafts = await documents.draftRepository!.list(accountId);
     if (drafts.any((draft) => draft.payload['remark'] == remark)) {
