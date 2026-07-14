@@ -1931,7 +1931,7 @@ function Test-EmulatorHealthz {
       -Arguments @('-s', $androidSerial, 'shell', $command) `
       -TimeoutSeconds 15
     $response = "$($execution.StandardOutput)`n$($execution.StandardError)"
-    if ($execution.ExitCode -eq 0 -and $response -match '200|ok|healthy') {
+    if ($response -match '(?i)(?:HTTP/\d(?:\.\d)?\s+200\b|"status"\s*:\s*"ok")') {
       return
     }
   }

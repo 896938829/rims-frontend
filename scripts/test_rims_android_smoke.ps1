@@ -64,6 +64,13 @@ if (-not $windowsHealthAction.Success -or
     )) {
   throw 'Windows health action must probe the selected owned bridge port.'
 }
+if ($androidWrapperText.Contains(
+    '$execution.ExitCode -eq 0 -and $response -match'
+  ) -or -not $androidWrapperText.Contains(
+    "`$response -match '(?i)(?:HTTP/\d(?:\.\d)?\s+200\b|`"status`"\s*:\s*`"ok`")'"
+  )) {
+  throw 'Emulator health must trust a strict successful HTTP response independently of nc exit status.'
+}
 
 function Test-StrictInteger {
   param($Value)
