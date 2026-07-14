@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rims_frontend/features/offline/domain/entities/cache_snapshot.dart';
 import 'package:rims_frontend/features/offline/domain/entities/network_reachability.dart';
@@ -71,5 +73,30 @@ void main() {
   test('offline boundaries expose storage and verified network services', () {
     expect(OfflineStore, isNotNull);
     expect(NetworkStatusService, isNotNull);
+  });
+
+  test('Android keeps offline records out of system backup and restore', () {
+    final manifest = File(
+      'android/app/src/main/AndroidManifest.xml',
+    ).readAsStringSync();
+
+    expect(manifest, contains('android:allowBackup="false"'));
+    expect(manifest, contains('android:fullBackupContent="false"'));
+    expect(
+      manifest,
+      contains('android:dataExtractionRules="@xml/data_extraction_rules"'),
+    );
+
+    final extractionRules = File(
+      'android/app/src/main/res/xml/data_extraction_rules.xml',
+    ).readAsStringSync();
+    expect(extractionRules, contains('<cloud-backup>'));
+    expect(extractionRules, contains('<device-transfer>'));
+    expect(
+      RegExp(r'<exclude domain="root" path="\."\s*/>').allMatches(
+        extractionRules,
+      ),
+      hasLength(2),
+    );
   });
 }
