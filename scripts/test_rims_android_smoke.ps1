@@ -606,8 +606,15 @@ Assert-Equal `
     $null,
     [object[]]@('server-conflict-next', $backgroundRequest)
   ) `
+  -Expected $false `
+  -Message 'Server conflict skips background reads without an idempotency key.'
+Assert-Equal `
+  -Actual $shouldConsumeNext.Invoke(
+    $null,
+    [object[]]@('server-conflict-next', $idempotentMutation)
+  ) `
   -Expected $true `
-  -Message 'Other one-shot faults preserve their existing request targeting.'
+  -Message 'Server conflict targets the next idempotent mutation.'
 
 function Reset-UnknownObservation {
   foreach ($fieldName in @(
