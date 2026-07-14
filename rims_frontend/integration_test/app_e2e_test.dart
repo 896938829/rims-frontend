@@ -2,19 +2,19 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:integration_test/integration_test.dart';
 import 'package:rims_frontend/features/documents/presentation/view_models/documents_view_model.dart';
 import 'package:rims_frontend/features/inventory/presentation/widgets/inventory_product_tile.dart';
 import 'package:rims_frontend/features/offline/data/repositories/memory_offline_store.dart';
 import 'package:rims_frontend/main.dart';
 
 import 'support/rims_e2e_driver.dart';
+import 'support/rims_e2e_binding.dart';
 import 'support/rims_e2e_config.dart';
 
-late final IntegrationTestWidgetsFlutterBinding binding;
+late final RimsE2eBinding binding;
 
 void main() {
-  binding = IntegrationTestWidgetsFlutterBinding.ensureInitialized();
+  binding = RimsE2eBinding();
   testWidgets('local acceptance journey', (tester) async {
     await screenshotOnFailure(
       binding,
@@ -148,10 +148,6 @@ void main() {
         debugPrint('RIMS_E2E_RESULT ${jsonEncode(reportData)}');
         await tester.pump(const Duration(seconds: 1));
         await settleBounded(tester);
-        await tester.pumpWidget(const SizedBox.shrink());
-        await tester.pump();
-        FocusManager.instance.applyFocusChangesIfNeeded();
-        await tester.pump();
       },
     );
   });
