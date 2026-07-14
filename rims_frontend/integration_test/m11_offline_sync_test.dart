@@ -1205,14 +1205,12 @@ Future<void> _tapDocumentDetailAction(
   do {
     if (action.evaluate().isNotEmpty) {
       try {
-        await scrollUntilVisible(
-          tester,
-          actionKey,
-          timeout: const Duration(seconds: 1),
-        );
-      } on TestFailure {
-        if (action.evaluate().isEmpty) continue;
-        rethrow;
+        await tester.ensureVisible(action.first);
+        await tester.pump(const Duration(milliseconds: 100));
+      } on StateError {
+        continue;
+      } on FlutterError {
+        continue;
       }
       if (action.hitTestable().evaluate().isEmpty) continue;
       await tester.tap(action.hitTestable().first);
