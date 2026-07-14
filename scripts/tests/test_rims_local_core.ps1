@@ -471,12 +471,18 @@ try {
       $_.name -eq 'workspaceEnv'
     }
   )[0]
+  $environmentBackendPathId = (Get-RimsLocalSafePathMetadata `
+      -Path $validEnvironmentBackendDir `
+      -Category (Get-RimsLocalAbsolutePathCategory -Value $validEnvironmentBackendDir)).pathId
+  $environmentRuntimePathId = (Get-RimsLocalSafePathMetadata `
+      -Path $validEnvironmentWorkspaceRoot `
+      -Category (Get-RimsLocalAbsolutePathCategory -Value $validEnvironmentWorkspaceRoot)).pathId
   if (-not $environmentBackendComponent.detail.Contains(
-      $validEnvironmentBackendDir)) {
+      $environmentBackendPathId)) {
     throw 'Doctor did not select RIMS_BACKEND_DIR.'
   }
   if (-not $environmentRuntimeComponent.detail.Contains(
-      $validEnvironmentWorkspaceRoot)) {
+      $environmentRuntimePathId)) {
     throw 'Doctor did not select RIMS_BACKEND_WORKSPACE_ROOT.'
   }
 
@@ -520,11 +526,11 @@ try {
     }
   )[0]
   if (-not $explicitBackendComponent.detail.Contains(
-      $validEnvironmentBackendDir)) {
+      $environmentBackendPathId)) {
     throw 'Doctor did not prefer explicit BackendDir over its environment value.'
   }
   if (-not $explicitRuntimeComponent.detail.Contains(
-      $validEnvironmentWorkspaceRoot)) {
+      $environmentRuntimePathId)) {
     throw 'Doctor did not prefer explicit runtime root over its environment value.'
   }
 } finally {

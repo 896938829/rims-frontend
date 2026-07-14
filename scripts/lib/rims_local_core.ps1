@@ -39,13 +39,150 @@ function Complete-RimsLocalResult {
   return $Result
 }
 
+function Get-RimsLocalSafePathMetadata {
+  param(
+    [Parameter(Mandatory = $true)]
+    [string]$Path,
+    [Parameter(Mandatory = $true)]
+    [ValidateSet('windowsAbsolutePath', 'wslAbsolutePath')]
+    [string]$Category
+  )
+
+  $sha256 = [Security.Cryptography.SHA256]::Create()
+  try {
+    $hashBytes = $sha256.ComputeHash([Text.Encoding]::UTF8.GetBytes($Path))
+    $pathId = ([BitConverter]::ToString($hashBytes) -replace '-', '').ToLowerInvariant()
+  } finally {
+    $sha256.Dispose()
+  }
+  try {
+    $exists = Test-Path -LiteralPath $Path
+  } catch {
+    $exists = $false
+  }
+  return [pscustomobject][ordered]@{
+    category = $Category
+    exists = [bool]$exists
+    pathId = "sha256:$pathId"
+  }
+}
+
+function Get-RimsLocalAbsolutePathCategory {
+  param(
+    [Parameter(Mandatory = $true)]
+    [AllowEmptyString()]
+    [string]$Value
+  )
+
+  if ($Value -match '\A(?:[A-Za-z]:[\\/]|\\\\)[\s\S]+\z') {
+    return 'windowsAbsolutePath'
+  }
+  if ($Value -match '\A/mnt/[A-Za-z](?:/|\z)[\s\S]*\z') {
+    return 'wslAbsolutePath'
+  }
+  return $null
+}
+
+function ConvertTo-RimsLocalSafeJsonString {
+  param(
+    [Parameter(Mandatory = $true)]
+    [AllowEmptyString()]
+    [string]$Value
+  )
+
+  $safe = $Value
+  foreach ($pathPattern in @(
+      '(?i)(?<![A-Za-z0-9])(?:[A-Z]:[\\/]|\\\\).*?(?=(?: \(|;|,\s|\. (?=\S)|\)|\r|\n|$))',
+      '(?i)(?<![A-Za-z0-9])/mnt/[A-Z](?:/.*?)?(?=(?: \(|;|,\s|\. (?=\S)|\)|\r|\n|$))'
+    )) {
+    $safe = [regex]::Replace($safe, $pathPattern, {
+        param($match)
+        $category = Get-RimsLocalAbsolutePathCategory -Value $match.Value
+        $metadata = Get-RimsLocalSafePathMetadata `
+          -Path $match.Value `
+          -Category $category
+        return '[path category={0} exists={1} pathId={2}]' -f `
+          $metadata.category, `
+          $metadata.exists.ToString().ToLowerInvariant(), `
+          $metadata.pathId
+      })
+  }
+  return $safe
+}
+
+function ConvertTo-RimsLocalSafeJsonValue {
+  param(
+    [AllowNull()]
+    [object]$Value,
+    [int]$Depth = 0
+  )
+
+  if ($null -eq $Value) { return $null }
+  if ($Depth -ge 20) { return '<max-depth>' }
+  if ($Value -is [string]) {
+    $category = Get-RimsLocalAbsolutePathCategory -Value $Value
+    if ($null -ne $category) {
+      return Get-RimsLocalSafePathMetadata -Path $Value -Category $category
+    }
+    return ConvertTo-RimsLocalSafeJsonString -Value $Value
+  }
+  if ($Value -is [char] -or $Value -is [DateTime] -or
+      $Value -is [DateTimeOffset] -or $Value -is [Guid] -or
+      $Value.GetType().IsPrimitive -or $Value -is [decimal]) {
+    return $Value
+  }
+  if ($Value -is [Management.Automation.ErrorRecord]) {
+    return ConvertTo-RimsLocalSafeJsonString -Value ([string]$Value.Exception.Message)
+  }
+  if ($Value -is [Exception]) {
+    return ConvertTo-RimsLocalSafeJsonString -Value ([string]$Value.Message)
+  }
+  if ($Value -is [Collections.IDictionary]) {
+    $safeDictionary = [ordered]@{}
+    foreach ($key in $Value.Keys) {
+      $safeKey = ConvertTo-RimsLocalSafeJsonString -Value ([string]$key)
+      $safeDictionary[$safeKey] = ConvertTo-RimsLocalSafeJsonValue `
+        -Value $Value[$key] `
+        -Depth ($Depth + 1)
+    }
+    return [pscustomobject]$safeDictionary
+  }
+  if ($Value -is [Collections.IEnumerable]) {
+    $safeItems = @($Value | ForEach-Object {
+        ConvertTo-RimsLocalSafeJsonValue -Value $_ -Depth ($Depth + 1)
+      })
+    Write-Output -NoEnumerate $safeItems
+    return
+  }
+
+  $safeObject = [ordered]@{}
+  foreach ($property in $Value.PSObject.Properties) {
+    if (-not $property.IsGettable) { continue }
+    $safeName = ConvertTo-RimsLocalSafeJsonString -Value ([string]$property.Name)
+    $safeObject[$safeName] = ConvertTo-RimsLocalSafeJsonValue `
+      -Value $property.Value `
+      -Depth ($Depth + 1)
+  }
+  return [pscustomobject]$safeObject
+}
+
+function ConvertTo-RimsLocalSafeJson {
+  param(
+    [Parameter(Mandatory = $true)]
+    [psobject]$Result
+  )
+
+  $safeResult = ConvertTo-RimsLocalSafeJsonValue -Value $Result
+  return $safeResult | ConvertTo-Json -Depth 20 -Compress
+}
+
 function Write-RimsLocalJson {
   param(
     [Parameter(Mandatory = $true)]
     [psobject]$Result
   )
 
-  $json = $Result | ConvertTo-Json -Depth 10 -Compress
+  $json = ConvertTo-RimsLocalSafeJson -Result $Result
   [Console]::Out.WriteLine($json)
 }
 

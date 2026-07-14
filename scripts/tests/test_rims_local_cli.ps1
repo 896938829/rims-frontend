@@ -220,8 +220,11 @@ Assert-ComponentFailed -Result $badDoctorResult -Name 'backendWorkspace'
 $badBackendComponent = @($badDoctorResult.components | Where-Object {
     $_.name -eq 'backendWorkspace'
   })[0]
-if (-not $badBackendComponent.detail.Contains($invalidBackendDir)) {
-  throw 'Backend workspace detail omitted the resolved backend source path.'
+$invalidBackendPathId = (Get-RimsLocalSafePathMetadata `
+    -Path $invalidBackendDir `
+    -Category (Get-RimsLocalAbsolutePathCategory -Value $invalidBackendDir)).pathId
+if (-not $badBackendComponent.detail.Contains($invalidBackendPathId)) {
+  throw 'Backend workspace detail omitted the safe backend source path ID.'
 }
 
 $webDoctor = Invoke-LocalCli -Arguments @(
@@ -279,14 +282,20 @@ if ($webDeviceComponent.detail -match '(^|[ ,:])windows([, .]|$)') {
 $webBackendComponent = @($webDoctorResult.components | Where-Object {
     $_.name -eq 'backendWorkspace'
   })[0]
-if (-not $webBackendComponent.detail.Contains($backendDir)) {
-  throw 'Successful backend workspace detail omitted the resolved source path.'
+$backendPathId = (Get-RimsLocalSafePathMetadata `
+    -Path $backendDir `
+    -Category (Get-RimsLocalAbsolutePathCategory -Value $backendDir)).pathId
+if (-not $webBackendComponent.detail.Contains($backendPathId)) {
+  throw 'Successful backend workspace detail omitted the safe source path ID.'
 }
 $workspaceEnvComponent = @($webDoctorResult.components | Where-Object {
     $_.name -eq 'workspaceEnv'
   })[0]
-if (-not $workspaceEnvComponent.detail.Contains($backendWorkspaceRoot)) {
-  throw 'Workspace environment detail omitted the resolved runtime root.'
+$backendWorkspacePathId = (Get-RimsLocalSafePathMetadata `
+    -Path $backendWorkspaceRoot `
+    -Category (Get-RimsLocalAbsolutePathCategory -Value $backendWorkspaceRoot)).pathId
+if (-not $workspaceEnvComponent.detail.Contains($backendWorkspacePathId)) {
+  throw 'Workspace environment detail omitted the safe runtime root ID.'
 }
 
 $androidDoctor = Invoke-LocalCli -Arguments @(

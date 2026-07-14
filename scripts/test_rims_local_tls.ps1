@@ -13,6 +13,16 @@ $testRoot = Join-Path `
 $workspaceA = Join-Path $testRoot 'workspace-a'
 $workspaceB = Join-Path $testRoot 'workspace-b'
 
+function Get-RimsTlsTestPort {
+  $listener = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, 0)
+  $listener.Start()
+  try {
+    return ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+  } finally {
+    $listener.Stop()
+  }
+}
+
 try {
   [void][IO.Directory]::CreateDirectory((Join-Path $workspaceA 'scripts'))
   [void][IO.Directory]::CreateDirectory((Join-Path $workspaceB 'scripts'))
@@ -115,6 +125,72 @@ try {
   Assert-False `
     -Value $legacyTlsSmokeResult.ok `
     -Message 'Legacy TLS smoke emitted successful HTTP evidence.'
+
+  $secretWindowsPath = 'E:\SECRET-rims-json-success\tls\server.pfx'
+  $secretWslPath = '/mnt/e/SECRET-rims-json-failure/tls/ca.key'
+  $secretDoctor = Invoke-LocalCli -Arguments @(
+    '-Command', 'doctor',
+    '-Target', 'web',
+    '-Output', 'Json',
+    '-UseLocalTls',
+    '-BackendDir', $secretWindowsPath,
+    '-BackendWorkspaceRoot', $secretWslPath
+  )
+  Assert-False `
+    -Value $secretDoctor.StandardOutput.Contains('SECRET-rims-json') `
+    -Message 'TLS doctor JSON leaked an arbitrary Windows or WSL absolute path.'
+  $secretDoctorText = Invoke-LocalCli -Arguments @(
+    '-Command', 'doctor',
+    '-Target', 'web',
+    '-Output', 'Text',
+    '-UseLocalTls',
+    '-BackendDir', $secretWindowsPath,
+    '-BackendWorkspaceRoot', $secretWslPath
+  )
+  Assert-True `
+    -Value $secretDoctorText.StandardOutput.Contains('SECRET-rims-json') `
+    -Message 'Text doctor lost actionable absolute-path diagnostics.'
+
+  foreach ($jsonBoundaryCase in @(
+      [pscustomobject]@{ command = 'doctor'; ok = $true; mode = 'success' },
+      [pscustomobject]@{ command = 'up'; ok = $false; mode = 'failure' },
+      [pscustomobject]@{ command = 'status'; ok = $true; mode = 'success' },
+      [pscustomobject]@{ command = 'logs'; ok = $false; mode = 'exception' },
+      [pscustomobject]@{ command = 'down'; ok = $true; mode = 'success' }
+    )) {
+    $boundaryResult = New-RimsLocalResult -Command $jsonBoundaryCase.command
+    $boundaryResult.components = @(
+      [pscustomobject][ordered]@{
+        name = 'localTls'
+        ok = $jsonBoundaryCase.ok
+        detail = "Result uses $secretWindowsPath"
+        nested = [pscustomobject]@{
+          certificatePath = $secretWindowsPath
+          events = @(
+            [pscustomobject]@{
+              error = "Injected $($jsonBoundaryCase.mode) at $secretWslPath"
+            }
+          )
+        }
+      }
+    )
+    $boundaryResult.errors = @(
+      "Injected $($jsonBoundaryCase.mode): $secretWslPath"
+    )
+    $boundaryResult = Complete-RimsLocalResult `
+      -Result $boundaryResult `
+      -Ok $jsonBoundaryCase.ok `
+      -ExitCode $(if ($jsonBoundaryCase.ok) { 0 } else { 2 })
+    $safeJson = ConvertTo-RimsLocalSafeJson -Result $boundaryResult
+    Assert-False `
+      -Value $safeJson.Contains('SECRET-rims-json') `
+      -Message "$($jsonBoundaryCase.command) JSON leaked a deep absolute path."
+    Assert-True `
+      -Value ($safeJson.Contains('pathId') -and
+        $safeJson.Contains('category') -and
+        $safeJson.Contains('exists')) `
+      -Message "$($jsonBoundaryCase.command) JSON omitted safe path metadata."
+  }
 
   $webSpkiPin = [Convert]::ToBase64String([byte[]](0..31))
   $missingWebPinRejected = $false
@@ -443,11 +519,185 @@ try {
     -Value $proxyScriptText.Contains('EphemeralKeySet') `
     -Message 'TLS proxy did not keep imported PFX keys ephemeral.'
   Assert-True `
-    -Value $proxyScriptText.Contains('[Net.IPAddress]::Loopback') `
+    -Value $proxyScriptText.Contains('IPAddress.Loopback') `
     -Message 'TLS proxy did not bind exclusively to host loopback.'
   Assert-False `
-    -Value $proxyScriptText.Contains('[Net.IPAddress]::Any') `
+    -Value $proxyScriptText.Contains('IPAddress.Any') `
     -Message 'TLS proxy exposed its listener beyond host loopback.'
+
+  if ($null -eq ('RimsTlsTestCertificateValidation' -as [type])) {
+    Add-Type -TypeDefinition @'
+using System.Net.Security;
+using System.Security.Cryptography.X509Certificates;
+
+public static class RimsTlsTestCertificateValidation
+{
+    public static bool Accept(
+        object sender,
+        X509Certificate certificate,
+        X509Chain chain,
+        SslPolicyErrors errors)
+    {
+        return true;
+    }
+}
+'@
+  }
+  $validationCallback = [Delegate]::CreateDelegate(
+    [Net.Security.RemoteCertificateValidationCallback],
+    [RimsTlsTestCertificateValidation].GetMethod('Accept')
+  )
+
+  $concurrentProxyRoot = Join-Path $testRoot 'concurrent-proxy'
+  [void][IO.Directory]::CreateDirectory($concurrentProxyRoot)
+  $concurrentWorkspaceScripts = Join-Path $testRoot 'concurrent-workspace\scripts'
+  [void][IO.Directory]::CreateDirectory($concurrentWorkspaceScripts)
+  $concurrentTlsPaths = Get-RimsLocalTlsPaths `
+    -ScriptDirectory $concurrentWorkspaceScripts
+  $concurrentCertificateResult = New-RimsLocalTlsCertificates `
+    -TlsPaths $concurrentTlsPaths
+  Assert-True `
+    -Value $concurrentCertificateResult.ok `
+    -Message "Real local TLS test certificate generation failed: $($concurrentCertificateResult.detail)"
+  $concurrentPfx = $concurrentTlsPaths.serverPfx
+  $concurrentProxyScript = Join-Path $concurrentProxyRoot 'proxy.ps1'
+  $concurrentBackendScript = Join-Path $concurrentProxyRoot 'backend.ps1'
+  $concurrentBackendReady = Join-Path $concurrentProxyRoot 'backend-first.ready'
+  $concurrentErrorLog = Join-Path $concurrentProxyRoot 'proxy-errors.log'
+  $concurrentStartupLog = Join-Path $concurrentProxyRoot 'proxy-startup.log'
+  $testPowerShell = (Get-Command powershell.exe -CommandType Application |
+      Select-Object -First 1).Source
+  [IO.File]::WriteAllText(
+    $concurrentProxyScript,
+    (New-RimsLocalTlsProxyScript),
+    (New-Object Text.UTF8Encoding($false)))
+  [IO.File]::WriteAllText(
+    $concurrentBackendScript,
+    @'
+param([int]$Port, [string]$FirstAcceptedMarker)
+$listener = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, $Port)
+$listener.Start()
+try {
+  $first = $listener.AcceptTcpClient()
+  [IO.File]::WriteAllText($FirstAcceptedMarker, 'ready')
+  try {
+    $second = $listener.AcceptTcpClient()
+    try {
+      $stream = $second.GetStream()
+      $buffer = New-Object byte[] 16
+      [void]$stream.Read($buffer, 0, $buffer.Length)
+      $response = [Text.Encoding]::ASCII.GetBytes('pong')
+      $stream.Write($response, 0, $response.Length)
+      $stream.Flush()
+    } finally { $second.Close() }
+  } finally { $first.Close() }
+} finally { $listener.Stop() }
+'@,
+    (New-Object Text.UTF8Encoding($false)))
+  $concurrentBackendPort = Get-RimsTlsTestPort
+  $concurrentProxyPort = Get-RimsTlsTestPort
+  $backendProcess = $null
+  $proxyProcess = $null
+  $firstClient = $null
+  $firstTls = $null
+  $secondClient = $null
+  $secondTls = $null
+  try {
+    $backendProcess = Start-Process `
+      -FilePath $testPowerShell `
+      -ArgumentList (@(
+          '-NoProfile', '-ExecutionPolicy', 'Bypass',
+          '-File', $concurrentBackendScript,
+          '-Port', [string]$concurrentBackendPort,
+          '-FirstAcceptedMarker', $concurrentBackendReady
+        ) | ForEach-Object { ConvertTo-RimsWindowsCommandLineArgument -Value $_ }) `
+      -WindowStyle Hidden `
+      -PassThru
+    $proxyProcess = Start-Process `
+      -FilePath $testPowerShell `
+      -ArgumentList (@(
+          '-NoProfile', '-ExecutionPolicy', 'Bypass',
+          '-File', $concurrentProxyScript,
+          '-PfxPath', $concurrentPfx,
+          '-ListenPort', [string]$concurrentProxyPort,
+          '-BackendPort', [string]$concurrentBackendPort,
+          '-OwnershipMarker', 'rims-local-concurrency-test',
+          '-ErrorLogPath', $concurrentErrorLog
+        ) | ForEach-Object { ConvertTo-RimsWindowsCommandLineArgument -Value $_ }) `
+      -WindowStyle Hidden `
+      -RedirectStandardError $concurrentStartupLog `
+      -PassThru
+    Start-Sleep -Milliseconds 500
+
+    $firstClient = New-Object Net.Sockets.TcpClient
+    $firstClient.Connect([Net.IPAddress]::Loopback, $concurrentProxyPort)
+    $firstTls = New-Object Net.Security.SslStream(
+      $firstClient.GetStream(),
+      $false,
+      $validationCallback
+    )
+    $firstHandshake = $firstTls.AuthenticateAsClientAsync('localhost')
+    Assert-True `
+      -Value $firstHandshake.Wait(5000) `
+      -Message 'First persistent TLS connection did not complete its handshake.'
+    $backendReadyDeadline = (Get-Date).AddSeconds(3)
+    while (-not (Test-Path -LiteralPath $concurrentBackendReady -PathType Leaf) -and
+        (Get-Date) -lt $backendReadyDeadline) {
+      Start-Sleep -Milliseconds 25
+    }
+    Assert-True `
+      -Value (Test-Path -LiteralPath $concurrentBackendReady -PathType Leaf) `
+      -Message 'First persistent connection did not reach the backend before the hard deadline.'
+
+    $secondClient = New-Object Net.Sockets.TcpClient
+    $secondClient.Connect([Net.IPAddress]::Loopback, $concurrentProxyPort)
+    Assert-True `
+      -Value ([Net.IPAddress]::IsLoopback(
+          [Net.IPAddress]$secondClient.Client.RemoteEndPoint.Address)) `
+      -Message 'Actual TLS proxy connection was not bound to host loopback.'
+    $secondTls = New-Object Net.Security.SslStream(
+      $secondClient.GetStream(),
+      $false,
+      $validationCallback
+    )
+    $secondHandshake = $secondTls.AuthenticateAsClientAsync('localhost')
+    Assert-True `
+      -Value $secondHandshake.Wait(3000) `
+      -Message 'Second TLS connection was blocked by the first persistent connection.'
+    $request = [Text.Encoding]::ASCII.GetBytes('ping')
+    $secondTls.Write($request, 0, $request.Length)
+    $secondTls.Flush()
+    $responseBuffer = New-Object byte[] 4
+    $responseRead = $secondTls.ReadAsync($responseBuffer, 0, $responseBuffer.Length)
+    Assert-True `
+      -Value $responseRead.Wait(3000) `
+      -Message 'Second proxied connection did not receive a concurrent backend response.'
+    Assert-Equal `
+      -Actual ([Text.Encoding]::ASCII.GetString($responseBuffer, 0, $responseRead.Result)) `
+      -Expected 'pong' `
+      -Message 'Second proxied connection returned the wrong backend response.'
+  } catch {
+    $proxyLog = if (Test-Path -LiteralPath $concurrentErrorLog -PathType Leaf) {
+      [IO.File]::ReadAllText($concurrentErrorLog)
+    } else { '' }
+    $startupLog = if (Test-Path -LiteralPath $concurrentStartupLog -PathType Leaf) {
+      try { [IO.File]::ReadAllText($concurrentStartupLog) } catch { '<startup log active>' }
+    } else { '' }
+    throw "$($_.Exception.Message) Proxy log: $proxyLog Startup log: $startupLog"
+  } finally {
+    if ($null -ne $secondTls) { $secondTls.Dispose() }
+    if ($null -ne $secondClient) { $secondClient.Close() }
+    if ($null -ne $firstTls) { $firstTls.Dispose() }
+    if ($null -ne $firstClient) { $firstClient.Close() }
+    foreach ($testProcess in @($proxyProcess, $backendProcess)) {
+      if ($null -ne $testProcess) {
+        try {
+          if (-not $testProcess.HasExited) { $testProcess.Kill() }
+          [void]$testProcess.WaitForExit(3000)
+        } catch {} finally { $testProcess.Dispose() }
+      }
+    }
+  }
   Assert-Equal -Actual $proxy.state.port -Expected 8443 -Message 'TLS port evidence changed.'
   Assert-Equal -Actual $proxy.state.windowsPid -Expected 4242 -Message 'TLS PID was not recorded.'
   Assert-Equal `
@@ -703,6 +953,45 @@ try {
     -Actual $adbCalls.Count `
     -Expected 0 `
     -Message 'Pre-existing trust triggered an ADB mutation.'
+
+  foreach ($queryFailureMode in @('exit2', 'throw')) {
+    $queryFailureCalls = New-Object 'Collections.Generic.List[string]'
+    $queryFailure = Install-RimsAndroidUserCa `
+      -TlsPaths $pathsA `
+      -EmulatorState $ownedEmulator `
+      -CaFingerprintSha256 ('AA' * 32) `
+      -CaSubjectHash $installed.state.subjectHash `
+      -EmulatorOwnershipAction { param($state) return $true } `
+      -AdbAction {
+        param($serial, $arguments)
+        $commandText = $arguments -join ' '
+        [void]$queryFailureCalls.Add($commandText)
+        if ($commandText -eq "shell test -f $($installed.state.remotePath)") {
+          if ($queryFailureMode -eq 'throw') {
+            throw 'fake ADB trust query exception'
+          }
+          return [pscustomobject]@{
+            exitCode = 2
+            stdout = ''
+            stderr = 'fake trust query indeterminate'
+          }
+        }
+        return [pscustomobject]@{ exitCode = 0; stdout = ''; stderr = '' }
+      }
+    Assert-False `
+      -Value $queryFailure.ok `
+      -Message "Android trust query $queryFailureMode did not fail closed."
+    $queryMutationCalls = @($queryFailureCalls | Where-Object {
+        $_ -match '^(push|shell (cp|rm|mkdir|chmod|chown|restorecon))'
+      })
+    Assert-Equal `
+      -Actual $queryMutationCalls.Count `
+      -Expected 0 `
+      -Message "Android trust query $queryFailureMode performed a mutation."
+    Assert-False `
+      -Value (@($queryFailureCalls) -contains "shell rm -f $($installed.state.remotePath)") `
+      -Message "Android trust query $queryFailureMode changed the existing remote certificate."
+  }
   $preserved = Remove-RimsAndroidUserCa `
     -TrustState $preExisting.state `
     -EmulatorState $ownedEmulator `

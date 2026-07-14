@@ -533,39 +533,138 @@ $ErrorActionPreference = 'Stop'
 $keyStorageFlags =
   [Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable -bor
   [Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet
-$certificate = New-Object Security.Cryptography.X509Certificates.X509Certificate2(
+$ephemeralCertificate = New-Object Security.Cryptography.X509Certificates.X509Certificate2(
   $PfxPath,
   '',
   $keyStorageFlags
 )
-$listener = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, $ListenPort)
-$listener.Start()
-try {
-  while ($true) {
-    $client = $listener.AcceptTcpClient()
-    $backend = $null
-    $ssl = $null
-    try {
-      $ssl = New-Object Net.Security.SslStream($client.GetStream(), $false)
-      $ssl.AuthenticateAsServer($certificate, $false, 3072, $false)
-      $backend = New-Object Net.Sockets.TcpClient
-      $backend.Connect('127.0.0.1', $BackendPort)
-      $backendStream = $backend.GetStream()
-      $toBackend = $ssl.CopyToAsync($backendStream)
-      $toClient = $backendStream.CopyToAsync($ssl)
-      [void][Threading.Tasks.Task]::WaitAny(@($toBackend, $toClient))
-    } catch {
-      $message = $_.Exception.Message -replace '[\r\n]+', ' '
-      [IO.File]::AppendAllText($ErrorLogPath, "$message`n")
-    } finally {
-      if ($null -ne $ssl) { $ssl.Dispose() }
-      if ($null -ne $backend) { $backend.Close() }
-      $client.Close()
+$serverKeyStorageFlags =
+  [Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable
+$certificate = New-Object Security.Cryptography.X509Certificates.X509Certificate2(
+  $PfxPath,
+  '',
+  $serverKeyStorageFlags
+)
+$proxyTypeSource = @"
+using System;
+using System.Collections.Concurrent;
+using System.IO;
+using System.Net;
+using System.Net.Security;
+using System.Net.Sockets;
+using System.Security.Authentication;
+using System.Security.Cryptography.X509Certificates;
+using System.Threading;
+using System.Threading.Tasks;
+
+namespace RimsLocalTls
+{
+    public static class ConcurrentTlsProxy
+    {
+        private static readonly object LogLock = new object();
+
+        public static void Run(
+            X509Certificate2 certificate,
+            int listenPort,
+            int backendPort,
+            string errorLogPath)
+        {
+            var clients = new ConcurrentDictionary<int, TcpClient>();
+            var tasks = new ConcurrentDictionary<int, Task>();
+            var listener = new TcpListener(IPAddress.Loopback, listenPort);
+            var nextConnectionId = 0;
+            listener.Start();
+            try
+            {
+                while (true)
+                {
+                    var client = listener.AcceptTcpClient();
+                    var connectionId = Interlocked.Increment(ref nextConnectionId);
+                    clients[connectionId] = client;
+                    var task = Task.Run(() =>
+                    {
+                        try
+                        {
+                            HandleClient(client, certificate, backendPort);
+                        }
+                        catch (Exception exception)
+                        {
+                            AppendError(errorLogPath, exception.Message);
+                        }
+                    });
+                    tasks[connectionId] = task;
+                    task.ContinueWith(completed =>
+                    {
+                        Task ignoredTask;
+                        TcpClient ignoredClient;
+                        tasks.TryRemove(connectionId, out ignoredTask);
+                        clients.TryRemove(connectionId, out ignoredClient);
+                        if (ignoredClient != null) ignoredClient.Close();
+                    }, TaskScheduler.Default);
+                }
+            }
+            finally
+            {
+                listener.Stop();
+                foreach (var client in clients.Values)
+                {
+                    try { client.Close(); } catch { }
+                }
+                foreach (var task in tasks.Values)
+                {
+                    try { task.Wait(1000); } catch { }
+                }
+            }
+        }
+
+        private static void HandleClient(
+            TcpClient client,
+            X509Certificate2 certificate,
+            int backendPort)
+        {
+            using (client)
+            using (var ssl = new SslStream(client.GetStream(), false))
+            using (var backend = new TcpClient())
+            {
+                ssl.AuthenticateAsServer(
+                    certificate,
+                    false,
+                    SslProtocols.Tls12,
+                    false);
+                backend.Connect(IPAddress.Loopback, backendPort);
+                using (var backendStream = backend.GetStream())
+                {
+                    var toBackend = ssl.CopyToAsync(backendStream);
+                    var toClient = backendStream.CopyToAsync(ssl);
+                    Task.WaitAny(toBackend, toClient);
+                }
+            }
+        }
+
+        private static void AppendError(string errorLogPath, string message)
+        {
+            var safeMessage = (message ?? String.Empty)
+                .Replace("\r", " ")
+                .Replace("\n", " ");
+            lock (LogLock)
+            {
+                File.AppendAllText(errorLogPath, safeMessage + Environment.NewLine);
+            }
+        }
     }
-  }
+}
+"@
+Add-Type -TypeDefinition $proxyTypeSource
+try {
+  [RimsLocalTls.ConcurrentTlsProxy]::Run(
+    $certificate,
+    $ListenPort,
+    $BackendPort,
+    $ErrorLogPath
+  )
 } finally {
-  $listener.Stop()
   $certificate.Dispose()
+  $ephemeralCertificate.Dispose()
 }
 '@
 }
@@ -1105,7 +1204,8 @@ function Install-RimsAndroidUserCa {
         }
       }
       $query = & $adb $serial @('shell', 'test', '-f', $remotePath)
-      if ([int]$query.exitCode -eq 0) {
+      $queryExitCode = [int]$query.exitCode
+      if ($queryExitCode -eq 0) {
         $existingPath = Join-Path $TlsPaths.root 'android-existing-ca.pem'
         try {
           $pull = & $adb $serial @('pull', $remotePath, $existingPath)
@@ -1131,7 +1231,16 @@ function Install-RimsAndroidUserCa {
         } finally {
           Remove-Item -LiteralPath $existingPath -Force -ErrorAction SilentlyContinue
         }
-      } else { $false }
+      } elseif ($queryExitCode -eq 1) {
+        $false
+      } else {
+        return [pscustomobject]@{
+          ok = $false
+          detail = 'Android trust query was indeterminate; existing trust was left unchanged.'
+          cleanupPending = $false
+          state = $null
+        }
+      }
     } else { [bool](& $TrustQueryAction $serial $CaFingerprintSha256) }
   } catch {
     return [pscustomobject]@{

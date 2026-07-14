@@ -168,7 +168,7 @@ if ($Command -eq 'smoke') {
   }
 
   if ($Output -eq 'Json' -and $null -ne $report) {
-    [Console]::Out.WriteLine(($report | ConvertTo-Json -Depth 12 -Compress))
+    Write-RimsLocalJson -Result $report
   } elseif ($Output -eq 'Json') {
     $failure = New-RimsLocalResult -Command $Command
     $failure.errors = @(
