@@ -55,6 +55,10 @@ function Assert-StrictNetworkEvidence {
   Assert-Equal -Actual $Evidence.hostBridge.upstreamPort -Expected $Evidence.backendTargetPort -Message "$Message host bridge upstream port."
   Assert-Equal -Actual $Evidence.faultProxy.listenPort -Expected $Evidence.faultProxyPort -Message "$Message fault proxy listen port."
   Assert-Equal -Actual $Evidence.faultProxy.upstreamPort -Expected $Evidence.ownedBridgePort -Message "$Message fault proxy upstream port."
+  Assert-Equal -Actual $Evidence.hostBridge.listenAddress -Expected '127.0.0.1' -Message "$Message host bridge listen address."
+  Assert-Equal -Actual $Evidence.hostBridge.upstreamAddress -Expected '::1' -Message "$Message host bridge upstream address."
+  Assert-Equal -Actual $Evidence.faultProxy.listenAddress -Expected '127.0.0.1' -Message "$Message fault proxy listen address."
+  Assert-Equal -Actual $Evidence.faultProxy.upstreamAddress -Expected '127.0.0.1' -Message "$Message fault proxy upstream address."
   Assert-True `
     -Condition ($Evidence.routeValidation.ok -is [bool] -and
       $Evidence.routeValidation.ok -and
@@ -424,6 +428,35 @@ try {
       } },
     @{ Name = 'string-owned'; Mutate = {
         param($value) $value.faultProxy.owned = 'true'
+      } },
+    @{ Name = 'missing-bridge-listen-address'; Mutate = {
+        param($value) $value.hostBridge.PSObject.Properties.Remove('listenAddress')
+      } },
+    @{ Name = 'bridge-address-wrong-type'; Mutate = {
+        param($value) $value.hostBridge.upstreamAddress = 6
+      } },
+    @{ Name = 'bridge-wrong-ipv4'; Mutate = {
+        param($value) $value.hostBridge.listenAddress = '0.0.0.0'
+      } },
+    @{ Name = 'bridge-wrong-ipv6'; Mutate = {
+        param($value) $value.hostBridge.upstreamAddress = '127.0.0.1'
+      } },
+    @{ Name = 'bridge-addresses-swapped'; Mutate = {
+        param($value)
+        $value.hostBridge.listenAddress = '::1'
+        $value.hostBridge.upstreamAddress = '127.0.0.1'
+      } },
+    @{ Name = 'missing-proxy-listen-address'; Mutate = {
+        param($value) $value.faultProxy.PSObject.Properties.Remove('listenAddress')
+      } },
+    @{ Name = 'proxy-address-wrong-type'; Mutate = {
+        param($value) $value.faultProxy.upstreamAddress = 4
+      } },
+    @{ Name = 'proxy-wrong-ipv4'; Mutate = {
+        param($value) $value.faultProxy.listenAddress = 'localhost'
+      } },
+    @{ Name = 'bridge-proxy-address-swapped'; Mutate = {
+        param($value) $value.faultProxy.upstreamAddress = '::1'
       } },
     @{ Name = 'bridge-listen-mismatch'; Mutate = {
         param($value) $value.hostBridge.listenPort = $value.ownedBridgePort + 10

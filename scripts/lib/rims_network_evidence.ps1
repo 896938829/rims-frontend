@@ -99,6 +99,22 @@ function Get-NetworkEvidenceErrors {
     $validated = Get-RimsNetworkProperty `
       -Candidate $bridge `
       -Name 'backendIdentityValidated'
+    foreach ($address in @(
+        @{ Name = 'listenAddress'; Expected = '127.0.0.1' },
+        @{ Name = 'upstreamAddress'; Expected = '::1' }
+      )) {
+      $addressProperty = Get-RimsNetworkProperty `
+        -Candidate $bridge `
+        -Name $address.Name
+      if ($null -eq $addressProperty -or
+          $addressProperty.Value -isnot [string] -or
+          [string]::IsNullOrWhiteSpace($addressProperty.Value) -or
+          $addressProperty.Value -cne $address.Expected) {
+        [void]$errors.Add(
+          "Host bridge $($address.Name) must be '$($address.Expected)'."
+        )
+      }
+    }
     if ($ports.ContainsKey('ownedBridgePort') -and
         ($null -eq $listen -or
           -not (Test-RimsNetworkInteger $listen.Value) -or
@@ -124,6 +140,22 @@ function Get-NetworkEvidenceErrors {
     $upstreamOwnership = Get-RimsNetworkProperty `
       -Candidate $proxy `
       -Name 'upstreamOwnership'
+    foreach ($address in @(
+        @{ Name = 'listenAddress'; Expected = '127.0.0.1' },
+        @{ Name = 'upstreamAddress'; Expected = '127.0.0.1' }
+      )) {
+      $addressProperty = Get-RimsNetworkProperty `
+        -Candidate $proxy `
+        -Name $address.Name
+      if ($null -eq $addressProperty -or
+          $addressProperty.Value -isnot [string] -or
+          [string]::IsNullOrWhiteSpace($addressProperty.Value) -or
+          $addressProperty.Value -cne $address.Expected) {
+        [void]$errors.Add(
+          "Fault proxy $($address.Name) must be '$($address.Expected)'."
+        )
+      }
+    }
     if ($ports.ContainsKey('faultProxyPort') -and
         ($null -eq $listen -or
           -not (Test-RimsNetworkInteger $listen.Value) -or

@@ -77,6 +77,10 @@ function Assert-StrictNetworkEvidence {
   Assert-Equal -Actual $Evidence.hostBridge.upstreamPort -Expected $Evidence.backendTargetPort -Message "$Message host bridge upstream port."
   Assert-Equal -Actual $Evidence.faultProxy.listenPort -Expected $Evidence.faultProxyPort -Message "$Message fault proxy listen port."
   Assert-Equal -Actual $Evidence.faultProxy.upstreamPort -Expected $Evidence.ownedBridgePort -Message "$Message fault proxy upstream port."
+  Assert-Equal -Actual $Evidence.hostBridge.listenAddress -Expected '127.0.0.1' -Message "$Message host bridge listen address."
+  Assert-Equal -Actual $Evidence.hostBridge.upstreamAddress -Expected '::1' -Message "$Message host bridge upstream address."
+  Assert-Equal -Actual $Evidence.faultProxy.listenAddress -Expected '127.0.0.1' -Message "$Message fault proxy listen address."
+  Assert-Equal -Actual $Evidence.faultProxy.upstreamAddress -Expected '127.0.0.1' -Message "$Message fault proxy upstream address."
   $route = $Evidence.routeValidation
   if ($null -eq $route -or $route.ok -isnot [bool] -or -not $route.ok -or
       $route.proxyReachedVerifiedBackend -isnot [bool] -or
@@ -492,8 +496,12 @@ try {
   } while ($networkFaultProxyPort -eq $occupiedBackendPort)
   $fixtureHelper = Join-Path $tempRoot 'dual-backend-fixture.ps1'
   $fixtureReady = Join-Path $tempRoot 'dual-backend-ready.txt'
+  $fixtureDiagnostics = Join-Path $tempRoot 'dual-backend-diagnostics.txt'
+  $fixtureStdout = Join-Path $tempRoot 'dual-backend-stdout.txt'
+  $fixtureStderr = Join-Path $tempRoot 'dual-backend-stderr.txt'
   $fixtureSource = @'
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
@@ -501,24 +509,51 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 public static class RimsDualBackendFixture {
-  public static void Run(int port, string readyPath) {
-    var ipv4 = new TcpListener(IPAddress.Loopback, port);
-    var ipv6 = new TcpListener(IPAddress.IPv6Loopback, port);
-    ipv6.Server.DualMode = false;
-    ipv4.Start();
-    ipv6.Start();
-    File.WriteAllText(readyPath, "ready");
-    Task.Factory.StartNew(
-      () => Loop(ipv4, "B"),
-      CancellationToken.None,
-      TaskCreationOptions.LongRunning,
-      TaskScheduler.Default);
-    Loop(ipv6, "A");
+  public static void Run(int port, string readyPath, string diagnosticsPath,
+      int workerDelayMs) {
+    try {
+      File.WriteAllText(diagnosticsPath, "starting pid=" +
+        Process.GetCurrentProcess().Id + Environment.NewLine);
+      var ipv4 = new TcpListener(IPAddress.Loopback, port);
+      var ipv6 = new TcpListener(IPAddress.IPv6Loopback, port);
+      ipv6.Server.DualMode = false;
+      ipv4.Start();
+      ipv6.Start();
+      Append(diagnosticsPath, "listeners-started port=" + port);
+      var ipv4Worker = Task.Factory.StartNew(
+        () => Loop(ipv4, "B", workerDelayMs),
+        CancellationToken.None,
+        TaskCreationOptions.LongRunning,
+        TaskScheduler.Default);
+      var ipv6Worker = Task.Factory.StartNew(
+        () => Loop(ipv6, "A", workerDelayMs),
+        CancellationToken.None,
+        TaskCreationOptions.LongRunning,
+        TaskScheduler.Default);
+      WaitForIdentity(port, diagnosticsPath);
+      var readyTemporaryPath = readyPath + ".tmp";
+      File.WriteAllText(readyTemporaryPath,
+        "{\"ipv4Backend\":\"B\",\"ipv6Backend\":\"A\"}");
+      File.Move(readyTemporaryPath, readyPath);
+      Append(diagnosticsPath, "ready-after-self-probe");
+      Task.WaitAll(ipv4Worker, ipv6Worker);
+    } catch (Exception error) {
+      Append(diagnosticsPath, "failed " + error.GetType().Name +
+        " " + error.Message);
+      throw;
+    }
   }
-  static void Loop(TcpListener listener, string identity) {
+  static void Loop(TcpListener listener, string identity, int workerDelayMs) {
+    if (workerDelayMs > 0) Thread.Sleep(workerDelayMs);
     while (true) {
       var client = listener.AcceptTcpClient();
-      Handle(client, identity);
+      try {
+        Handle(client, identity);
+      } catch (IOException) {
+        client.Dispose();
+      } catch (SocketException) {
+        client.Dispose();
+      }
     }
   }
   static void Handle(TcpClient client, string identity) {
@@ -532,25 +567,93 @@ public static class RimsDualBackendFixture {
       stream.Write(body, 0, body.Length);
     }
   }
+  static void WaitForIdentity(int port, string diagnosticsPath) {
+    var deadline = DateTime.UtcNow.AddSeconds(10);
+    var ipv4Ready = false;
+    var ipv6Ready = false;
+    string ipv4Error = "not-probed";
+    string ipv6Error = "not-probed";
+    while (DateTime.UtcNow < deadline) {
+      if (!ipv4Ready) ipv4Ready = Probe(
+        IPAddress.Loopback, AddressFamily.InterNetwork, port, "B", out ipv4Error);
+      if (!ipv6Ready) ipv6Ready = Probe(
+        IPAddress.IPv6Loopback, AddressFamily.InterNetworkV6, port, "A", out ipv6Error);
+      if (ipv4Ready && ipv6Ready) {
+        Append(diagnosticsPath, "self-probe ipv4=B ipv6=A");
+        return;
+      }
+      Thread.Sleep(100);
+    }
+    throw new TimeoutException("self-probe timeout ipv4=" + ipv4Error +
+      " ipv6=" + ipv6Error);
+  }
+  static bool Probe(IPAddress address, AddressFamily family, int port,
+      string expectedIdentity, out string error) {
+    try {
+      using (var client = new TcpClient(family)) {
+        var connect = client.ConnectAsync(address, port);
+        if (!connect.Wait(500)) throw new TimeoutException("connect timeout");
+        var stream = client.GetStream();
+        var request = Encoding.ASCII.GetBytes(
+          "GET /healthz HTTP/1.0\r\nHost: localhost\r\nConnection: close\r\n\r\n");
+        stream.Write(request, 0, request.Length);
+        var buffer = new byte[4096];
+        var response = new StringBuilder();
+        var marker = "\"backend\":\"" + expectedIdentity + "\"";
+        var readDeadline = DateTime.UtcNow.AddSeconds(3);
+        while (DateTime.UtcNow < readDeadline) {
+          var readTask = stream.ReadAsync(buffer, 0, buffer.Length);
+          if (!readTask.Wait(2000)) throw new TimeoutException("read timeout");
+          var read = readTask.Result;
+          if (read == 0) break;
+          response.Append(Encoding.UTF8.GetString(buffer, 0, read));
+          if (response.ToString().Contains(marker)) {
+            error = "";
+            return true;
+          }
+        }
+        error = "identity-mismatch";
+        return false;
+      }
+    } catch (Exception probeError) {
+      error = probeError.GetType().Name + ":" + probeError.Message;
+      return false;
+    }
+  }
+  static void Append(string path, string message) {
+    File.AppendAllText(path, DateTimeOffset.UtcNow.ToString("o") + " " +
+      message + Environment.NewLine);
+  }
 }
 '@
   $fixtureHelperBody = @"
-param([int]`$Port, [string]`$ReadyPath)
+param([int]`$Port, [string]`$ReadyPath, [string]`$DiagnosticsPath, [int]`$WorkerDelayMs)
 Add-Type -TypeDefinition @'
 $fixtureSource
 '@
-[RimsDualBackendFixture]::Run(`$Port, `$ReadyPath)
+[RimsDualBackendFixture]::Run(`$Port, `$ReadyPath, `$DiagnosticsPath, `$WorkerDelayMs)
 "@
   Set-Content -LiteralPath $fixtureHelper -Value $fixtureHelperBody -Encoding UTF8
+  $fixtureStartedAt = [DateTimeOffset]::UtcNow
   $fixtureProcess = Start-Process `
     -FilePath (Join-Path $PSHOME 'powershell.exe') `
     -ArgumentList @(
       '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $fixtureHelper,
-      '-Port', "$occupiedBackendPort", '-ReadyPath', $fixtureReady
+      '-Port', "$occupiedBackendPort", '-ReadyPath', $fixtureReady,
+      '-DiagnosticsPath', $fixtureDiagnostics, '-WorkerDelayMs', '750'
     ) `
     -WindowStyle Hidden `
+    -RedirectStandardOutput $fixtureStdout `
+    -RedirectStandardError $fixtureStderr `
     -PassThru
-  $fixtureDeadline = [DateTime]::UtcNow.AddSeconds(10)
+  Start-Sleep -Milliseconds 200
+  if (Test-Path -LiteralPath $fixtureReady -PathType Leaf) {
+    $prematureDiagnostics = if (Test-Path -LiteralPath $fixtureDiagnostics -PathType Leaf) {
+      Get-Content -LiteralPath $fixtureDiagnostics -Raw
+    } else { 'diagnostics file missing' }
+    throw "Dual backend fixture signaled ready before its slow workers responded. pid=$($fixtureProcess.Id); diagnostics=$prematureDiagnostics"
+  }
+  $fixtureDeadline = [DateTime]::UtcNow.AddSeconds(15)
   while (-not (Test-Path -LiteralPath $fixtureReady -PathType Leaf) -and
       -not $fixtureProcess.HasExited -and
       [DateTime]::UtcNow -lt $fixtureDeadline) {
@@ -558,7 +661,23 @@ $fixtureSource
   }
   if ($fixtureProcess.HasExited -or
       -not (Test-Path -LiteralPath $fixtureReady -PathType Leaf)) {
-    throw 'Dual backend fixture did not start.'
+    $diagnostics = if (Test-Path -LiteralPath $fixtureDiagnostics -PathType Leaf) {
+      Get-Content -LiteralPath $fixtureDiagnostics -Raw
+    } else { 'diagnostics file missing' }
+    $stderr = if (Test-Path -LiteralPath $fixtureStderr -PathType Leaf) {
+      Get-Content -LiteralPath $fixtureStderr -Raw
+    } else { 'stderr file missing' }
+    $exitCode = if ($fixtureProcess.HasExited) {
+      [void]$fixtureProcess.WaitForExit(1000)
+      $fixtureProcess.ExitCode
+    } else { 'running' }
+    throw "Dual backend fixture did not become ready. pid=$($fixtureProcess.Id); exit=$exitCode; ready=$(Test-Path -LiteralPath $fixtureReady -PathType Leaf); diagnostics=$diagnostics; stderr=$stderr"
+  }
+  $readyEvidence = Get-Content -LiteralPath $fixtureReady -Raw | ConvertFrom-Json
+  Assert-Equal -Actual $readyEvidence.ipv4Backend -Expected 'B' -Message 'IPv4 worker readiness identity.'
+  Assert-Equal -Actual $readyEvidence.ipv6Backend -Expected 'A' -Message 'IPv6 worker readiness identity.'
+  if (([DateTimeOffset]::UtcNow - $fixtureStartedAt).TotalMilliseconds -lt 600) {
+    throw 'Dual backend readiness did not wait for the injected slow worker.'
   }
   $unownedHealth = Invoke-RestMethod `
     -Uri "http://127.0.0.1:$occupiedBackendPort/healthz" `
@@ -651,6 +770,35 @@ $fixtureSource
       } },
     @{ Name = 'string-owned'; Mutate = {
         param($value) $value.faultProxy.owned = 'true'
+      } },
+    @{ Name = 'missing-bridge-listen-address'; Mutate = {
+        param($value) $value.hostBridge.PSObject.Properties.Remove('listenAddress')
+      } },
+    @{ Name = 'bridge-address-wrong-type'; Mutate = {
+        param($value) $value.hostBridge.upstreamAddress = 6
+      } },
+    @{ Name = 'bridge-wrong-ipv4'; Mutate = {
+        param($value) $value.hostBridge.listenAddress = '0.0.0.0'
+      } },
+    @{ Name = 'bridge-wrong-ipv6'; Mutate = {
+        param($value) $value.hostBridge.upstreamAddress = '127.0.0.1'
+      } },
+    @{ Name = 'bridge-addresses-swapped'; Mutate = {
+        param($value)
+        $value.hostBridge.listenAddress = '::1'
+        $value.hostBridge.upstreamAddress = '127.0.0.1'
+      } },
+    @{ Name = 'missing-proxy-listen-address'; Mutate = {
+        param($value) $value.faultProxy.PSObject.Properties.Remove('listenAddress')
+      } },
+    @{ Name = 'proxy-address-wrong-type'; Mutate = {
+        param($value) $value.faultProxy.upstreamAddress = 4
+      } },
+    @{ Name = 'proxy-wrong-ipv4'; Mutate = {
+        param($value) $value.faultProxy.listenAddress = 'localhost'
+      } },
+    @{ Name = 'bridge-proxy-address-swapped'; Mutate = {
+        param($value) $value.faultProxy.upstreamAddress = '::1'
       } },
     @{ Name = 'bridge-listen-mismatch'; Mutate = {
         param($value) $value.hostBridge.listenPort = $value.ownedBridgePort + 10
