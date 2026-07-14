@@ -779,7 +779,7 @@ git diff --check
 git status --short
 ```
 
-- [ ] **Step 7: Commit evidence in both repositories, fast-forward merge, and push only after all gates pass.**
+- [x] **Step 7: Commit evidence in both repositories, fast-forward merge, and push only after all gates pass.**
 
 ```text
 docs: record M11 offline sync acceptance
