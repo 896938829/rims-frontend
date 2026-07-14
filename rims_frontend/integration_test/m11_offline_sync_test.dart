@@ -513,6 +513,7 @@ void main() {
           (await _operation(outbox, accountId, lifecycle.operationId)).state,
           OutboxState.succeeded,
         );
+        await _warmProductCache(documents, salesProductSku);
 
         await _fault('unreachable');
         await _returnToShell(tester);
@@ -1249,6 +1250,26 @@ Future<void> _prepareDraft(
       condition: () => documents.attachmentStagingIds.length == 1,
     );
   }
+}
+
+Future<void> _warmProductCache(DocumentsViewModel documents, String sku) async {
+  final repository = documents.inventoryRepository;
+  if (repository == null) {
+    throw TestFailure(
+      'Inventory repository is unavailable while caching $sku.',
+    );
+  }
+  final result = await repository.listInventory(keyword: sku);
+  result.when(
+    success: (page) {
+      if (!page.items.any((item) => item.sku == sku)) {
+        throw TestFailure('Online product cache warm-up did not return $sku.');
+      }
+    },
+    failure: (failure) => throw TestFailure(
+      'Online product cache warm-up failed for $sku: ${failure.message}',
+    ),
+  );
 }
 
 Future<void> _addProductBySku(
