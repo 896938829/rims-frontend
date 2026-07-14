@@ -272,7 +272,6 @@ void main() {
           tester,
           documents,
           beforeQueued,
-          timeout: const Duration(milliseconds: 250),
         );
         final queuedCreate = queuedResult.operation;
         outboxEnqueueLatencyMs = queuedResult.enqueueLatencyMs;
@@ -1268,24 +1267,26 @@ Future<({OutboxOperation operation, int enqueueLatencyMs})> _queueCurrentDraft(
   final enqueueWatch = Stopwatch()..start();
   await tester.tap(confirm.hitTestable().first);
   await tester.pump();
-  List<OutboxOperation> after = const [];
-  final previousIds = before.map((operation) => operation.operationId).toSet();
   final deadline = DateTime.now().add(timeout);
   do {
-    after = await _operations(
-      documents.outboxRepository!,
-      documents.accountId!,
-    );
-    if (after.any(
-      (operation) =>
-          !previousIds.contains(operation.operationId) &&
-          operation.kind == OutboxOperationKind.documentCreate,
-    )) {
+    if (documents.formError == '已保存到待同步，请前往同步中心复核') {
       break;
     }
     await tester.pump(const Duration(milliseconds: 10));
   } while (DateTime.now().isBefore(deadline));
   enqueueWatch.stop();
+  if (documents.formError != '已保存到待同步，请前往同步中心复核') {
+    throw TestFailure(
+      'Offline enqueue did not complete after '
+      '${enqueueWatch.elapsedMilliseconds} ms: ${documents.formError}',
+    );
+  }
+
+  final after = await _operations(
+    documents.outboxRepository!,
+    documents.accountId!,
+  );
+  final previousIds = before.map((operation) => operation.operationId).toSet();
   final created = after
       .where(
         (operation) =>
