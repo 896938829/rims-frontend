@@ -112,15 +112,15 @@ Run focused tests, full analyze, and diff check. Commit: `feat: enforce frontend
 - Test: backend `internal/app/security_surface_test.go`
 - Modify: backend `internal/modules/file/routes.go`
 
-- [ ] **Step 1: Write RED transport matrix**
+- [x] **Step 1: Write RED transport matrix**
 
 Require non-local HTTP rejection, forwarded HTTPS only from trusted CIDR, spoof rejection, HTTPS-only HSTS, exact CORS origin matching, bounded preflight methods/headers, no credentialed wildcard, Swagger disabled outside local/test, no public static upload route, and authenticated file ACL.
 
-- [ ] **Step 2: Implement effective scheme and surface policy**
+- [x] **Step 2: Implement effective scheme and surface policy**
 
 Parse CIDRs at startup; trust forwarding only from immediate trusted peer. Remove `r.Static("/uploads")` and keep provider object keys private. Gate Swagger by profile.
 
-- [ ] **Step 3: Verify and commit**
+- [x] **Step 3: Verify and commit**
 
 Run middleware/app/file tests and full Go suite. Commit: `feat: enforce backend transport boundaries`.
 
