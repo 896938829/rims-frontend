@@ -123,6 +123,14 @@ foreach ($faultAction in @(
     -Condition ($integrationTestText.Contains("_fault('$faultAction'")) `
     -Message "M11 Android journey omitted fault action '$faultAction'."
 }
+foreach ($confirmedSyncBoundary in @(
+    'final confirmedSyncWatch = Stopwatch()..start();',
+    'return confirmedSyncWatch.elapsedMilliseconds;'
+  )) {
+  Assert-True `
+    -Condition ($integrationTestText.Contains($confirmedSyncBoundary)) `
+    -Message "M11 integration omitted confirmed-sync timing boundary '$confirmedSyncBoundary'."
+}
 Assert-True `
   -Condition ($integrationTestText.Contains("M9-E2E:M11:`$runId:")) `
   -Message 'M11 records must use the M9 reset namespace.'

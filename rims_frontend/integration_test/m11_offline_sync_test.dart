@@ -285,10 +285,10 @@ void main() {
         expect(queuedVisible, isTrue);
 
         await _fault('reset');
-        final queuedSyncWatch = Stopwatch()..start();
-        await _syncOperation(tester, queuedCreate.operationId);
-        queuedSyncWatch.stop();
-        syncTotalMs = _max(syncTotalMs, queuedSyncWatch.elapsedMilliseconds);
+        syncTotalMs = _max(
+          syncTotalMs,
+          await _syncOperation(tester, queuedCreate.operationId),
+        );
         expect(
           (await _operation(outbox, accountId, queuedCreate.operationId)).state,
           OutboxState.succeeded,
@@ -319,10 +319,10 @@ void main() {
         _recordOperation(unknownCreate, operationIds, idempotencyHashes);
         final unknownStatusBefore = await _fault('status');
         await _fault('reset');
-        final unknownSyncWatch = Stopwatch()..start();
-        await _syncOperation(tester, unknownCreate.operationId);
-        unknownSyncWatch.stop();
-        syncTotalMs = _max(syncTotalMs, unknownSyncWatch.elapsedMilliseconds);
+        syncTotalMs = _max(
+          syncTotalMs,
+          await _syncOperation(tester, unknownCreate.operationId),
+        );
         var current = await _operation(
           outbox,
           accountId,
@@ -398,12 +398,9 @@ void main() {
         }
         await _fault('reset');
         await _fault('duplicate-delivery');
-        final attachmentSyncWatch = Stopwatch()..start();
-        await _syncOperation(tester, attachmentCreate.operationId);
-        attachmentSyncWatch.stop();
         syncTotalMs = _max(
           syncTotalMs,
-          attachmentSyncWatch.elapsedMilliseconds,
+          await _syncOperation(tester, attachmentCreate.operationId),
         );
         final attachmentStates = await Future.wait(
           attachmentGraph.map(
@@ -505,10 +502,10 @@ void main() {
           _recordOperation(operation, operationIds, idempotencyHashes);
         }
         await _fault('reset');
-        final lifecycleWatch = Stopwatch()..start();
-        await _syncOperation(tester, lifecycle.operationId);
-        lifecycleWatch.stop();
-        syncTotalMs = _max(syncTotalMs, lifecycleWatch.elapsedMilliseconds);
+        syncTotalMs = _max(
+          syncTotalMs,
+          await _syncOperation(tester, lifecycle.operationId),
+        );
         expect(
           (await _operation(outbox, accountId, lifecycle.operationId)).state,
           OutboxState.succeeded,
@@ -1391,7 +1388,7 @@ Future<({OutboxOperation operation, int enqueueLatencyMs})> _queueCurrentDraft(
   );
 }
 
-Future<void> _syncOperation(WidgetTester tester, String operationId) async {
+Future<int> _syncOperation(WidgetTester tester, String operationId) async {
   final viewModel = await _waitForOperationInSyncCenter(tester, operationId);
   await tapFinderAndSettle(
     tester,
@@ -1399,6 +1396,7 @@ Future<void> _syncOperation(WidgetTester tester, String operationId) async {
     description: 'review operation $operationId',
   );
   await expectText(tester, '复核并同步');
+  final confirmedSyncWatch = Stopwatch()..start();
   await tapFinderAndSettle(
     tester,
     find.widgetWithText(FilledButton, '确认同步'),
@@ -1410,6 +1408,8 @@ Future<void> _syncOperation(WidgetTester tester, String operationId) async {
     condition: () => !viewModel.isBusy,
     timeout: const Duration(seconds: 12),
   );
+  confirmedSyncWatch.stop();
+  return confirmedSyncWatch.elapsedMilliseconds;
 }
 
 Future<void> _openSyncCenter(WidgetTester tester) async {
