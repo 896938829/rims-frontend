@@ -93,9 +93,9 @@ void main() {
     expect(extractionRules, contains('<cloud-backup>'));
     expect(extractionRules, contains('<device-transfer>'));
     expect(
-      RegExp(r'<exclude domain="root" path="\."\s*/>').allMatches(
-        extractionRules,
-      ),
+      RegExp(
+        r'<exclude domain="root" path="\."\s*/>',
+      ).allMatches(extractionRules),
       hasLength(2),
     );
   });
