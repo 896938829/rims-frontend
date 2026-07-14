@@ -18,6 +18,55 @@ function Assert-True {
   if (-not $Condition) { throw $Message }
 }
 
+function Test-StrictInteger {
+  param($Value)
+  return $Value -is [byte] -or $Value -is [sbyte] -or
+    $Value -is [int16] -or $Value -is [uint16] -or
+    $Value -is [int32] -or $Value -is [uint32] -or
+    $Value -is [int64] -or $Value -is [uint64]
+}
+
+function Assert-StrictNetworkEvidence {
+  param($Evidence, [string]$Message)
+  Assert-True -Condition ($null -ne $Evidence) -Message "$Message Network evidence is missing."
+  foreach ($portName in @(
+      'backendTargetPort', 'ownedBridgePort', 'faultProxyPort'
+    )) {
+    Assert-True `
+      -Condition ((Test-StrictInteger $Evidence.$portName) -and
+        $Evidence.$portName -ge 1 -and $Evidence.$portName -le 65535) `
+      -Message "$Message '$portName' is not a strict valid integer port."
+  }
+  foreach ($identityName in @('hostBridge', 'faultProxy')) {
+    $identity = $Evidence.$identityName
+    $parsedStart = [DateTimeOffset]::MinValue
+    Assert-True `
+      -Condition ($null -ne $identity -and $identity.owned -is [bool] -and
+        $identity.owned -and (Test-StrictInteger $identity.windowsPid) -and
+        $identity.windowsPid -gt 0 -and
+        $identity.windowsProcessStartTimeUtc -is [string] -and
+        [DateTimeOffset]::TryParse(
+          $identity.windowsProcessStartTimeUtc,
+          [ref]$parsedStart
+        )) `
+      -Message "$Message '$identityName' identity is malformed."
+  }
+  Assert-Equal -Actual $Evidence.hostBridge.listenPort -Expected $Evidence.ownedBridgePort -Message "$Message host bridge listen port."
+  Assert-Equal -Actual $Evidence.hostBridge.upstreamPort -Expected $Evidence.backendTargetPort -Message "$Message host bridge upstream port."
+  Assert-Equal -Actual $Evidence.faultProxy.listenPort -Expected $Evidence.faultProxyPort -Message "$Message fault proxy listen port."
+  Assert-Equal -Actual $Evidence.faultProxy.upstreamPort -Expected $Evidence.ownedBridgePort -Message "$Message fault proxy upstream port."
+  Assert-True `
+    -Condition ($Evidence.routeValidation.ok -is [bool] -and
+      $Evidence.routeValidation.ok -and
+      $Evidence.routeValidation.proxyReachedVerifiedBackend -is [bool] -and
+      $Evidence.routeValidation.proxyReachedVerifiedBackend -and
+      $Evidence.routeValidation.unownedListenerReached -is [bool] -and
+      -not $Evidence.routeValidation.unownedListenerReached -and
+      $Evidence.routeValidation.expectedBackendIdentity -ceq
+        $Evidence.routeValidation.observedBackendIdentity) `
+    -Message "$Message route validation is malformed."
+}
+
 function Invoke-ExpectFailure {
   param(
     [string[]]$Arguments,
@@ -188,6 +237,7 @@ $tempRoot = Join-Path `
   ('rims-m11-smoke-test-' + [guid]::NewGuid().ToString('N'))
 $resolvedTempRoot = [IO.Path]::GetFullPath($tempRoot)
 New-Item -ItemType Directory -Path $resolvedTempRoot | Out-Null
+$previousChildFixture = $env:RIMS_M11_TEST_CHILD_REPORT_FIXTURE
 try {
   $fixturePath = Join-Path $resolvedTempRoot 'valid-fixture.json'
   $fixture = [ordered]@{
@@ -255,6 +305,63 @@ try {
     -LiteralPath $fixturePath `
     -Encoding UTF8
 
+  $validNetworkEvidence = [ordered]@{
+    backendTargetPort = 18080
+    ownedBridgePort = [int]$plan.ownedBridgePort
+    faultProxyPort = 18081
+    connectionChain = 'emulator->owned-fault-proxy->owned-host-bridge->verified-wsl-backend'
+    hostBridge = [ordered]@{
+      owned = $true
+      windowsPid = 4101
+      windowsProcessStartTimeUtc = '2026-07-14T00:00:00Z'
+      listenAddress = '127.0.0.1'
+      listenPort = [int]$plan.ownedBridgePort
+      upstreamAddress = '::1'
+      upstreamPort = 18080
+      backendIdentityValidated = $true
+    }
+    faultProxy = [ordered]@{
+      owned = $true
+      windowsPid = 4102
+      windowsProcessStartTimeUtc = '2026-07-14T00:00:01Z'
+      listenAddress = '127.0.0.1'
+      listenPort = 18081
+      upstreamAddress = '127.0.0.1'
+      upstreamPort = [int]$plan.ownedBridgePort
+      upstreamOwnership = 'validated-owned-host-bridge'
+    }
+    routeValidation = [ordered]@{
+      ok = $true
+      proxyReachedVerifiedBackend = $true
+      unownedListenerReached = $false
+      expectedBackendIdentity = 'A'
+      observedBackendIdentity = 'A'
+      backend = 'A'
+      backendTargetPort = 18080
+      ownedBridgePort = [int]$plan.ownedBridgePort
+      faultProxyPort = 18081
+    }
+  }
+  $childFixturePath = Join-Path $resolvedTempRoot 'valid-child-report.json'
+  $childFixture = [ordered]@{
+    ok = $true
+    exitCode = 0
+    frontendCommit = (& git -C (Resolve-Path (Join-Path $scriptDir '..')) rev-parse HEAD).Trim()
+    backendCommit = ('b' * 40)
+    backendDir = 'E:\fixture\backend'
+    runtimeOwnedByRun = $true
+    emulator = [ordered]@{ owned = $true }
+    baselineRestore = [ordered]@{ ok = $true }
+    adbStateRestore = [ordered]@{ ok = $true }
+    faultProxyCleanup = [ordered]@{ ok = $true }
+    networkEvidence = $validNetworkEvidence
+    e2e = $fixture
+  }
+  $childFixture | ConvertTo-Json -Depth 20 | Set-Content `
+    -LiteralPath $childFixturePath `
+    -Encoding UTF8
+  $env:RIMS_M11_TEST_CHILD_REPORT_FIXTURE = $childFixturePath
+
   $reportPath = Join-Path $resolvedTempRoot 'success-report.json'
   $recordPath = Join-Path $resolvedTempRoot 'success-commands.json'
   & $wrapper `
@@ -287,12 +394,115 @@ try {
   Assert-Equal -Actual $report.backendTargetPort -Expected 18080 -Message 'Report backend target.'
   Assert-Equal -Actual $report.ownedBridgePort -Expected $plan.ownedBridgePort -Message 'Report owned bridge.'
   Assert-Equal -Actual $report.faultProxyPort -Expected 18081 -Message 'Report fault proxy.'
+  Assert-StrictNetworkEvidence `
+    -Evidence $report.networkEvidence `
+    -Message 'M11 aggregate report.'
+  Assert-Equal -Actual $report.networkEvidence.hostBridge.windowsPid -Expected 4101 -Message 'Aggregate host bridge PID.'
+  Assert-Equal -Actual $report.networkEvidence.faultProxy.windowsPid -Expected 4102 -Message 'Aggregate fault proxy PID.'
   Assert-Equal -Actual $report.cleanup.networkRestored -Expected $true -Message 'Network cleanup.'
   Assert-Equal -Actual $report.cleanup.ownedProcessesStopped -Expected $true -Message 'Owned process cleanup.'
   Assert-True -Condition ($report.evidence.cacheReadLatencyMs -is [ValueType]) -Message 'Cache metric must be numeric.'
   Assert-True -Condition ($report.evidence.cleanup.accountCacheCleared -is [bool]) -Message 'Cleanup evidence must be Boolean.'
   Assert-True -Condition ($report.frontendCommit -match '^[0-9a-f]{40}$') -Message 'Frontend commit missing.'
   Assert-True -Condition ($report.backendCommit -match '^[0-9a-f]{40}$') -Message 'Backend commit missing.'
+
+  $aggregateNetworkCases = @(
+    @{ Name = 'missing-host-identity'; Mutate = {
+        param($value) $value.PSObject.Properties.Remove('hostBridge')
+      } },
+    @{ Name = 'missing-proxy-identity'; Mutate = {
+        param($value) $value.PSObject.Properties.Remove('faultProxy')
+      } },
+    @{ Name = 'zero-pid'; Mutate = {
+        param($value) $value.hostBridge.windowsPid = 0
+      } },
+    @{ Name = 'string-pid'; Mutate = {
+        param($value) $value.faultProxy.windowsPid = '4102'
+      } },
+    @{ Name = 'bad-start-time'; Mutate = {
+        param($value) $value.hostBridge.windowsProcessStartTimeUtc = 'bad-time'
+      } },
+    @{ Name = 'string-owned'; Mutate = {
+        param($value) $value.faultProxy.owned = 'true'
+      } },
+    @{ Name = 'bridge-listen-mismatch'; Mutate = {
+        param($value) $value.hostBridge.listenPort = $value.ownedBridgePort + 10
+      } },
+    @{ Name = 'bridge-upstream-mismatch'; Mutate = {
+        param($value) $value.hostBridge.upstreamPort = $value.backendTargetPort + 10
+      } },
+    @{ Name = 'proxy-listen-mismatch'; Mutate = {
+        param($value) $value.faultProxy.listenPort = $value.faultProxyPort + 10
+      } },
+    @{ Name = 'proxy-upstream-mismatch'; Mutate = {
+        param($value) $value.faultProxy.upstreamPort = $value.ownedBridgePort + 10
+      } },
+    @{ Name = 'route-false'; Mutate = {
+        param($value) $value.routeValidation.ok = $false
+      } },
+    @{ Name = 'route-missing'; Mutate = {
+        param($value) $value.PSObject.Properties.Remove('routeValidation')
+      } },
+    @{ Name = 'route-fake-listener'; Mutate = {
+        param($value)
+        $value.routeValidation.expectedBackendIdentity = 'B'
+        $value.routeValidation.observedBackendIdentity = 'B'
+        $value.routeValidation.backend = 'B'
+      } },
+    @{ Name = 'route-unverified-identity'; Mutate = {
+        param($value)
+        $value.routeValidation.expectedBackendIdentity = 'C'
+        $value.routeValidation.observedBackendIdentity = 'C'
+        $value.routeValidation.backend = 'C'
+      } },
+    @{ Name = 'string-port'; Mutate = {
+        param($value) $value.backendTargetPort = '18080'
+      } },
+    @{ Name = 'port-out-of-range'; Mutate = {
+        param($value) $value.faultProxyPort = 65536
+      } },
+    @{ Name = 'port-negative'; Mutate = {
+        param($value) $value.ownedBridgePort = -1
+      } }
+  )
+  foreach ($networkCase in $aggregateNetworkCases) {
+    $invalidChild = $childFixture | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+    & $networkCase.Mutate $invalidChild.networkEvidence
+    $invalidChildPath = Join-Path $resolvedTempRoot "invalid-child-$($networkCase.Name).json"
+    $invalidChild | ConvertTo-Json -Depth 20 | Set-Content `
+      -LiteralPath $invalidChildPath `
+      -Encoding UTF8
+    $invalidAggregateReportPath = Join-Path $resolvedTempRoot "invalid-child-$($networkCase.Name)-report.json"
+    $invalidAggregateRecordPath = Join-Path $resolvedTempRoot "invalid-child-$($networkCase.Name)-commands.json"
+    Invoke-ExpectFailure `
+      -ExpectedExitCode 2 `
+      -Message "Aggregate malformed network '$($networkCase.Name)'." `
+      -Arguments @(
+        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $wrapper,
+        '-AndroidDevice', 'Medium_Phone_API_36.1', '-TestMode',
+        '-FixturePath', $fixturePath,
+        '-TestChildReportFixturePath', $invalidChildPath,
+        '-ReportPath', $invalidAggregateReportPath,
+        '-ArtifactRoot', (Join-Path $resolvedTempRoot "invalid-child-$($networkCase.Name)-artifacts"),
+        '-CommandRecordPath', $invalidAggregateRecordPath
+      ) | Out-Null
+    $invalidAggregate = Get-Content -LiteralPath $invalidAggregateReportPath -Raw |
+      ConvertFrom-Json
+    $invalidAggregateCommands = @(Get-Content -LiteralPath $invalidAggregateRecordPath -Raw |
+        ConvertFrom-Json | ForEach-Object { $_ })
+    Assert-Equal -Actual $invalidAggregate.ok -Expected $false -Message "Aggregate malformed network '$($networkCase.Name)' report."
+    Assert-Equal -Actual $invalidAggregate.failedStep -Expected 'validate-evidence' -Message "Aggregate malformed network '$($networkCase.Name)' gate."
+    Assert-Equal -Actual $invalidAggregate.cleanup.attempted -Expected $true -Message "Aggregate malformed network '$($networkCase.Name)' cleanup attempt."
+    Assert-Equal -Actual $invalidAggregate.cleanup.ok -Expected $true -Message "Aggregate malformed network '$($networkCase.Name)' cleanup result."
+    foreach ($cleanupCommand in @(
+        'restore-fault-proxy', 'restore-airplane-mode', 'restore-wifi',
+        'stop-owned-driver', 'stop-owned-fault-proxy'
+      )) {
+      Assert-True `
+        -Condition ($invalidAggregateCommands -contains $cleanupCommand) `
+        -Message "Aggregate malformed network '$($networkCase.Name)' omitted cleanup '$cleanupCommand'."
+    }
+  }
 
   $preExistingReportPath = Join-Path $resolvedTempRoot 'pre-existing-report.json'
   $preExistingRecordPath = Join-Path $resolvedTempRoot 'pre-existing-commands.json'
@@ -562,6 +772,7 @@ try {
     -Condition (($secretOutput -join ' ') -notmatch 'RIMS-RAW-SECRET-KEY') `
     -Message 'Raw idempotency key leaked to wrapper output.'
 } finally {
+  $env:RIMS_M11_TEST_CHILD_REPORT_FIXTURE = $previousChildFixture
   $candidate = [IO.Path]::GetFullPath($resolvedTempRoot)
   $tempBase = [IO.Path]::GetFullPath([IO.Path]::GetTempPath())
   if ($candidate.StartsWith($tempBase, [StringComparison]::OrdinalIgnoreCase) -and

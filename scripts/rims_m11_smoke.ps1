@@ -14,6 +14,8 @@ param(
   [string]$CommandRecordPath,
   [string]$TestFrontendCommit,
   [string]$TestBackendCommit,
+  [string]$TestChildReportFixturePath =
+    $env:RIMS_M11_TEST_CHILD_REPORT_FIXTURE,
   [switch]$TestPreExistingRuntime,
   [switch]$TestPreExistingEmulator,
   [ValidateSet(
@@ -74,6 +76,7 @@ if ($TestMode -and [string]::IsNullOrWhiteSpace($FixturePath)) {
 $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $scriptDir '..')).Path
 $androidWrapper = Join-Path $scriptDir 'rims_android_smoke.ps1'
+. (Join-Path $scriptDir 'lib\rims_network_evidence.ps1')
 $androidPlan = (& $androidWrapper `
     -ListPlan `
     -Phase 'offline-sync' `
@@ -144,6 +147,8 @@ $frontendCommit = $null
 $backendCommit = $null
 $reportedFrontendCommit = $null
 $reportedBackendCommit = $null
+$networkEvidence = $null
+$networkEvidenceErrors = @()
 $ownership = [pscustomobject][ordered]@{
   backendOwned = -not $TestPreExistingRuntime
   emulatorOwned = -not $TestPreExistingEmulator
@@ -417,6 +422,21 @@ function Get-M11CommitErrors {
   return @($errors)
 }
 
+function Get-M11NetworkValue {
+  param([string]$Name, $Fallback = $null)
+  if ($null -eq $script:networkEvidence) { return $Fallback }
+  $property = $script:networkEvidence.PSObject.Properties[$Name]
+  if ($null -eq $property) { return $Fallback }
+  return $property.Value
+}
+
+function Get-M11NetworkValueFromChild {
+  if ($null -eq $script:childReport) { return $null }
+  $property = $script:childReport.PSObject.Properties['networkEvidence']
+  if ($null -eq $property) { return $null }
+  return $property.Value
+}
+
 function Add-M11CleanupCommand([string]$Name) {
   Add-M11Command $Name
   if ($TestMode -and $Name -eq $TestCleanupFailStep) {
@@ -442,6 +462,12 @@ try {
     $reportedBackendCommit = if ([string]::IsNullOrWhiteSpace($TestBackendCommit)) {
       $backendCommit
     } else { $TestBackendCommit }
+    if (-not [string]::IsNullOrWhiteSpace($TestChildReportFixturePath)) {
+      $script:childReport = Get-Content `
+        -LiteralPath $TestChildReportFixturePath `
+        -Raw | ConvertFrom-Json -ErrorAction Stop
+      $script:networkEvidence = Get-M11NetworkValueFromChild
+    }
   }
   foreach ($scenario in $scenarioNames) {
     if ($firstExitCode -ne 0) { break }
@@ -489,6 +515,7 @@ try {
       $childBackendDir = [string]$script:childReport.backendDir
       $script:backendCommit = (& git -C $childBackendDir rev-parse HEAD 2>$null).Trim()
       $script:evidence = $script:childReport.e2e
+      $script:networkEvidence = Get-M11NetworkValueFromChild
       $script:ownership.backendOwned = [bool]$script:childReport.runtimeOwnedByRun
       $script:ownership.emulatorOwned = [bool]$script:childReport.emulator.owned
       $faultProxyProperty = $script:childReport.PSObject.Properties['faultProxy']
@@ -530,8 +557,20 @@ if (-not $cleanup.ok -and $firstExitCode -eq 0) {
   $failedStep = 'cleanup'
 }
 Add-M11Command 'validate-evidence'
+try {
+  [void](Assert-NetworkEvidence -Candidate $script:networkEvidence)
+  $script:networkEvidenceErrors = @()
+} catch {
+  if ($_.Exception.Data.Contains('Errors')) {
+    $script:networkEvidenceErrors = @($_.Exception.Data['Errors'])
+  } else {
+    $script:networkEvidenceErrors = @($_.Exception.Message)
+  }
+}
 $evidenceErrors = @(
-  @(Get-M11EvidenceErrors $evidence) + @(Get-M11CommitErrors)
+  @(Get-M11EvidenceErrors $evidence) +
+    @(Get-M11CommitErrors) +
+    @($script:networkEvidenceErrors)
 )
 if ($TestMode -and $FailStep -eq 'validate-evidence' -and $firstExitCode -eq 0) {
   $firstExitCode = 23
@@ -543,9 +582,18 @@ if ($TestMode -and $FailStep -eq 'validate-evidence' -and $firstExitCode -eq 0) 
 Add-M11Command 'write-report'
 
 $forbidden = $evidenceErrors -contains 'M11 evidence contains a forbidden secret or raw key field.'
-$networkReport = if (-not $TestMode -and $null -ne $script:childReport) {
-  $script:childReport
-} else { $plan }
+$networkBackendTargetPort = Get-M11NetworkValue `
+  -Name 'backendTargetPort' `
+  -Fallback $plan.backendTargetPort
+$networkOwnedBridgePort = Get-M11NetworkValue `
+  -Name 'ownedBridgePort' `
+  -Fallback $plan.ownedBridgePort
+$networkFaultProxyPort = Get-M11NetworkValue `
+  -Name 'faultProxyPort' `
+  -Fallback $plan.faultProxyPort
+$networkConnectionChain = Get-M11NetworkValue `
+  -Name 'connectionChain' `
+  -Fallback $plan.connectionChain
 $report = [pscustomobject][ordered]@{
   schemaVersion = 1
   target = 'android-m11'
@@ -556,11 +604,16 @@ $report = [pscustomobject][ordered]@{
   backendCommit = $backendCommit
   androidDevice = $AndroidDevice
   backendPort = $BackendPort
-  backendTargetPort = $networkReport.backendTargetPort
-  ownedBridgePort = $networkReport.ownedBridgePort
-  faultProxyPort = $networkReport.faultProxyPort
-  connectionChain = $networkReport.connectionChain
-  portOwnership = $networkReport.portOwnership
+  backendTargetPort = $networkBackendTargetPort
+  ownedBridgePort = $networkOwnedBridgePort
+  faultProxyPort = $networkFaultProxyPort
+  connectionChain = $networkConnectionChain
+  portOwnership = $plan.portOwnership
+  hostBridge = Get-M11NetworkValue -Name 'hostBridge'
+  faultProxy = Get-M11NetworkValue -Name 'faultProxy'
+  routeValidation = Get-M11NetworkValue -Name 'routeValidation'
+  networkEvidence = $script:networkEvidence
+  networkEvidenceErrors = @($script:networkEvidenceErrors)
   ownership = $ownership
   cleanup = $cleanup
   thresholds = $thresholds

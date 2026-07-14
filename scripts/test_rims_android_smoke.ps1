@@ -31,6 +31,64 @@ if (-not $windowsHealthAction.Success -or
     )) {
   throw 'Windows health action must probe the selected owned bridge port.'
 }
+
+function Test-StrictInteger {
+  param($Value)
+  return $Value -is [byte] -or $Value -is [sbyte] -or
+    $Value -is [int16] -or $Value -is [uint16] -or
+    $Value -is [int32] -or $Value -is [uint32] -or
+    $Value -is [int64] -or $Value -is [uint64]
+}
+
+function Assert-StrictNetworkEvidence {
+  param($Evidence, [string]$Message)
+  if ($null -eq $Evidence) { throw "$Message Network evidence is missing." }
+  foreach ($portName in @(
+      'backendTargetPort', 'ownedBridgePort', 'faultProxyPort'
+    )) {
+    $port = $Evidence.$portName
+    if (-not (Test-StrictInteger $port) -or $port -lt 1 -or $port -gt 65535) {
+      throw "$Message '$portName' is not a strict valid integer port."
+    }
+  }
+  if ($Evidence.backendTargetPort -eq $Evidence.faultProxyPort -or
+      $Evidence.ownedBridgePort -eq $Evidence.faultProxyPort) {
+    throw "$Message Fault proxy port overlaps its target or upstream."
+  }
+  foreach ($identityName in @('hostBridge', 'faultProxy')) {
+    $identity = $Evidence.$identityName
+    if ($null -eq $identity -or $identity.owned -isnot [bool] -or
+        -not $identity.owned -or
+        -not (Test-StrictInteger $identity.windowsPid) -or
+        $identity.windowsPid -le 0) {
+      throw "$Message '$identityName' identity is malformed."
+    }
+    $parsedStart = [DateTimeOffset]::MinValue
+    if ($identity.windowsProcessStartTimeUtc -isnot [string] -or
+        [string]::IsNullOrWhiteSpace($identity.windowsProcessStartTimeUtc) -or
+        -not [DateTimeOffset]::TryParse(
+          $identity.windowsProcessStartTimeUtc,
+          [ref]$parsedStart
+        )) {
+      throw "$Message '$identityName' start time is malformed."
+    }
+  }
+  Assert-Equal -Actual $Evidence.hostBridge.listenPort -Expected $Evidence.ownedBridgePort -Message "$Message host bridge listen port."
+  Assert-Equal -Actual $Evidence.hostBridge.upstreamPort -Expected $Evidence.backendTargetPort -Message "$Message host bridge upstream port."
+  Assert-Equal -Actual $Evidence.faultProxy.listenPort -Expected $Evidence.faultProxyPort -Message "$Message fault proxy listen port."
+  Assert-Equal -Actual $Evidence.faultProxy.upstreamPort -Expected $Evidence.ownedBridgePort -Message "$Message fault proxy upstream port."
+  $route = $Evidence.routeValidation
+  if ($null -eq $route -or $route.ok -isnot [bool] -or -not $route.ok -or
+      $route.proxyReachedVerifiedBackend -isnot [bool] -or
+      -not $route.proxyReachedVerifiedBackend -or
+      $route.unownedListenerReached -isnot [bool] -or
+      $route.unownedListenerReached -or
+      $route.expectedBackendIdentity -isnot [string] -or
+      $route.observedBackendIdentity -isnot [string] -or
+      $route.expectedBackendIdentity -cne $route.observedBackendIdentity) {
+    throw "$Message route validation is malformed or did not prove backend identity."
+  }
+}
 foreach ($resetEvidenceContract in @(
     'RIMS_M9_RESET_COUNTS',
     'Reset evidence must emit exactly one strict counts marker.',
@@ -535,6 +593,13 @@ $fixtureSource
     -M11CommandRecordPath $networkRecordPath
   Assert-Equal -Actual $LASTEXITCODE -Expected 23 -Message 'Owned network harness first failure.'
   $networkReport = Get-Content -LiteralPath $networkReportPath -Raw | ConvertFrom-Json
+  Assert-StrictNetworkEvidence `
+    -Evidence $networkReport.networkEvidence `
+    -Message 'Owned network report.'
+  Assert-Equal `
+    -Actual @($networkReport.networkEvidenceErrors).Count `
+    -Expected 0 `
+    -Message 'Owned network validator errors.'
   Assert-Equal -Actual $networkReport.backendTargetPort -Expected $occupiedBackendPort -Message 'Report backend target.'
   Assert-Equal -Actual $networkReport.ownedBridgePort -Expected $occupiedPlan.ownedBridgePort -Message 'Report owned bridge.'
   Assert-Equal -Actual $networkReport.faultProxyPort -Expected $networkFaultProxyPort -Message 'Report fault proxy.'
@@ -566,6 +631,109 @@ $fixtureSource
   }
   if (-not (Test-LoopbackPortClosed -Port $networkReport.faultProxyPort)) {
     throw 'Owned fault proxy listener remained after cleanup.'
+  }
+
+  $networkMutationCases = @(
+    @{ Name = 'missing-host-identity'; Mutate = {
+        param($value) $value.PSObject.Properties.Remove('hostBridge')
+      } },
+    @{ Name = 'missing-proxy-identity'; Mutate = {
+        param($value) $value.PSObject.Properties.Remove('faultProxy')
+      } },
+    @{ Name = 'zero-pid'; Mutate = {
+        param($value) $value.hostBridge.windowsPid = 0
+      } },
+    @{ Name = 'string-pid'; Mutate = {
+        param($value) $value.faultProxy.windowsPid = '1234'
+      } },
+    @{ Name = 'bad-start-time'; Mutate = {
+        param($value) $value.hostBridge.windowsProcessStartTimeUtc = 'not-a-time'
+      } },
+    @{ Name = 'string-owned'; Mutate = {
+        param($value) $value.faultProxy.owned = 'true'
+      } },
+    @{ Name = 'bridge-listen-mismatch'; Mutate = {
+        param($value) $value.hostBridge.listenPort = $value.ownedBridgePort + 10
+      } },
+    @{ Name = 'bridge-upstream-mismatch'; Mutate = {
+        param($value) $value.hostBridge.upstreamPort = $value.backendTargetPort + 10
+      } },
+    @{ Name = 'proxy-listen-mismatch'; Mutate = {
+        param($value) $value.faultProxy.listenPort = $value.faultProxyPort + 10
+      } },
+    @{ Name = 'proxy-upstream-mismatch'; Mutate = {
+        param($value) $value.faultProxy.upstreamPort = $value.ownedBridgePort + 10
+      } },
+    @{ Name = 'route-false'; Mutate = {
+        param($value) $value.routeValidation.ok = $false
+      } },
+    @{ Name = 'route-missing'; Mutate = {
+        param($value) $value.PSObject.Properties.Remove('routeValidation')
+      } },
+    @{ Name = 'route-fake-listener'; Mutate = {
+        param($value)
+        $value.routeValidation.expectedBackendIdentity = 'B'
+        $value.routeValidation.observedBackendIdentity = 'B'
+        $value.routeValidation.backend = 'B'
+      } },
+    @{ Name = 'route-unverified-identity'; Mutate = {
+        param($value)
+        $value.routeValidation.expectedBackendIdentity = 'C'
+        $value.routeValidation.observedBackendIdentity = 'C'
+        $value.routeValidation.backend = 'C'
+      } },
+    @{ Name = 'string-port'; Mutate = {
+        param($value) $value.backendTargetPort = '18080'
+      } },
+    @{ Name = 'port-out-of-range'; Mutate = {
+        param($value) $value.faultProxyPort = 65536
+      } },
+    @{ Name = 'port-negative'; Mutate = {
+        param($value) $value.ownedBridgePort = -1
+      } }
+  )
+  foreach ($networkCase in $networkMutationCases) {
+    $invalidNetwork = $networkReport.networkEvidence |
+      ConvertTo-Json -Depth 12 | ConvertFrom-Json
+    & $networkCase.Mutate $invalidNetwork
+    $invalidNetworkPath = Join-Path $tempRoot "network-$($networkCase.Name).json"
+    $invalidNetwork | ConvertTo-Json -Depth 12 | Set-Content `
+      -LiteralPath $invalidNetworkPath `
+      -Encoding UTF8
+    $invalidNetworkReportPath = Join-Path $tempRoot "network-$($networkCase.Name)-report.json"
+    $invalidNetworkRecordPath = Join-Path $tempRoot "network-$($networkCase.Name)-commands.json"
+    & $wrapper `
+      -AndroidDevice 'Medium_Phone_API_36.1' `
+      -Phase 'offline-sync' `
+      -BackendPort $occupiedBackendPort `
+      -FaultProxyPort $networkFaultProxyPort `
+      -TestMode `
+      -TestNetworkEvidenceFixturePath $invalidNetworkPath `
+      -ReportPath $invalidNetworkReportPath `
+      -ArtifactRoot (Join-Path $tempRoot "network-$($networkCase.Name)-artifacts") `
+      -M11CommandRecordPath $invalidNetworkRecordPath
+    Assert-Equal -Actual $LASTEXITCODE -Expected 2 -Message "Android malformed network '$($networkCase.Name)'."
+    $invalidNetworkReport = Get-Content -LiteralPath $invalidNetworkReportPath -Raw |
+      ConvertFrom-Json
+    $invalidNetworkCommands = @(Get-Content -LiteralPath $invalidNetworkRecordPath -Raw |
+        ConvertFrom-Json | ForEach-Object { $_ })
+    Assert-Equal -Actual $invalidNetworkReport.ok -Expected $false -Message "Android malformed network '$($networkCase.Name)' report."
+    Assert-Equal -Actual $invalidNetworkReport.failedStep -Expected 'validate-network-evidence' -Message "Android malformed network '$($networkCase.Name)' gate."
+    foreach ($cleanupResult in @(
+        $invalidNetworkReport.baselineRestore.ok,
+        $invalidNetworkReport.hostBridgeCleanup.ok,
+        $invalidNetworkReport.faultProxyCleanup.ok
+      )) {
+      Assert-Equal -Actual $cleanupResult -Expected $true -Message "Android malformed network '$($networkCase.Name)' cleanup."
+    }
+    foreach ($cleanupCommand in @(
+        'reset-fault-proxy', 'stop-owned-fault-proxy',
+        'stop-owned-host-bridge', 'reset-fixtures-final'
+      )) {
+      if (-not ($invalidNetworkCommands -contains $cleanupCommand)) {
+        throw "Android malformed network '$($networkCase.Name)' omitted cleanup '$cleanupCommand'."
+      }
+    }
   }
 
   $markerCases = @(

@@ -25,6 +25,7 @@ param(
   [switch]$TestFixtureBaselineMismatch,
   [switch]$TestBridgeFailure,
   [switch]$TestOwnedNetworkHarness,
+  [string]$TestNetworkEvidenceFixturePath,
   [string]$TestMarkerFixturePath,
   [ValidateSet('Result', 'Stage')]
   [string]$TestExpectedMarker = 'Result',
@@ -120,7 +121,8 @@ if ([string]::IsNullOrWhiteSpace($AndroidDevice)) {
 }
 if ($TestMode -and
     [string]::IsNullOrWhiteSpace($FailStep) -and
-    [string]::IsNullOrWhiteSpace($TestMarkerFixturePath)) {
+    [string]::IsNullOrWhiteSpace($TestMarkerFixturePath) -and
+    [string]::IsNullOrWhiteSpace($TestNetworkEvidenceFixturePath)) {
   throw 'TestMode requires an explicit FailStep.'
 }
 if ($TestMode -and
@@ -284,6 +286,7 @@ $appRoot = Join-Path $repoRoot 'rims_frontend'
 $localScript = Join-Path $scriptDir 'rims_local.ps1'
 $commonScript = Join-Path $scriptDir 'lib\rims_local_common.ps1'
 . $commonScript
+. (Join-Path $scriptDir 'lib\rims_network_evidence.ps1')
 
 $runtimePaths = Get-RimsRuntimePaths -ScriptDirectory $scriptDir
 $logRoot = $runtimePaths.logs
@@ -384,6 +387,8 @@ $artifactCollection = [pscustomobject][ordered]@{
 $faultProxyProcess = $null
 $faultProxyIdentity = $null
 $routeValidation = $null
+$networkEvidence = $null
+$networkEvidenceErrors = @()
 $m11Commands = [Collections.Generic.List[string]]::new()
 $initialAirplaneMode = $null
 $initialWifiEnabled = $null
@@ -504,6 +509,19 @@ function Invoke-Adb {
     -FilePath $adb `
     -Arguments $Arguments `
     -TimeoutSeconds $TimeoutSeconds
+}
+
+function New-AndroidNetworkEvidence {
+  return [pscustomobject][ordered]@{
+    backendTargetPort = $backendTargetPort
+    ownedBridgePort = $ownedBridgePort
+    faultProxyPort = $FaultProxyPort
+    connectionChain =
+      'emulator->owned-fault-proxy->owned-host-bridge->verified-wsl-backend'
+    hostBridge = $script:hostBridgeIdentity
+    faultProxy = $script:faultProxyIdentity
+    routeValidation = $script:routeValidation
+  }
 }
 
 function Resolve-RimsAndroidSmokeRuntimeDisposition {
@@ -1286,13 +1304,32 @@ $source
         -Uri "http://127.0.0.1:$FaultProxyPort/__rims_m11?action=status" `
         -TimeoutSec 2
       if ($status.ok -eq $true) {
-        if ($TestOwnedNetworkHarness) {
-          $script:routeValidation = Invoke-RestMethod `
-            -Uri "http://127.0.0.1:$FaultProxyPort/healthz" `
-            -TimeoutSec 3
-          if ($script:routeValidation.backend -ne 'A') {
-            throw 'Fault proxy did not route through the owned bridge to backend A.'
-          }
+        $health = Invoke-RestMethod `
+          -Uri "http://127.0.0.1:$FaultProxyPort/healthz" `
+          -TimeoutSec 3
+        $backendProperty = $health.PSObject.Properties['backend']
+        $observedIdentity = if ($null -ne $backendProperty -and
+            $backendProperty.Value -is [string] -and
+            ($TestOwnedNetworkHarness -or
+              $backendProperty.Value -cmatch '^(B|fake|unowned)$')) {
+          $backendProperty.Value
+        } else { 'verified-managed-wsl-runtime' }
+        $expectedIdentity = if ($TestOwnedNetworkHarness) {
+          'A'
+        } else { 'verified-managed-wsl-runtime' }
+        $script:routeValidation = [pscustomobject][ordered]@{
+          ok = $observedIdentity -ceq $expectedIdentity
+          proxyReachedVerifiedBackend = $observedIdentity -ceq $expectedIdentity
+          unownedListenerReached = $observedIdentity -cne $expectedIdentity
+          expectedBackendIdentity = $expectedIdentity
+          observedBackendIdentity = $observedIdentity
+          backend = $observedIdentity
+          backendTargetPort = $backendTargetPort
+          ownedBridgePort = $ownedBridgePort
+          faultProxyPort = $FaultProxyPort
+        }
+        if (-not $script:routeValidation.ok) {
+          throw 'Fault proxy did not route through the owned bridge to the verified backend.'
         }
         return
       }
@@ -2071,6 +2108,8 @@ function Write-AndroidReport {
     } else { 'emulator->backend' }
     portOwnership = $plan.portOwnership
     routeValidation = $script:routeValidation
+    networkEvidence = $script:networkEvidence
+    networkEvidenceErrors = @($script:networkEvidenceErrors)
     emulator = $script:emulatorIdentity
     fixtureCounts = $script:fixtureCounts
     e2e = $script:e2eData
@@ -2258,6 +2297,36 @@ try {
   Restore-AndroidBaseline
   if ($firstExitCode -ne 0 -and -not $artifactCollection.attempted) {
     Invoke-AndroidArtifactCollection
+  }
+}
+
+if ($Phase -eq 'offline-sync') {
+  try {
+    $script:networkEvidence = if (-not [string]::IsNullOrWhiteSpace(
+        $TestNetworkEvidenceFixturePath
+      )) {
+      Get-Content -LiteralPath $TestNetworkEvidenceFixturePath -Raw |
+        ConvertFrom-Json -ErrorAction Stop
+    } else {
+      New-AndroidNetworkEvidence
+    }
+    try {
+      [void](Assert-NetworkEvidence -Candidate $script:networkEvidence)
+      $script:networkEvidenceErrors = @()
+    } catch {
+      if ($_.Exception.Data.Contains('Errors')) {
+        $script:networkEvidenceErrors = @($_.Exception.Data['Errors'])
+      } else { throw }
+    }
+  } catch {
+    $script:networkEvidenceErrors = @(
+      "Network evidence could not be parsed: $($_.Exception.Message)"
+    )
+  }
+  if ($script:networkEvidenceErrors.Count -gt 0 -and
+      $script:firstExitCode -eq 0) {
+    $script:firstExitCode = 2
+    $script:failedStep = 'validate-network-evidence'
   }
 }
 
