@@ -1410,7 +1410,9 @@ Future<String> _singleStagedAttachmentHash() async {
   final files = <File>[];
   if (await stagingRoot.exists()) {
     await for (final entity in stagingRoot.list(recursive: true)) {
-      if (entity is File && !entity.path.contains('thumbnails')) {
+      if (entity is File &&
+          !entity.path.contains('thumbnails') &&
+          !entity.path.endsWith('manifest.json')) {
         files.add(entity);
       }
     }

@@ -372,6 +372,11 @@ try {
         'await expectText(tester, operationId);'
       )) `
     -Message 'Operation lookup must not wait passively after Sync Center is removed.'
+  Assert-True `
+    -Condition $integrationText.Contains(
+      "!entity.path.endsWith('manifest.json')"
+    ) `
+    -Message 'Physical attachment evidence must exclude the staging manifest.'
   $autosaveStart = $integrationText.IndexOf('final autosaveWatch = Stopwatch()..start();')
   $autosaveMutation = $integrationText.IndexOf(
     "const Key('document-remark-field')"
