@@ -871,6 +871,54 @@ void main() {
     },
   );
 
+  testWidgets(
+    'parent reachability rebuild updates the form outside the build phase',
+    (tester) async {
+      final reachability = ValueNotifier(NetworkReachability.online);
+      final viewModel = DocumentsViewModel();
+      final navigatorKey = GlobalKey<NavigatorState>();
+      addTearDown(reachability.dispose);
+      addTearDown(viewModel.dispose);
+
+      await tester.pumpWidget(
+        MaterialApp(
+          navigatorKey: navigatorKey,
+          home: ListenableBuilder(
+            listenable: reachability,
+            builder: (context, child) => Scaffold(
+              body: DocumentsPage(
+                viewModel: viewModel,
+                networkReachability: reachability.value,
+              ),
+            ),
+          ),
+        ),
+      );
+      final detailRoute = navigatorKey.currentState!.push<void>(
+        PageRouteBuilder<void>(
+          transitionDuration: Duration.zero,
+          reverseTransitionDuration: Duration.zero,
+          pageBuilder: (context, animation, secondaryAnimation) => Scaffold(
+            body: AnimatedBuilder(
+              animation: viewModel,
+              builder: (context, child) => const Text('详情'),
+            ),
+          ),
+        ),
+      );
+      await tester.pumpAndSettle();
+
+      reachability.value = NetworkReachability.unreachable;
+      await tester.pump();
+
+      expect(tester.takeException(), isNull);
+      expect(viewModel.canSubmitAuthoritatively, isFalse);
+      navigatorKey.currentState!.pop();
+      await tester.pumpAndSettle();
+      await detailRoute;
+    },
+  );
+
   testWidgets('create queue dialog rejects confirmation from an old scope', (
     tester,
   ) async {

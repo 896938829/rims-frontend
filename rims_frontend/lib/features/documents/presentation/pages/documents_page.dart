@@ -96,6 +96,7 @@ final class _DocumentsPageState extends State<DocumentsPage> {
   late final DocumentsViewModel viewModel;
   late final bool _ownsViewModel;
   StreamSubscription<GlobalRefreshRequestedEvent>? _refreshSubscription;
+  int _externalContextGeneration = 0;
 
   @override
   void initState() {
@@ -145,14 +146,7 @@ final class _DocumentsPageState extends State<DocumentsPage> {
   @override
   void didUpdateWidget(covariant DocumentsPage oldWidget) {
     super.didUpdateWidget(oldWidget);
-    viewModel.updateAllowedOutboxKinds(widget.allowedOutboxKinds);
-    viewModel.configureOfflineSubmissionContext(
-      contextReader: widget.outboxContextReader,
-      contextGenerationReader: widget.outboxContextGenerationReader,
-    );
-    if (widget.networkReachability case final reachability?) {
-      viewModel.updateNetworkReachability(reachability);
-    }
+    _scheduleExternalContextUpdate();
 
     if (widget.initialActionLabel != oldWidget.initialActionLabel) {
       _selectInitialAction();
@@ -172,12 +166,28 @@ final class _DocumentsPageState extends State<DocumentsPage> {
 
   @override
   void dispose() {
+    _externalContextGeneration += 1;
     unawaited(_refreshSubscription?.cancel());
     if (_ownsViewModel) {
       viewModel.dispose();
     }
 
     super.dispose();
+  }
+
+  void _scheduleExternalContextUpdate() {
+    final generation = ++_externalContextGeneration;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || generation != _externalContextGeneration) return;
+      viewModel.updateAllowedOutboxKinds(widget.allowedOutboxKinds);
+      viewModel.configureOfflineSubmissionContext(
+        contextReader: widget.outboxContextReader,
+        contextGenerationReader: widget.outboxContextGenerationReader,
+      );
+      if (widget.networkReachability case final reachability?) {
+        viewModel.updateNetworkReachability(reachability);
+      }
+    });
   }
 
   void _subscribeToRefreshEvents() {
