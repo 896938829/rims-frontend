@@ -450,14 +450,40 @@ void main() {
                 stagedAttachmentHash.toLowerCase();
         expect(serverAttachmentVerified, isTrue);
         await _closeDocumentDetail(tester);
-        await _fault('unreachable');
-        final beforeLifecycle = await _operations(outbox, accountId);
-        await _openDocumentDetail(tester, created.id);
+        await _prepareDraft(
+          tester,
+          documents,
+          sku: salesProductSku,
+          remark: remarks.lifecycle,
+          withAttachment: false,
+        );
         await scrollUntilVisible(
           tester,
-          Key('document-complete-${created.id}'),
+          const Key('document-create-button'),
+          scrollable: find.byKey(const Key('documents-scroll-view')),
         );
-        await tapAndSettle(tester, Key('document-complete-${created.id}'));
+        await tapAndSettle(tester, const Key('document-create-button'));
+        await waitUntil(
+          tester,
+          description: 'online lifecycle draft',
+          condition: () => documents.recentDocuments.any(
+            (document) => document.remark == remarks.lifecycle,
+          ),
+        );
+        final lifecycleDraft = documents.recentDocuments.singleWhere(
+          (document) => document.remark == remarks.lifecycle,
+        );
+        await _fault('unreachable');
+        final beforeLifecycle = await _operations(outbox, accountId);
+        await _openDocumentDetail(tester, lifecycleDraft.id);
+        await scrollUntilVisible(
+          tester,
+          Key('document-complete-${lifecycleDraft.id}'),
+        );
+        await tapAndSettle(
+          tester,
+          Key('document-complete-${lifecycleDraft.id}'),
+        );
         await expectText(tester, '完成单据');
         await tapFinderAndSettle(
           tester,
@@ -695,6 +721,7 @@ void main() {
           remarks.queued,
           remarks.unknown,
           remarks.attachment,
+          remarks.lifecycle,
         ];
         final successfulDocuments = successfulRemarks.map((remark) {
           return documents.recentDocuments.singleWhere(
@@ -714,7 +741,7 @@ void main() {
             .where((document) => document.remark == remarks.unknown)
             .length;
         final unknownTransactionCount = transactionCounts[unknownDocument.id]!;
-        const expectedStockDecrease = 3;
+        const expectedStockDecrease = 4;
         final observedStockDecrease = stockBefore - stockAfter;
         duplicateSingleEffect =
             serverDocumentCount == 1 &&
@@ -726,9 +753,9 @@ void main() {
         serverLifecycleVerified =
             documents.recentDocuments.any(
               (document) =>
-                  document.id == created.id && document.status == '已完成',
+                  document.id == lifecycleDraft.id && document.status == '已完成',
             ) &&
-            transactionCounts[created.id] == 1;
+            transactionCounts[lifecycleDraft.id] == 1;
         expect(serverLifecycleVerified, isTrue);
         final duplicateDocumentCount = successfulRemarks.fold<int>(0, (
           duplicates,
@@ -911,6 +938,7 @@ final class _JourneyRemarks {
   String get queued => 'M9-E2E:M11:$runId:queued';
   String get unknown => 'M9-E2E:M11:$runId:unknown';
   String get attachment => 'M9-E2E:M11:$runId:attachment';
+  String get lifecycle => 'M9-E2E:M11:$runId:lifecycle';
   String get conflict => 'M9-E2E:M11:$runId:conflict-discard';
   String get replacementConflict => 'M9-E2E:M11:$runId:conflict-replacement';
   String get staleContext => 'M9-E2E:M11:$runId:stale-context';
