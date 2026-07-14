@@ -21,6 +21,7 @@ import 'package:rims_frontend/features/offline/domain/services/offline_store.dar
 import 'package:rims_frontend/features/offline/presentation/pages/sync_center_page.dart';
 import 'package:rims_frontend/features/offline/presentation/view_models/sync_center_view_model.dart';
 import 'package:rims_frontend/features/reports/presentation/view_models/reports_view_model.dart';
+import 'package:rims_frontend/features/shell/presentation/pages/app_shell_page.dart';
 
 import 'support/m11_fault_control.dart';
 import 'support/m11_journey_fixtures.dart';
@@ -1067,10 +1068,24 @@ Future<void> _normalizeLoggedOutState(WidgetTester tester) async {
     },
   );
   if (find.byKey(const Key('bottom-nav-home')).evaluate().isEmpty) return;
-  await tapAndSettle(tester, const Key('bottom-nav-profile'));
-  await scrollUntilVisible(tester, const Key('profile-logout-button'));
-  await tapAndSettle(tester, const Key('profile-logout-button'));
-  await tapAndSettle(tester, const Key('profile-logout-delete-drafts'));
+  final shellFinder = find.byType(AppShellPage);
+  await waitUntil(
+    tester,
+    description: 'restored application shell',
+    condition: () => shellFinder.evaluate().isNotEmpty,
+  );
+  final shell = tester.widget<AppShellPage>(shellFinder.first);
+  final report = await shell.sessionController.logout(
+    authRepository: shell.authRepository,
+    draftRetention: DraftRetentionChoice.delete,
+  );
+  if (report != null && !report.completed) {
+    throw TestFailure(
+      'Unable to normalize the restored session: '
+      '${report.failures.map((failure) => failure.message).join('; ')}',
+    );
+  }
+  await settleBounded(tester);
   await waitForKey(tester, const Key('login-username-field'));
 }
 
