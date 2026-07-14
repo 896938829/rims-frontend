@@ -247,6 +247,7 @@ final class DocumentsViewModel extends ChangeNotifier {
   _PendingOfflineSubmission? _pendingOfflineSubmission;
   _PendingLifecycleSubmission? _pendingLifecycleSubmission;
   bool _offlineEnqueueInFlight = false;
+  Duration? _lastOutboxEnqueueDuration;
   Failure? _offlineSubmissionFailure;
   final Map<String, String> _lifecycleRequestIds = {};
 
@@ -383,6 +384,7 @@ final class DocumentsViewModel extends ChangeNotifier {
   String get quantityText => _quantityText;
   String get remark => _remark;
   String? get formError => _formError;
+  Duration? get lastOutboxEnqueueDuration => _lastOutboxEnqueueDuration;
   String? get errorMessage => _errorMessage;
   String? get transactionError => _transactionError;
   String? get documentActionError => _documentActionError;
@@ -1802,7 +1804,8 @@ final class DocumentsViewModel extends ChangeNotifier {
       return false;
     }
     if (!isOfflineSubmissionSnapshotCurrent(pending.snapshot)) return false;
-    final result = await outbox.enqueueGraph(
+    final result = await _enqueueOutboxGraph(
+      outbox,
       OutboxGraph(operations: operations, dependencies: dependencies),
     );
     if (result case FailureResult<List<OutboxOperation>>(:final failure)) {
@@ -1858,7 +1861,8 @@ final class DocumentsViewModel extends ChangeNotifier {
       return false;
     }
     if (!isOfflineSubmissionSnapshotCurrent(pending.snapshot)) return false;
-    final result = await outbox.enqueueGraph(
+    final result = await _enqueueOutboxGraph(
+      outbox,
       OutboxGraph(
         operations: operations,
         dependencies: {
@@ -1873,6 +1877,20 @@ final class DocumentsViewModel extends ChangeNotifier {
     _pendingLifecycleSubmission = null;
     _documentActionError = '已保存到待同步，请前往同步中心复核';
     return true;
+  }
+
+  Future<Result<List<OutboxOperation>>> _enqueueOutboxGraph(
+    OutboxRepository outbox,
+    OutboxGraph graph,
+  ) async {
+    _lastOutboxEnqueueDuration = null;
+    final watch = Stopwatch()..start();
+    try {
+      return await outbox.enqueueGraph(graph);
+    } finally {
+      watch.stop();
+      _lastOutboxEnqueueDuration = watch.elapsed;
+    }
   }
 
   AuthorizationFailure? _graphPermissionFailure(

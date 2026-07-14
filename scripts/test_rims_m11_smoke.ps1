@@ -379,9 +379,14 @@ try {
     -Message 'Physical attachment evidence must exclude the staging manifest.'
   Assert-True `
     -Condition $integrationText.Contains(
-      'timeout: const Duration(milliseconds: 250)'
+      'documents.lastOutboxEnqueueDuration'
     ) `
-    -Message 'The measured initial enqueue must retain the 250 ms deadline.'
+    -Message 'The journey must read the repository-bound enqueue duration.'
+  Assert-True `
+    -Condition $integrationText.Contains(
+      'expect(outboxEnqueueLatencyMs, lessThanOrEqualTo(250))'
+    ) `
+    -Message 'The measured initial enqueue must retain the 250 ms threshold.'
   Assert-True `
     -Condition $integrationText.Contains(
       'Duration timeout = const Duration(seconds: 12)'

@@ -822,6 +822,32 @@ void main() {
     expect(viewModel.remark, 'after');
   });
 
+  test(
+    'offline enqueue duration covers the repository write boundary',
+    () async {
+      final outbox = _ControlledEnqueueOutboxRepository(
+        MemoryOutboxRepository(stateMachine: OutboxStateMachine()),
+      );
+      final viewModel = _draftEnabledViewModel(
+        drafts: _FakeDocumentDraftRepository(),
+        documents: _FakeDocumentsRepository(),
+        outbox: outbox,
+        submissionStagingStore: _OutboxSubmissionStagingStore(),
+        networkReachability: NetworkReachability.offline,
+      )..addScannedProduct(_standardItem);
+      expect(await viewModel.prepareOfflineSubmission(), isTrue);
+
+      final enqueue = viewModel.confirmOfflineSubmission();
+      await outbox.enqueueStarted.future;
+
+      expect(viewModel.lastOutboxEnqueueDuration, isNull);
+
+      outbox.releaseEnqueue.complete();
+      expect(await enqueue, isTrue);
+      expect(viewModel.lastOutboxEnqueueDuration, isNotNull);
+    },
+  );
+
   testWidgets(
     'offline document form keeps draft and labels reviewed queue flow',
     (tester) async {
@@ -3540,6 +3566,25 @@ final class _CountingEnqueueOutboxRepository implements OutboxRepository {
   @override
   Future<Result<List<OutboxOperation>>> enqueueGraph(OutboxGraph graph) {
     enqueueGraphCalls += 1;
+    return delegate.enqueueGraph(graph);
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) =>
+      delegate.noSuchMethod(invocation);
+}
+
+final class _ControlledEnqueueOutboxRepository implements OutboxRepository {
+  _ControlledEnqueueOutboxRepository(this.delegate);
+
+  final OutboxRepository delegate;
+  final enqueueStarted = Completer<void>();
+  final releaseEnqueue = Completer<void>();
+
+  @override
+  Future<Result<List<OutboxOperation>>> enqueueGraph(OutboxGraph graph) async {
+    enqueueStarted.complete();
+    await releaseEnqueue.future;
     return delegate.enqueueGraph(graph);
   }
 

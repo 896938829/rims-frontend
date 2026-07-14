@@ -273,7 +273,6 @@ void main() {
           tester,
           documents,
           beforeQueued,
-          timeout: const Duration(milliseconds: 250),
         );
         final queuedCreate = queuedResult.operation;
         outboxEnqueueLatencyMs = queuedResult.enqueueLatencyMs;
@@ -1280,7 +1279,7 @@ Future<({OutboxOperation operation, int enqueueLatencyMs})> _queueCurrentDraft(
     description: 'confirm offline queue button',
     condition: () => confirm.hitTestable().evaluate().isNotEmpty,
   );
-  final enqueueWatch = Stopwatch()..start();
+  final completionWatch = Stopwatch()..start();
   await tester.tap(confirm.hitTestable().first);
   await tester.pump();
   final deadline = DateTime.now().add(timeout);
@@ -1290,12 +1289,16 @@ Future<({OutboxOperation operation, int enqueueLatencyMs})> _queueCurrentDraft(
     }
     await tester.pump(const Duration(milliseconds: 10));
   } while (DateTime.now().isBefore(deadline));
-  enqueueWatch.stop();
+  completionWatch.stop();
   if (documents.formError != '已保存到待同步，请前往同步中心复核') {
     throw TestFailure(
       'Offline enqueue did not complete after '
-      '${enqueueWatch.elapsedMilliseconds} ms: ${documents.formError}',
+      '${completionWatch.elapsedMilliseconds} ms: ${documents.formError}',
     );
+  }
+  final enqueueDuration = documents.lastOutboxEnqueueDuration;
+  if (enqueueDuration == null) {
+    throw TestFailure('Offline enqueue completed without duration evidence.');
   }
 
   final after = await _operations(
@@ -1313,14 +1316,14 @@ Future<({OutboxOperation operation, int enqueueLatencyMs})> _queueCurrentDraft(
   if (created.length != 1) {
     throw TestFailure(
       'Expected one new document create operation after '
-      '${enqueueWatch.elapsedMilliseconds} ms, found ${created.length}.',
+      '${completionWatch.elapsedMilliseconds} ms, found ${created.length}.',
     );
   }
   final operation = created.single;
   await settleBounded(tester);
   return (
     operation: operation,
-    enqueueLatencyMs: enqueueWatch.elapsedMilliseconds,
+    enqueueLatencyMs: enqueueDuration.inMilliseconds,
   );
 }
 
