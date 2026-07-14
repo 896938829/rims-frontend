@@ -17,6 +17,7 @@ final class ScannerPage extends StatefulWidget {
     required this.camera,
     this.onOpenSettings,
     this.returnSingleResult = false,
+    this.allowStaleSingleResult = false,
     super.key,
   });
 
@@ -25,6 +26,7 @@ final class ScannerPage extends StatefulWidget {
   final Widget camera;
   final VoidCallback? onOpenSettings;
   final bool returnSingleResult;
+  final bool allowStaleSingleResult;
 
   @override
   State<ScannerPage> createState() => _ScannerPageState();
@@ -102,7 +104,8 @@ final class _ScannerPageState extends State<ScannerPage>
         widget.viewModel.mode != ScanMode.single ||
         !widget.viewModel.isComplete ||
         widget.viewModel.lines.isEmpty ||
-        widget.viewModel.lines.single.isStale) {
+        (widget.viewModel.lines.single.isStale &&
+            !widget.allowStaleSingleResult)) {
       return;
     }
     _isReturning = true;

@@ -293,6 +293,72 @@ void main() {
     );
   });
 
+  testWidgets('single stale scan returns only when the caller opts in', (
+    tester,
+  ) async {
+    final harness = _Harness(
+      readStatus: InventoryReadStatus(
+        source: InventoryDataSource.cache,
+        fetchedAt: DateTime.utc(2026, 7, 13),
+        expiresAt: DateTime.utc(2026, 7, 14),
+      ),
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        initialRoute: '/scanner',
+        routes: {
+          '/': (_) => const Scaffold(body: Text('Document page')),
+          '/scanner': (_) => ScannerPage(
+            viewModel: harness.viewModel,
+            scanner: harness.scanner,
+            camera: const ColoredBox(color: Colors.black),
+            returnSingleResult: true,
+            allowStaleSingleResult: true,
+          ),
+        },
+      ),
+    );
+    await tester.pump();
+
+    harness.scanner.emit(_scan('303'));
+    await tester.pumpAndSettle();
+
+    expect(find.text('Document page'), findsOneWidget);
+  });
+
+  testWidgets('single stale scan stays on scanner by default', (tester) async {
+    final harness = _Harness(
+      readStatus: InventoryReadStatus(
+        source: InventoryDataSource.cache,
+        fetchedAt: DateTime.utc(2026, 7, 13),
+        expiresAt: DateTime.utc(2026, 7, 14),
+      ),
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        initialRoute: '/scanner',
+        routes: {
+          '/': (_) => const Scaffold(body: Text('Inventory page')),
+          '/scanner': (_) => ScannerPage(
+            viewModel: harness.viewModel,
+            scanner: harness.scanner,
+            camera: const ColoredBox(color: Colors.black),
+            returnSingleResult: true,
+          ),
+        },
+      ),
+    );
+    await tester.pump();
+
+    harness.scanner.emit(_scan('304'));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('scanner-page')), findsOneWidget);
+    expect(harness.viewModel.isComplete, isTrue);
+    expect(harness.viewModel.lines.single.item.productId, 304);
+    expect(harness.viewModel.lines.single.isStale, isTrue);
+  });
+
   testWidgets('single manual fallback returns to the requesting page', (
     tester,
   ) async {
@@ -392,8 +458,12 @@ final class _Harness {
   _Harness({
     List<Object>? startErrors,
     Completer<Result<InventoryItem>>? lookupResult,
+    InventoryReadStatus? readStatus,
   }) : scanner = _FakeScanner(startErrors: startErrors),
-       repository = _FakeInventoryRepository(lookupResult: lookupResult),
+       repository = _FakeInventoryRepository(
+         lookupResult: lookupResult,
+         readStatus: readStatus,
+       ),
        storage = _MemoryScanStorage() {
     viewModel = ScanSessionViewModel(
       inventoryRepository: repository,
@@ -473,11 +543,16 @@ final class _FakeScanner implements BarcodeScannerCapability {
   void emit(ScanData scan) => _scans.add(scan);
 }
 
-final class _FakeInventoryRepository implements InventoryRepository {
-  _FakeInventoryRepository({this.lookupResult});
+final class _FakeInventoryRepository
+    implements InventoryRepository, InventoryReadMetadata {
+  _FakeInventoryRepository({this.lookupResult, this.readStatus});
 
   final Completer<Result<InventoryItem>>? lookupResult;
+  final InventoryReadStatus? readStatus;
   final List<String> lookups = [];
+
+  @override
+  InventoryReadStatus? get lastReadStatus => readStatus;
 
   @override
   Future<Result<InventoryItem>> findProductByBarcode(String barcode) async {

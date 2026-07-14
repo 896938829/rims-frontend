@@ -215,7 +215,7 @@ final class _AppShellPageState extends State<AppShellPage> {
         canManageInventorySettings:
             widget.sessionController.currentUser?.isAdmin == true,
         eventBus: widget.eventBus,
-        onScanRequested: _openInventoryScanner,
+        onScanRequested: (context) => _openInventoryScanner(context),
         barcodeInputs: _wedgeBarcodes.stream,
       ),
       AppTab.documents => DocumentsPage(
@@ -231,7 +231,8 @@ final class _AppShellPageState extends State<AppShellPage> {
             widget.sessionController.currentUser?.isAdmin == true,
         initialActionLabel: _pendingDocumentActionLabel,
         requestScannerOnOpen: _pendingDocumentScanner,
-        onScanRequested: _openInventoryScanner,
+        onScanRequested: (context) =>
+            _openInventoryScanner(context, allowStaleSingleResult: true),
         eventBus: widget.eventBus,
         attachmentsRepository: widget.attachmentsRepository,
         attachmentPicker: widget.attachmentPicker,
@@ -303,7 +304,10 @@ final class _AppShellPageState extends State<AppShellPage> {
     );
   }
 
-  Future<InventoryItem?> _openInventoryScanner(BuildContext context) async {
+  Future<InventoryItem?> _openInventoryScanner(
+    BuildContext context, {
+    bool allowStaleSingleResult = false,
+  }) async {
     final repository = widget.inventoryRepository;
     final user = widget.sessionController.currentUser;
     final warehouse = widget.sessionController.currentWarehouse;
@@ -339,6 +343,7 @@ final class _AppShellPageState extends State<AppShellPage> {
             scanner: scanner,
             camera: camera,
             returnSingleResult: true,
+            allowStaleSingleResult: allowStaleSingleResult,
           ),
         ),
       );
