@@ -550,7 +550,7 @@ void main() {
         expect(attentionVisible, isTrue);
         await tapFinderAndSettle(
           tester,
-          find.byTooltip('丢弃记录').first,
+          find.byKey(ValueKey('sync-discard-${conflicted.operationId}')),
           description: 'discard conflicted operation',
         );
         await _waitForOperationRemoval(
@@ -603,7 +603,9 @@ void main() {
         );
         await tapFinderAndSettle(
           tester,
-          find.widgetWithText(TextButton, '解决冲突').first,
+          find.byKey(
+            ValueKey('sync-resolve-${replacementConflict.operationId}'),
+          ),
           description: 'open replacement conflict dialog',
         );
         await expectText(tester, '解决冲突');

@@ -255,6 +255,7 @@ final class _OperationList extends StatelessWidget {
       itemBuilder: (context, index) {
         final operation = operations[index];
         return _OperationRow(
+          key: ValueKey('sync-operation-${operation.operationId}'),
           operation: operation,
           permissionBlocked: viewModel.isPermissionBlocked(
             operation.operationId,
@@ -280,6 +281,7 @@ final class _OperationList extends StatelessWidget {
 
 final class _OperationRow extends StatelessWidget {
   const _OperationRow({
+    super.key,
     required this.operation,
     required this.permissionBlocked,
     required this.selected,
@@ -370,12 +372,14 @@ final class _OperationRow extends StatelessWidget {
                       ),
                     if (operation.state == OutboxState.conflict)
                       TextButton.icon(
+                        key: ValueKey('sync-resolve-${operation.operationId}'),
                         onPressed: busy ? null : onResolve,
                         icon: const Icon(Icons.call_split, size: 17),
                         label: const Text('解决冲突'),
                       ),
                     if (canDiscard)
                       IconButton(
+                        key: ValueKey('sync-discard-${operation.operationId}'),
                         tooltip: '丢弃记录',
                         onPressed: busy ? null : onDiscard,
                         icon: const Icon(Icons.delete_outline, size: 19),
