@@ -191,7 +191,7 @@ void main() {
             const Key('document-remark-field'),
             remarks.queued,
           );
-          final autosavePumpedMs = await _waitForPersistedDraft(
+          draftSaveLatencyMs = await _waitForPersistedDraft(
             tester,
             documents,
             accountId: accountId,
@@ -200,15 +200,11 @@ void main() {
           autosaveWatch.stop();
           draftAutosaveEndToEndMs = _max(
             autosaveWatch.elapsedMilliseconds,
-            autosavePumpedMs,
+            draftAutosaveDebounceMs + draftSaveLatencyMs,
           );
           expect(
             draftAutosaveEndToEndMs,
             greaterThanOrEqualTo(draftAutosaveDebounceMs),
-          );
-          draftSaveLatencyMs = _max(
-            0,
-            draftAutosaveEndToEndMs - draftAutosaveDebounceMs,
           );
           expect(draftSaveLatencyMs, lessThanOrEqualTo(250));
           autosaveCompleted = true;
@@ -878,14 +874,14 @@ Future<int> _waitForPersistedDraft(
   final deadline = DateTime.now().add(const Duration(seconds: 2));
   const debounce = Duration(milliseconds: 300);
   await tester.pump(debounce);
-  var pumpedMs = debounce.inMilliseconds;
+  final persistenceWatch = Stopwatch()..start();
   do {
     final drafts = await documents.draftRepository!.list(accountId);
     if (drafts.any((draft) => draft.payload['remark'] == remark)) {
-      return pumpedMs;
+      persistenceWatch.stop();
+      return persistenceWatch.elapsedMilliseconds;
     }
     await tester.pump(const Duration(milliseconds: 10));
-    pumpedMs += 10;
   } while (DateTime.now().isBefore(deadline));
   throw TestFailure('Debounced autosave did not persist the M11 draft.');
 }
