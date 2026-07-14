@@ -1105,6 +1105,93 @@ LIMIT 1
   }
 
   @override
+  Future<Result<List<OutboxOperation>>> discardComponent({
+    required String accountId,
+    required String operationId,
+  }) async {
+    try {
+      return await database.transaction(() async {
+        final operationRows =
+            await (database.select(database.offlineOutboxOperations)
+                  ..where((row) => row.accountId.equals(accountId))
+                  ..orderBy([
+                    (row) => OrderingTerm.asc(row.createdAt),
+                    (row) => OrderingTerm.asc(row.operationId),
+                  ]))
+                .get();
+        final accountOperationIds = operationRows
+            .map((row) => row.operationId)
+            .toSet();
+        if (!accountOperationIds.contains(operationId)) {
+          return const FailureResult(
+            NotFoundFailure(message: 'Offline operation not found.'),
+          );
+        }
+        final edgeRows = await (database.select(
+          database.offlineOutboxDependencies,
+        )..where((row) => row.operationId.isIn(accountOperationIds))).get();
+        final dependencies = <String, Set<String>>{};
+        for (final edge in edgeRows) {
+          if (!accountOperationIds.contains(edge.dependencyId)) continue;
+          dependencies
+              .putIfAbsent(edge.operationId, () => <String>{})
+              .add(edge.dependencyId);
+        }
+        final componentIds = _connectedOperationIds(
+          accountOperationIds,
+          dependencies,
+          {operationId},
+        );
+        final component = operationRows
+            .where((row) => componentIds.contains(row.operationId))
+            .map(_toDomainOperation)
+            .toList(growable: false);
+        if (component.any((operation) => !_isTerminal(operation.state))) {
+          return const FailureResult(
+            StateFailure(
+              message: 'Only fully completed offline work can be discarded.',
+            ),
+          );
+        }
+        await (database.delete(database.offlineOutboxResolutions)..where(
+              (row) =>
+                  row.originalOperationId.isIn(componentIds) |
+                  row.replacementOperationId.isIn(componentIds),
+            ))
+            .go();
+        await (database.delete(database.offlineOutboxDependencies)..where(
+              (row) =>
+                  row.operationId.isIn(componentIds) |
+                  row.dependencyId.isIn(componentIds),
+            ))
+            .go();
+        await (database.delete(database.offlineOutboxOperations)..where(
+              (row) =>
+                  row.accountId.equals(accountId) &
+                  row.operationId.isIn(componentIds),
+            ))
+            .go();
+        return Success(List.unmodifiable(component));
+      });
+    } on StateError catch (error) {
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to discard offline dependency component.',
+          cause: error,
+        ),
+      );
+    } on Exception catch (error) {
+      if (!_isStorageException(error)) rethrow;
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to discard offline dependency component.',
+          cause: error,
+        ),
+      );
+    }
+  }
+
+  @override
   Future<Result<OutboxOperation>> resolveConflict({
     required String accountId,
     required String conflictedOperationId,

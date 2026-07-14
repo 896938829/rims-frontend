@@ -838,6 +838,31 @@ void main() {
       );
     },
   );
+
+  test('discard removes a fully terminal dependency component', () async {
+    await repository.enqueueGraph(
+      OutboxGraph(
+        operations: [
+          _operation('conflicted-root'),
+          _operation(
+            'cancelled-child',
+            kind: OutboxOperationKind.documentComplete,
+          ),
+        ],
+        dependencies: const {
+          'cancelled-child': {'conflicted-root'},
+        },
+      ),
+    );
+    await transition('conflicted-root', OutboxState.syncing);
+    await transition('conflicted-root', OutboxState.conflict);
+    await viewModel.load();
+
+    await viewModel.discard('conflicted-root');
+
+    expect((await repository.list('7')).dataOrNull, isEmpty);
+    expect(viewModel.commandFailure, isNull);
+  });
 }
 
 OutboxOperation _operation(
@@ -1021,6 +1046,13 @@ final class _DeferredRepository implements OutboxRepository {
     required String accountId,
     required String operationId,
   }) => delegate.discard(accountId: accountId, operationId: operationId);
+
+  @override
+  Future<Result<List<OutboxOperation>>> discardComponent({
+    required String accountId,
+    required String operationId,
+  }) =>
+      delegate.discardComponent(accountId: accountId, operationId: operationId);
 
   @override
   Future<Result<OutboxOperation>> resolveConflict({

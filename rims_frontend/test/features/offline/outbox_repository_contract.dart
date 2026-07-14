@@ -779,6 +779,72 @@ void runOutboxRepositoryContract(String name, OutboxHarnessFactory create) {
     });
 
     test(
+      'discardComponent atomically removes only a fully terminal graph',
+      () async {
+        await repository.enqueueGraph(
+          OutboxGraph(
+            operations: [
+              _operation('discard-root', clock.value),
+              _operation(
+                'discard-child',
+                clock.value,
+                kind: OutboxOperationKind.documentComplete,
+              ),
+            ],
+            dependencies: const {
+              'discard-child': {'discard-root'},
+            },
+          ),
+        );
+        await repository.transition(
+          accountId: '7',
+          operationId: 'discard-root',
+          next: OutboxState.syncing,
+        );
+        await repository.transition(
+          accountId: '7',
+          operationId: 'discard-root',
+          next: OutboxState.conflict,
+        );
+
+        final discarded = await repository.discardComponent(
+          accountId: '7',
+          operationId: 'discard-root',
+        );
+
+        expect(
+          discarded.successData.map((operation) => operation.operationId),
+          unorderedEquals(['discard-root', 'discard-child']),
+        );
+        expect((await repository.list('7')).successData, isEmpty);
+
+        await repository.enqueueGraph(
+          OutboxGraph(
+            operations: [
+              _operation('active-root', clock.value),
+              _operation(
+                'active-child',
+                clock.value,
+                kind: OutboxOperationKind.documentComplete,
+              ),
+            ],
+            dependencies: const {
+              'active-child': {'active-root'},
+            },
+          ),
+        );
+        expect(
+          await repository.discardComponent(
+            accountId: '7',
+            operationId: 'active-root',
+          ),
+          isA<FailureResult<List<OutboxOperation>>>(),
+        );
+        expect((await repository.list('7')).successData, hasLength(2));
+      },
+    );
+
+    test(
       'prune retains an expired succeeded parent output while its child is active',
       () async {
         final old = initialTime.subtract(const Duration(days: 31));

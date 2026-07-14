@@ -668,6 +668,18 @@ final class WriteBarrierOutboxRepository implements OutboxRepository {
   );
 
   @override
+  Future<Result<List<OutboxOperation>>> discardComponent({
+    required String accountId,
+    required String operationId,
+  }) => _write(
+    accountId,
+    () => delegate.discardComponent(
+      accountId: accountId,
+      operationId: operationId,
+    ),
+  );
+
+  @override
   Future<Result<OutboxOperation>> resolveConflict({
     required String accountId,
     required String conflictedOperationId,

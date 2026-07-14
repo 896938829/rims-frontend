@@ -579,6 +579,54 @@ final class MemoryOutboxRepository implements OutboxRepository {
   }
 
   @override
+  Future<Result<List<OutboxOperation>>> discardComponent({
+    required String accountId,
+    required String operationId,
+  }) async {
+    final operation = _operations[operationId];
+    if (operation == null || operation.accountId != accountId) {
+      return const FailureResult(
+        NotFoundFailure(message: 'Offline operation not found.'),
+      );
+    }
+    final accountOperationIds = _operations.values
+        .where((item) => item.accountId == accountId)
+        .map((item) => item.operationId)
+        .toSet();
+    final componentIds = _connectedOperationIds(
+      accountOperationIds,
+      _dependencies,
+      {operationId},
+    );
+    final component =
+        componentIds.map((id) => _operations[id]!).toList(growable: false)
+          ..sort(_compareOperations);
+    if (component.any((item) => !_isTerminal(item.state))) {
+      return const FailureResult(
+        StateFailure(
+          message: 'Only fully completed offline work can be discarded.',
+        ),
+      );
+    }
+    _replacementByOriginal.removeWhere(
+      (original, replacement) =>
+          componentIds.contains(original) || componentIds.contains(replacement),
+    );
+    for (final id in componentIds) {
+      _operations.remove(id);
+      _dependencies.remove(id);
+      _payloadFingerprintByOperation.remove(id);
+      _cleanupIntents.remove(id);
+    }
+    _dependencies.updateAll(
+      (_, dependencies) => Set.unmodifiable(
+        dependencies.where((id) => !componentIds.contains(id)),
+      ),
+    );
+    return Success(List.unmodifiable(component));
+  }
+
+  @override
   Future<Result<OutboxOperation>> resolveConflict({
     required String accountId,
     required String conflictedOperationId,

@@ -330,16 +330,35 @@ final class SyncCenterViewModel extends ChangeNotifier {
   }
 
   Future<void> discard(String operationId) async {
-    final applied = await _mutateVisible(
-      operationId,
-      (context) => repository.discard(
-        accountId: context.accountId,
+    if (!_beginCommand()) return;
+    final snapshot = _commandSnapshot();
+    final operation = _find(operationId);
+    if (snapshot == null ||
+        operation == null ||
+        !_isAllowed(snapshot.context, operation)) {
+      _rejectScope();
+      _endCommand();
+      return;
+    }
+    try {
+      final result = await repository.discardComponent(
+        accountId: snapshot.context.accountId,
         operationId: operationId,
-      ),
-    );
-    if (!applied) return;
-    _reviewedOperationIds.remove(operationId);
-    _selectedOperationIds.remove(operationId);
+      );
+      if (!_acceptResult(snapshot.generation, snapshot.context)) return;
+      if (result case FailureResult<List<OutboxOperation>>(:final failure)) {
+        _commandFailure = failure;
+      } else {
+        final discardedIds = (result as Success<List<OutboxOperation>>).data
+            .map((item) => item.operationId)
+            .toSet();
+        _reviewedOperationIds.removeAll(discardedIds);
+        _selectedOperationIds.removeAll(discardedIds);
+      }
+      await _load(snapshot.generation, snapshot.context);
+    } finally {
+      _endCommand();
+    }
   }
 
   Future<void> resolveConflict(

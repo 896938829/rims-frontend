@@ -91,6 +91,11 @@ abstract interface class OutboxRepository {
     required String operationId,
   });
 
+  Future<Result<List<OutboxOperation>>> discardComponent({
+    required String accountId,
+    required String operationId,
+  });
+
   Future<Result<OutboxOperation>> resolveConflict({
     required String accountId,
     required String conflictedOperationId,
