@@ -474,7 +474,7 @@ function Invoke-WslBackendCommand {
   $execution = Invoke-RimsExternalCommand `
     -FilePath 'wsl.exe' `
     -Arguments (@(
-        '--cd', $BackendDir, 'bash', '-lc', $Command, 'rims-android-smoke'
+        '--cd', $BackendDir, '-e', 'bash', '-lc', $Command, 'rims-android-smoke'
       ) + $CommandArguments) `
     -TimeoutSeconds 600
   if ($execution.ExitCode -ne 0) {

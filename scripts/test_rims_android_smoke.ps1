@@ -23,6 +23,16 @@ $androidWrapperText = Get-Content -LiteralPath $wrapper -Raw
 if ($androidWrapperText.Contains("Join-Path `$PSHOME 'powershell.exe'")) {
   throw 'Android smoke must launch child processes with the current PowerShell host.'
 }
+foreach ($wslWrapper in @(
+    [pscustomobject]@{ Name = 'Web'; Text = $webWrapperText },
+    [pscustomobject]@{ Name = 'Android'; Text = $androidWrapperText }
+  )) {
+  if (-not $wslWrapper.Text.Contains(
+      "'--cd', `$BackendDir, '-e', 'bash', '-lc'"
+    )) {
+    throw "$($wslWrapper.Name) WSL backend command must use explicit exec mode."
+  }
+}
 foreach ($healthRetryContract in @(
     'for ($attempt = 1; $attempt -le 5; $attempt += 1)',
     'Start-Sleep -Milliseconds 500'

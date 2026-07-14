@@ -309,7 +309,7 @@ function Invoke-WslBackendCommand {
   $execution = Invoke-RimsExternalCommand `
     -FilePath 'wsl.exe' `
     -Arguments (@(
-        '--cd', $BackendDir, 'bash', '-lc', $Command, 'rims-web-e2e'
+        '--cd', $BackendDir, '-e', 'bash', '-lc', $Command, 'rims-web-e2e'
       ) + $CommandArguments) `
     -TimeoutSeconds 600
   if (-not [string]::IsNullOrWhiteSpace($LogPath)) {
