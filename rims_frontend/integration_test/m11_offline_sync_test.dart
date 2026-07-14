@@ -1359,16 +1359,37 @@ Future<({OutboxOperation operation, int enqueueLatencyMs})> _queueCurrentDraft(
   List<OutboxOperation> before, {
   Duration timeout = const Duration(seconds: 12),
 }) async {
+  final submitButton = find.byKey(const Key('document-create-button'));
+  await waitUntil(
+    tester,
+    description: 'offline draft submission readiness',
+    timeout: timeout,
+    condition: () =>
+        !documents.canSubmitAuthoritatively &&
+        !documents.isSubmitting &&
+        !documents.isAttachmentMutationInProgress,
+  );
   await scrollUntilVisible(
     tester,
     const Key('document-create-button'),
     scrollable: find.byKey(const Key('documents-scroll-view')),
+    timeout: timeout,
   );
-  await tapAndSettle(tester, const Key('document-create-button'));
-  if (find.text('保存到待同步').evaluate().isEmpty) {
-    await waitForKey(tester, const Key('document-create-button'));
-    await tapAndSettle(tester, const Key('document-create-button'));
-  }
+  await waitUntil(
+    tester,
+    description: 'enabled offline draft submission button',
+    timeout: timeout,
+    condition: () {
+      final hitTarget = submitButton.hitTestable();
+      return !documents.canSubmitAuthoritatively &&
+          !documents.isSubmitting &&
+          !documents.isAttachmentMutationInProgress &&
+          hitTarget.evaluate().length == 1 &&
+          tester.widget<FilledButton>(submitButton).onPressed != null;
+    },
+  );
+  await tester.tap(submitButton.hitTestable().first);
+  await settleBounded(tester, timeout: timeout);
   await expectText(tester, '保存到待同步');
   final confirm = find.widgetWithText(FilledButton, '确认保存');
   await waitUntil(
