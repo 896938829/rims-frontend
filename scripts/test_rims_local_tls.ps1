@@ -171,6 +171,46 @@ try {
     -Actual $httpWebLaunch.arguments[$httpWebDeviceIndex + 1] `
     -Expected 'web-server' `
     -Message 'Legacy local HTTP Web launch no longer uses its explicit web-server device.'
+
+  $edgeOnlyDevices = @(
+    [pscustomobject]@{ id = 'edge'; targetPlatform = 'web-javascript' }
+  ) | ConvertTo-Json -Compress
+  $edgeOnlyDoctor = Test-RimsWebDeviceComponent `
+    -FlutterExecutable 'fake-flutter' `
+    -Required $true `
+    -RequiredDeviceId 'chrome' `
+    -DeviceQueryAction {
+      param($flutter)
+      return [pscustomobject]@{
+        ExitCode = 0
+        StandardOutput = $edgeOnlyDevices
+        StandardError = ''
+      }
+    }
+  Assert-False `
+    -Value $edgeOnlyDoctor.ok `
+    -Message 'TLS Web doctor accepted Edge without Flutter device ID chrome.'
+  $chromeDoctor = Test-RimsWebDeviceComponent `
+    -FlutterExecutable 'fake-flutter' `
+    -Required $true `
+    -RequiredDeviceId 'chrome' `
+    -DeviceQueryAction {
+      param($flutter)
+      return [pscustomobject]@{
+        ExitCode = 0
+        StandardOutput = (@(
+            [pscustomobject]@{ id = 'chrome'; targetPlatform = 'web-javascript' }
+          ) | ConvertTo-Json -Compress)
+        StandardError = ''
+      }
+    }
+  Assert-True `
+    -Value $chromeDoctor.ok `
+    -Message 'TLS Web doctor rejected Flutter device ID chrome.'
+  $doctorSource = [IO.File]::ReadAllText((Join-Path $scriptDir 'lib\rims_local_doctor.ps1'))
+  Assert-True `
+    -Value $doctorSource.Contains("if (`$UseLocalTls -and `$Target -eq 'web') { 'chrome' }") `
+    -Message 'Doctor does not request Chrome specifically for TLS Web.'
   $androidLaunch = New-FlutterLaunchSpec `
     -Target android `
     -FrontendDirectory (Join-Path $workspaceA 'rims_frontend') `
@@ -473,6 +513,84 @@ try {
     -Expected $proxy.state.windowsPid `
     -Message 'Proxy stop failure lost PID ownership state.'
 
+  $startThrow = Start-RimsLocalTlsProxy `
+    -TlsPaths $pathsA `
+    -BackendPort 8080 `
+    -TlsPort 8443 `
+    -PortListeningAction { param($port) return $false } `
+    -StartProcessAction { param($spec) throw 'fake start throw' }
+  Assert-False -Value $startThrow.ok -Message 'Proxy start throw escaped or was hidden.'
+  Assert-False `
+    -Value $startThrow.cleanupPending `
+    -Message 'Proxy start throw without identity invented owned cleanup state.'
+
+  foreach ($throwStage in @('readiness', 'ownership')) {
+    $throwStopCalls = 0
+    $proxyStageThrow = Start-RimsLocalTlsProxy `
+      -TlsPaths $pathsA `
+      -BackendPort 8080 `
+      -TlsPort 8443 `
+      -PortListeningAction { param($port) return $false } `
+      -StartProcessAction {
+        param($spec)
+        return [pscustomobject]@{
+          windowsPid = $proxy.state.windowsPid
+          windowsProcessStartTimeUtc = $proxy.state.windowsProcessStartTimeUtc
+          commandLine = $spec.commandLine
+        }
+      } `
+      -ReadinessAction {
+        param($state)
+        if ($throwStage -eq 'readiness') { throw 'fake readiness throw' }
+        return $true
+      } `
+      -PortOwnershipAction {
+        param($port, $processId)
+        if ($throwStage -eq 'ownership') { throw 'fake ownership throw' }
+        return $true
+      } `
+      -StopAction {
+        param($state)
+        $script:throwStopCalls++
+        return [pscustomobject]@{ ok = $true; detail = 'stopped' }
+      }
+    Assert-False `
+      -Value $proxyStageThrow.ok `
+      -Message "Proxy $throwStage throw escaped or was hidden."
+    Assert-Equal `
+      -Actual $throwStopCalls `
+      -Expected 1 `
+      -Message "Proxy $throwStage throw did not stop the obtained identity."
+    Assert-False `
+      -Value $proxyStageThrow.cleanupPending `
+      -Message "Proxy $throwStage throw remained pending after successful stop."
+  }
+
+  $stopThrowPending = Start-RimsLocalTlsProxy `
+    -TlsPaths $pathsA `
+    -BackendPort 8080 `
+    -TlsPort 8443 `
+    -PortListeningAction { param($port) return $false } `
+    -StartProcessAction {
+      param($spec)
+      return [pscustomobject]@{
+        windowsPid = $proxy.state.windowsPid
+        windowsProcessStartTimeUtc = $proxy.state.windowsProcessStartTimeUtc
+        commandLine = $spec.commandLine
+      }
+    } `
+    -ReadinessAction { param($state) return $false } `
+    -PortOwnershipAction { param($port, $processId) return $true } `
+    -StopAction { param($state) throw 'fake stop throw' }
+  Assert-False -Value $stopThrowPending.ok -Message 'Proxy stop throw escaped.'
+  Assert-True `
+    -Value $stopThrowPending.cleanupPending `
+    -Message 'Proxy stop throw did not retain obtained identity.'
+  Assert-Equal `
+    -Actual $stopThrowPending.state.windowsPid `
+    -Expected $proxy.state.windowsPid `
+    -Message 'Proxy stop throw lost full ownership state.'
+
   $ownedEmulator = [pscustomobject]@{
     serial = 'emulator-5556'
     avdName = 'Medium_Phone_API_36.1'
@@ -518,13 +636,13 @@ try {
     -Message 'Controller-installed Android CA removal failed.'
   Assert-Equal `
     -Actual ($adbCalls -join '|') `
-    -Expected "root|shell test -f $($installed.state.remotePath)|pull $($installed.state.remotePath) $($pathsA.root)\android-remove-ca.pem|shell rm -f $($installed.state.remotePath)" `
+    -Expected "root|shell test -f $($installed.state.remotePath)|pull $($installed.state.remotePath) $($pathsA.root)\android-remove-ca.pem|shell rm -f $($installed.state.remotePath)|shell rm -f $($installed.state.temporaryPath)" `
     -Message 'Owned Android CA removal did not verify and remove the exact recorded certificate.'
   Assert-True `
     -Value (-not (Test-Path -LiteralPath (Join-Path $pathsA.root 'android-remove-ca.pem'))) `
     -Message 'Android CA removal left its temporary pulled certificate.'
   Assert-True `
-    -Value $adbCalls[$adbCalls.Count - 1].Contains($installed.state.remotePath) `
+    -Value (@($adbCalls) -contains "shell rm -f $($installed.state.remotePath)") `
     -Message 'Owned Android CA removal did not use the exact recorded path.'
 
   $adbCalls.Clear()
@@ -693,6 +811,162 @@ try {
     -Expected $ownedEmulator.serial `
     -Message 'Android compensation failure lost the exact emulator serial.'
 
+  foreach ($tamperedField in @('subjectHash', 'remotePath', 'temporaryPath')) {
+    $tamperedTrust = [pscustomobject][ordered]@{}
+    foreach ($property in $failedCompensation.state.PSObject.Properties) {
+      $tamperedTrust | Add-Member `
+        -MemberType NoteProperty `
+        -Name $property.Name `
+        -Value $property.Value
+    }
+    if ($tamperedField -eq 'subjectHash') {
+      $tamperedTrust.subjectHash = '../bad'
+    } elseif ($tamperedField -eq 'remotePath') {
+      $tamperedTrust.remotePath = '/data/misc/user/0/cacerts-added/evil.0'
+    } else {
+      $tamperedTrust.temporaryPath = '/data/local/tmp/other.pem'
+    }
+    $tamperedAdbCalls = 0
+    $tamperedRemoval = Remove-RimsAndroidUserCa `
+      -TrustState $tamperedTrust `
+      -EmulatorState $ownedEmulator `
+      -TlsPaths $pathsA `
+      -EmulatorOwnershipAction { param($state) return $true } `
+      -AdbAction {
+        param($serial, $arguments)
+        $script:tamperedAdbCalls++
+        return [pscustomobject]@{ exitCode = 0; stdout = ''; stderr = '' }
+      }
+    Assert-False `
+      -Value $tamperedRemoval.ok `
+      -Message "Android cleanup accepted tampered $tamperedField state."
+    Assert-Equal `
+      -Actual $tamperedAdbCalls `
+      -Expected 0 `
+      -Message "Tampered $tamperedField state reached root/ADB."
+  }
+
+  $partialRetryCalls = New-Object 'Collections.Generic.List[string]'
+  $partialRetry = Remove-RimsAndroidUserCa `
+    -TrustState $failedCompensation.state `
+    -EmulatorState $ownedEmulator `
+    -TlsPaths $pathsA `
+    -EmulatorOwnershipAction { param($state) return $true } `
+    -AdbAction {
+      param($serial, $arguments)
+      $commandText = $arguments -join ' '
+      [void]$partialRetryCalls.Add($commandText)
+      if ($commandText -eq "shell test -f $($failedCompensation.state.remotePath)") {
+        return [pscustomobject]@{ exitCode = 1; stdout = ''; stderr = '' }
+      }
+      return [pscustomobject]@{ exitCode = 0; stdout = ''; stderr = '' }
+    }
+  Assert-True `
+    -Value $partialRetry.ok `
+    -Message 'Later down retry did not finish Android partial-install cleanup.'
+  Assert-True `
+    -Value (@($partialRetryCalls) -contains "shell rm -f $($failedCompensation.state.temporaryPath)") `
+    -Message 'Later down retry did not remove the fixed Android temp PEM.'
+
+  $partialTempFailure = Remove-RimsAndroidUserCa `
+    -TrustState $failedCompensation.state `
+    -EmulatorState $ownedEmulator `
+    -TlsPaths $pathsA `
+    -EmulatorOwnershipAction { param($state) return $true } `
+    -AdbAction {
+      param($serial, $arguments)
+      $commandText = $arguments -join ' '
+      if ($commandText -eq "shell test -f $($failedCompensation.state.remotePath)") {
+        return [pscustomobject]@{ exitCode = 1; stdout = ''; stderr = '' }
+      }
+      if ($commandText -eq "shell rm -f $($failedCompensation.state.temporaryPath)") {
+        return [pscustomobject]@{ exitCode = 1; stdout = ''; stderr = 'fake temp cleanup failure' }
+      }
+      return [pscustomobject]@{ exitCode = 0; stdout = ''; stderr = '' }
+    }
+  Assert-False `
+    -Value $partialTempFailure.ok `
+    -Message 'Later down hid Android temp PEM cleanup failure.'
+  Assert-True `
+    -Value $partialTempFailure.cleanupPending `
+    -Message 'Android temp PEM cleanup failure lost partial state.'
+
+  $installThrowCalls = New-Object 'Collections.Generic.List[string]'
+  $script:installPrimaryThrew = $false
+  $installAdbThrow = Install-RimsAndroidUserCa `
+    -TlsPaths $pathsA `
+    -EmulatorState $ownedEmulator `
+    -CaFingerprintSha256 ('AA' * 32) `
+    -EmulatorOwnershipAction { param($state) return $true } `
+    -TrustQueryAction { param($serial, $fingerprint) return $false } `
+    -AdbAction {
+      param($serial, $arguments)
+      $commandText = $arguments -join ' '
+      [void]$installThrowCalls.Add($commandText)
+      if (-not $script:installPrimaryThrew -and $arguments -contains 'chmod') {
+        $script:installPrimaryThrew = $true
+        throw 'fake install ADB throw'
+      }
+      return [pscustomobject]@{ exitCode = 0; stdout = ''; stderr = '' }
+    }
+  Assert-False -Value $installAdbThrow.ok -Message 'Install ADB throw escaped.'
+  Assert-False `
+    -Value $installAdbThrow.cleanupPending `
+    -Message 'Install ADB throw remained pending after successful compensation.'
+  Assert-True `
+    -Value (@($installThrowCalls) -contains "shell rm -f $($installed.state.remotePath)") `
+    -Message 'Install ADB throw did not compensate fixed remote CA.'
+  Assert-True `
+    -Value (@($installThrowCalls) -contains "shell rm -f $($installed.state.temporaryPath)") `
+    -Message 'Install ADB throw did not compensate fixed temp PEM.'
+
+  foreach ($throwingCompensation in @('remote', 'temporary')) {
+    $compensationThrowCalls = New-Object 'Collections.Generic.List[string]'
+    $compensationThrow = Install-RimsAndroidUserCa `
+      -TlsPaths $pathsA `
+      -EmulatorState $ownedEmulator `
+      -CaFingerprintSha256 ('AA' * 32) `
+      -EmulatorOwnershipAction { param($state) return $true } `
+      -TrustQueryAction { param($serial, $fingerprint) return $false } `
+      -AdbAction {
+        param($serial, $arguments)
+        $commandText = $arguments -join ' '
+        [void]$compensationThrowCalls.Add($commandText)
+        if ($arguments -contains 'chmod') {
+          return [pscustomobject]@{ exitCode = 1; stdout = ''; stderr = 'fake install failure' }
+        }
+        if ($throwingCompensation -eq 'remote' -and
+            $commandText -eq "shell rm -f $($installed.state.remotePath)") {
+          throw 'fake remote compensation throw'
+        }
+        if ($throwingCompensation -eq 'temporary' -and
+            $commandText -eq "shell rm -f $($installed.state.temporaryPath)") {
+          throw 'fake temp compensation throw'
+        }
+        return [pscustomobject]@{ exitCode = 0; stdout = ''; stderr = '' }
+      }
+    Assert-False `
+      -Value $compensationThrow.ok `
+      -Message "Android $throwingCompensation compensation throw escaped."
+    Assert-True `
+      -Value $compensationThrow.cleanupPending `
+      -Message "Android $throwingCompensation compensation throw lost partial state."
+    Assert-True `
+      -Value (@($compensationThrowCalls) -contains "shell rm -f $($installed.state.temporaryPath)") `
+      -Message "Android $throwingCompensation compensation throw skipped temp cleanup attempt."
+  }
+
+  $queryThrow = Install-RimsAndroidUserCa `
+    -TlsPaths $pathsA `
+    -EmulatorState $ownedEmulator `
+    -CaFingerprintSha256 ('AA' * 32) `
+    -EmulatorOwnershipAction { param($state) return $true } `
+    -TrustQueryAction { param($serial, $fingerprint) throw 'fake trust query throw' }
+  Assert-False -Value $queryThrow.ok -Message 'Trust query throw escaped install boundary.'
+  Assert-False `
+    -Value $queryThrow.cleanupPending `
+    -Message 'Trust query throw invented mutation cleanup state.'
+
   $unownedAdbCalls = 0
   $unownedInstall = Install-RimsAndroidUserCa `
     -TlsPaths $pathsA `
@@ -756,6 +1030,69 @@ try {
       -Value (Test-Path -LiteralPath (Join-Path $pathsA.root 'android-remove-ca.pem')) `
       -Message "Android CA $removeFailureCommand failure left its pulled temporary file."
   }
+
+  $removeAdbThrow = Remove-RimsAndroidUserCa `
+    -TrustState $installed.state `
+    -EmulatorState $ownedEmulator `
+    -TlsPaths $pathsA `
+    -EmulatorOwnershipAction { param($state) return $true } `
+    -AdbAction { param($serial, $arguments) throw 'fake remove ADB throw' }
+  Assert-False -Value $removeAdbThrow.ok -Message 'Remove ADB throw escaped.'
+  Assert-True `
+    -Value $removeAdbThrow.cleanupPending `
+    -Message 'Remove ADB throw lost trust partial state.'
+
+  $legacyTrustWithoutPending = [pscustomobject][ordered]@{
+    serial = $installed.state.serial
+    fingerprintSha256 = $installed.state.fingerprintSha256
+    subjectHash = $installed.state.subjectHash
+    remotePath = $installed.state.remotePath
+    temporaryPath = $installed.state.temporaryPath
+    preExisting = $false
+    installedByController = $true
+  }
+  $legacyTrustThrow = Remove-RimsAndroidUserCa `
+    -TrustState $legacyTrustWithoutPending `
+    -EmulatorState $ownedEmulator `
+    -TlsPaths $pathsA `
+    -EmulatorOwnershipAction { param($state) return $true } `
+    -AdbAction { param($serial, $arguments) throw 'fake legacy-state ADB throw' }
+  Assert-False `
+    -Value $legacyTrustThrow.ok `
+    -Message 'Legacy trust state without cleanupPending escaped exception handling.'
+  Assert-True `
+    -Value $legacyTrustThrow.cleanupPending `
+    -Message 'Legacy trust state did not gain cleanupPending evidence.'
+
+  $fingerprintThrowCalls = New-Object 'Collections.Generic.List[string]'
+  $removeFingerprintThrow = Remove-RimsAndroidUserCa `
+    -TrustState $installed.state `
+    -EmulatorState $ownedEmulator `
+    -TlsPaths $pathsA `
+    -EmulatorOwnershipAction { param($state) return $true } `
+    -FingerprintAction { param($path) throw 'fake fingerprint throw' } `
+    -AdbAction {
+      param($serial, $arguments)
+      $commandText = $arguments -join ' '
+      [void]$fingerprintThrowCalls.Add($commandText)
+      if ($arguments[0] -eq 'pull') {
+        [IO.File]::WriteAllText([string]$arguments[2], 'fake pulled CA')
+      }
+      return [pscustomobject]@{ exitCode = 0; stdout = ''; stderr = '' }
+    }
+  Assert-False `
+    -Value $removeFingerprintThrow.ok `
+    -Message 'Remove fingerprint throw escaped.'
+  Assert-True `
+    -Value $removeFingerprintThrow.cleanupPending `
+    -Message 'Remove fingerprint throw lost trust partial state.'
+  Assert-True `
+    -Value (@($fingerprintThrowCalls) -contains "shell rm -f $($installed.state.temporaryPath)") `
+    -Message 'Remove fingerprint throw skipped fixed temp cleanup.'
+  Assert-False `
+    -Value (Test-Path -LiteralPath (Join-Path $pathsA.root 'android-remove-ca.pem')) `
+    -Message 'Remove fingerprint throw left pulled local material.'
+
   $preservedTlsState = [pscustomobject]@{
     localTls = [pscustomobject]@{
       proxy = $null
@@ -862,6 +1199,60 @@ try {
     -Expected 0 `
     -Message 'TLS evidence was deleted after unowned-listener refusal.'
 
+  $downTrustThrowState = [pscustomobject]@{
+    localTls = [pscustomobject]@{
+      androidTrust = $failedCompensation.state
+      proxy = $null
+      cleanupPending = $true
+    }
+    emulator = $ownedEmulator
+  }
+  $downTrustThrow = Stop-RimsLocalTlsRuntime `
+    -State $downTrustThrowState `
+    -TlsPaths $pathsA `
+    -TrustRemoveAction { param($trust, $emulator) throw 'fake trust remove throw' }
+  Assert-False -Value $downTrustThrow.ok -Message 'Down trust cleanup throw escaped.'
+  Assert-True `
+    -Value $downTrustThrow.cleanupPending `
+    -Message 'Down trust cleanup throw lost persisted state.'
+
+  $downProxyThrowState = [pscustomobject]@{
+    localTls = [pscustomobject]@{
+      androidTrust = $null
+      proxy = $proxy.state
+      cleanupPending = $true
+    }
+    emulator = $ownedEmulator
+  }
+  $downProxyThrow = Stop-RimsLocalTlsRuntime `
+    -State $downProxyThrowState `
+    -TlsPaths $pathsA `
+    -OwnershipAction { param($state, $paths) return [pscustomobject]@{ ok = $true } } `
+    -ProxyStopAction { param($state) throw 'fake down proxy stop throw' }
+  Assert-False -Value $downProxyThrow.ok -Message 'Down proxy stop throw escaped.'
+  Assert-True `
+    -Value $downProxyThrow.cleanupPending `
+    -Message 'Down proxy stop throw lost persisted state.'
+
+  $downCertificateThrowState = [pscustomobject]@{
+    localTls = [pscustomobject]@{
+      androidTrust = $null
+      proxy = $null
+      cleanupPending = $true
+    }
+    emulator = $ownedEmulator
+  }
+  $downCertificateThrow = Stop-RimsLocalTlsRuntime `
+    -State $downCertificateThrowState `
+    -TlsPaths $pathsA `
+    -CertificateCleanupAction { param($paths) throw 'fake down certificate cleanup throw' }
+  Assert-False `
+    -Value $downCertificateThrow.ok `
+    -Message 'Down certificate cleanup throw escaped.'
+  Assert-True `
+    -Value $downCertificateThrow.cleanupPending `
+    -Message 'Down certificate cleanup throw lost persisted state.'
+
   foreach ($failedStep in 1..4) {
     $stepWorkspace = Join-Path $testRoot "openssl-step-$failedStep"
     [void][IO.Directory]::CreateDirectory((Join-Path $stepWorkspace 'scripts'))
@@ -944,6 +1335,29 @@ try {
     -Actual $cleanupFailure.state.root `
     -Expected $cleanupPaths.root `
     -Message 'Certificate partial state lost its deterministic cleanup root.'
+
+  $throwCleanupWorkspace = Join-Path $testRoot 'cleanup-throw'
+  [void][IO.Directory]::CreateDirectory((Join-Path $throwCleanupWorkspace 'scripts'))
+  $throwCleanupPaths = Get-RimsLocalTlsPaths `
+    -ScriptDirectory (Join-Path $throwCleanupWorkspace 'scripts')
+  $throwCleanup = New-RimsLocalTlsCertificates `
+    -TlsPaths $throwCleanupPaths `
+    -OpenSslAction {
+      param($arguments, $invocationPaths)
+      [IO.File]::WriteAllText((Join-Path $invocationPaths.root 'partial'), 'partial')
+      return [pscustomobject]@{ exitCode = 1; stdout = ''; stderr = 'fake generation failure' }
+    } `
+    -CleanupAction { param($paths) throw 'fake cleanup throw' }
+  Assert-False `
+    -Value $throwCleanup.ok `
+    -Message 'OpenSSL cleanup throw escaped the certificate boundary.'
+  Assert-True `
+    -Value $throwCleanup.cleanupPending `
+    -Message 'OpenSSL cleanup throw was not persisted as pending.'
+  Assert-Equal `
+    -Actual $throwCleanup.state.root `
+    -Expected $throwCleanupPaths.root `
+    -Message 'OpenSSL cleanup throw lost deterministic certificate state.'
 
   $certificatePartial = [pscustomobject]@{
     workspaceId = $pathsA.workspaceId
@@ -1069,6 +1483,88 @@ try {
     -Actual $failedTrustUp.state.proxy.windowsPid `
     -Expected $proxy.state.windowsPid `
     -Message 'TLS up lost proxy state after trust compensation failed.'
+
+  $upStartThrowCertificateCleanupCalls = 0
+  $upStartThrow = Invoke-RimsLocalTlsUp `
+    -TlsPaths $pathsA `
+    -BackendPort 8080 `
+    -TlsPort 8443 `
+    -Target none `
+    -CertificateAction { param($paths) return $successfulCertificateState } `
+    -ProxyStartAction { param($paths, $backendPort, $tlsPort) throw 'fake proxy start action throw' } `
+    -CertificateCleanupAction {
+      param($paths)
+      $script:upStartThrowCertificateCleanupCalls++
+      return [pscustomobject]@{ ok = $true }
+    }
+  Assert-False -Value $upStartThrow.ok -Message 'Invoke Up proxy start throw escaped.'
+  Assert-Equal `
+    -Actual $upStartThrowCertificateCleanupCalls `
+    -Expected 1 `
+    -Message 'Invoke Up proxy start throw skipped certificate cleanup.'
+  Assert-False `
+    -Value $upStartThrow.cleanupPending `
+    -Message 'Invoke Up proxy start throw remained pending after certificate cleanup.'
+
+  $upCertificateCleanupThrow = Invoke-RimsLocalTlsUp `
+    -TlsPaths $pathsA `
+    -BackendPort 8080 `
+    -TlsPort 8443 `
+    -Target none `
+    -CertificateAction { param($paths) return $successfulCertificateState } `
+    -ProxyStartAction {
+      param($paths, $backendPort, $tlsPort)
+      return [pscustomobject]@{
+        ok = $false
+        detail = 'fake proxy start failure'
+        cleanupPending = $false
+        state = $null
+      }
+    } `
+    -CertificateCleanupAction { param($paths) throw 'fake up certificate cleanup throw' }
+  Assert-False `
+    -Value $upCertificateCleanupThrow.ok `
+    -Message 'Invoke Up certificate cleanup throw escaped.'
+  Assert-True `
+    -Value $upCertificateCleanupThrow.cleanupPending `
+    -Message 'Invoke Up certificate cleanup throw lost certificate state.'
+  Assert-True `
+    -Value $upCertificateCleanupThrow.state.certificateCreated `
+    -Message 'Invoke Up certificate cleanup throw did not retain created material evidence.'
+
+  $upTrustThrow = Invoke-RimsLocalTlsUp `
+    -TlsPaths $pathsA `
+    -BackendPort 8080 `
+    -TlsPort 8443 `
+    -Target android `
+    -EmulatorState $ownedEmulator `
+    -CertificateAction { param($paths) return $successfulCertificateState } `
+    -ProxyStartAction {
+      param($paths, $backendPort, $tlsPort)
+      return [pscustomobject]@{ ok = $true; state = $proxy.state }
+    } `
+    -TrustInstallAction {
+      param($paths, $emulator, $fingerprint, $subjectHash)
+      throw 'fake trust install throw'
+    } `
+    -ProxyStopAction { param($state) throw 'fake up proxy stop throw' } `
+    -CertificateCleanupAction { param($paths) throw 'fake up certificate cleanup throw' }
+  Assert-False -Value $upTrustThrow.ok -Message 'Invoke Up trust install throw escaped.'
+  Assert-True `
+    -Value $upTrustThrow.cleanupPending `
+    -Message 'Invoke Up trust install throw lost cleanup state.'
+  Assert-Equal `
+    -Actual $upTrustThrow.state.proxy.windowsPid `
+    -Expected $proxy.state.windowsPid `
+    -Message 'Invoke Up proxy stop throw lost proxy identity.'
+  Assert-Equal `
+    -Actual $upTrustThrow.state.androidTrust.remotePath `
+    -Expected (Get-RimsAndroidCaRemotePath -SubjectHash $successfulCertificateState.caSubjectHash) `
+    -Message 'Invoke Up trust throw did not persist deterministic remote cleanup state.'
+  Assert-Equal `
+    -Actual $upTrustThrow.state.androidTrust.temporaryPath `
+    -Expected (Get-RimsAndroidCaTemporaryPath -WorkspaceId $pathsA.workspaceId) `
+    -Message 'Invoke Up trust throw did not persist deterministic temp cleanup state.'
 
   $tlsComponentState = [pscustomobject]@{
     localTls = [pscustomobject]@{

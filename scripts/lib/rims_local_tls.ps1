@@ -429,10 +429,19 @@ function New-RimsLocalTlsCertificates {
     $generationDetail = ConvertTo-RimsDiagnosticSummary `
       -StandardOutput '' `
       -StandardError $_.Exception.Message
-    $cleanup = if ($null -eq $CleanupAction) {
-      Remove-RimsLocalTlsCertificates -TlsPaths $TlsPaths
-    } else {
-      & $CleanupAction $TlsPaths
+    try {
+      $cleanup = if ($null -eq $CleanupAction) {
+        Remove-RimsLocalTlsCertificates -TlsPaths $TlsPaths
+      } else {
+        & $CleanupAction $TlsPaths
+      }
+    } catch {
+      $cleanup = [pscustomobject]@{
+        ok = $false
+        detail = ConvertTo-RimsDiagnosticSummary `
+          -StandardOutput '' `
+          -StandardError $_.Exception.Message
+      }
     }
     $cleanupOk = [bool](Get-RimsObjectPropertyValue `
         -Value $cleanup `
@@ -632,10 +641,19 @@ function Start-RimsLocalTlsProxy {
     stderrLogPath = $TlsPaths.proxyStderrLog
     commandLine = "powershell $($TlsPaths.proxyScript) $marker"
   }
-  $start = if ($null -eq $StartProcessAction) {
-    Start-RimsLocalTlsProxyProcess -Spec $spec
-  } else {
-    & $StartProcessAction $spec
+  try {
+    $start = if ($null -eq $StartProcessAction) {
+      Start-RimsLocalTlsProxyProcess -Spec $spec
+    } else {
+      & $StartProcessAction $spec
+    }
+  } catch {
+    return [pscustomobject][ordered]@{
+      ok = $false
+      detail = "TLS proxy start failed before process identity was obtained: $(ConvertTo-RimsDiagnosticSummary -StandardOutput '' -StandardError $_.Exception.Message)"
+      cleanupPending = $false
+      state = $null
+    }
   }
   $state = [pscustomobject][ordered]@{
     workspaceId = $TlsPaths.workspaceId
@@ -650,28 +668,50 @@ function Start-RimsLocalTlsProxy {
     stderrLogPath = $TlsPaths.proxyStderrLog
     cleanupPending = $true
   }
-  $ready = if ($null -eq $ReadinessAction) {
-    $deadline = (Get-Date).AddSeconds(15)
-    $isReady = $false
-    do {
-      if (Test-RimsTcpPortListening -Port $TlsPort -TimeoutMilliseconds 250) {
-        $isReady = $true
-        break
-      }
-      Start-Sleep -Milliseconds 100
-    } while ((Get-Date) -lt $deadline)
-    $isReady
-  } else {
-    [bool](& $ReadinessAction $state)
+  $failureDetail = $null
+  try {
+    $ready = if ($null -eq $ReadinessAction) {
+      $deadline = (Get-Date).AddSeconds(15)
+      $isReady = $false
+      do {
+        if (Test-RimsTcpPortListening -Port $TlsPort -TimeoutMilliseconds 250) {
+          $isReady = $true
+          break
+        }
+        Start-Sleep -Milliseconds 100
+      } while ((Get-Date) -lt $deadline)
+      $isReady
+    } else {
+      [bool](& $ReadinessAction $state)
+    }
+  } catch {
+    $ready = $false
+    $failureDetail = "TLS proxy readiness check failed: $(ConvertTo-RimsDiagnosticSummary -StandardOutput '' -StandardError $_.Exception.Message)"
   }
   $testPortOwnership = if ($null -eq $PortOwnershipAction) {
     { param($port, $processId) Test-RimsFrontendPortOwnedByProcess -Port $port -RootProcessId $processId }
   } else { $PortOwnershipAction }
-  $portOwned = [bool](& $testPortOwnership $TlsPort $state.windowsPid)
+  $portOwned = $false
+  if ($null -eq $failureDetail -and $ready) {
+    try {
+      $portOwned = [bool](& $testPortOwnership $TlsPort $state.windowsPid)
+    } catch {
+      $failureDetail = "TLS proxy port ownership check failed: $(ConvertTo-RimsDiagnosticSummary -StandardOutput '' -StandardError $_.Exception.Message)"
+    }
+  }
   if (-not $ready -or -not $portOwned) {
-    $stopResult = Stop-RimsLocalTlsProxy `
-      -TlsState $state `
-      -StopAction $StopAction
+    try {
+      $stopResult = Stop-RimsLocalTlsProxy `
+        -TlsState $state `
+        -StopAction $StopAction
+    } catch {
+      $stopResult = [pscustomobject]@{
+        ok = $false
+        detail = ConvertTo-RimsDiagnosticSummary `
+          -StandardOutput '' `
+          -StandardError $_.Exception.Message
+      }
+    }
     $stopOk = [bool](Get-RimsObjectPropertyValue `
         -Value $stopResult `
         -Name 'ok' `
@@ -679,7 +719,9 @@ function Start-RimsLocalTlsProxy {
     $state.cleanupPending = -not $stopOk
     return [pscustomobject][ordered]@{
       ok = $false
-      detail = "$(if (-not $portOwned) {
+      detail = "$(if ($null -ne $failureDetail) {
+        $failureDetail
+      } elseif (-not $portOwned) {
         'TLS listener was not owned by the recorded process.'
       } else { 'TLS proxy did not become ready.' })$(if (-not $stopOk) {
           " Proxy cleanup remains pending: $([string](Get-RimsObjectPropertyValue -Value $stopResult -Name 'detail' -DefaultValue 'unknown stop failure'))."
@@ -920,6 +962,27 @@ function Get-RimsAndroidCaRemotePath {
   return "/data/misc/user/0/cacerts-added/$($SubjectHash.ToLowerInvariant()).0"
 }
 
+function Get-RimsAndroidCaTemporaryPath {
+  param([Parameter(Mandatory = $true)][string]$WorkspaceId)
+  if ($WorkspaceId -notmatch '\A[0-9a-fA-F]{16}\z') {
+    throw 'TLS workspace ID must contain exactly sixteen hexadecimal characters.'
+  }
+  return "/data/local/tmp/rims-$($WorkspaceId.ToLowerInvariant())-ca.pem"
+}
+
+function Set-RimsLocalTlsCleanupPending {
+  param(
+    [Parameter(Mandatory = $true)][psobject]$State,
+    [Parameter(Mandatory = $true)][bool]$Value
+  )
+
+  $State | Add-Member `
+    -MemberType NoteProperty `
+    -Name cleanupPending `
+    -Value $Value `
+    -Force
+}
+
 function Test-RimsOwnedEmulatorState {
   param([Parameter(Mandatory = $true)][psobject]$EmulatorState)
 
@@ -944,53 +1007,86 @@ function Install-RimsAndroidUserCa {
     [AllowNull()][scriptblock]$AdbAction
   )
 
-  $owned = if ($null -eq $EmulatorOwnershipAction) {
-    Test-RimsOwnedEmulatorState -EmulatorState $EmulatorState
-  } else { [bool](& $EmulatorOwnershipAction $EmulatorState) }
+  try {
+    $owned = if ($null -eq $EmulatorOwnershipAction) {
+      Test-RimsOwnedEmulatorState -EmulatorState $EmulatorState
+    } else { [bool](& $EmulatorOwnershipAction $EmulatorState) }
+  } catch {
+    return [pscustomobject]@{
+      ok = $false
+      detail = "Could not verify exact emulator ownership: $(ConvertTo-RimsDiagnosticSummary -StandardOutput '' -StandardError $_.Exception.Message)"
+      cleanupPending = $false
+      state = $null
+    }
+  }
   if (-not $owned) {
     return [pscustomobject]@{ ok = $false; detail = 'Android CA install requires an exactly owned emulator.' }
   }
   $serial = [string]$EmulatorState.serial
-  $subjectHash = if ([string]::IsNullOrWhiteSpace($CaSubjectHash)) {
-    $TlsPaths.workspaceId.Substring(0, 8)
-  } else { $CaSubjectHash }
-  $remotePath = Get-RimsAndroidCaRemotePath -SubjectHash $subjectHash
+  try {
+    $subjectHash = if ([string]::IsNullOrWhiteSpace($CaSubjectHash)) {
+      $TlsPaths.workspaceId.Substring(0, 8)
+    } else { $CaSubjectHash }
+    $remotePath = Get-RimsAndroidCaRemotePath -SubjectHash $subjectHash
+  } catch {
+    return [pscustomobject]@{
+      ok = $false
+      detail = "Android CA identity is invalid: $(ConvertTo-RimsDiagnosticSummary -StandardOutput '' -StandardError $_.Exception.Message)"
+      cleanupPending = $false
+      state = $null
+    }
+  }
   $adb = if ($null -eq $AdbAction) {
     { param($device, $arguments) Invoke-RimsAdbCommand -Serial $device -Arguments $arguments }
   } else { $AdbAction }
-  $alreadyTrusted = if ($null -eq $TrustQueryAction) {
-    $rootResult = & $adb $serial @('root')
-    if ([int]$rootResult.exitCode -ne 0) {
-      return [pscustomobject]@{
-        ok = $false
-        detail = 'Could not inspect Android user trust without root on the owned emulator.'
+  try {
+    $alreadyTrusted = if ($null -eq $TrustQueryAction) {
+      $rootResult = & $adb $serial @('root')
+      if ([int]$rootResult.exitCode -ne 0) {
+        return [pscustomobject]@{
+          ok = $false
+          detail = 'Could not inspect Android user trust without root on the owned emulator.'
+          cleanupPending = $false
+          state = $null
+        }
       }
+      $query = & $adb $serial @('shell', 'test', '-f', $remotePath)
+      if ([int]$query.exitCode -eq 0) {
+        $existingPath = Join-Path $TlsPaths.root 'android-existing-ca.pem'
+        try {
+          $pull = & $adb $serial @('pull', $remotePath, $existingPath)
+          if ([int]$pull.exitCode -ne 0) {
+            return [pscustomobject]@{
+              ok = $false
+              detail = 'Could not compare the pre-existing Android trust certificate.'
+              cleanupPending = $false
+              state = $null
+            }
+          }
+          $existingFingerprint = Get-RimsLocalTlsCertificateFingerprint `
+            -CertificatePath $existingPath
+          if ($existingFingerprint -ne $CaFingerprintSha256) {
+            return [pscustomobject]@{
+              ok = $false
+              detail = 'Android trust path is occupied by a different certificate; it was left untouched.'
+              cleanupPending = $false
+              state = $null
+            }
+          }
+          $true
+        } finally {
+          Remove-Item -LiteralPath $existingPath -Force -ErrorAction SilentlyContinue
+        }
+      } else { $false }
+    } else { [bool](& $TrustQueryAction $serial $CaFingerprintSha256) }
+  } catch {
+    return [pscustomobject]@{
+      ok = $false
+      detail = "Could not inspect Android trust safely: $(ConvertTo-RimsDiagnosticSummary -StandardOutput '' -StandardError $_.Exception.Message)"
+      cleanupPending = $false
+      state = $null
     }
-    $query = & $adb $serial @('shell', 'test', '-f', $remotePath)
-    if ([int]$query.exitCode -eq 0) {
-      $existingPath = Join-Path $TlsPaths.root 'android-existing-ca.pem'
-      try {
-        $pull = & $adb $serial @('pull', $remotePath, $existingPath)
-        if ([int]$pull.exitCode -ne 0) {
-          return [pscustomobject]@{
-            ok = $false
-            detail = 'Could not compare the pre-existing Android trust certificate.'
-          }
-        }
-        $existingFingerprint = Get-RimsLocalTlsCertificateFingerprint `
-          -CertificatePath $existingPath
-        if ($existingFingerprint -ne $CaFingerprintSha256) {
-          return [pscustomobject]@{
-            ok = $false
-            detail = 'Android trust path is occupied by a different certificate; it was left untouched.'
-          }
-        }
-        $true
-      } finally {
-        Remove-Item -LiteralPath $existingPath -Force -ErrorAction SilentlyContinue
-      }
-    } else { $false }
-  } else { [bool](& $TrustQueryAction $serial $CaFingerprintSha256) }
+  }
   if ($alreadyTrusted) {
     return [pscustomobject]@{
       ok = $true
@@ -1005,7 +1101,8 @@ function Install-RimsAndroidUserCa {
       }
     }
   }
-  $temporaryPath = "/data/local/tmp/rims-$($TlsPaths.workspaceId)-ca.pem"
+  $temporaryPath = Get-RimsAndroidCaTemporaryPath `
+    -WorkspaceId ([string]$TlsPaths.workspaceId)
   $trustState = [pscustomobject][ordered]@{
     serial = $serial
     fingerprintSha256 = $CaFingerprintSha256
@@ -1031,24 +1128,48 @@ function Install-RimsAndroidUserCa {
     if ($arguments[0] -eq 'shell' -and $arguments[1] -eq 'cp') {
       $trustState.remoteMutationAttempted = $true
     }
-    $result = & $adb $serial $arguments
-    if ([int](Get-RimsObjectPropertyValue -Value $result -Name 'exitCode' -DefaultValue -1) -ne 0) {
+    $operationDetail = 'Failed to install the owned CA on the owned emulator.'
+    try {
+      $result = & $adb $serial $arguments
+      $operationOk = [int](Get-RimsObjectPropertyValue `
+          -Value $result `
+          -Name 'exitCode' `
+          -DefaultValue -1) -eq 0
+    } catch {
+      $operationOk = $false
+      $operationDetail = "Android CA install action threw: $(ConvertTo-RimsDiagnosticSummary -StandardOutput '' -StandardError $_.Exception.Message)"
+    }
+    if (-not $operationOk) {
       $compensationOk = $true
       if ($trustState.remoteMutationAttempted) {
-        $removeRemote = & $adb $serial @('shell', 'rm', '-f', $remotePath)
-        $compensationOk = $compensationOk -and
-          [int](Get-RimsObjectPropertyValue -Value $removeRemote -Name 'exitCode' -DefaultValue -1) -eq 0
+        try {
+          $removeRemote = & $adb $serial @('shell', 'rm', '-f', $remotePath)
+          $remoteCleanupOk = [int](Get-RimsObjectPropertyValue `
+              -Value $removeRemote `
+              -Name 'exitCode' `
+              -DefaultValue -1) -eq 0
+        } catch {
+          $remoteCleanupOk = $false
+        }
+        $compensationOk = $compensationOk -and $remoteCleanupOk
       }
-      $removeTemporary = & $adb $serial @('shell', 'rm', '-f', $temporaryPath)
-      $compensationOk = $compensationOk -and
-        [int](Get-RimsObjectPropertyValue -Value $removeTemporary -Name 'exitCode' -DefaultValue -1) -eq 0
+      try {
+        $removeTemporary = & $adb $serial @('shell', 'rm', '-f', $temporaryPath)
+        $temporaryCleanupOk = [int](Get-RimsObjectPropertyValue `
+            -Value $removeTemporary `
+            -Name 'exitCode' `
+            -DefaultValue -1) -eq 0
+      } catch {
+        $temporaryCleanupOk = $false
+      }
+      $compensationOk = $compensationOk -and $temporaryCleanupOk
       $trustState.cleanupPending = -not $compensationOk
       return [pscustomobject][ordered]@{
         ok = $false
         detail = if ($compensationOk) {
-          'Failed to install the owned CA; partial Android mutations were removed.'
+          "$operationDetail Partial Android mutations were removed."
         } else {
-          'Failed to install the owned CA and Android cleanup remains pending.'
+          "$operationDetail Android cleanup remains pending."
         }
         cleanupPending = -not $compensationOk
         state = if ($compensationOk) { $null } else { $trustState }
@@ -1083,9 +1204,52 @@ function Remove-RimsAndroidUserCa {
       detail = 'Pre-existing Android trust was preserved.'
     }
   }
-  $owned = if ($null -eq $EmulatorOwnershipAction) {
-    Test-RimsOwnedEmulatorState -EmulatorState $EmulatorState
-  } else { [bool](& $EmulatorOwnershipAction $EmulatorState) }
+  $subjectHash = [string](Get-RimsObjectPropertyValue `
+      -Value $TrustState `
+      -Name 'subjectHash' `
+      -DefaultValue '')
+  try {
+    $fixedRemotePath = Get-RimsAndroidCaRemotePath -SubjectHash $subjectHash
+    $fixedTemporaryPath = Get-RimsAndroidCaTemporaryPath `
+      -WorkspaceId ([string]$TlsPaths.workspaceId)
+  } catch {
+    return [pscustomobject]@{
+      ok = $false
+      detail = 'Recorded Android trust paths are invalid; no ADB command was issued.'
+      cleanupPending = $true
+      state = $TrustState
+    }
+  }
+  $recordedRemotePath = [string](Get-RimsObjectPropertyValue `
+      -Value $TrustState `
+      -Name 'remotePath' `
+      -DefaultValue '')
+  $recordedTemporaryPath = [string](Get-RimsObjectPropertyValue `
+      -Value $TrustState `
+      -Name 'temporaryPath' `
+      -DefaultValue '')
+  if ($recordedRemotePath -cne $fixedRemotePath -or
+      $recordedTemporaryPath -cne $fixedTemporaryPath) {
+    return [pscustomobject]@{
+      ok = $false
+      detail = 'Recorded Android trust paths do not match deterministic workspace paths; no ADB command was issued.'
+      cleanupPending = $true
+      state = $TrustState
+    }
+  }
+  try {
+    $owned = if ($null -eq $EmulatorOwnershipAction) {
+      Test-RimsOwnedEmulatorState -EmulatorState $EmulatorState
+    } else { [bool](& $EmulatorOwnershipAction $EmulatorState) }
+  } catch {
+    Set-RimsLocalTlsCleanupPending -State $TrustState -Value $true
+    return [pscustomobject]@{
+      ok = $false
+      detail = "Could not verify exact emulator ownership: $(ConvertTo-RimsDiagnosticSummary -StandardOutput '' -StandardError $_.Exception.Message)"
+      cleanupPending = $true
+      state = $TrustState
+    }
+  }
   if (-not $owned) {
     return [pscustomobject]@{
       ok = $false
@@ -1112,10 +1276,11 @@ function Remove-RimsAndroidUserCa {
   $adb = if ($null -eq $AdbAction) {
     { param($device, $arguments) Invoke-RimsAdbCommand -Serial $device -Arguments $arguments }
   } else { $AdbAction }
-  $remotePath = [string]$TrustState.remotePath
+  $remotePath = $fixedRemotePath
+  $temporaryPath = $fixedTemporaryPath
   $pending = {
     param($detail)
-    $TrustState.cleanupPending = $true
+    Set-RimsLocalTlsCleanupPending -State $TrustState -Value $true
     return [pscustomobject]@{
       ok = $false
       detail = $detail
@@ -1123,46 +1288,93 @@ function Remove-RimsAndroidUserCa {
       state = $TrustState
     }
   }
-  $rootResult = & $adb $recordedSerial @('root')
+  try {
+    $rootResult = & $adb $recordedSerial @('root')
+  } catch {
+    return & $pending "Android root action threw during trust cleanup: $(ConvertTo-RimsDiagnosticSummary -StandardOutput '' -StandardError $_.Exception.Message)"
+  }
   if ([int](Get-RimsObjectPropertyValue -Value $rootResult -Name 'exitCode' -DefaultValue -1) -ne 0) {
     return & $pending 'Could not verify Android trust cleanup with root on the exact owned emulator.'
   }
-  $query = & $adb $recordedSerial @('shell', 'test', '-f', $remotePath)
-  $queryExitCode = [int](Get-RimsObjectPropertyValue `
-      -Value $query `
-      -Name 'exitCode' `
-      -DefaultValue -1)
-  if ($queryExitCode -eq 1) {
-    return [pscustomobject]@{
-      ok = $true
-      detail = 'The controller-installed Android CA is already absent.'
-      cleanupPending = $false
-    }
-  }
-  if ($queryExitCode -ne 0) {
-    return & $pending 'Could not query the recorded Android trust path.'
+  $remoteFailure = $null
+  try {
+    $query = & $adb $recordedSerial @('shell', 'test', '-f', $remotePath)
+    $queryExitCode = [int](Get-RimsObjectPropertyValue `
+        -Value $query `
+        -Name 'exitCode' `
+        -DefaultValue -1)
+  } catch {
+    $queryExitCode = -1
+    $remoteFailure = "Android trust query threw: $(ConvertTo-RimsDiagnosticSummary -StandardOutput '' -StandardError $_.Exception.Message)"
   }
   $pulledPath = Join-Path $TlsPaths.root 'android-remove-ca.pem'
   [void][IO.Directory]::CreateDirectory([string]$TlsPaths.root)
   try {
-    $pull = & $adb $recordedSerial @('pull', $remotePath, $pulledPath)
-    if ([int](Get-RimsObjectPropertyValue -Value $pull -Name 'exitCode' -DefaultValue -1) -ne 0) {
-      return & $pending 'Could not pull the recorded Android CA for fingerprint verification.'
+    if ($queryExitCode -eq 0) {
+      try {
+        $pull = & $adb $recordedSerial @('pull', $remotePath, $pulledPath)
+        $pullOk = [int](Get-RimsObjectPropertyValue `
+            -Value $pull `
+            -Name 'exitCode' `
+            -DefaultValue -1) -eq 0
+      } catch {
+        $pullOk = $false
+      }
+      if (-not $pullOk) {
+        $remoteFailure = 'Could not pull the recorded Android CA for fingerprint verification.'
+      } else {
+        $getFingerprint = if ($null -eq $FingerprintAction) {
+          { param($path) Get-RimsLocalTlsCertificateFingerprint -CertificatePath $path }
+        } else { $FingerprintAction }
+        try {
+          $remoteFingerprint = [string](& $getFingerprint $pulledPath)
+          $fingerprintOk = $remoteFingerprint -eq [string]$TrustState.fingerprintSha256
+        } catch {
+          $fingerprintOk = $false
+          $remoteFailure = "Android CA fingerprint verification threw: $(ConvertTo-RimsDiagnosticSummary -StandardOutput '' -StandardError $_.Exception.Message)"
+        }
+        if (-not $fingerprintOk -and $null -eq $remoteFailure) {
+          $remoteFailure = 'The recorded Android trust path now contains a different certificate; it was left untouched.'
+        } elseif ($fingerprintOk) {
+          try {
+            $remove = & $adb $recordedSerial @('shell', 'rm', '-f', $remotePath)
+            $remoteRemoveOk = [int](Get-RimsObjectPropertyValue `
+                -Value $remove `
+                -Name 'exitCode' `
+                -DefaultValue -1) -eq 0
+          } catch {
+            $remoteRemoveOk = $false
+          }
+          if (-not $remoteRemoveOk) {
+            $remoteFailure = 'Failed to remove the verified controller-installed Android CA.'
+          }
+        }
+      }
+    } elseif ($queryExitCode -ne 1 -and $null -eq $remoteFailure) {
+      $remoteFailure = 'Could not query the recorded Android trust path.'
     }
-    $getFingerprint = if ($null -eq $FingerprintAction) {
-      { param($path) Get-RimsLocalTlsCertificateFingerprint -CertificatePath $path }
-    } else { $FingerprintAction }
-    $remoteFingerprint = [string](& $getFingerprint $pulledPath)
-    if ($remoteFingerprint -ne [string]$TrustState.fingerprintSha256) {
-      return & $pending 'The recorded Android trust path now contains a different certificate; it was left untouched.'
+    try {
+      $removeTemporary = & $adb $recordedSerial @(
+        'shell', 'rm', '-f', $temporaryPath
+      )
+      $temporaryOk = [int](Get-RimsObjectPropertyValue `
+          -Value $removeTemporary `
+          -Name 'exitCode' `
+          -DefaultValue -1) -eq 0
+    } catch {
+      $temporaryOk = $false
     }
-    $remove = & $adb $recordedSerial @('shell', 'rm', '-f', $remotePath)
-    if ([int](Get-RimsObjectPropertyValue -Value $remove -Name 'exitCode' -DefaultValue -1) -ne 0) {
-      return & $pending 'Failed to remove the verified controller-installed Android CA.'
+    if ($null -ne $remoteFailure -or -not $temporaryOk) {
+      $detailParts = @()
+      if ($null -ne $remoteFailure) { $detailParts += $remoteFailure }
+      if (-not $temporaryOk) {
+        $detailParts += 'Failed to remove the deterministic Android temp CA PEM.'
+      }
+      return & $pending ($detailParts -join ' ')
     }
     return [pscustomobject]@{
       ok = $true
-      detail = 'Removed only the fingerprint-verified controller-installed Android CA.'
+      detail = 'Removed deterministic controller-owned Android CA and temp PEM state.'
       cleanupPending = $false
     }
   } finally {
@@ -1220,7 +1432,14 @@ function Stop-RimsLocalTlsRuntime {
           -TlsPaths $TlsPaths
       }
     } else { $TrustRemoveAction }
-    $trustResult = & $removeTrust $trustState $State.emulator
+    try {
+      $trustResult = & $removeTrust $trustState $State.emulator
+    } catch {
+      $trustResult = [pscustomobject]@{
+        ok = $false
+        detail = "Android trust cleanup threw: $(ConvertTo-RimsDiagnosticSummary -StandardOutput '' -StandardError $_.Exception.Message)"
+      }
+    }
     if (-not $trustResult.ok) {
       $tlsState.cleanupPending = $true
       return [pscustomobject]@{
@@ -1234,16 +1453,29 @@ function Stop-RimsLocalTlsRuntime {
 
   $proxyState = Get-RimsObjectPropertyValue -Value $tlsState -Name 'proxy'
   if ($null -ne $proxyState) {
-    $ownership = if ($null -eq $OwnershipAction) {
-      Test-RimsLocalTlsProxyOwnership `
-        -TlsState $proxyState `
-        -TlsPaths $TlsPaths
-    } else { & $OwnershipAction $proxyState $TlsPaths }
+    try {
+      $ownership = if ($null -eq $OwnershipAction) {
+        Test-RimsLocalTlsProxyOwnership `
+          -TlsState $proxyState `
+          -TlsPaths $TlsPaths
+      } else { & $OwnershipAction $proxyState $TlsPaths }
+    } catch {
+      $ownership = [pscustomobject]@{
+        ok = $false
+        detail = "TLS proxy ownership inspection threw: $(ConvertTo-RimsDiagnosticSummary -StandardOutput '' -StandardError $_.Exception.Message)"
+      }
+    }
     if (-not $ownership.ok) {
       $testListening = if ($null -eq $PortListeningAction) {
         { param($port) Test-RimsTcpPortListening -Port $port }
       } else { $PortListeningAction }
-      if ([bool](& $testListening ([int]$proxyState.port))) {
+      try {
+        $listenerStillPresent = [bool](& $testListening ([int]$proxyState.port))
+      } catch {
+        $listenerStillPresent = $true
+        $ownership.detail = "$($ownership.detail) Port inspection threw; ownership remains unverified."
+      }
+      if ($listenerStillPresent) {
         $tlsState.cleanupPending = $true
         return [pscustomobject]@{
           ok = $false
@@ -1255,7 +1487,14 @@ function Stop-RimsLocalTlsRuntime {
       $stopProxy = if ($null -eq $ProxyStopAction) {
         { param($proxy) Stop-RimsLocalTlsProxy -TlsState $proxy }
       } else { $ProxyStopAction }
-      $proxyResult = & $stopProxy $proxyState
+      try {
+        $proxyResult = & $stopProxy $proxyState
+      } catch {
+        $proxyResult = [pscustomobject]@{
+          ok = $false
+          detail = "TLS proxy stop threw: $(ConvertTo-RimsDiagnosticSummary -StandardOutput '' -StandardError $_.Exception.Message)"
+        }
+      }
       if (-not $proxyResult.ok) {
         $tlsState.cleanupPending = $true
         return [pscustomobject]@{
@@ -1267,14 +1506,21 @@ function Stop-RimsLocalTlsRuntime {
     }
     $tlsState.proxy = $null
   }
-  $cleanup = if ($preserveCertificateMaterial) {
-    [pscustomobject]@{
-      ok = $true
-      detail = 'Preserved workspace CA material required by pre-existing trust.'
+  try {
+    $cleanup = if ($preserveCertificateMaterial) {
+      [pscustomobject]@{
+        ok = $true
+        detail = 'Preserved workspace CA material required by pre-existing trust.'
+      }
+    } elseif ($null -eq $CertificateCleanupAction) {
+      Remove-RimsLocalTlsCertificates -TlsPaths $TlsPaths
+    } else { & $CertificateCleanupAction $TlsPaths }
+  } catch {
+    $cleanup = [pscustomobject]@{
+      ok = $false
+      detail = "TLS certificate cleanup threw: $(ConvertTo-RimsDiagnosticSummary -StandardOutput '' -StandardError $_.Exception.Message)"
     }
-  } elseif ($null -eq $CertificateCleanupAction) {
-    Remove-RimsLocalTlsCertificates -TlsPaths $TlsPaths
-  } else { & $CertificateCleanupAction $TlsPaths }
+  }
   if (-not $cleanup.ok) {
     $tlsState.cleanupPending = $true
     return [pscustomobject]@{
@@ -1338,11 +1584,27 @@ function Invoke-RimsLocalTlsUp {
       -Value $certificates `
       -Name 'created' `
       -DefaultValue $true)
-  $proxy = & $startProxy $TlsPaths $BackendPort $TlsPort
+  try {
+    $proxy = & $startProxy $TlsPaths $BackendPort $TlsPort
+  } catch {
+    $proxy = [pscustomobject]@{
+      ok = $false
+      detail = "TLS proxy start action threw before identity was returned: $(ConvertTo-RimsDiagnosticSummary -StandardOutput '' -StandardError $_.Exception.Message)"
+      cleanupPending = $false
+      state = $null
+    }
+  }
   if (-not $proxy.ok) {
     $certificateCleanupOk = $true
     if ($certificatesCreated) {
-      $certificateCleanup = & $cleanupCertificates $TlsPaths
+      try {
+        $certificateCleanup = & $cleanupCertificates $TlsPaths
+      } catch {
+        $certificateCleanup = [pscustomobject]@{
+          ok = $false
+          detail = "TLS certificate cleanup threw: $(ConvertTo-RimsDiagnosticSummary -StandardOutput '' -StandardError $_.Exception.Message)"
+        }
+      }
       $certificateCleanupOk = [bool](Get-RimsObjectPropertyValue `
           -Value $certificateCleanup `
           -Name 'ok' `
@@ -1393,20 +1655,57 @@ function Invoke-RimsLocalTlsUp {
         -Value $certificates `
         -Name 'caSubjectHash' `
         -DefaultValue $TlsPaths.workspaceId.Substring(0, 8))
-    $trust = & $installTrust `
-      $TlsPaths `
-      $EmulatorState `
-      $certificates.caFingerprintSha256 `
-      $caSubjectHash
+    try {
+      $trust = & $installTrust `
+        $TlsPaths `
+        $EmulatorState `
+        $certificates.caFingerprintSha256 `
+        $caSubjectHash
+    } catch {
+      $trust = [pscustomobject]@{
+        ok = $false
+        detail = "Android trust install threw: $(ConvertTo-RimsDiagnosticSummary -StandardOutput '' -StandardError $_.Exception.Message)"
+        cleanupPending = $true
+        state = [pscustomobject][ordered]@{
+          serial = [string](Get-RimsObjectPropertyValue `
+              -Value $EmulatorState `
+              -Name 'serial' `
+              -DefaultValue '')
+          fingerprintSha256 = $certificates.caFingerprintSha256
+          subjectHash = $caSubjectHash
+          remotePath = Get-RimsAndroidCaRemotePath -SubjectHash $caSubjectHash
+          temporaryPath = Get-RimsAndroidCaTemporaryPath `
+            -WorkspaceId ([string]$TlsPaths.workspaceId)
+          preExisting = $false
+          installedByController = $true
+          remoteMutationAttempted = $true
+          cleanupPending = $true
+        }
+      }
+    }
     if (-not $trust.ok) {
-      $proxyCleanup = & $stopProxy $proxy.state
+      try {
+        $proxyCleanup = & $stopProxy $proxy.state
+      } catch {
+        $proxyCleanup = [pscustomobject]@{
+          ok = $false
+          detail = "TLS proxy cleanup threw: $(ConvertTo-RimsDiagnosticSummary -StandardOutput '' -StandardError $_.Exception.Message)"
+        }
+      }
       $proxyCleanupOk = [bool](Get-RimsObjectPropertyValue `
           -Value $proxyCleanup `
           -Name 'ok' `
           -DefaultValue $false)
       $certificateCleanupOk = $true
       if ($certificatesCreated) {
-        $certificateCleanup = & $cleanupCertificates $TlsPaths
+        try {
+          $certificateCleanup = & $cleanupCertificates $TlsPaths
+        } catch {
+          $certificateCleanup = [pscustomobject]@{
+            ok = $false
+            detail = "TLS certificate cleanup threw: $(ConvertTo-RimsDiagnosticSummary -StandardOutput '' -StandardError $_.Exception.Message)"
+          }
+        }
         $certificateCleanupOk = [bool](Get-RimsObjectPropertyValue `
             -Value $certificateCleanup `
             -Name 'ok' `

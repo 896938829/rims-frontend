@@ -282,7 +282,12 @@ function Test-RimsWebDeviceComponent {
     [AllowEmptyString()]
     [string]$FlutterExecutable,
     [Parameter(Mandatory = $true)]
-    [bool]$Required
+    [bool]$Required,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$RequiredDeviceId,
+    [AllowNull()]
+    [scriptblock]$DeviceQueryAction
   )
 
   if ([string]::IsNullOrWhiteSpace($FlutterExecutable)) {
@@ -294,9 +299,13 @@ function Test-RimsWebDeviceComponent {
       -Remediation 'Install Flutter and enable at least one Web browser device.'
   }
 
-  $check = Invoke-RimsExternalCommand `
-    -FilePath $FlutterExecutable `
-    -Arguments @('devices', '--machine')
+  $check = if ($null -eq $DeviceQueryAction) {
+    Invoke-RimsExternalCommand `
+      -FilePath $FlutterExecutable `
+      -Arguments @('devices', '--machine')
+  } else {
+    & $DeviceQueryAction $FlutterExecutable
+  }
   $devices = @()
   $parseError = $null
   if ($check.ExitCode -eq 0) {
@@ -313,8 +322,13 @@ function Test-RimsWebDeviceComponent {
   $webDevices = @($devices | Where-Object {
       $_.targetPlatform -eq 'web-javascript'
     })
+  $matchingDevices = if ([string]::IsNullOrWhiteSpace($RequiredDeviceId)) {
+    $webDevices
+  } else {
+    @($webDevices | Where-Object { [string]$_.id -ceq $RequiredDeviceId })
+  }
   $ok = $check.ExitCode -eq 0 -and $null -eq $parseError -and
-    $webDevices.Count -gt 0
+    @($matchingDevices).Count -gt 0
   if ($ok) {
     $deviceIds = @($webDevices | ForEach-Object { $_.id })
     $detail = "Web devices: $($deviceIds -join ', ')."
@@ -322,7 +336,11 @@ function Test-RimsWebDeviceComponent {
     $detail = "Could not parse flutter devices --machine: $parseError"
   } else {
     $summary = Get-RimsExternalCommandSummary -Result $check
-    $detail = "No web-javascript Flutter device was found. $summary".Trim()
+    $detail = if ([string]::IsNullOrWhiteSpace($RequiredDeviceId)) {
+      "No web-javascript Flutter device was found. $summary".Trim()
+    } else {
+      "Required Flutter Web device ID '$RequiredDeviceId' was not found. $summary".Trim()
+    }
   }
   return New-RimsLocalComponent `
     -Name 'webDevice' `
@@ -330,7 +348,11 @@ function Test-RimsWebDeviceComponent {
     -Required $Required `
     -Detail $detail `
     -Remediation $(if ($ok) { '' } else {
-        'Install or enable Chrome/Edge and run flutter config --enable-web.'
+        if ([string]::IsNullOrWhiteSpace($RequiredDeviceId)) {
+          'Install or enable Chrome/Edge and run flutter config --enable-web.'
+        } else {
+          "Install or enable the Flutter Web device '$RequiredDeviceId' and run flutter config --enable-web."
+        }
       })
 }
 
@@ -664,9 +686,11 @@ function Invoke-RimsLocalDoctor {
         -WslExecutable $wslExecutable `
         -BashCommand 'docker compose version' `
         -Remediation 'Install the Docker Compose plugin in WSL or repair Docker Desktop integration.'))
+  $requiredWebDeviceId = if ($UseLocalTls -and $Target -eq 'web') { 'chrome' } else { '' }
   [void]$components.Add((Test-RimsWebDeviceComponent `
         -FlutterExecutable $flutterExecutable `
-        -Required ($Target -in @('web', 'android'))))
+        -Required ($Target -in @('web', 'android')) `
+        -RequiredDeviceId $requiredWebDeviceId))
 
   if ($Target -eq 'android') {
     $adbPathState = Resolve-RimsAndroidToolState `
