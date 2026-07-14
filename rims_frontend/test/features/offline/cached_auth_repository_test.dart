@@ -214,6 +214,14 @@ void main() {
     expect(repository.lastRestoreSource, AuthSessionSource.cache);
     expect(repository.lastRestoreFetchedAt, now);
 
+    delegate.restoreResult = const FailureResult(TransportUnknownFailure());
+    final cachedAfterDroppedResponse = _sessionFrom(
+      await repository.restoreSession(),
+    );
+    expect(cachedAfterDroppedResponse?.user.username, 'alice');
+    expect(cachedAfterDroppedResponse?.accessToken, 'token');
+    expect(repository.lastRestoreSource, AuthSessionSource.cache);
+
     final controller = AuthSessionController();
     addTearDown(controller.dispose);
     await controller.restoreSession(repository);

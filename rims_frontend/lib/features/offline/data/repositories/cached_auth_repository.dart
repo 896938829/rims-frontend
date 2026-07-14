@@ -11,6 +11,7 @@ import '../../domain/entities/cache_snapshot.dart';
 import '../../domain/services/offline_store.dart';
 import '../../domain/services/offline_ownership_service.dart';
 import '../../domain/services/offline_write_barrier.dart';
+import 'cache_fallback.dart';
 import '../services/cache_policy.dart';
 
 final class CachedAuthRepository
@@ -186,7 +187,7 @@ final class CachedAuthRepository
       }
       return FailureResult(failure);
     }
-    if (failure is! NetworkFailure || accountId == null) {
+    if (!isCacheFallbackFailure(failure) || accountId == null) {
       return FailureResult(failure);
     }
     final record = await store.readCache(

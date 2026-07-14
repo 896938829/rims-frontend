@@ -7,6 +7,9 @@ import '../services/cache_policy.dart';
 typedef CacheEncoder<T> = Map<String, Object?> Function(T value);
 typedef CacheDecoder<T> = T Function(Map<String, Object?> payload);
 
+bool isCacheFallbackFailure(Failure failure) =>
+    failure is NetworkFailure || failure is TransportUnknownFailure;
+
 Future<Result<CacheSnapshot<T>>> cacheNetworkFirst<T>({
   required OfflineStore store,
   required CacheKey key,
@@ -43,7 +46,7 @@ Future<Result<CacheSnapshot<T>>> cacheNetworkFirst<T>({
         ),
       );
     case FailureResult<T>(failure: final failure):
-      if (failure is! NetworkFailure) {
+      if (!isCacheFallbackFailure(failure)) {
         return FailureResult(failure);
       }
       final record = await store.readCache(

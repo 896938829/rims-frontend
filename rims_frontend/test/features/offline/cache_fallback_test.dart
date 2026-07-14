@@ -75,6 +75,35 @@ void main() {
     },
   );
 
+  test('unknown read transport result falls back to retained cache', () async {
+    final store = MemoryOfflineStore();
+    await store.writeCache(
+      CacheRecord(
+        key: key,
+        payload: const {'value': 2},
+        schemaVersion: 3,
+        fetchedAt: now,
+        expiresAt: now.add(const Duration(hours: 1)),
+      ),
+    );
+
+    final result = await cacheNetworkFirst<int>(
+      store: store,
+      key: key,
+      policy: policy,
+      now: () => now,
+      loadNetwork: () async => const FailureResult(
+        TransportUnknownFailure(message: 'connection closed'),
+      ),
+      encode: (value) => {'value': value},
+      decode: (payload) => payload['value']! as int,
+    );
+
+    final snapshot = _success(result);
+    expect(snapshot.value, 2);
+    expect(snapshot.source, DataSourceKind.cache);
+  });
+
   test(
     'retention expiry and schema mismatch preserve network failure',
     () async {
