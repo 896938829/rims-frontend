@@ -162,7 +162,7 @@ final class _MainAppState extends State<MainApp> {
         );
     _offlineOwnershipService = OfflineOwnershipService(
       store: ownershipStore as OfflineOwnershipStore,
-      files: _attachmentStagingStore,
+      files: createOfflineOwnedFileStore(_attachmentStagingStore),
       scans: OfflineScanOwnershipAdapter(
         sessions: _scanSessionStore,
         lookupCache: _scanLookupCache,

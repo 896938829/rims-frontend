@@ -34,3 +34,7 @@ OfflineDatabaseKeyManager createOfflineDatabaseKeyManager({
   }
   return MemoryOfflineDatabaseKeyManager();
 }
+
+OfflineOwnedFileStore createOfflineOwnedFileStore(Object store) {
+  return store as OfflineOwnedFileStore;
+}

@@ -19,3 +19,31 @@ OfflineDatabaseKeyManager createOfflineDatabaseKeyManager({
   required ReadOfflineDatabaseKey readKey,
   required WriteOfflineDatabaseKey writeKey,
 }) => MemoryOfflineDatabaseKeyManager();
+
+OfflineOwnedFileStore createOfflineOwnedFileStore(Object store) {
+  return const _EmptyOfflineOwnedFileStore();
+}
+
+final class _EmptyOfflineOwnedFileStore implements OfflineOwnedFileStore {
+  const _EmptyOfflineOwnedFileStore();
+
+  @override
+  Future<OfflineFileOwnershipSnapshot> inspectAccount(String accountId) async {
+    return const OfflineFileOwnershipSnapshot();
+  }
+
+  @override
+  Future<void> clearAccountFiles(
+    String accountId, {
+    required Set<String> retainStagedRequestIds,
+  }) async {}
+
+  @override
+  Future<void> clearDownloads(String accountId) async {}
+
+  @override
+  Future<void> clearStagedTransfers(String accountId) async {}
+
+  @override
+  Future<void> clearAllFiles() async {}
+}
