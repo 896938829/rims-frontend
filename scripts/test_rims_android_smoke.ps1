@@ -23,6 +23,14 @@ $androidWrapperText = Get-Content -LiteralPath $wrapper -Raw
 if ($androidWrapperText.Contains("Join-Path `$PSHOME 'powershell.exe'")) {
   throw 'Android smoke must launch child processes with the current PowerShell host.'
 }
+foreach ($healthRetryContract in @(
+    'for ($attempt = 1; $attempt -le 5; $attempt += 1)',
+    'Start-Sleep -Milliseconds 500'
+  )) {
+  if (-not $androidWrapperText.Contains($healthRetryContract)) {
+    throw "Android WSL health probe omitted bounded retry contract '$healthRetryContract'."
+  }
+}
 $localRuntimeCalls = [regex]::Matches(
   $androidWrapperText,
   'Invoke-LocalRuntime\s+-Arguments'

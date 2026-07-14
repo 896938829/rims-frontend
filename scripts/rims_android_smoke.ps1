@@ -754,14 +754,18 @@ function Test-RimsFixtureBaselineMatches {
 }
 
 function Test-WslBackendHealthz {
-  try {
-    $execution = Invoke-WslBackendCommand `
-      -Command 'curl --noproxy "*" --fail --silent --show-error --max-time 5 "http://[::1]:$1/healthz" >/dev/null' `
-      -CommandArguments @("$BackendPort")
-    return $execution.ExitCode -eq 0
-  } catch {
-    return $false
+  for ($attempt = 1; $attempt -le 5; $attempt += 1) {
+    try {
+      $execution = Invoke-WslBackendCommand `
+        -Command 'curl --noproxy "*" --fail --silent --show-error --max-time 5 "http://[::1]:$1/healthz" >/dev/null' `
+        -CommandArguments @("$BackendPort")
+      if ($execution.ExitCode -eq 0) { return $true }
+    } catch {
+      if ($attempt -eq 5) { return $false }
+    }
+    Start-Sleep -Milliseconds 500
   }
+  return $false
 }
 
 function Initialize-AndroidRuntime {
