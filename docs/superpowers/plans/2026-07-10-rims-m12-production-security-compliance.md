@@ -547,4 +547,3 @@ Repository/runtime:
     powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rims_local.ps1 -Command status -Output Json
 
 M12 is locally complete only when these commands and the real M12 report pass, P0/P1 is zero, services are stopped, repository scope is clean, and all remaining production/legal actions are explicitly OPEN EXTERNAL.
-
