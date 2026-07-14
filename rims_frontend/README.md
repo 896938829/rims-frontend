@@ -33,19 +33,19 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rims_local.ps1 -Co
 
 ```powershell
 flutter pub get --offline
-flutter run -d chrome --dart-define=API_BASE_URL=http://localhost:8080/api/v1
+flutter run -d chrome `
+  --dart-define=APP_ENV=development `
+  --dart-define=ALLOW_LOCAL_HTTP=true `
+  --dart-define=API_BASE_URL=http://localhost:8080/api/v1
 ```
 
-如果后端使用默认地址，也可以省略 `--dart-define`：
+本地 HTTP 必须显式声明开发环境和本地覆盖。桌面端同样使用这三个 define：
 
 ```powershell
-flutter run -d chrome
-```
-
-桌面端或移动端同样使用 `API_BASE_URL` 指向后端：
-
-```powershell
-flutter run -d windows --dart-define=API_BASE_URL=http://localhost:8080/api/v1
+flutter run -d windows `
+  --dart-define=APP_ENV=development `
+  --dart-define=ALLOW_LOCAL_HTTP=true `
+  --dart-define=API_BASE_URL=http://localhost:8080/api/v1
 ```
 
 ## 登录和账号

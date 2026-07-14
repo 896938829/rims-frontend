@@ -47,6 +47,14 @@ Assert-Contains `
   -Collection $web.arguments `
   -Expected '--dart-define=API_BASE_URL=http://localhost:18080/api/v1' `
   -Message 'Web API URL changed.'
+Assert-Contains `
+  -Collection $web.arguments `
+  -Expected '--dart-define=APP_ENV=development' `
+  -Message 'Web environment profile must be explicit.'
+Assert-Contains `
+  -Collection $web.arguments `
+  -Expected '--dart-define=ALLOW_LOCAL_HTTP=true' `
+  -Message 'Web local HTTP override must be explicit.'
 
 $android = New-FlutterLaunchSpec `
   -Target 'android' `
@@ -63,6 +71,14 @@ Assert-Contains `
   -Collection $android.arguments `
   -Expected '--dart-define=API_BASE_URL=http://10.0.2.2:18080/api/v1' `
   -Message 'Android API URL changed.'
+Assert-Contains `
+  -Collection $android.arguments `
+  -Expected '--dart-define=APP_ENV=development' `
+  -Message 'Android environment profile must be explicit.'
+Assert-Contains `
+  -Collection $android.arguments `
+  -Expected '--dart-define=ALLOW_LOCAL_HTTP=true' `
+  -Message 'Android local HTTP override must be explicit.'
 Assert-Contains `
   -Collection $android.arguments `
   -Expected '--machine' `

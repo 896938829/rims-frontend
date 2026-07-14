@@ -17,6 +17,25 @@ void main() {
     expect(ApiEndpoints.healthUri, Uri.parse('http://localhost:8080/healthz'));
   });
 
+  test('derives health URI from the validated API base URI', () {
+    expect(
+      ApiEndpoints.healthUriFor(Uri.parse('https://api.rims.example/api/v1')),
+      Uri.parse('https://api.rims.example/healthz'),
+    );
+  });
+
+  test('uses an injected validated API base URI', () {
+    final dio = Dio();
+
+    ApiClient(
+      dio: dio,
+      apiBaseUri: Uri.parse('https://api.rims.example/api/v1'),
+      enableLogging: false,
+    );
+
+    expect(dio.options.baseUrl, 'https://api.rims.example/api/v1');
+  });
+
   test('attaches logging interceptor by default', () {
     final dio = Dio();
 

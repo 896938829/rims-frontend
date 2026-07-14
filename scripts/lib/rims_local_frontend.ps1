@@ -45,6 +45,8 @@ function New-FlutterLaunchSpec {
       '127.0.0.1',
       '--web-port',
       [string]$FrontendPort,
+      '--dart-define=APP_ENV=development',
+      '--dart-define=ALLOW_LOCAL_HTTP=true',
       "--dart-define=API_BASE_URL=http://localhost:$BackendPort/api/v1"
     )
   } else {
@@ -54,6 +56,8 @@ function New-FlutterLaunchSpec {
       '--machine',
       '-d',
       $AndroidSerial,
+      '--dart-define=APP_ENV=development',
+      '--dart-define=ALLOW_LOCAL_HTTP=true',
       "--dart-define=API_BASE_URL=http://10.0.2.2:$BackendPort/api/v1"
     )
   }

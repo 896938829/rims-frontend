@@ -223,6 +223,8 @@ $plan = [pscustomobject][ordered]@{
   ) + $offlineRunnerArguments + @(
     $integrationTestPath,
     '-d', '<resolved-serial>',
+    '--dart-define=APP_ENV=development',
+    '--dart-define=ALLOW_LOCAL_HTTP=true',
     "--dart-define=API_BASE_URL=$apiBaseUrl"
   ) + $fieldDefines + $offlineDefines
   deviceActions = if ($Phase -eq 'field-operations') {
@@ -1668,6 +1670,8 @@ function Invoke-AndroidFlutterTest {
   ) + $offlineRunnerArguments + @(
     $integrationTestPath,
     '-d', $androidSerial,
+    '--dart-define=APP_ENV=development',
+    '--dart-define=ALLOW_LOCAL_HTTP=true',
     "--dart-define=API_BASE_URL=$apiBaseUrl"
   ) + $fieldDefines + $offlineDefines + $processStageDefine
   $flutterCommand = (@($flutter) + $flutterArguments | ForEach-Object {

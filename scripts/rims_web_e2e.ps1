@@ -788,6 +788,8 @@ trap 'rm -f "$output"' EXIT
               --target=integration_test/app_e2e_test.dart `
               -d web-server `
               --driver-port=$DriverPort `
+              --dart-define="APP_ENV=development" `
+              --dart-define="ALLOW_LOCAL_HTTP=true" `
               --dart-define="API_BASE_URL=http://localhost:$BackendPort/api/v1" `
               --timeout=240 *>&1 | Tee-Object -FilePath $e2eLog
             $flutterExitCode = $LASTEXITCODE

@@ -7,6 +7,7 @@ import 'package:go_router/go_router.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 
+import 'core/config/app_environment.dart';
 import 'core/events/app_event.dart';
 import 'core/events/app_event_bus.dart';
 import 'core/network/api_client.dart';
@@ -73,6 +74,7 @@ class MainApp extends StatefulWidget {
     this.networkStatusService,
     this.outboxHandlers = const [],
     this.offlineDatabaseKeyManager,
+    this.configuration,
     super.key,
   });
 
@@ -80,6 +82,7 @@ class MainApp extends StatefulWidget {
   final NetworkStatusService? networkStatusService;
   final List<OutboxOperationHandler> outboxHandlers;
   final OfflineDatabaseKeyManager? offlineDatabaseKeyManager;
+  final AppConfiguration? configuration;
 
   @override
   State<MainApp> createState() => _MainAppState();
@@ -114,11 +117,13 @@ final class _MainAppState extends State<MainApp> {
   late final AdminRepositoryImpl _adminRepository;
   late final GoRouter _router;
   late final NetworkStatusService _networkStatusService;
+  late final AppConfiguration _configuration;
   Dio? _healthClient;
 
   @override
   void initState() {
     super.initState();
+    _configuration = widget.configuration ?? AppConfiguration.localTest();
     _networkStatusService =
         widget.networkStatusService ?? _createNetworkStatusService();
     final fieldConfig = FieldOperationsTestConfig.current;
@@ -185,13 +190,14 @@ final class _MainAppState extends State<MainApp> {
       warehouseIdReader: () async => _sessionController.currentWarehouse?.id,
       eventBus: _eventBus,
       requestObserver: ApiReachabilityObserver(_networkStatusService).call,
+      apiBaseUri: _configuration.apiBaseUri,
     );
     final attachmentsRemoteDataSource = ApiAttachmentsRemoteDataSource(
       _apiClient,
     );
     _attachmentsRepository = AttachmentsRepositoryImpl(
       remoteDataSource: attachmentsRemoteDataSource,
-      apiBaseUri: Uri.parse(ApiEndpoints.baseUrl),
+      apiBaseUri: _configuration.apiBaseUri,
       saveDownload: (attachment, bytes) async {
         final userId = _sessionController.currentUser?.id.toString();
         if (userId == null) {
@@ -370,7 +376,7 @@ final class _MainAppState extends State<MainApp> {
       connectivityChanges: connectivity.onConnectivityChanged,
       healthProbe: () async {
         final response = await healthClient.getUri<Object?>(
-          ApiEndpoints.healthUri,
+          ApiEndpoints.healthUriFor(_configuration.apiBaseUri),
         );
         return response.statusCode == 200;
       },

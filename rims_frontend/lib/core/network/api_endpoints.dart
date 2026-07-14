@@ -1,11 +1,11 @@
 abstract final class ApiEndpoints {
-  static const String baseUrl = String.fromEnvironment(
-    'API_BASE_URL',
-    defaultValue: 'http://localhost:8080/api/v1',
-  );
-  static final Uri healthUri = Uri.parse(
-    baseUrl,
-  ).replace(path: '/healthz', query: null, fragment: null);
+  static const String baseUrl = 'http://localhost:8080/api/v1';
+  static final Uri baseUri = Uri.parse(baseUrl);
+  static final Uri healthUri = healthUriFor(baseUri);
+
+  static Uri healthUriFor(Uri apiBaseUri) {
+    return apiBaseUri.replace(path: '/healthz', query: null, fragment: null);
+  }
 
   static const String login = '/auth/login';
   static const String currentUser = '/users/me';

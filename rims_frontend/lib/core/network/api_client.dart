@@ -33,6 +33,7 @@ final class ApiClient {
     AppEventBus? eventBus,
     ApiRequestObserver? requestObserver,
     bool enableLogging = true,
+    Uri? apiBaseUri,
   }) : this._(
          dio: dio ?? Dio(),
          exceptionMapper: exceptionMapper,
@@ -41,6 +42,7 @@ final class ApiClient {
          eventBus: eventBus,
          requestObserver: requestObserver,
          enableLogging: enableLogging,
+         apiBaseUri: apiBaseUri ?? ApiEndpoints.baseUri,
        );
 
   ApiClient._({
@@ -51,9 +53,10 @@ final class ApiClient {
     required this.eventBus,
     required this.requestObserver,
     required bool enableLogging,
+    required Uri apiBaseUri,
   }) : _tokenReader = tokenReader {
     _dio.options = BaseOptions(
-      baseUrl: ApiEndpoints.baseUrl,
+      baseUrl: apiBaseUri.toString(),
       connectTimeout: const Duration(seconds: 15),
       receiveTimeout: const Duration(seconds: 15),
       sendTimeout: const Duration(seconds: 15),
