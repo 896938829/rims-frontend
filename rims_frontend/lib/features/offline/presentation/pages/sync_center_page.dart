@@ -360,6 +360,7 @@ final class _OperationRow extends StatelessWidget {
                   children: [
                     if (canReview)
                       TextButton.icon(
+                        key: ValueKey('sync-review-${operation.operationId}'),
                         onPressed: busy ? null : onReview,
                         icon: const Icon(Icons.fact_check_outlined, size: 17),
                         label: Text(reviewed ? '重新复核' : '复核并同步'),

@@ -9,6 +9,49 @@ import 'package:rims_frontend/features/offline/presentation/pages/sync_center_pa
 import 'package:rims_frontend/features/offline/presentation/view_models/sync_center_view_model.dart';
 
 void main() {
+  testWidgets('review controls are scoped to their operation', (tester) async {
+    final now = DateTime.utc(2026, 7, 13);
+    final repository = MemoryOutboxRepository(
+      stateMachine: OutboxStateMachine(now: () => now),
+      now: () => now,
+    );
+    for (final id in ['first', 'target']) {
+      await repository.enqueue(
+        OutboxOperation(
+          operationId: id,
+          idempotencyKey: 'key-$id',
+          accountId: '7',
+          warehouseId: 11,
+          kind: OutboxOperationKind.documentCreate,
+          payload: const {},
+          state: OutboxState.queued,
+          createdAt: now,
+        ),
+      );
+    }
+    const context = OutboxExecutionContext(
+      accountId: '7',
+      warehouseId: 11,
+      permissionStamp: 'document:create',
+      allowedKinds: {OutboxOperationKind.documentCreate},
+    );
+    final viewModel = SyncCenterViewModel(
+      repository: repository,
+      executor: const _Executor(),
+      contextReader: () => context,
+    );
+    addTearDown(viewModel.dispose);
+    await viewModel.load();
+
+    await tester.pumpWidget(
+      MaterialApp(home: SyncCenterPage(viewModel: viewModel)),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const ValueKey('sync-review-first')), findsOneWidget);
+    expect(find.byKey(const ValueKey('sync-review-target')), findsOneWidget);
+  });
+
   testWidgets(
     'permission blocked graph is visible as attention and not reviewable',
     (tester) async {

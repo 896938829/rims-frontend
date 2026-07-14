@@ -1395,7 +1395,7 @@ Future<void> _syncOperation(WidgetTester tester, String operationId) async {
   final viewModel = await _waitForOperationInSyncCenter(tester, operationId);
   await tapFinderAndSettle(
     tester,
-    find.text('复核并同步').first,
+    find.byKey(ValueKey('sync-review-$operationId')),
     description: 'review operation $operationId',
   );
   await expectText(tester, '复核并同步');
