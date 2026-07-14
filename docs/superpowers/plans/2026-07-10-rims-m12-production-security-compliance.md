@@ -36,22 +36,22 @@
 - Create: `docs/security/external-launch-checklist.md`
 - Test: `rims_frontend/test/m12_architecture_test.dart`
 
-- [ ] **Step 1: Write RED architecture tests**
+- [x] **Step 1: Write RED architecture tests**
 
 Require stable inventory rows for credentials, caches, drafts, outbox, attachments, scans, logs, exports, audit, providers, Android permissions, environment profiles, and external approvals. Each class must declare owner scope, encryption, backup, retention, clear trigger, export, and redaction.
 
 Run: `flutter test --no-pub test/m12_architecture_test.dart` from `rims_frontend`.
 Expected: FAIL because the M12 records do not exist.
 
-- [ ] **Step 2: Record observed baseline**
+- [x] **Step 2: Record observed baseline**
 
 Pin frontend/backend base commits, tools, stopped state, and current JWT/config/CORS/Swagger/upload/logging/Android behavior. Mark unobserved exit rows `planned`.
 
-- [ ] **Step 3: Write classification and external records**
+- [x] **Step 3: Write classification and external records**
 
 Use stable class IDs for access/refresh/TOTP credentials, identity, four cache groups, drafts, outbox, staged/server attachments, scans, runtime logs, server audit, account export, and test evidence. Record DNS/TLS, secret custody, DB backups, legal, penetration, signing/integrity/store, incident response, and rollout as `OPEN EXTERNAL`.
 
-- [ ] **Step 4: Run GREEN and commit**
+- [x] **Step 4: Run GREEN and commit**
 
 Run architecture test and `git diff --check`. Commit: `docs: inventory M12 security boundaries`.
 
