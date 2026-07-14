@@ -71,9 +71,17 @@ final class DriftOutboxRepository implements OutboxRepository {
 
     try {
       final stored = await database.transaction(() async {
-        final existing = await (database.select(
-          database.offlineOutboxOperations,
-        )..where((row) => row.operationId.isIn(byId.keys))).get();
+        final collisions =
+            await (database.select(database.offlineOutboxOperations)..where(
+                  (row) =>
+                      row.operationId.isIn(byId.keys) |
+                      (row.accountId.equals(accountId) &
+                          row.idempotencyKey.isIn(keys)),
+                ))
+                .get();
+        final existing = collisions
+            .where((row) => byId.containsKey(row.operationId))
+            .toList(growable: false);
         if (existing.isNotEmpty) {
           if (existing.length != graph.operations.length ||
               !await _isExactGraphReplay(graph, payloads, existing)) {
@@ -82,6 +90,11 @@ final class DriftOutboxRepository implements OutboxRepository {
             );
           }
           return existing.map(_toDomainOperation).toList(growable: false);
+        }
+        if (collisions.isNotEmpty) {
+          throw const _OutboxConflictException(
+            'An idempotency key already exists.',
+          );
         }
 
         final activeCount = database.offlineOutboxOperations.operationId
@@ -106,21 +119,6 @@ final class DriftOutboxRepository implements OutboxRepository {
             'The offline outbox limit is 500 operations.',
           );
         }
-        final keyCollision =
-            await (database.select(database.offlineOutboxOperations)
-                  ..where(
-                    (row) =>
-                        row.accountId.equals(accountId) &
-                        row.idempotencyKey.isIn(keys),
-                  )
-                  ..limit(1))
-                .getSingleOrNull();
-        if (keyCollision != null) {
-          throw const _OutboxConflictException(
-            'An idempotency key already exists.',
-          );
-        }
-
         final dependencyIds = graph.dependencies.values
             .expand((ids) => ids)
             .where((id) => !byId.containsKey(id))
