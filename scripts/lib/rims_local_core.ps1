@@ -44,7 +44,11 @@ function Get-RimsLocalSafePathMetadata {
     [Parameter(Mandatory = $true)]
     [string]$Path,
     [Parameter(Mandatory = $true)]
-    [ValidateSet('windowsAbsolutePath', 'wslAbsolutePath')]
+    [ValidateSet(
+      'windowsAbsolutePath',
+      'wslAbsolutePath',
+      'posixAbsolutePath'
+    )]
     [string]$Category
   )
 
@@ -80,6 +84,9 @@ function Get-RimsLocalAbsolutePathCategory {
   if ($Value -match '\A/mnt/[A-Za-z](?:/|\z)[\s\S]*\z') {
     return 'wslAbsolutePath'
   }
+  if ($Value -match '\A/(?!/)[\s\S]+\z') {
+    return 'posixAbsolutePath'
+  }
   return $null
 }
 
@@ -93,7 +100,8 @@ function ConvertTo-RimsLocalSafeJsonString {
   $safe = $Value
   foreach ($pathPattern in @(
       '(?i)(?<![A-Za-z0-9])(?:[A-Z]:[\\/]|\\\\).*?(?=(?: \(|;|,\s|\. (?=\S)|\)|\r|\n|$))',
-      '(?i)(?<![A-Za-z0-9])/mnt/[A-Z](?:/.*?)?(?=(?: \(|;|,\s|\. (?=\S)|\)|\r|\n|$))'
+      '(?i)(?<![A-Za-z0-9])/mnt/[A-Z](?:/.*?)?(?=(?: \(|;|,\s|\. (?=\S)|\)|\r|\n|$))',
+      '(?<![A-Za-z0-9:/])/(?!/)[^\s;,)\r\n]+'
     )) {
     $safe = [regex]::Replace($safe, $pathPattern, {
         param($match)
@@ -151,8 +159,7 @@ function ConvertTo-RimsLocalSafeJsonValue {
     $safeItems = @($Value | ForEach-Object {
         ConvertTo-RimsLocalSafeJsonValue -Value $_ -Depth ($Depth + 1)
       })
-    Write-Output -NoEnumerate $safeItems
-    return
+    return ,$safeItems
   }
 
   $safeObject = [ordered]@{}

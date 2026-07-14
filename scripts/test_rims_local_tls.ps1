@@ -23,7 +23,70 @@ function Get-RimsTlsTestPort {
   }
 }
 
+function Get-RimsTlsPrivateKeyContainerSnapshot {
+  $snapshot = [ordered]@{}
+  foreach ($containerRoot in @(
+      (Join-Path $env:APPDATA 'Microsoft\Crypto\RSA'),
+      (Join-Path $env:ProgramData 'Microsoft\Crypto\RSA\MachineKeys')
+    )) {
+    if (-not (Test-Path -LiteralPath $containerRoot -PathType Container)) {
+      continue
+    }
+    foreach ($file in @(Get-ChildItem `
+        -LiteralPath $containerRoot `
+        -File `
+        -Recurse `
+        -Force `
+        -ErrorAction SilentlyContinue)) {
+      $snapshot[$file.FullName] = '{0}:{1}' -f `
+        $file.LastWriteTimeUtc.Ticks, `
+        $file.Length
+    }
+  }
+  return $snapshot
+}
+
+function Assert-RimsTlsPrivateKeySnapshotEqual {
+  param(
+    [Parameter(Mandatory = $true)][Collections.IDictionary]$Before,
+    [Parameter(Mandatory = $true)][Collections.IDictionary]$After,
+    [Parameter(Mandatory = $true)][string]$Message
+  )
+
+  $changes = @()
+  foreach ($path in $After.Keys) {
+    if (-not $Before.Contains($path)) {
+      $changes += "new:$path"
+    } elseif ($Before[$path] -ne $After[$path]) {
+      $changes += "changed:$path"
+    }
+  }
+  if ($changes.Count -gt 0) {
+    throw "$Message Changes: $($changes -join ', ')"
+  }
+}
+
+function Wait-RimsTlsTestTask {
+  param(
+    [Parameter(Mandatory = $true)][Threading.Tasks.Task]$Task,
+    [Parameter(Mandatory = $true)][int]$TimeoutMilliseconds,
+    [Parameter(Mandatory = $true)][string]$Message
+  )
+
+  if (-not $Task.Wait($TimeoutMilliseconds)) {
+    throw $Message
+  }
+  return $Task.GetAwaiter().GetResult()
+}
+
+function Write-RimsTlsTestStage {
+  param([Parameter(Mandatory = $true)][string]$Name)
+
+  Write-Output "[TLS TEST] $Name"
+}
+
 try {
+  Write-RimsTlsTestStage -Name 'wrapper and safe JSON contracts'
   [void][IO.Directory]::CreateDirectory((Join-Path $workspaceA 'scripts'))
   [void][IO.Directory]::CreateDirectory((Join-Path $workspaceB 'scripts'))
 
@@ -84,6 +147,10 @@ try {
   Assert-True `
     -Value ($readmeSource.Contains('SPKI') -and $readmeSource.Contains('temporary Chrome')) `
     -Message 'README does not explain isolated Web SPKI trust.'
+  Assert-True `
+    -Value ($readmeSource.Contains('WSL Go TLS proxy') -and
+      $readmeSource.Contains('Linux process identity')) `
+    -Message 'README does not explain the WSL Go TLS proxy ownership boundary.'
   $tlsLibrarySource = [IO.File]::ReadAllText((Join-Path $scriptDir 'lib\rims_local_tls.ps1'))
   Assert-True `
     -Value ($tlsLibrarySource.Contains("'-pubkey'") -and
@@ -191,6 +258,42 @@ try {
         $safeJson.Contains('exists')) `
       -Message "$($jsonBoundaryCase.command) JSON omitted safe path metadata."
   }
+
+  $posixSecretResult = New-RimsLocalResult -Command 'doctor'
+  $posixSecretResult.components = @(
+    [pscustomobject]@{
+      name = 'localTls'
+      purePath = '/home/SECRET-posix-pure/tls/server.pem'
+      nested = @(
+        [pscustomobject]@{
+          temporaryPath = '/tmp/SECRET-posix-nested/ca.pem'
+          exception = New-Object InvalidOperationException(
+            'failed at /var/lib/SECRET-posix-exception/private.key')
+        }
+      )
+      detail = 'mixed /usr/local/SECRET-posix-mixed/server.pfx; retry denied'
+      url = 'https://example.test/home/SAFE-URL/resource'
+      ordinarySlashText = 'docs/guide/SAFE-SLASH remains diagnostic'
+    }
+  )
+  $posixSafeJson = ConvertTo-RimsLocalSafeJson -Result $posixSecretResult
+  foreach ($secretMarker in @(
+      'SECRET-posix-pure',
+      'SECRET-posix-nested',
+      'SECRET-posix-exception',
+      'SECRET-posix-mixed'
+    )) {
+    Assert-False `
+      -Value $posixSafeJson.Contains($secretMarker) `
+      -Message "Safe JSON leaked POSIX path marker $secretMarker."
+  }
+  Assert-True `
+    -Value $posixSafeJson.Contains('posixAbsolutePath') `
+    -Message 'Safe JSON omitted POSIX path metadata.'
+  Assert-True `
+    -Value ($posixSafeJson.Contains('https://example.test/home/SAFE-URL/resource') -and
+      $posixSafeJson.Contains('docs/guide/SAFE-SLASH remains diagnostic')) `
+    -Message 'Safe JSON incorrectly treated a URL or ordinary slash text as a local path.'
 
   $webSpkiPin = [Convert]::ToBase64String([byte[]](0..31))
   $missingWebPinRejected = $false
@@ -304,6 +407,65 @@ try {
     -ScriptDirectory (Join-Path $workspaceA 'scripts')
   $pathsB = Get-RimsLocalTlsPaths `
     -ScriptDirectory (Join-Path $workspaceB 'scripts')
+  Assert-Equal `
+    -Actual ([string](Get-RimsObjectPropertyValue `
+        -Value $pathsA `
+        -Name 'proxySource' `
+        -DefaultValue '')) `
+    -Expected (Join-Path $pathsA.root 'proxy.go') `
+    -Message 'TLS paths omitted deterministic WSL Go proxy source.'
+  Assert-Equal `
+    -Actual ([string](Get-RimsObjectPropertyValue `
+        -Value $pathsA `
+        -Name 'proxyBinary' `
+        -DefaultValue '')) `
+    -Expected (Join-Path $pathsA.root 'rims-local-tls-proxy') `
+    -Message 'TLS paths omitted deterministic WSL Go proxy binary.'
+  Assert-Equal `
+    -Actual ([string](Get-RimsObjectPropertyValue `
+        -Value $pathsA `
+        -Name 'proxyLinuxIdentity' `
+        -DefaultValue '')) `
+    -Expected (Join-Path $pathsA.root 'proxy.linux-identity.json') `
+    -Message 'TLS paths omitted deterministic Linux identity evidence.'
+  $goProxySource = New-RimsLocalTlsProxySource
+  foreach ($goProxyPattern in @(
+      'tls.LoadX509KeyPair',
+      'net.Listen("tcp", "127.0.0.1:"',
+      'go func()',
+      'io.Copy',
+      'signal.NotifyContext'
+    )) {
+    Assert-True `
+      -Value $goProxySource.Contains($goProxyPattern) `
+      -Message "WSL Go TLS proxy omitted required pattern: $goProxyPattern"
+  }
+  Assert-False `
+    -Value ($goProxySource.Contains('0.0.0.0') -or
+      $goProxySource.Contains('[::]')) `
+    -Message 'WSL Go TLS proxy source exposed a non-loopback listener.'
+  Assert-True `
+    -Value $goProxySource.Contains('func handleConnection(ctx context.Context') `
+    -Message 'WSL Go TLS proxy does not pass cancellation into active connections.'
+  Assert-True `
+    -Value $goProxySource.Contains('case <-ctx.Done():') `
+    -Message 'WSL Go TLS proxy does not close active connections on shutdown.'
+  $tlsLibrarySource = [IO.File]::ReadAllText(
+    (Join-Path $scriptDir 'lib\rims_local_tls.ps1')
+  )
+  Assert-False `
+    -Value ([regex]::IsMatch($tlsLibrarySource, '\.WaitForExit\(\s*\)')) `
+    -Message 'TLS process compensation retained an unbounded WaitForExit call.'
+  foreach ($retiredProxyPattern in @(
+      'EphemeralKeySet',
+      'X509Certificate2',
+      'ConcurrentTlsProxy',
+      'Start-RimsLegacyLocalTlsProxyProcess'
+    )) {
+    Assert-False `
+      -Value $tlsLibrarySource.Contains($retiredProxyPattern) `
+      -Message "Retired Windows TLS proxy path remains: $retiredProxyPattern"
+  }
   Assert-NotEqual `
     -Actual $pathsA.workspaceId `
     -Expected $pathsB.workspaceId `
@@ -461,12 +623,16 @@ try {
     -Message 'TLS proxy spawned despite an occupied unowned port.'
 
   $script:startedProcessCompensated = $false
+  $script:startedProcessWaitTimeout = $null
+  $script:proxyRuntimeExecutable = $null
+  Write-RimsTlsTestStage -Name 'process start and compensation seams'
   $fakeStartedProcess = [pscustomobject]@{
     StartInfo = $null
     Id = 4343
     HasExited = $false
   }
   $fakeStartedProcess | Add-Member -MemberType ScriptMethod -Name Start -Value {
+    $script:proxyRuntimeExecutable = $this.StartInfo.FileName
     return $true
   }
   $fakeStartedProcess | Add-Member -MemberType ScriptProperty -Name StartTime -Value {
@@ -475,17 +641,27 @@ try {
   $fakeStartedProcess | Add-Member -MemberType ScriptMethod -Name Kill -Value {
     $script:startedProcessCompensated = $true
   }
-  $fakeStartedProcess | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {}
+  $fakeStartedProcess | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {
+    param($timeoutMilliseconds)
+    $script:startedProcessWaitTimeout = $timeoutMilliseconds
+    return $true
+  }
   $fakeStartedProcess | Add-Member -MemberType ScriptMethod -Name Dispose -Value {}
   $startThenIdentityThrow = Start-RimsLocalTlsProxyProcess `
     -Spec ([pscustomobject]@{
-      proxyScript = $pathsA.proxyScript
-      serverPfx = $pathsA.serverPfx
+      proxySource = $pathsA.proxySource
+      proxyBinary = $pathsA.proxyBinary
+      linuxIdentityPath = $pathsA.proxyLinuxIdentity
+      serverCertificate = $pathsA.serverCertificate
+      serverPrivateKey = $pathsA.serverPrivateKey
       tlsPort = 8443
       backendPort = 8080
       ownershipMarker = "rims-local-tls-proxy:$($pathsA.workspaceId)"
       stderrLogPath = $pathsA.proxyStderrLog
+      stdoutLogPath = $pathsA.proxyStdoutLog
     }) `
+    -BuildAction { param($spec) return [pscustomobject]@{ ok = $true } } `
+    -PathConversionAction { param($path) return "/mnt/c/fake/$([IO.Path]::GetFileName($path))" } `
     -ProcessFactoryAction { return $fakeStartedProcess }
   Assert-False `
     -Value $startThenIdentityThrow.ok `
@@ -496,8 +672,81 @@ try {
   Assert-False `
     -Value $startThenIdentityThrow.cleanupPending `
     -Message 'Successfully compensated process start left cleanup pending.'
+  Assert-Equal `
+    -Actual $script:startedProcessWaitTimeout `
+    -Expected 3000 `
+    -Message 'Started proxy compensation did not use the bounded exit wait.'
+  Assert-Equal `
+    -Actual ([IO.Path]::GetFileName($script:proxyRuntimeExecutable)) `
+    -Expected 'wsl.exe' `
+    -Message 'PS5.1 controller did not launch the TLS proxy through WSL.'
+
+  $script:linuxIdentityCompensated = $false
+  $fakeIdentityProcess = [pscustomobject]@{
+    StartInfo = $null
+    Id = 4444
+    HasExited = $false
+    StartTime = [DateTime]::Parse('2026-07-15T01:02:03Z')
+  }
+  $fakeIdentityProcess | Add-Member -MemberType ScriptMethod -Name Start -Value {
+    return $true
+  }
+  $fakeIdentityProcess | Add-Member -MemberType ScriptMethod -Name Kill -Value {}
+  $fakeIdentityProcess | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {
+    param($timeoutMilliseconds)
+    return $true
+  }
+  $fakeIdentityProcess | Add-Member -MemberType ScriptMethod -Name Dispose -Value {}
+  $throwingLinuxIdentity = [pscustomobject][ordered]@{
+    bootId = 'boot-id'
+    leaderPid = 4445
+    startTicks = '654321'
+    commandMarker = "rims-local-tls-proxy:$($pathsA.workspaceId)"
+  }
+  $throwingLinuxIdentity | Add-Member `
+    -MemberType ScriptProperty `
+    -Name processGroupId `
+    -Value { throw 'fake PGID read after Linux identity publication' }
+  $identityPostReadThrow = Start-RimsLocalTlsProxyProcess `
+    -Spec ([pscustomobject]@{
+      proxySource = $pathsA.proxySource
+      proxyBinary = $pathsA.proxyBinary
+      linuxIdentityPath = $pathsA.proxyLinuxIdentity
+      serverCertificate = $pathsA.serverCertificate
+      serverPrivateKey = $pathsA.serverPrivateKey
+      tlsPort = 8443
+      backendPort = 8080
+      ownershipMarker = "rims-local-tls-proxy:$($pathsA.workspaceId)"
+      stderrLogPath = $pathsA.proxyStderrLog
+      stdoutLogPath = $pathsA.proxyStdoutLog
+    }) `
+    -BuildAction { param($spec) return [pscustomobject]@{ ok = $true } } `
+    -PathConversionAction { param($path) return "/mnt/c/fake/$([IO.Path]::GetFileName($path))" } `
+    -ProcessFactoryAction { return $fakeIdentityProcess } `
+    -LinuxIdentityAction { param($spec, $process) return $throwingLinuxIdentity } `
+    -CompensationAction {
+      param($state)
+      $script:linuxIdentityCompensated = $true
+      return $true
+    }
+  Assert-False `
+    -Value $identityPostReadThrow.ok `
+    -Message 'Post-identity TLS start throw was reported as success.'
+  Assert-True `
+    -Value $script:linuxIdentityCompensated `
+    -Message 'Post-identity TLS start throw skipped exact Linux compensation.'
+  Assert-False `
+    -Value $identityPostReadThrow.cleanupPending `
+    -Message 'Successful post-identity compensation left cleanup pending.'
 
   $fakeStartedAt = '2026-07-15T01:02:03.0000000Z'
+  $fakeLinuxIdentity = [pscustomobject][ordered]@{
+    bootId = 'fake-boot-id'
+    leaderPid = 4344
+    startTicks = '123456'
+    processGroupId = 4344
+    commandMarker = "rims-local-tls-proxy:$($pathsA.workspaceId)"
+  }
   $proxy = Start-RimsLocalTlsProxy `
     -TlsPaths $pathsA `
     -BackendPort 8080 `
@@ -508,22 +757,24 @@ try {
       return [pscustomobject]@{
         windowsPid = 4242
         windowsProcessStartTimeUtc = $fakeStartedAt
-        commandLine = $spec.commandLine
+        commandLine = "wsl.exe /mnt/c/fake/rims-local-tls-proxy $($spec.ownershipMarker)"
+        linuxIdentity = $fakeLinuxIdentity
+        linuxProcessGroupId = $fakeLinuxIdentity.processGroupId
+        proxyBinaryWslPath = '/mnt/c/fake/rims-local-tls-proxy'
       }
     } `
     -ReadinessAction { param($state) return $true } `
     -PortOwnershipAction { param($port, $processId) return $processId -eq 4242 }
   Assert-True -Value $proxy.ok -Message 'Owned fake TLS proxy did not start.'
-  $proxyScriptText = [IO.File]::ReadAllText($pathsA.proxyScript)
-  Assert-True `
-    -Value $proxyScriptText.Contains('EphemeralKeySet') `
-    -Message 'TLS proxy did not keep imported PFX keys ephemeral.'
-  Assert-True `
-    -Value $proxyScriptText.Contains('IPAddress.Loopback') `
-    -Message 'TLS proxy did not bind exclusively to host loopback.'
-  Assert-False `
-    -Value $proxyScriptText.Contains('IPAddress.Any') `
-    -Message 'TLS proxy exposed its listener beyond host loopback.'
+  $proxySourceText = [IO.File]::ReadAllText($pathsA.proxySource)
+  Assert-Equal `
+    -Actual $proxySourceText `
+    -Expected $goProxySource `
+    -Message 'TLS start did not write the reviewed WSL Go proxy source.'
+  Assert-Equal `
+    -Actual $proxy.state.linuxIdentity.commandMarker `
+    -Expected $fakeLinuxIdentity.commandMarker `
+    -Message 'TLS state omitted Linux command-marker ownership.'
 
   if ($null -eq ('RimsTlsTestCertificateValidation' -as [type])) {
     Add-Type -TypeDefinition @'
@@ -548,6 +799,7 @@ public static class RimsTlsTestCertificateValidation
     [RimsTlsTestCertificateValidation].GetMethod('Accept')
   )
 
+  Write-RimsTlsTestStage -Name 'real WSL proxy concurrency integration'
   $concurrentProxyRoot = Join-Path $testRoot 'concurrent-proxy'
   [void][IO.Directory]::CreateDirectory($concurrentProxyRoot)
   $concurrentWorkspaceScripts = Join-Path $testRoot 'concurrent-workspace\scripts'
@@ -559,78 +811,127 @@ public static class RimsTlsTestCertificateValidation
   Assert-True `
     -Value $concurrentCertificateResult.ok `
     -Message "Real local TLS test certificate generation failed: $($concurrentCertificateResult.detail)"
-  $concurrentPfx = $concurrentTlsPaths.serverPfx
-  $concurrentProxyScript = Join-Path $concurrentProxyRoot 'proxy.ps1'
-  $concurrentBackendScript = Join-Path $concurrentProxyRoot 'backend.ps1'
+  $concurrentBackendScript = Join-Path $concurrentProxyRoot 'backend.go'
   $concurrentBackendReady = Join-Path $concurrentProxyRoot 'backend-first.ready'
-  $concurrentErrorLog = Join-Path $concurrentProxyRoot 'proxy-errors.log'
-  $concurrentStartupLog = Join-Path $concurrentProxyRoot 'proxy-startup.log'
-  $testPowerShell = (Get-Command powershell.exe -CommandType Application |
-      Select-Object -First 1).Source
-  [IO.File]::WriteAllText(
-    $concurrentProxyScript,
-    (New-RimsLocalTlsProxyScript),
-    (New-Object Text.UTF8Encoding($false)))
+  $concurrentBackendMarker = 'rims-tls-backend-' +
+    [guid]::NewGuid().ToString('N')
+  $testWsl = Resolve-RimsCommandPath -Name 'wsl.exe'
   [IO.File]::WriteAllText(
     $concurrentBackendScript,
     @'
-param([int]$Port, [string]$FirstAcceptedMarker)
-$listener = New-Object Net.Sockets.TcpListener([Net.IPAddress]::Loopback, $Port)
-$listener.Start()
-try {
-  $first = $listener.AcceptTcpClient()
-  [IO.File]::WriteAllText($FirstAcceptedMarker, 'ready')
-  try {
-    $second = $listener.AcceptTcpClient()
-    try {
-      $stream = $second.GetStream()
-      $buffer = New-Object byte[] 16
-      [void]$stream.Read($buffer, 0, $buffer.Length)
-      $response = [Text.Encoding]::ASCII.GetBytes('pong')
-      $stream.Write($response, 0, $response.Length)
-      $stream.Flush()
-    } finally { $second.Close() }
-  } finally { $first.Close() }
-} finally { $listener.Stop() }
+package main
+
+import (
+	"flag"
+	"net"
+	"os"
+	"sync"
+)
+
+func main() {
+	port := flag.String("port", "", "listen port")
+	ready := flag.String("ready", "", "first payload marker")
+	marker := flag.String("marker", "", "ownership marker")
+	flag.Parse()
+	if *marker == "" {
+		os.Exit(2)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:"+*port)
+	if err != nil {
+		panic(err)
+	}
+	defer listener.Close()
+	var firstPayload sync.Once
+	for {
+		connection, acceptErr := listener.Accept()
+		if acceptErr != nil {
+			return
+		}
+		go func() {
+			defer connection.Close()
+			buffer := make([]byte, 16)
+			for {
+				count, readErr := connection.Read(buffer)
+				if readErr != nil {
+					return
+				}
+				firstPayload.Do(func() {
+					_ = os.WriteFile(*ready, []byte("ready"), 0600)
+				})
+				if string(buffer[:count]) == "ping" {
+					_, _ = connection.Write([]byte("pong"))
+				}
+			}
+		}()
+	}
+}
 '@,
     (New-Object Text.UTF8Encoding($false)))
   $concurrentBackendPort = Get-RimsTlsTestPort
   $concurrentProxyPort = Get-RimsTlsTestPort
   $backendProcess = $null
-  $proxyProcess = $null
+  $realProxy = $null
   $firstClient = $null
   $firstTls = $null
   $secondClient = $null
   $secondTls = $null
+  $privateKeySnapshotBefore = Get-RimsTlsPrivateKeyContainerSnapshot
+  $privateKeySnapshotDuring = $null
+  $privateKeySnapshotAfter = $null
   try {
+    $backendSourceWsl = ConvertTo-RimsWslPath `
+      -WindowsPath $concurrentBackendScript `
+      -WslExecutable $testWsl
+    $backendReadyWsl = ConvertTo-RimsWslPath `
+      -WindowsPath $concurrentBackendReady `
+      -WslExecutable $testWsl
+    $backendCommand = 'exec "$HOME/local/go/bin/go" run "$1" ' +
+      '-port "$2" -ready "$3" -marker "$4"'
+    $backendArguments = @(
+      '-e', 'bash', '-c', $backendCommand,
+      'rims-tls-test-backend',
+      $backendSourceWsl,
+      [string]$concurrentBackendPort,
+      $backendReadyWsl,
+      $concurrentBackendMarker
+    )
     $backendProcess = Start-Process `
-      -FilePath $testPowerShell `
-      -ArgumentList (@(
-          '-NoProfile', '-ExecutionPolicy', 'Bypass',
-          '-File', $concurrentBackendScript,
-          '-Port', [string]$concurrentBackendPort,
-          '-FirstAcceptedMarker', $concurrentBackendReady
-        ) | ForEach-Object { ConvertTo-RimsWindowsCommandLineArgument -Value $_ }) `
+      -FilePath $testWsl `
+      -ArgumentList (($backendArguments | ForEach-Object {
+            ConvertTo-RimsWindowsCommandLineArgument -Value $_
+          }) -join ' ') `
       -WindowStyle Hidden `
       -PassThru
-    $proxyProcess = Start-Process `
-      -FilePath $testPowerShell `
-      -ArgumentList (@(
-          '-NoProfile', '-ExecutionPolicy', 'Bypass',
-          '-File', $concurrentProxyScript,
-          '-PfxPath', $concurrentPfx,
-          '-ListenPort', [string]$concurrentProxyPort,
-          '-BackendPort', [string]$concurrentBackendPort,
-          '-OwnershipMarker', 'rims-local-concurrency-test',
-          '-ErrorLogPath', $concurrentErrorLog
-        ) | ForEach-Object { ConvertTo-RimsWindowsCommandLineArgument -Value $_ }) `
-      -WindowStyle Hidden `
-      -RedirectStandardError $concurrentStartupLog `
-      -PassThru
-    Start-Sleep -Milliseconds 500
+    $backendDeadline = (Get-Date).AddSeconds(20)
+    do {
+      if ($backendProcess.HasExited) {
+        throw "WSL test backend exited with $($backendProcess.ExitCode)."
+      }
+      if (Test-RimsTcpPortListening `
+          -Port $concurrentBackendPort `
+          -TimeoutMilliseconds 250) {
+        break
+      }
+      Start-Sleep -Milliseconds 100
+    } while ((Get-Date) -lt $backendDeadline)
+    if ((Get-Date) -ge $backendDeadline) {
+      throw 'WSL test backend readiness timed out.'
+    }
+    $realProxy = Start-RimsLocalTlsProxy `
+      -TlsPaths $concurrentTlsPaths `
+      -BackendPort $concurrentBackendPort `
+      -TlsPort $concurrentProxyPort
+    Assert-True `
+      -Value $realProxy.ok `
+      -Message "Real WSL Go TLS proxy failed to start: $($realProxy.detail)"
 
     $firstClient = New-Object Net.Sockets.TcpClient
-    $firstClient.Connect([Net.IPAddress]::Loopback, $concurrentProxyPort)
+    [void](Wait-RimsTlsTestTask `
+        -Task $firstClient.ConnectAsync(
+          [Net.IPAddress]::Loopback,
+          $concurrentProxyPort) `
+        -TimeoutMilliseconds 3000 `
+        -Message 'First TLS client connect exceeded its hard timeout.')
     $firstTls = New-Object Net.Security.SslStream(
       $firstClient.GetStream(),
       $false,
@@ -640,6 +941,14 @@ try {
     Assert-True `
       -Value $firstHandshake.Wait(5000) `
       -Message 'First persistent TLS connection did not complete its handshake.'
+    $holdRequest = [Text.Encoding]::ASCII.GetBytes('hold')
+    [void](Wait-RimsTlsTestTask `
+        -Task $firstTls.WriteAsync(
+          $holdRequest,
+          0,
+          $holdRequest.Length) `
+        -TimeoutMilliseconds 3000 `
+        -Message 'First TLS client write exceeded its hard timeout.')
     $backendReadyDeadline = (Get-Date).AddSeconds(3)
     while (-not (Test-Path -LiteralPath $concurrentBackendReady -PathType Leaf) -and
         (Get-Date) -lt $backendReadyDeadline) {
@@ -650,7 +959,12 @@ try {
       -Message 'First persistent connection did not reach the backend before the hard deadline.'
 
     $secondClient = New-Object Net.Sockets.TcpClient
-    $secondClient.Connect([Net.IPAddress]::Loopback, $concurrentProxyPort)
+    [void](Wait-RimsTlsTestTask `
+        -Task $secondClient.ConnectAsync(
+          [Net.IPAddress]::Loopback,
+          $concurrentProxyPort) `
+        -TimeoutMilliseconds 3000 `
+        -Message 'Second TLS client connect exceeded its hard timeout.')
     Assert-True `
       -Value ([Net.IPAddress]::IsLoopback(
           [Net.IPAddress]$secondClient.Client.RemoteEndPoint.Address)) `
@@ -665,8 +979,10 @@ try {
       -Value $secondHandshake.Wait(3000) `
       -Message 'Second TLS connection was blocked by the first persistent connection.'
     $request = [Text.Encoding]::ASCII.GetBytes('ping')
-    $secondTls.Write($request, 0, $request.Length)
-    $secondTls.Flush()
+    [void](Wait-RimsTlsTestTask `
+        -Task $secondTls.WriteAsync($request, 0, $request.Length) `
+        -TimeoutMilliseconds 3000 `
+        -Message 'Second TLS client write exceeded its hard timeout.')
     $responseBuffer = New-Object byte[] 4
     $responseRead = $secondTls.ReadAsync($responseBuffer, 0, $responseBuffer.Length)
     Assert-True `
@@ -676,28 +992,54 @@ try {
       -Actual ([Text.Encoding]::ASCII.GetString($responseBuffer, 0, $responseRead.Result)) `
       -Expected 'pong' `
       -Message 'Second proxied connection returned the wrong backend response.'
+    $privateKeySnapshotDuring = Get-RimsTlsPrivateKeyContainerSnapshot
+    Assert-RimsTlsPrivateKeySnapshotEqual `
+      -Before $privateKeySnapshotBefore `
+      -After $privateKeySnapshotDuring `
+      -Message 'TLS proxy created or updated a Windows user private-key container while running.'
   } catch {
-    $proxyLog = if (Test-Path -LiteralPath $concurrentErrorLog -PathType Leaf) {
-      [IO.File]::ReadAllText($concurrentErrorLog)
+    $proxyLog = if (Test-Path `
+        -LiteralPath $concurrentTlsPaths.proxyStderrLog `
+        -PathType Leaf) {
+      try {
+        [IO.File]::ReadAllText($concurrentTlsPaths.proxyStderrLog)
+      } catch { '<proxy log active>' }
     } else { '' }
-    $startupLog = if (Test-Path -LiteralPath $concurrentStartupLog -PathType Leaf) {
-      try { [IO.File]::ReadAllText($concurrentStartupLog) } catch { '<startup log active>' }
-    } else { '' }
-    throw "$($_.Exception.Message) Proxy log: $proxyLog Startup log: $startupLog"
+    throw "$($_.Exception.Message) Proxy log: $proxyLog"
   } finally {
     if ($null -ne $secondTls) { $secondTls.Dispose() }
     if ($null -ne $secondClient) { $secondClient.Close() }
     if ($null -ne $firstTls) { $firstTls.Dispose() }
     if ($null -ne $firstClient) { $firstClient.Close() }
-    foreach ($testProcess in @($proxyProcess, $backendProcess)) {
-      if ($null -ne $testProcess) {
-        try {
-          if (-not $testProcess.HasExited) { $testProcess.Kill() }
-          [void]$testProcess.WaitForExit(3000)
-        } catch {} finally { $testProcess.Dispose() }
+    if ($null -ne $realProxy -and $realProxy.ok) {
+      $realProxyStop = Stop-RimsLocalTlsProxy `
+        -TlsState $realProxy.state
+      if (-not $realProxyStop.ok) {
+        throw "Real WSL Go TLS proxy cleanup failed: $($realProxyStop.detail)"
       }
     }
+    $backendPattern = '[r]' + $concurrentBackendMarker.Substring(1)
+    [void](Invoke-RimsExternalCommand `
+        -FilePath $testWsl `
+        -Arguments @(
+          '-e', 'bash', '-c',
+          'pkill -TERM -f -- "$1" 2>/dev/null || true',
+          'rims-tls-test-cleanup', $backendPattern
+        ) `
+        -TimeoutSeconds 5)
+    if ($null -ne $backendProcess) {
+      try {
+        if (-not $backendProcess.HasExited) { $backendProcess.Kill() }
+        [void]$backendProcess.WaitForExit(3000)
+      } catch {} finally { $backendProcess.Dispose() }
+    }
+    $privateKeySnapshotAfter = Get-RimsTlsPrivateKeyContainerSnapshot
   }
+  Assert-RimsTlsPrivateKeySnapshotEqual `
+    -Before $privateKeySnapshotBefore `
+    -After $privateKeySnapshotAfter `
+    -Message 'TLS proxy left a new or updated Windows user private-key container after exit.'
+  Write-RimsTlsTestStage -Name 'real WSL proxy integration complete'
   Assert-Equal -Actual $proxy.state.port -Expected 8443 -Message 'TLS port evidence changed.'
   Assert-Equal -Actual $proxy.state.windowsPid -Expected 4242 -Message 'TLS PID was not recorded.'
   Assert-Equal `
@@ -709,6 +1051,8 @@ try {
     -TlsPaths $pathsA `
     -ProcessOwnershipAction { param($state) return $true } `
     -PortOwnershipAction { param($port, $processId) return $true } `
+    -LinuxOwnershipAction { param($state) return $true } `
+    -LinuxPortOwnershipAction { param($port, $state) return $true } `
     -CommandLineAction { param($processId) return $proxy.state.commandLine }
   Assert-True -Value $owned.ok -Message 'Exact fake TLS proxy ownership was rejected.'
   $wrongCommand = Test-RimsLocalTlsProxyOwnership `
@@ -716,6 +1060,8 @@ try {
     -TlsPaths $pathsA `
     -ProcessOwnershipAction { param($state) return $true } `
     -PortOwnershipAction { param($port, $processId) return $true } `
+    -LinuxOwnershipAction { param($state) return $true } `
+    -LinuxPortOwnershipAction { param($port, $state) return $true } `
     -CommandLineAction { param($processId) return 'powershell unrelated-proxy.ps1' }
   Assert-False `
     -Value $wrongCommand.ok `
@@ -745,10 +1091,19 @@ try {
   Assert-True `
     -Value $startTimeMismatch.detail.Contains('start time') `
     -Message 'TLS process start-time mismatch evidence was not specific.'
+  $linuxIdentityMismatch = Test-RimsLocalTlsProxyOwnership `
+    -TlsState $proxy.state `
+    -TlsPaths $pathsA `
+    -ProcessOwnershipAction { param($state) return $true } `
+    -LinuxOwnershipAction { param($state) return $false }
+  Assert-False `
+    -Value $linuxIdentityMismatch.ok `
+    -Message 'TLS ownership accepted a Linux identity mismatch.'
   $ownershipPortMismatch = Test-RimsLocalTlsProxyOwnership `
     -TlsState $proxy.state `
     -TlsPaths $pathsA `
     -ProcessOwnershipAction { param($state) return $true } `
+    -LinuxOwnershipAction { param($state) return $true } `
     -PortOwnershipAction { param($port, $processId) return $false }
   Assert-False `
     -Value $ownershipPortMismatch.ok `
@@ -758,6 +1113,8 @@ try {
     -TlsPaths $pathsA `
     -ProcessOwnershipAction { param($state) return $true } `
     -PortOwnershipAction { param($port, $processId) return $true } `
+    -LinuxOwnershipAction { param($state) return $true } `
+    -LinuxPortOwnershipAction { param($port, $state) return $true } `
     -CommandLineAction { param($processId) return "powershell $($pathsA.proxyScript)" }
   Assert-False `
     -Value $markerMismatch.ok `
@@ -767,10 +1124,23 @@ try {
     -TlsPaths $pathsA `
     -ProcessOwnershipAction { param($state) return $true } `
     -PortOwnershipAction { param($port, $processId) return $true } `
-    -CommandLineAction { param($processId) return "powershell C:\other\proxy.ps1 $($proxy.state.ownershipMarker)" }
+    -LinuxOwnershipAction { param($state) return $true } `
+    -LinuxPortOwnershipAction { param($port, $state) return $true } `
+    -CommandLineAction { param($processId) return "wsl.exe /mnt/c/other/proxy $($proxy.state.ownershipMarker)" }
   Assert-False `
     -Value $scriptPathMismatch.ok `
     -Message 'TLS ownership accepted the wrong proxy script path.'
+  $linuxPortMismatch = Test-RimsLocalTlsProxyOwnership `
+    -TlsState $proxy.state `
+    -TlsPaths $pathsA `
+    -ProcessOwnershipAction { param($state) return $true } `
+    -PortOwnershipAction { param($port, $processId) return $true } `
+    -LinuxOwnershipAction { param($state) return $true } `
+    -LinuxPortOwnershipAction { param($port, $state) return $false } `
+    -CommandLineAction { param($processId) return $proxy.state.commandLine }
+  Assert-False `
+    -Value $linuxPortMismatch.ok `
+    -Message 'TLS ownership accepted a Linux listener inode mismatch.'
 
   $failedProxyStop = Start-RimsLocalTlsProxy `
     -TlsPaths $pathsA `
@@ -884,6 +1254,7 @@ try {
     windowsPid = 5151
     windowsProcessStartTimeUtc = $fakeStartedAt
   }
+  Write-RimsTlsTestStage -Name 'Android trust sentinel and compensation'
   $adbCalls = New-Object 'Collections.Generic.List[string]'
   $installed = Install-RimsAndroidUserCa `
     -TlsPaths $pathsA `
@@ -903,6 +1274,142 @@ try {
   Assert-True `
     -Value ($adbCalls.Count -gt 0) `
     -Message 'Owned CA install did not cross the fake ADB boundary.'
+
+  $presenceScript = 'if [ -f "$1" ]; then printf EXISTS; else printf ABSENT; fi'
+  $presenceCommand = "shell sh -c $presenceScript rims-ca-query $($installed.state.remotePath)"
+  $sentinelInstallCalls = New-Object 'Collections.Generic.List[string]'
+  $sentinelAbsentInstall = Install-RimsAndroidUserCa `
+    -TlsPaths $pathsA `
+    -EmulatorState $ownedEmulator `
+    -CaFingerprintSha256 ('AA' * 32) `
+    -CaSubjectHash $installed.state.subjectHash `
+    -EmulatorOwnershipAction { param($state) return $true } `
+    -AdbAction {
+      param($serial, $arguments)
+      $commandText = $arguments -join ' '
+      [void]$sentinelInstallCalls.Add($commandText)
+      if ($commandText -eq $presenceCommand) {
+        return [pscustomobject]@{
+          exitCode = 0
+          stdout = 'ABSENT'
+          stderr = ''
+        }
+      }
+      return [pscustomobject]@{ exitCode = 0; stdout = ''; stderr = '' }
+    }
+  Assert-True `
+    -Value $sentinelAbsentInstall.ok `
+    -Message 'Android ABSENT sentinel did not permit an owned CA install.'
+  Assert-True `
+    -Value (@($sentinelInstallCalls) -contains $presenceCommand) `
+    -Message 'Android install did not use the single shell presence sentinel.'
+  Assert-False `
+    -Value (($sentinelInstallCalls -join '|').Contains('shell test -f')) `
+    -Message 'Android install retained exit-code-based shell test querying.'
+
+  foreach ($sentinelFailure in @(
+      [pscustomobject]@{
+        name = 'exit1-with-stderr'
+        exitCode = 1
+        stdout = 'ABSENT'
+        stderr = 'query failed'
+        throws = $false
+      },
+      [pscustomobject]@{
+        name = 'stderr-on-exit0'
+        exitCode = 0
+        stdout = 'ABSENT'
+        stderr = 'unexpected diagnostic'
+        throws = $false
+      },
+      [pscustomobject]@{
+        name = 'unknown-stdout'
+        exitCode = 0
+        stdout = 'UNKNOWN'
+        stderr = ''
+        throws = $false
+      },
+      [pscustomobject]@{
+        name = 'adb-throw'
+        exitCode = 0
+        stdout = ''
+        stderr = ''
+        throws = $true
+      }
+    )) {
+    $sentinelFailureCalls = New-Object 'Collections.Generic.List[string]'
+    $sentinelFailureResult = Install-RimsAndroidUserCa `
+      -TlsPaths $pathsA `
+      -EmulatorState $ownedEmulator `
+      -CaFingerprintSha256 ('AA' * 32) `
+      -CaSubjectHash $installed.state.subjectHash `
+      -EmulatorOwnershipAction { param($state) return $true } `
+      -AdbAction {
+        param($serial, $arguments)
+        $commandText = $arguments -join ' '
+        [void]$sentinelFailureCalls.Add($commandText)
+        if ($commandText -eq $presenceCommand -or
+            $commandText -like 'shell test -f *') {
+          if ($sentinelFailure.throws) {
+            throw 'fake sentinel ADB exception'
+          }
+          return [pscustomobject]@{
+            exitCode = $sentinelFailure.exitCode
+            stdout = $sentinelFailure.stdout
+            stderr = $sentinelFailure.stderr
+          }
+        }
+        return [pscustomobject]@{ exitCode = 0; stdout = ''; stderr = '' }
+      }
+    Assert-False `
+      -Value $sentinelFailureResult.ok `
+      -Message "Android sentinel $($sentinelFailure.name) did not fail closed."
+    $unsafeSentinelMutations = @($sentinelFailureCalls | Where-Object {
+        $_ -match '^(push|shell (cp|rm))'
+      })
+    Assert-Equal `
+      -Actual $unsafeSentinelMutations.Count `
+      -Expected 0 `
+      -Message "Android sentinel $($sentinelFailure.name) performed a mutation."
+  }
+
+  $adbCalls.Clear()
+  $sentinelAbsentRemoval = Remove-RimsAndroidUserCa `
+    -TrustState $installed.state `
+    -EmulatorState $ownedEmulator `
+    -TlsPaths $pathsA `
+    -EmulatorOwnershipAction { param($state) return $true } `
+    -FingerprintAction { param($path) return ('AA' * 32) } `
+    -SubjectHashAction { param($path) return $installed.state.subjectHash } `
+    -AdbAction {
+      param($serial, $arguments)
+      $commandText = $arguments -join ' '
+      [void]$adbCalls.Add($commandText)
+      if ($commandText -eq $presenceCommand) {
+        return [pscustomobject]@{
+          exitCode = 0
+          stdout = 'ABSENT'
+          stderr = ''
+        }
+      }
+      if ($commandText -like 'shell test -f *') {
+        return [pscustomobject]@{ exitCode = 1; stdout = ''; stderr = '' }
+      }
+      return [pscustomobject]@{ exitCode = 0; stdout = ''; stderr = '' }
+    }
+  Assert-True `
+    -Value $sentinelAbsentRemoval.ok `
+    -Message 'Android ABSENT sentinel did not permit deterministic temp cleanup.'
+  Assert-True `
+    -Value (@($adbCalls) -contains $presenceCommand) `
+    -Message 'Android removal did not use the single shell presence sentinel.'
+  Assert-False `
+    -Value (@($adbCalls) -contains "pull $($installed.state.remotePath) $($pathsA.root)\android-remove-ca.pem") `
+    -Message 'Android ABSENT removal attempted to pull a missing remote CA.'
+  Assert-False `
+    -Value (@($adbCalls) -contains "shell rm -f $($installed.state.remotePath)") `
+    -Message 'Android ABSENT removal attempted to mutate the missing remote CA.'
+
   $adbCalls.Clear()
   $removedOwnedTrust = Remove-RimsAndroidUserCa `
     -TrustState $installed.state `
@@ -914,6 +1421,13 @@ try {
     -AdbAction {
       param($serial, $arguments)
       [void]$adbCalls.Add(($arguments -join ' '))
+      if (($arguments -join ' ') -eq $presenceCommand) {
+        return [pscustomobject]@{
+          exitCode = 0
+          stdout = 'EXISTS'
+          stderr = ''
+        }
+      }
       if ($arguments[0] -eq 'pull') {
         [IO.File]::WriteAllText([string]$arguments[2], 'fake remote CA')
       }
@@ -924,7 +1438,7 @@ try {
     -Message 'Controller-installed Android CA removal failed.'
   Assert-Equal `
     -Actual ($adbCalls -join '|') `
-    -Expected "root|shell test -f $($installed.state.remotePath)|pull $($installed.state.remotePath) $($pathsA.root)\android-remove-ca.pem|shell rm -f $($installed.state.remotePath)|shell rm -f $($installed.state.temporaryPath)" `
+    -Expected "root|$presenceCommand|pull $($installed.state.remotePath) $($pathsA.root)\android-remove-ca.pem|shell rm -f $($installed.state.remotePath)|shell rm -f $($installed.state.temporaryPath)" `
     -Message 'Owned Android CA removal did not verify and remove the exact recorded certificate.'
   Assert-True `
     -Value (-not (Test-Path -LiteralPath (Join-Path $pathsA.root 'android-remove-ca.pem'))) `
@@ -966,7 +1480,7 @@ try {
         param($serial, $arguments)
         $commandText = $arguments -join ' '
         [void]$queryFailureCalls.Add($commandText)
-        if ($commandText -eq "shell test -f $($installed.state.remotePath)") {
+        if ($commandText -eq $presenceCommand) {
           if ($queryFailureMode -eq 'throw') {
             throw 'fake ADB trust query exception'
           }
@@ -1240,8 +1754,8 @@ try {
       param($serial, $arguments)
       $commandText = $arguments -join ' '
       [void]$legacyTemporaryCalls.Add($commandText)
-      if ($commandText -eq "shell test -f $($installed.state.remotePath)") {
-        return [pscustomobject]@{ exitCode = 1; stdout = ''; stderr = '' }
+      if ($commandText -eq $presenceCommand) {
+        return [pscustomobject]@{ exitCode = 0; stdout = 'ABSENT'; stderr = '' }
       }
       return [pscustomobject]@{ exitCode = 0; stdout = ''; stderr = '' }
     }
@@ -1264,8 +1778,8 @@ try {
       param($serial, $arguments)
       $commandText = $arguments -join ' '
       [void]$partialRetryCalls.Add($commandText)
-      if ($commandText -eq "shell test -f $($failedCompensation.state.remotePath)") {
-        return [pscustomobject]@{ exitCode = 1; stdout = ''; stderr = '' }
+      if ($commandText -eq $presenceCommand) {
+        return [pscustomobject]@{ exitCode = 0; stdout = 'ABSENT'; stderr = '' }
       }
       return [pscustomobject]@{ exitCode = 0; stdout = ''; stderr = '' }
     }
@@ -1286,8 +1800,8 @@ try {
     -AdbAction {
       param($serial, $arguments)
       $commandText = $arguments -join ' '
-      if ($commandText -eq "shell test -f $($failedCompensation.state.remotePath)") {
-        return [pscustomobject]@{ exitCode = 1; stdout = ''; stderr = '' }
+      if ($commandText -eq $presenceCommand) {
+        return [pscustomobject]@{ exitCode = 0; stdout = 'ABSENT'; stderr = '' }
       }
       if ($commandText -eq "shell rm -f $($failedCompensation.state.temporaryPath)") {
         return [pscustomobject]@{ exitCode = 1; stdout = ''; stderr = 'fake temp cleanup failure' }
@@ -1964,6 +2478,13 @@ try {
           param($serial, $arguments)
           $commandText = $arguments -join ' '
           [void]$pendingTrustRetryCalls.Add($commandText)
+          if ($commandText -eq $presenceCommand) {
+            return [pscustomobject]@{
+              exitCode = 0
+              stdout = 'EXISTS'
+              stderr = ''
+            }
+          }
           if ($arguments[0] -eq 'pull') {
             [IO.File]::WriteAllText([string]$arguments[2], 'verified remote CA')
           }

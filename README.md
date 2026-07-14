@@ -32,13 +32,15 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rims_local.ps1 -Co
 
 WSL OpenSSL creates a workspace-scoped CA and server certificate under the
 ignored `.runtime/rims-local/tls/` directory. The server SANs cover
-`localhost`, `127.0.0.1`, `10.0.2.2`, and `rims.local`. The controller owns the
-HTTPS proxy, which binds only to host loopback. Android's special `10.0.2.2`
-alias routes emulator traffic to that host loopback listener; it does not make
-the proxy a LAN listener. For Web runs, the server certificate's SHA-256 SPKI
-pin is passed only to the temporary Chrome process started by Flutter. The
-controller never installs a global desktop CA and never uses an unconstrained
-certificate-error bypass.
+`localhost`, `127.0.0.1`, `10.0.2.2`, and `rims.local`. A WSL Go TLS proxy loads
+the ignored PEM certificate and key directly, binds `127.0.0.1`, and forwards
+to the WSL backend. The controller records both the Windows `wsl.exe` wrapper
+identity and the Linux process identity and process group before accepting the
+listener as owned. Android's special `10.0.2.2` alias routes emulator traffic
+to that host loopback listener; it does not make the proxy a LAN listener. For
+Web runs, the server certificate's SHA-256 SPKI pin is passed only to the
+temporary Chrome process started by Flutter. The controller never installs a
+global desktop CA and never uses an unconstrained certificate-error bypass.
 
 Private runtime state keeps exact paths and PID/start-time/port/command identity
 for ownership cleanup. User-facing JSON reports only stable log IDs, certificate

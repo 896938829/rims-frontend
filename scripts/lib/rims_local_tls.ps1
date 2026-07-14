@@ -36,10 +36,129 @@ function Get-RimsLocalTlsPaths {
     serverCertificate = Join-Path $root 'server.cert.pem'
     serverPfx = Join-Path $root 'server.pfx'
     caSerial = Join-Path $root 'ca.cert.srl'
-    proxyScript = Join-Path $root 'proxy.ps1'
+    proxySource = Join-Path $root 'proxy.go'
+    proxyBinary = Join-Path $root 'rims-local-tls-proxy'
+    proxyLinuxIdentity = Join-Path $root 'proxy.linux-identity.json'
+    proxyScript = Join-Path $root 'proxy.go'
     proxyStdoutLog = Join-Path $root 'proxy.stdout.log'
     proxyStderrLog = Join-Path $root 'proxy.stderr.log'
   }
+}
+
+function New-RimsLocalTlsProxySource {
+  return @'
+package main
+
+import (
+	"context"
+	"crypto/tls"
+	"errors"
+	"flag"
+	"io"
+	"log"
+	"net"
+	"os"
+	"os/signal"
+	"sync"
+	"syscall"
+)
+
+func handleConnection(ctx context.Context, client net.Conn, backendAddress string) {
+	defer client.Close()
+	connectionDone := make(chan struct{})
+	defer close(connectionDone)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = client.Close()
+		case <-connectionDone:
+		}
+	}()
+	tlsClient, ok := client.(*tls.Conn)
+	if !ok {
+		return
+	}
+	if err := tlsClient.Handshake(); err != nil {
+		return
+	}
+	backend, err := (&net.Dialer{}).DialContext(ctx, "tcp", backendAddress)
+	if err != nil {
+		return
+	}
+	defer backend.Close()
+
+	done := make(chan struct{}, 2)
+	go func() {
+		_, _ = io.Copy(backend, tlsClient)
+		done <- struct{}{}
+	}()
+	go func() {
+		_, _ = io.Copy(tlsClient, backend)
+		done <- struct{}{}
+	}()
+	<-done
+	_ = tlsClient.Close()
+	_ = backend.Close()
+	<-done
+}
+
+func main() {
+	certificatePath := flag.String("cert", "", "server certificate PEM")
+	privateKeyPath := flag.String("key", "", "server private key PEM")
+	listenPort := flag.String("listen-port", "", "loopback TLS port")
+	backendPort := flag.String("backend-port", "", "loopback backend port")
+	commandMarker := flag.String("command-marker", "", "ownership marker")
+	flag.Parse()
+	if *commandMarker == "" {
+		log.Fatal("missing command marker")
+	}
+
+	certificate, err := tls.LoadX509KeyPair(
+		*certificatePath,
+		*privateKeyPath,
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:"+*listenPort)
+	if err != nil {
+		log.Fatal(err)
+	}
+	tlsListener := tls.NewListener(listener, &tls.Config{
+		Certificates: []tls.Certificate{certificate},
+		MinVersion:   tls.VersionTLS12,
+	})
+
+	ctx, stop := signal.NotifyContext(
+		context.Background(),
+		os.Interrupt,
+		syscall.SIGTERM,
+	)
+	defer stop()
+	go func() {
+		<-ctx.Done()
+		_ = tlsListener.Close()
+	}()
+
+	backendAddress := "127.0.0.1:" + *backendPort
+	var connections sync.WaitGroup
+	for {
+		client, acceptErr := tlsListener.Accept()
+		if acceptErr != nil {
+			if errors.Is(acceptErr, net.ErrClosed) || ctx.Err() != nil {
+				break
+			}
+			continue
+		}
+		connections.Add(1)
+		go func() {
+			defer connections.Done()
+			handleConnection(ctx, client, backendAddress)
+		}()
+	}
+	connections.Wait()
+}
+'@
 }
 
 function Get-RimsLocalTlsPort {
@@ -520,232 +639,274 @@ function Test-RimsLocalTlsCertificate {
   }
 }
 
-function New-RimsLocalTlsProxyScript {
+
+function Get-RimsLocalTlsProxyBootstrapScript {
   return @'
-param(
-  [Parameter(Mandatory = $true)][string]$PfxPath,
-  [Parameter(Mandatory = $true)][int]$ListenPort,
-  [Parameter(Mandatory = $true)][int]$BackendPort,
-  [Parameter(Mandatory = $true)][string]$OwnershipMarker,
-  [Parameter(Mandatory = $true)][string]$ErrorLogPath
-)
-$ErrorActionPreference = 'Stop'
-$keyStorageFlags =
-  [Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable -bor
-  [Security.Cryptography.X509Certificates.X509KeyStorageFlags]::EphemeralKeySet
-$ephemeralCertificate = New-Object Security.Cryptography.X509Certificates.X509Certificate2(
-  $PfxPath,
-  '',
-  $keyStorageFlags
-)
-$serverKeyStorageFlags =
-  [Security.Cryptography.X509Certificates.X509KeyStorageFlags]::Exportable
-$certificate = New-Object Security.Cryptography.X509Certificates.X509Certificate2(
-  $PfxPath,
-  '',
-  $serverKeyStorageFlags
-)
-$proxyTypeSource = @"
-using System;
-using System.Collections.Concurrent;
-using System.IO;
-using System.Net;
-using System.Net.Security;
-using System.Net.Sockets;
-using System.Security.Authentication;
-using System.Security.Cryptography.X509Certificates;
-using System.Threading;
-using System.Threading.Tasks;
-
-namespace RimsLocalTls
-{
-    public static class ConcurrentTlsProxy
-    {
-        private static readonly object LogLock = new object();
-
-        public static void Run(
-            X509Certificate2 certificate,
-            int listenPort,
-            int backendPort,
-            string errorLogPath)
-        {
-            var clients = new ConcurrentDictionary<int, TcpClient>();
-            var tasks = new ConcurrentDictionary<int, Task>();
-            var listener = new TcpListener(IPAddress.Loopback, listenPort);
-            var nextConnectionId = 0;
-            listener.Start();
-            try
-            {
-                while (true)
-                {
-                    var client = listener.AcceptTcpClient();
-                    var connectionId = Interlocked.Increment(ref nextConnectionId);
-                    clients[connectionId] = client;
-                    var task = Task.Run(() =>
-                    {
-                        try
-                        {
-                            HandleClient(client, certificate, backendPort);
-                        }
-                        catch (Exception exception)
-                        {
-                            AppendError(errorLogPath, exception.Message);
-                        }
-                    });
-                    tasks[connectionId] = task;
-                    task.ContinueWith(completed =>
-                    {
-                        Task ignoredTask;
-                        TcpClient ignoredClient;
-                        tasks.TryRemove(connectionId, out ignoredTask);
-                        clients.TryRemove(connectionId, out ignoredClient);
-                        if (ignoredClient != null) ignoredClient.Close();
-                    }, TaskScheduler.Default);
-                }
-            }
-            finally
-            {
-                listener.Stop();
-                foreach (var client in clients.Values)
-                {
-                    try { client.Close(); } catch { }
-                }
-                foreach (var task in tasks.Values)
-                {
-                    try { task.Wait(1000); } catch { }
-                }
-            }
-        }
-
-        private static void HandleClient(
-            TcpClient client,
-            X509Certificate2 certificate,
-            int backendPort)
-        {
-            using (client)
-            using (var ssl = new SslStream(client.GetStream(), false))
-            using (var backend = new TcpClient())
-            {
-                ssl.AuthenticateAsServer(
-                    certificate,
-                    false,
-                    SslProtocols.Tls12,
-                    false);
-                backend.Connect(IPAddress.Loopback, backendPort);
-                using (var backendStream = backend.GetStream())
-                {
-                    var toBackend = ssl.CopyToAsync(backendStream);
-                    var toClient = backendStream.CopyToAsync(ssl);
-                    Task.WaitAny(toBackend, toClient);
-                }
-            }
-        }
-
-        private static void AppendError(string errorLogPath, string message)
-        {
-            var safeMessage = (message ?? String.Empty)
-                .Replace("\r", " ")
-                .Replace("\n", " ");
-            lock (LogLock)
-            {
-                File.AppendAllText(errorLogPath, safeMessage + Environment.NewLine);
-            }
-        }
-    }
-}
-"@
-Add-Type -TypeDefinition $proxyTypeSource
-try {
-  [RimsLocalTls.ConcurrentTlsProxy]::Run(
-    $certificate,
-    $ListenPort,
-    $BackendPort,
-    $ErrorLogPath
-  )
-} finally {
-  $certificate.Dispose()
-  $ephemeralCertificate.Dispose()
-}
+set -euo pipefail
+binary=$1
+certificate=$2
+private_key=$3
+listen_port=$4
+backend_port=$5
+identity_file=$6
+command_marker=$7
+stdout_log=$8
+stderr_log=$9
+exec setsid --fork --wait bash -c '
+  set -euo pipefail
+  binary=$1
+  certificate=$2
+  private_key=$3
+  listen_port=$4
+  backend_port=$5
+  identity_file=$6
+  command_marker=$7
+  stdout_log=$8
+  stderr_log=$9
+  leader_pid=$$
+  process_group_id=$(ps -o pgid= -p "$leader_pid" | tr -d "[:space:]")
+  if [ "$process_group_id" != "$leader_pid" ]; then
+    printf "TLS bootstrap did not become its process-group leader.\n" >&2
+    exit 2
+  fi
+  boot_id=$(cat /proc/sys/kernel/random/boot_id)
+  stat_line=$(cat "/proc/$leader_pid/stat")
+  stat_tail=${stat_line##*) }
+  set -- $stat_tail
+  start_ticks=${20}
+  umask 077
+  identity_tmp="$identity_file.tmp.$$"
+  printf "{\"bootId\":\"%s\",\"leaderPid\":%s,\"startTicks\":\"%s\",\"processGroupId\":%s,\"commandMarker\":\"%s\"}\n" \
+    "$boot_id" "$leader_pid" "$start_ticks" "$process_group_id" "$command_marker" \
+    > "$identity_tmp"
+  mv -f -- "$identity_tmp" "$identity_file"
+  exec "$binary" \
+    -cert "$certificate" \
+    -key "$private_key" \
+    -listen-port "$listen_port" \
+    -backend-port "$backend_port" \
+    -command-marker "$command_marker" \
+    >> "$stdout_log" 2>> "$stderr_log"
+' "rims-local-tls-$command_marker" \
+  "$binary" "$certificate" "$private_key" "$listen_port" \
+  "$backend_port" "$identity_file" "$command_marker" \
+  "$stdout_log" "$stderr_log"
 '@
 }
 
 function Start-RimsLocalTlsProxyProcess {
   param(
     [Parameter(Mandatory = $true)][psobject]$Spec,
-    [AllowNull()][scriptblock]$ProcessFactoryAction
+    [AllowNull()][scriptblock]$ProcessFactoryAction,
+    [AllowNull()][scriptblock]$BuildAction,
+    [AllowNull()][scriptblock]$PathConversionAction,
+    [AllowNull()][scriptblock]$LinuxIdentityAction,
+    [AllowNull()][scriptblock]$CompensationAction
   )
 
-  $powerShell = (Get-Process -Id $PID).Path
+  $wsl = Resolve-RimsCommandPath -Name 'wsl.exe'
+  if ([string]::IsNullOrWhiteSpace($wsl)) {
+    return [pscustomobject]@{
+      ok = $false
+      detail = 'wsl.exe is unavailable for the local TLS proxy.'
+      cleanupPending = $false
+      state = $null
+    }
+  }
+  $convertPath = if ($null -eq $PathConversionAction) {
+    { param($path) ConvertTo-RimsWslPath -WindowsPath $path -WslExecutable $wsl }
+  } else { $PathConversionAction }
+  try {
+    $wslPaths = [pscustomobject][ordered]@{
+      source = [string](& $convertPath ([string]$Spec.proxySource))
+      binary = [string](& $convertPath ([string]$Spec.proxyBinary))
+      certificate = [string](& $convertPath ([string]$Spec.serverCertificate))
+      privateKey = [string](& $convertPath ([string]$Spec.serverPrivateKey))
+      identity = [string](& $convertPath ([string]$Spec.linuxIdentityPath))
+      stdoutLog = [string](& $convertPath ([string]$Spec.stdoutLogPath))
+      stderrLog = [string](& $convertPath ([string]$Spec.stderrLogPath))
+    }
+  } catch {
+    return [pscustomobject]@{
+      ok = $false
+      detail = "TLS proxy WSL path conversion failed: $(ConvertTo-RimsDiagnosticSummary -StandardOutput '' -StandardError $_.Exception.Message)"
+      cleanupPending = $false
+      state = $null
+    }
+  }
+  try {
+    $build = if ($null -eq $BuildAction) {
+      $buildScript = @'
+set -euo pipefail
+source=$1
+binary=$2
+"$HOME/local/go/bin/go" build -trimpath -o "$binary" "$source"
+chmod 700 "$binary"
+'@
+      $buildResult = Invoke-RimsExternalCommand `
+        -FilePath $wsl `
+        -Arguments @(
+          '-e', 'bash', '-c', $buildScript,
+          'rims-local-tls-build', $wslPaths.source, $wslPaths.binary
+        ) `
+        -TimeoutSeconds 60
+      [pscustomobject]@{
+        ok = $buildResult.ExitCode -eq 0
+        detail = Get-RimsExternalCommandSummary -Result $buildResult
+      }
+    } else { & $BuildAction $Spec }
+  } catch {
+    $build = [pscustomobject]@{ ok = $false; detail = $_.Exception.Message }
+  }
+  if (-not [bool](Get-RimsObjectPropertyValue `
+      -Value $build -Name 'ok' -DefaultValue $build)) {
+    return [pscustomobject]@{
+      ok = $false
+      detail = "TLS proxy Go build failed: $([string](Get-RimsObjectPropertyValue -Value $build -Name 'detail' -DefaultValue 'unknown build failure'))"
+      cleanupPending = $false
+      state = $null
+    }
+  }
+
+  Remove-Item `
+    -LiteralPath ([string]$Spec.linuxIdentityPath) `
+    -Force `
+    -ErrorAction SilentlyContinue
   $arguments = @(
-    '-NoProfile', '-ExecutionPolicy', 'Bypass',
-    '-File', $Spec.proxyScript,
-    '-PfxPath', $Spec.serverPfx,
-    '-ListenPort', [string]$Spec.tlsPort,
-    '-BackendPort', [string]$Spec.backendPort,
-    '-OwnershipMarker', $Spec.ownershipMarker,
-    '-ErrorLogPath', $Spec.stderrLogPath
+    '-e', 'bash', '-c', (Get-RimsLocalTlsProxyBootstrapScript),
+    'rims-local-tls-bootstrap',
+    $wslPaths.binary,
+    $wslPaths.certificate,
+    $wslPaths.privateKey,
+    [string]$Spec.tlsPort,
+    [string]$Spec.backendPort,
+    $wslPaths.identity,
+    [string]$Spec.ownershipMarker,
+    $wslPaths.stdoutLog,
+    $wslPaths.stderrLog
   )
+  $effectiveArguments = @(ConvertTo-RimsWslBashArguments `
+      -FilePath $wsl `
+      -Arguments $arguments)
   $startInfo = New-Object Diagnostics.ProcessStartInfo
-  $startInfo.FileName = $powerShell
-  $startInfo.Arguments = ($arguments | ForEach-Object {
+  $startInfo.FileName = $wsl
+  $startInfo.Arguments = ($effectiveArguments | ForEach-Object {
       ConvertTo-RimsWindowsCommandLineArgument -Value $_
     }) -join ' '
   $startInfo.UseShellExecute = $false
   $startInfo.CreateNoWindow = $true
-  $startInfo.RedirectStandardOutput = $false
-  $startInfo.RedirectStandardError = $false
   $process = if ($null -eq $ProcessFactoryAction) {
     New-Object Diagnostics.Process
-  } else {
-    & $ProcessFactoryAction
-  }
+  } else { & $ProcessFactoryAction }
   $process.StartInfo = $startInfo
   $started = $false
   $processId = $null
   $processStartTimeUtc = $null
-  $commandLine = "$powerShell $($startInfo.Arguments)"
+  $linuxIdentity = $null
+  $linuxProcessGroupId = $null
+  $commandLine = "$wsl $($startInfo.Arguments)"
   try {
     [void]$process.Start()
     $started = $true
     $processId = $process.Id
     $processStartTimeUtc = $process.StartTime.ToUniversalTime().ToString('o')
+    $linuxIdentity = if ($null -eq $LinuxIdentityAction) {
+      Wait-RimsBootstrapLinuxIdentity `
+        -RuntimePaths ([pscustomobject]@{
+          linuxIdentity = $Spec.linuxIdentityPath
+        }) `
+        -Process $process `
+        -CommandMarker $Spec.ownershipMarker
+    } else { & $LinuxIdentityAction $Spec $process }
+    foreach ($requiredIdentityProperty in @(
+        'bootId',
+        'leaderPid',
+        'startTicks',
+        'processGroupId',
+        'commandMarker'
+      )) {
+      $requiredIdentityValue = [string](Get-RimsObjectPropertyValue `
+          -Value $linuxIdentity `
+          -Name $requiredIdentityProperty `
+          -DefaultValue '')
+      if ([string]::IsNullOrWhiteSpace($requiredIdentityValue)) {
+        throw "TLS proxy Linux identity is missing $requiredIdentityProperty."
+      }
+      if ($requiredIdentityProperty -eq 'processGroupId') {
+        $linuxProcessGroupId = [int]$requiredIdentityValue
+      }
+    }
+    if (-not ([string]$linuxIdentity.commandMarker).Equals(
+        [string]$Spec.ownershipMarker,
+        [StringComparison]::Ordinal
+      )) {
+      throw 'TLS proxy Linux identity command marker does not match the workspace marker.'
+    }
     return [pscustomobject]@{
       windowsPid = $processId
       windowsProcessStartTimeUtc = $processStartTimeUtc
       commandLine = $commandLine
+      linuxIdentity = $linuxIdentity
+      linuxProcessGroupId = $linuxProcessGroupId
+      proxyBinaryWslPath = $wslPaths.binary
     }
   } catch {
     $startFailure = $_.Exception.Message
     $cleanupFailure = $null
-    if ($started) {
+    $compensationState = [pscustomobject][ordered]@{
+      port = $Spec.tlsPort
+      backendPort = $Spec.backendPort
+      windowsPid = $processId
+      windowsProcessStartTimeUtc = $processStartTimeUtc
+      commandLine = $commandLine
+      ownershipMarker = $Spec.ownershipMarker
+      proxySourcePath = $Spec.proxySource
+      proxyBinaryPath = $Spec.proxyBinary
+      proxyBinaryWslPath = $wslPaths.binary
+      linuxIdentity = $linuxIdentity
+      linuxProcessGroupId = $linuxProcessGroupId
+      cleanupPending = $true
+    }
+    if ($null -ne $linuxIdentity) {
       try {
-        $process.Kill()
-        $process.WaitForExit()
-      } catch {
-        $cleanupFailure = $_.Exception.Message
+        $compensationState.linuxProcessGroupId =
+          Get-RimsObjectPropertyValue `
+            -Value $linuxIdentity `
+            -Name 'processGroupId'
+      } catch {}
+    }
+    $compensated = -not $started
+    if ($started) {
+      if ($null -ne $linuxIdentity) {
+        try {
+          $compensated = if ($null -eq $CompensationAction) {
+            [bool](Stop-RimsOwnedBackendProcess -State $compensationState)
+          } else { [bool](& $CompensationAction $compensationState) }
+          if (-not $compensated) {
+            $cleanupFailure = 'Exact Windows/Linux compensation returned false.'
+          }
+        } catch {
+          $compensated = $false
+          $cleanupFailure = $_.Exception.Message
+        }
+      } else {
+        try {
+          $process.Kill()
+          if (-not $process.WaitForExit(3000)) {
+            throw 'TLS proxy process did not exit within the compensation timeout.'
+          }
+          $compensated = $true
+        } catch {
+          $compensated = $false
+          $cleanupFailure = $_.Exception.Message
+        }
       }
     }
-    $cleanupPending = $started -and -not [string]::IsNullOrWhiteSpace($cleanupFailure)
-    $partialState = if ($cleanupPending) {
-      [pscustomobject][ordered]@{
-        port = $Spec.tlsPort
-        backendPort = $Spec.backendPort
-        windowsPid = $processId
-        windowsProcessStartTimeUtc = $processStartTimeUtc
-        commandLine = $commandLine
-        ownershipMarker = $Spec.ownershipMarker
-        proxyScriptPath = $Spec.proxyScript
-        stderrLogPath = $Spec.stderrLogPath
-        cleanupPending = $true
-      }
-    } else { $null }
-    $detail = "TLS proxy process start or identity acquisition failed: $startFailure"
-    if ($cleanupPending) {
-      $detail = "$detail; process compensation failed: $cleanupFailure"
-    }
+    $cleanupPending = $started -and -not $compensated
+    $partialState = if ($cleanupPending) { $compensationState } else { $null }
     return [pscustomobject][ordered]@{
       ok = $false
-      detail = $detail
+      detail = "TLS proxy process start or identity acquisition failed: $startFailure$(if ($cleanupPending) { "; cleanup remains pending: $cleanupFailure" })"
       cleanupPending = $cleanupPending
       state = $partialState
     }
@@ -777,19 +938,23 @@ function Start-RimsLocalTlsProxy {
   }
   [void][IO.Directory]::CreateDirectory([string]$TlsPaths.root)
   [IO.File]::WriteAllText(
-    [string]$TlsPaths.proxyScript,
-    (New-RimsLocalTlsProxyScript),
+    [string]$TlsPaths.proxySource,
+    (New-RimsLocalTlsProxySource),
     (New-Object Text.UTF8Encoding($false))
   )
   $marker = "rims-local-tls-proxy:$($TlsPaths.workspaceId)"
   $spec = [pscustomobject][ordered]@{
-    proxyScript = $TlsPaths.proxyScript
-    serverPfx = $TlsPaths.serverPfx
+    proxySource = $TlsPaths.proxySource
+    proxyBinary = $TlsPaths.proxyBinary
+    linuxIdentityPath = $TlsPaths.proxyLinuxIdentity
+    serverCertificate = $TlsPaths.serverCertificate
+    serverPrivateKey = $TlsPaths.serverPrivateKey
     backendPort = $BackendPort
     tlsPort = $TlsPort
     ownershipMarker = $marker
+    stdoutLogPath = $TlsPaths.proxyStdoutLog
     stderrLogPath = $TlsPaths.proxyStderrLog
-    commandLine = "powershell $($TlsPaths.proxyScript) $marker"
+    commandLine = "wsl.exe $($TlsPaths.proxyBinary) $marker"
   }
   try {
     $start = if ($null -eq $StartProcessAction) {
@@ -816,9 +981,20 @@ function Start-RimsLocalTlsProxy {
     windowsProcessStartTimeUtc = $start.windowsProcessStartTimeUtc
     commandLine = $start.commandLine
     ownershipMarker = $marker
-    proxyScriptPath = $TlsPaths.proxyScript
+    proxySourcePath = $TlsPaths.proxySource
+    proxyBinaryPath = $TlsPaths.proxyBinary
+    proxyBinaryWslPath = Get-RimsObjectPropertyValue `
+      -Value $start `
+      -Name 'proxyBinaryWslPath' `
+      -DefaultValue ''
     stdoutLogPath = $TlsPaths.proxyStdoutLog
     stderrLogPath = $TlsPaths.proxyStderrLog
+    linuxIdentity = Get-RimsObjectPropertyValue `
+      -Value $start `
+      -Name 'linuxIdentity'
+    linuxProcessGroupId = Get-RimsObjectPropertyValue `
+      -Value $start `
+      -Name 'linuxProcessGroupId'
     cleanupPending = $true
   }
   $failureDetail = $null
@@ -842,7 +1018,11 @@ function Start-RimsLocalTlsProxy {
     $failureDetail = "TLS proxy readiness check failed: $(ConvertTo-RimsDiagnosticSummary -StandardOutput '' -StandardError $_.Exception.Message)"
   }
   $testPortOwnership = if ($null -eq $PortOwnershipAction) {
-    { param($port, $processId) Test-RimsFrontendPortOwnedByProcess -Port $port -RootProcessId $processId }
+    { param($port, $processId)
+      Test-RimsLocalTlsLinuxPortOwnership `
+        -TlsState $state `
+        -Port $port
+    }
   } else { $PortOwnershipAction }
   $portOwned = $false
   if ($null -eq $failureDetail -and $ready) {
@@ -903,13 +1083,62 @@ function Get-RimsProcessCommandLine {
   }
 }
 
+function Test-RimsLocalTlsLinuxPortOwnership {
+  param(
+    [Parameter(Mandatory = $true)][psobject]$TlsState,
+    [Parameter(Mandatory = $true)][ValidateRange(1, 65535)][int]$Port
+  )
+
+  if (-not (Test-RimsStateOwnsLinuxProcess -State $TlsState)) {
+    return $false
+  }
+  $leaderPid = [string]$TlsState.linuxIdentity.leaderPid
+  $wsl = Resolve-RimsCommandPath -Name 'wsl.exe'
+  if ([string]::IsNullOrWhiteSpace($wsl)) {
+    return $false
+  }
+  $probe = @'
+set -euo pipefail
+pid=$1
+port=$2
+case "$pid" in ''|*[!0-9]*) exit 2 ;; esac
+case "$port" in ''|*[!0-9]*) exit 2 ;; esac
+if [ ! -d "/proc/$pid/fd" ]; then
+  exit 3
+fi
+port_hex=$(printf '%04X' "$port")
+endpoint="0100007F:$port_hex"
+for descriptor in "/proc/$pid/fd/"*; do
+  target=$(readlink "$descriptor" 2>/dev/null || true)
+  inode=$(printf '%s' "$target" | sed -n 's/^socket:\[\([0-9][0-9]*\)\]$/\1/p')
+  if [ -n "$inode" ] && awk -v endpoint="$endpoint" -v inode="$inode" '
+      $2 == endpoint && $4 == "0A" && $10 == inode { found = 1 }
+      END { exit(found ? 0 : 1) }
+    ' /proc/net/tcp; then
+    exit 0
+  fi
+done
+exit 4
+'@
+  $result = Invoke-RimsExternalCommand `
+    -FilePath $wsl `
+    -Arguments @(
+      '-e', 'bash', '-c', $probe,
+      'rims-local-tls-port-owner', $leaderPid, [string]$Port
+    ) `
+    -TimeoutSeconds 10
+  return $result.ExitCode -eq 0
+}
+
 function Test-RimsLocalTlsProxyOwnership {
   param(
     [Parameter(Mandatory = $true)][psobject]$TlsState,
     [Parameter(Mandatory = $true)][psobject]$TlsPaths,
     [AllowNull()][scriptblock]$ProcessOwnershipAction,
     [AllowNull()][scriptblock]$PortOwnershipAction,
-    [AllowNull()][scriptblock]$CommandLineAction
+    [AllowNull()][scriptblock]$CommandLineAction,
+    [AllowNull()][scriptblock]$LinuxOwnershipAction,
+    [AllowNull()][scriptblock]$LinuxPortOwnershipAction
   )
 
   $processOwnership = if ($null -eq $ProcessOwnershipAction) {
@@ -941,23 +1170,51 @@ function Test-RimsLocalTlsProxyOwnership {
     }
     return [pscustomobject]@{ ok = $false; detail = $detail }
   }
+  $linuxOwned = if ($null -eq $LinuxOwnershipAction) {
+    Test-RimsStateOwnsLinuxProcess -State $TlsState
+  } else { [bool](& $LinuxOwnershipAction $TlsState) }
+  if (-not $linuxOwned) {
+    return [pscustomobject]@{
+      ok = $false
+      detail = 'TLS Linux process identity or command marker does not match.'
+    }
+  }
   $processId = [int]$TlsState.windowsPid
   $portOwned = if ($null -eq $PortOwnershipAction) {
-    Test-RimsFrontendPortOwnedByProcess -Port ([int]$TlsState.port) -RootProcessId $processId
+    Test-RimsTcpPortListening -Port ([int]$TlsState.port)
   } else { [bool](& $PortOwnershipAction ([int]$TlsState.port) $processId) }
   if (-not $portOwned) {
-    return [pscustomobject]@{ ok = $false; detail = 'TLS port is not owned by the recorded process tree.' }
+    return [pscustomobject]@{ ok = $false; detail = 'TLS loopback port is not reachable from Windows.' }
+  }
+  $linuxPortOwned = if ($null -eq $LinuxPortOwnershipAction) {
+    Test-RimsLocalTlsLinuxPortOwnership `
+      -TlsState $TlsState `
+      -Port ([int]$TlsState.port)
+  } else {
+    [bool](& $LinuxPortOwnershipAction ([int]$TlsState.port) $TlsState)
+  }
+  if (-not $linuxPortOwned) {
+    return [pscustomobject]@{
+      ok = $false
+      detail = 'TLS Linux listener is not owned by the recorded process identity.'
+    }
   }
   $commandLine = if ($null -eq $CommandLineAction) {
     Get-RimsProcessCommandLine -ProcessId $processId
   } else { [string](& $CommandLineAction $processId) }
   $marker = "rims-local-tls-proxy:$($TlsPaths.workspaceId)"
+  $proxyBinaryWslPath = [string](Get-RimsObjectPropertyValue `
+      -Value $TlsState `
+      -Name 'proxyBinaryWslPath' `
+      -DefaultValue '')
   $commandOwned = $commandLine.Contains($marker) -and
-    $commandLine.Contains([string]$TlsPaths.proxyScript)
+    $commandLine.Contains('wsl') -and
+    -not [string]::IsNullOrWhiteSpace($proxyBinaryWslPath) -and
+    $commandLine.Contains($proxyBinaryWslPath)
   return [pscustomobject]@{
     ok = $commandOwned
     detail = if ($commandOwned) {
-      'TLS PID, start time, port, command line, and workspace marker match.'
+      'TLS Windows wrapper, Linux identity, loopback port, command line, and workspace marker match.'
     } else { 'TLS command line or workspace marker does not match.' }
   }
 }
@@ -1083,8 +1340,26 @@ function Stop-RimsLocalTlsProxy {
   if ($null -ne $StopAction) {
     return & $StopAction $TlsState
   }
-  $container = [pscustomobject]@{ tlsProxy = $TlsState }
-  return Stop-RimsNestedOwnedProcess -State $container -PropertyName 'tlsProxy'
+  try {
+    $stopped = Stop-RimsOwnedBackendProcess -State $TlsState
+    return [pscustomobject]@{
+      ok = [bool]$stopped
+      stopped = [bool]$stopped
+      detail = if ($stopped) {
+        'Stopped the exactly owned Windows WSL wrapper and Linux TLS process group.'
+      } else {
+        'Could not stop the exactly owned WSL Go TLS proxy.'
+      }
+    }
+  } catch {
+    return [pscustomobject]@{
+      ok = $false
+      stopped = $false
+      detail = ConvertTo-RimsDiagnosticSummary `
+        -StandardOutput '' `
+        -StandardError $_.Exception.Message
+    }
+  }
 }
 
 function Invoke-RimsAdbCommand {
@@ -1149,6 +1424,46 @@ function Test-RimsOwnedEmulatorState {
   return Test-RimsNestedOwnedProcess -State $container -PropertyName 'emulator'
 }
 
+function Invoke-RimsAndroidPathPresenceQuery {
+  param(
+    [Parameter(Mandatory = $true)][string]$Serial,
+    [Parameter(Mandatory = $true)][string]$Path,
+    [Parameter(Mandatory = $true)][scriptblock]$AdbAction
+  )
+
+  $sentinelScript = 'if [ -f "$1" ]; then printf EXISTS; else printf ABSENT; fi'
+  try {
+    $result = & $AdbAction $Serial @(
+      'shell', 'sh', '-c', $sentinelScript, 'rims-ca-query', $Path
+    )
+  } catch {
+    return [pscustomobject]@{
+      ok = $false
+      present = $null
+      detail = "Android path sentinel threw: $(ConvertTo-RimsDiagnosticSummary -StandardOutput '' -StandardError $_.Exception.Message)"
+    }
+  }
+  $exitCode = [int](Get-RimsObjectPropertyValue `
+      -Value $result -Name 'exitCode' -DefaultValue -1)
+  $stdout = [string](Get-RimsObjectPropertyValue `
+      -Value $result -Name 'stdout' -DefaultValue '')
+  $stderr = [string](Get-RimsObjectPropertyValue `
+      -Value $result -Name 'stderr' -DefaultValue '')
+  if ($exitCode -ne 0 -or $stderr.Length -ne 0 -or
+      $stdout -notin @('EXISTS', 'ABSENT')) {
+    return [pscustomobject]@{
+      ok = $false
+      present = $null
+      detail = 'Android path sentinel returned indeterminate output.'
+    }
+  }
+  return [pscustomobject]@{
+    ok = $true
+    present = $stdout -ceq 'EXISTS'
+    detail = "Android path sentinel returned $stdout."
+  }
+}
+
 function Install-RimsAndroidUserCa {
   param(
     [Parameter(Mandatory = $true)][psobject]$TlsPaths,
@@ -1203,9 +1518,19 @@ function Install-RimsAndroidUserCa {
           state = $null
         }
       }
-      $query = & $adb $serial @('shell', 'test', '-f', $remotePath)
-      $queryExitCode = [int]$query.exitCode
-      if ($queryExitCode -eq 0) {
+      $query = Invoke-RimsAndroidPathPresenceQuery `
+        -Serial $serial `
+        -Path $remotePath `
+        -AdbAction $adb
+      if (-not $query.ok) {
+        return [pscustomobject]@{
+          ok = $false
+          detail = 'Android trust query was indeterminate; existing trust was left unchanged.'
+          cleanupPending = $false
+          state = $null
+        }
+      }
+      if ($query.present) {
         $existingPath = Join-Path $TlsPaths.root 'android-existing-ca.pem'
         try {
           $pull = & $adb $serial @('pull', $remotePath, $existingPath)
@@ -1231,15 +1556,8 @@ function Install-RimsAndroidUserCa {
         } finally {
           Remove-Item -LiteralPath $existingPath -Force -ErrorAction SilentlyContinue
         }
-      } elseif ($queryExitCode -eq 1) {
-        $false
       } else {
-        return [pscustomobject]@{
-          ok = $false
-          detail = 'Android trust query was indeterminate; existing trust was left unchanged.'
-          cleanupPending = $false
-          state = $null
-        }
+        $false
       }
     } else { [bool](& $TrustQueryAction $serial $CaFingerprintSha256) }
   } catch {
@@ -1599,19 +1917,22 @@ function Remove-RimsAndroidUserCa {
   }
   $remoteFailure = $null
   try {
-    $query = & $adb $recordedSerial @('shell', 'test', '-f', $remotePath)
-    $queryExitCode = [int](Get-RimsObjectPropertyValue `
-        -Value $query `
-        -Name 'exitCode' `
-        -DefaultValue -1)
+    $query = Invoke-RimsAndroidPathPresenceQuery `
+      -Serial $recordedSerial `
+      -Path $remotePath `
+      -AdbAction $adb
   } catch {
-    $queryExitCode = -1
+    $query = [pscustomobject]@{ ok = $false; present = $null }
     $remoteFailure = "Android trust query threw: $(ConvertTo-RimsDiagnosticSummary -StandardOutput '' -StandardError $_.Exception.Message)"
   }
   $pulledPath = Join-Path $TlsPaths.root 'android-remove-ca.pem'
   [void][IO.Directory]::CreateDirectory([string]$TlsPaths.root)
   try {
-    if ($queryExitCode -eq 0) {
+    if (-not $query.ok) {
+      if ($null -eq $remoteFailure) {
+        $remoteFailure = 'Could not query the recorded Android trust path.'
+      }
+    } elseif ($query.present) {
       try {
         $pull = & $adb $recordedSerial @('pull', $remotePath, $pulledPath)
         $pullOk = [int](Get-RimsObjectPropertyValue `
@@ -1651,8 +1972,6 @@ function Remove-RimsAndroidUserCa {
           }
         }
       }
-    } elseif ($queryExitCode -ne 1 -and $null -eq $remoteFailure) {
-      $remoteFailure = 'Could not query the recorded Android trust path.'
     }
     try {
       $removeTemporary = & $adb $recordedSerial @(
