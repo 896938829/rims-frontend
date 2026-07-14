@@ -1,6 +1,6 @@
 # RIMS M11 Execution Record
 
-Status: IN PROGRESS
+Status: COMPLETE on 2026-07-15
 
 This record accepts only observed local output. Test names and implementation
 claims are not exit evidence until report identities, state effects, duplicate
@@ -17,27 +17,27 @@ counts, encrypted storage ownership, cleanup, and baseline restore are read.
 
 | Requirement | Plan task(s) | Required direct evidence | Status |
 | --- | --- | --- | --- |
-| Versioned encrypted native database | 2, 14 | migration, key, corruption, Android artifact | foundation PASS; Android acceptance pending |
-| Web regression adapter | 2, 17 | Web M9 journey with in-memory store | adapter/build PASS; M9 journey pending |
-| Verified network reachability | 3, 16 | captive/unreachable/switch probes | service PASS; fault harness pending |
-| Account/warehouse scoped cache | 4-7 | cache keys, invalidation, no cross-scope read | primitives PASS; repositories pending |
+| Versioned encrypted native database | 2, 14 | migration, key, corruption, Android artifact | PASS |
+| Web regression adapter | 2, 17 | Web M9 journey with in-memory store | PASS |
+| Verified network reachability | 3, 16 | captive/unreachable/switch probes | PASS |
+| Account/warehouse scoped cache | 4-7 | cache keys, invalidation, no cross-scope read | PASS |
 | User/warehouse references | 5 | secure-token gate and cached projection | PASS |
 | Product/inventory/alerts/barcode | 6 | offline read, stale source/age, no mutation authority | PASS |
 | Documents/details/reports | 7 | offline read and financial field boundary | PASS |
 | Six document draft types | 8, 9 | autosave, reopen, recreation, ownership | PASS |
-| Explicit reviewed queueing | 11-13 | confirmation and immutable payload | confirmation/executor PASS; workflow wiring pending |
+| Explicit reviewed queueing | 11-13 | confirmation and immutable payload | PASS |
 | Outbox states and legal transitions | 11 | complete state matrix | PASS |
-| Operation dependency ordering | 11, 13 | attachment -> create -> lifecycle | graph PASS; workflow wiring pending |
-| Client operation/idempotency IDs | 10-13 | backend status and duplicate replay | status API PASS; replay pending |
+| Operation dependency ordering | 11, 13 | attachment -> create -> lifecycle | PASS |
+| Client operation/idempotency IDs | 10-13 | backend status and duplicate replay | PASS |
 | Unknown-result recovery | 10, 12 | status first, replay same key, one effect | PASS |
-| Conflict visibility/resolution | 12, 16 | no overwrite, replacement operation | planned |
-| Session/permission revalidation | 12, 14, 16 | 401/403/account/warehouse probes | planned |
-| Account cleanup and retention | 2, 14 | counts, files, key lifecycle | planned |
-| Offline/stale UI | 6, 7, 9, 12, 15 | source, age, queued/attention state | planned |
-| Fault recovery | 16 | airplane, latency, switch, termination, duplicate, conflict | planned |
-| M9/M10 regression | 17 | current Web/Android/M10 reports | planned |
-| M11 performance thresholds | 16, 17 | strict numeric report | planned |
-| P0/P1 zero | 17 | final defect audit | planned |
+| Conflict visibility/resolution | 12, 16 | no overwrite, replacement operation | PASS |
+| Session/permission revalidation | 12, 14, 16 | 401/403/account/warehouse probes | PASS |
+| Account cleanup and retention | 2, 14 | counts, files, key lifecycle | PASS |
+| Offline/stale UI | 6, 7, 9, 12, 15 | source, age, queued/attention state | PASS |
+| Fault recovery | 16 | airplane, latency, switch, termination, duplicate, conflict | PASS |
+| M9/M10 regression | 17 | current Web/Android/M10 reports | PASS |
+| M11 performance thresholds | 16, 17 | strict numeric report | PASS |
+| P0/P1 zero | 17 | final defect audit | PASS: 0 open |
 
 ## Environment And Entry Evidence
 
@@ -263,6 +263,19 @@ counts, encrypted storage ownership, cleanup, and baseline restore are read.
 
 ## Final Android State Evidence
 
+| Evidence | Observed result |
+| --- | --- |
+| Aggregate report | `.runtime/reports/latest-m11-smoke.json`; `ok=true`; no failed step or evidence errors |
+| Tested identities | frontend `b232fca2bd4c909bc40dc3a8378103239278c2d8`; backend `64826d23d302cc1627c23f156b6dac6dbece321c` |
+| Owned route | `emulator -> owned fault proxy -> owned host bridge -> verified WSL backend`; route validation true and no unowned listener reached |
+| Performance | cache 386 ms; draft save 11 ms; full autosave 651 ms; process recovery 649 ms; enqueue 225 ms; confirmed sync 7,101 ms; database 102,400 bytes |
+| Idempotency | one unknown-status probe, two same-target replay requests, stable hashed key/fingerprint, one server document, zero duplicate documents, zero duplicate inventory transactions |
+| Inventory | stock 48 -> 44; expected and observed decrease both 4 |
+| Attachment | staged and uploaded SHA-256 both `d513664bb193a75493bd9597bb18f5190a2b49d86d89a968d5cc0a7cd2d8177f`; server attachment count 1 |
+| Journey | every Boolean true: cached reads, draft/scanner/autosave/reopen, queued/attention, explicit sync, unknown replay, attachment/lifecycle, stale session/permission, conflict replacement, logout cleanup, corruption quarantine |
+| Cleanup | account cache, outbox, staging and baseline cleanup all true; network restored; owned processes stopped; ports 8080/8081 not listening after exit |
+| Regression | M9 Web and Android reports are `ok=true` and bind frontend `b232fca2` plus backend `64826d23`; M10 is `ok=true` from the same checked worktrees |
+
 ## Task 16 Local Fault Harness And Android Acceptance Evidence
 
 | Probe | Observed result |
@@ -280,26 +293,43 @@ counts, encrypted storage ownership, cleanup, and baseline restore are read.
 | Backend | final Task 16 backend HEAD `64826d2`; `bash scripts/test_m9_dev_seed.sh` PASS against PostgreSQL; `go test ./... -count=1` PASS; migrations 15-17 upgrade and repeat safely |
 | Frontend | final Task 16 frontend HEAD `2624cf4`; M11, Android, and M10 wrapper self-tests PASS; strict analyze PASS; full Flutter suite PASS (1208 tests); M11 integration debug APK builds |
 | Review | repeated specification and quality reviews drove all reported P0/P1/P2 fixes; final main-agent code audit and fresh gates found no remaining Task 16 P0/P1/P2 |
-| Boundary | real stopped-state AVD/backend acceptance and report inspection remain Task 17 and are not claimed by wrapper self-tests or APK compilation |
-
-| Evidence | Observed result |
-| --- | --- |
+| Boundary | Task 17 stopped-state acceptance and report inspection are recorded above; wrapper self-tests and APK compilation remain supporting, not substitute, evidence |
 
 ## Defect Record
 
 | ID | Severity | Status | Reproducer/evidence | Resolution |
 | --- | --- | --- | --- | --- |
+| M11-17-01 | P1 | FIXED | confirmed profile logout could dispose the page before invoking the captured callback | capture callback before dialog; invoke after confirmation; guard only local `setState`; widget regression |
+| M11-17-02 | P1 | FIXED | logout could clear in-memory session before durable credential cleanup completed | await repository credential cleanup before clearing session; lifecycle tests |
+| M11-17-03 | P1 | FIXED | ownership preview could wait forever for quiescence | bounded quiescence timeout with diagnostics and regression coverage |
+| M11-17-04 | P1 | FIXED | Android helper could tap a disabled/offscreen offline submit action | wait for an enabled hit-testable action before tapping |
+| M11-17-05 | P1 | FIXED | proxy disconnect mapped to transport-unknown and did not reverify health | `ApiReachabilityObserver` verifies unknown transport failures while excluding business failures; 33 network tests |
+| M11-17-06 | P2 | FIXED | first formal enqueue measured 282 ms against a 250 ms limit | merge Drift operation/idempotency lookups; final observed enqueue 225 ms |
+| M11-17-07 | P1 | FIXED | acceptance helper treated unknown-response submission as known-offline | pass authoritative start state explicitly; same-key status/replay evidence retained |
+| M11-17-08 | P1 | FIXED | reachability context notification during retained overlay build raised `markNeedsBuild` | defer generation-guarded context notifications post-frame; realistic shared-ViewModel widget regression |
 
-Entry counts are not exit evidence. Final P0/P1 counts remain open until Task 17.
+Final open counts: P0 = 0, P1 = 0, P2 = 0, P3 = 0.
 
 ## Final Verification
 
 | Started (+08:00) | Command | Duration | Exit | Evidence |
 | --- | --- | ---: | ---: | --- |
+| 2026-07-15 00:27 | `scripts/rims_m11_smoke.ps1` | 337.9 s device step | 0 | current formal M11 report; all 12 steps and cleanup PASS |
+| 2026-07-15 00:35 | six PowerShell wrapper self-tests | about 4 min | 0 | each isolated process returned 0 |
+| 2026-07-15 00:38 | managed M9 Web smoke | 136.4 s | 0 | A-F journey, fixture counts, baseline and driver cleanup PASS |
+| 2026-07-15 00:41 | managed M9 Android smoke | 141.7 s | 0 | A-F journey, bridge/AVD ownership and baseline cleanup PASS |
+| 2026-07-15 00:43 | `scripts/rims_m10_smoke.ps1` | about 2 min | 0 | all field-operation scenarios and provider cleanup PASS |
+| 2026-07-15 00:47 | Flutter final gates | about 1 min | 0 | format 296/0 changed; analyze clean; 1,232 tests; debug APK built |
+| 2026-07-15 00:49 | backend Go/build/seed gates | about 1 min | 0 | `go test ./...`, temp build, M9 seed/reset idempotency PASS |
 
 ## M11 Decision
 
-**PLANNED.** M11 is not complete until cached reads and drafts work offline,
-queued writes are explicitly confirmed and idempotent, conflicts never silently
-overwrite server state, all local gates pass, cleanup is exact, and open P0/P1
-counts are zero.
+**PASS.** M11 is complete. Cached reads and drafts work offline; queued writes
+require explicit review and confirmation; unknown results are idempotent;
+conflicts remain visible and never silently overwrite server state; M9, M10,
+M11 and all local gates pass; cleanup is exact; open P0/P1 counts are zero.
+
+The post-acceptance commit `cdb4cb2` changes Dart formatting in tests only. No
+production code changed after the formal report identity above. M12 inherits the
+encrypted-record inventory, key lifecycle, outbox payloads, permission
+revalidation, redacted evidence, and the foreground explicit-confirmation rule.

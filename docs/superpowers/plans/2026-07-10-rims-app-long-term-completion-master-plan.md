@@ -142,7 +142,7 @@ storage-provider code before planning implementation. It must inherit:
 
 ### Task 3: Generate And Execute M11 Limited Offline Plan
 
-**Status:** IN PROGRESS on 2026-07-13. Plan:
+**Status:** COMPLETE on 2026-07-15. Plan:
 [`2026-07-10-rims-m11-limited-offline-sync.md`](2026-07-10-rims-m11-limited-offline-sync.md).
 Evidence:
 [`2026-07-10-rims-m11-execution-record.md`](2026-07-10-rims-m11-execution-record.md).
@@ -153,14 +153,14 @@ Evidence:
 **Entry:** M10 online scan and attachment contracts are stable and current local
 persistence options have been evaluated against supported platforms.
 
-- [ ] Define versioned cache records, draft records, outbox operations, operation
+- [x] Define versioned cache records, draft records, outbox operations, operation
   dependencies, migration ownership, encryption boundary, and retention.
-- [ ] Implement cached reads before queued writes.
-- [ ] Implement drafts before outbox processing.
-- [ ] Add idempotency and conflict handling before automatic retry.
-- [ ] Test airplane mode, latency, network switching, app termination, stale
+- [x] Implement cached reads before queued writes.
+- [x] Implement drafts before outbox processing.
+- [x] Add idempotency and conflict handling before automatic retry.
+- [x] Test airplane mode, latency, network switching, app termination, stale
   session, stale permission, duplicate delivery, and server conflict.
-- [ ] Record M11 evidence and keep P0/P1 at zero.
+- [x] Record M11 evidence and keep P0/P1 at zero.
 
 ### Task 4: Generate And Execute M12 Security And Compliance Plan
 

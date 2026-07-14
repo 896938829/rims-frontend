@@ -726,7 +726,7 @@ test: automate M11 offline synchronization
 - Modify: `docs/superpowers/plans/2026-07-10-rims-m11-execution-record.md`
 - Modify: `docs/superpowers/plans/2026-07-10-rims-app-long-term-completion-master-plan.md`
 
-- [ ] **Step 1: Run deterministic gates from stopped state.**
+- [x] **Step 1: Run deterministic gates from stopped state.**
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\test_rims_local.ps1
@@ -755,23 +755,23 @@ trap 'rm -f -- "$build_output"' EXIT
 bash scripts/test_m9_dev_seed.sh
 ```
 
-- [ ] **Step 2: Run M9 Web/Android regression, M10 field acceptance, and M11 offline acceptance with AI-owned services.**
+- [x] **Step 2: Run M9 Web/Android regression, M10 field acceptance, and M11 offline acceptance with AI-owned services.**
 
-- [ ] **Step 3: Read reports and verify Boolean result types, commits, thresholds, fixture counts, stock effects, duplicate counts, hashes, database size, ownership cleanup, and baseline restore.**
+- [x] **Step 3: Read reports and verify Boolean result types, commits, thresholds, fixture counts, stock effects, duplicate counts, hashes, database size, ownership cleanup, and baseline restore.**
 
-- [ ] **Step 4: Record P0/P1/P2/P3 defects.**
+- [x] **Step 4: Record P0/P1/P2/P3 defects.**
 
 M11 exits only with open P0/P1 zero. Performance variance over threshold is at
 least P2 and requires an explicit owner milestone; correctness, duplicate stock,
 cross-account leakage, or silent conflict overwrite is P0/P1 and blocks exit.
 
-- [ ] **Step 5: Update local docs.**
+- [x] **Step 5: Update local docs.**
 
 Document AI-owned startup, Android AVD, offline cache age/source, draft behavior,
 manual sync, conflict handling, data clearing, database/provider locations,
 fault hooks, and the no-cloud local path.
 
-- [ ] **Step 6: Verify stopped cleanup and repository scope.**
+- [x] **Step 6: Verify stopped cleanup and repository scope.**
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rims_local.ps1 -Command status

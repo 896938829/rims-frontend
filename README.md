@@ -80,6 +80,46 @@ Android system gallery/file pickers use scoped access and require no legacy
 storage permission. Run `reset` only against `dev`, `development`, or `test`;
 the controller rejects incompatible runtime ownership instead of taking it over.
 
+## M11 Limited Offline Acceptance
+
+The M11 wrapper can start the backend, named Android AVD, loopback bridge, and
+an owned fault proxy from a stopped machine. It restores Wi-Fi, fixtures, and
+owned processes in `finally`, including on first failure:
+
+```powershell
+$env:RIMS_ANDROID_DEVICE = 'Medium_Phone_API_36.1'
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\rims_m11_smoke.ps1 -AndroidDevice $env:RIMS_ANDROID_DEVICE -BackendDir $env:RIMS_BACKEND_DIR -BackendWorkspaceRoot $env:RIMS_BACKEND_WORKSPACE_ROOT -Output Json
+```
+
+The native app stores its encrypted Drift database as `rims_offline.sqlite` in
+the platform application-support directory. The encryption key is held by
+secure storage. Web and widget tests use an in-memory adapter. References and
+inventory are fresh for 24 hours and retained for offline fallback for another
+30 days; reports are fresh for 6 hours and retained for 14 days; recent
+documents are fresh for 7 days and retained for another 30 days. The UI shows
+the source and age whenever cached data is used.
+
+Drafts remain editable offline and recover after process recreation. A write is
+queued only after the user reviews and explicitly confirms an immutable
+snapshot. Synchronization is foreground-only from Sync Center; network changes
+never submit work automatically. Unknown responses probe operation status and
+reuse the same idempotency key. Conflicts remain visible and require discard or
+a new replacement operation; cached stock is never treated as write authority.
+
+Profile data controls preview account-scoped counts before clearing cache or
+offline work. Logout clears cache, outbox, staged files, downloads, and scan
+state, while an explicit retain choice may keep encrypted drafts for that same
+account. Test attachment files remain under
+`.runtime/rims-local/providers/files`; M11 reports and transient fault evidence
+remain under `.runtime/reports/` and `.runtime/m11-smoke-artifacts/`. No cloud
+account, object store, or public service is required.
+
+The fault controls are compiled only with `RIMS_E2E_M11=true` and use the
+run-owned `RIMS_E2E_M11_FAULT_CONTROL_URL`. Production defaults cannot activate
+them. The acceptance covers airplane mode, latency, packet loss, unreachable
+API, Wi-Fi switching, process recreation, stale session/permission, unknown and
+duplicate delivery, server conflict, database corruption, and exact cleanup.
+
 ## License
 
 SPDX-License-Identifier: AGPL-3.0-only
