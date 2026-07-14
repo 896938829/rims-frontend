@@ -501,7 +501,7 @@ final class OfflineOwnershipService
       try {
         await Future.wait(
           mutationBlocks.map((entry) => entry.block.waitForQuiescence()),
-        );
+        ).timeout(mutationQuiescenceTimeout);
         final snapshot = await _capture(accountId);
         return OfflineClearPreview(
           accountId: accountId,

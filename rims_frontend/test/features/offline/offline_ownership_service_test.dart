@@ -520,6 +520,28 @@ void main() {
       },
     );
 
+    test('preview quiescence timeout releases its turn and block', () async {
+      final participant = _BlockingMutationParticipant();
+      final fixture = _Fixture(
+        participant: participant,
+        mutationQuiescenceTimeout: const Duration(milliseconds: 10),
+      );
+
+      await expectLater(
+        fixture.service.preview(
+          accountId: '7',
+          command: OfflineClearCommand.cache,
+        ),
+        throwsA(isA<TimeoutException>()),
+      );
+
+      participant.release.complete();
+      final retry = await fixture.service.apply(
+        const OfflineOwnershipIntent.permissionRefresh(accountId: '7'),
+      );
+      expect(retry.completed, isTrue);
+    });
+
     test(
       'logout account switch and permission refresh drain active mutations before cleanup',
       () async {

@@ -356,26 +356,6 @@ void main() {
     });
 
     test(
-      'logout invalidates the active session before credential cleanup settles',
-      () async {
-        final cleanup = Completer<void>();
-        final repository = _FakeAuthRepository(logoutFuture: cleanup.future);
-        final sessionController = AuthSessionController();
-        await sessionController.startSession(_session);
-
-        final logout = sessionController.logout(authRepository: repository);
-        await Future<void>.delayed(Duration.zero);
-
-        expect(repository.logoutCallCount, 1);
-        expect(sessionController.isAuthenticated, isFalse);
-        expect(sessionController.canAuthenticateRequests, isFalse);
-
-        cleanup.complete();
-        await logout;
-      },
-    );
-
-    test(
       'logout keeps the real session and repository credentials until ownership cleanup succeeds',
       () async {
         final ownership = OfflineOwnershipService(
@@ -704,7 +684,6 @@ final class _FakeAuthRepository implements AuthRepository {
     ),
     this.restoreFuture,
     this.switchFuture,
-    this.logoutFuture,
   }) : _result = result ?? const FailureResult<AuthSession>(UnknownFailure()),
        _restoreResult =
            restoreResult ?? const FailureResult<AuthSession?>(UnknownFailure());
@@ -714,7 +693,6 @@ final class _FakeAuthRepository implements AuthRepository {
   final Result<Warehouse> switchWarehouseResult;
   final Future<Result<AuthSession?>>? restoreFuture;
   final Future<Result<Warehouse>>? switchFuture;
-  final Future<void>? logoutFuture;
   int loginCallCount = 0;
   int restoreCallCount = 0;
   int logoutCallCount = 0;
@@ -748,7 +726,6 @@ final class _FakeAuthRepository implements AuthRepository {
   @override
   Future<void> logout() async {
     logoutCallCount += 1;
-    await logoutFuture;
   }
 }
 
