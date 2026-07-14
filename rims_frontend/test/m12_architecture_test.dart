@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:xml/xml.dart';
 
 const _classificationPath = '../docs/security/data-classification.md';
 const _executionRecordPath =
@@ -80,30 +81,113 @@ const _externalApprovalIds = <String>{
 
 void main() {
   test(
-    'checked subprocess times out and terminates within a bound',
+    'checked subprocess timeout terminates a spawned descendant within a bound',
     () async {
       final directory = Directory.systemTemp.createTempSync(
         'rims-m12-timeout-child-',
       );
-      final script = File('${directory.path}/sleep.dart')
+      final childScript = File('${directory.path}/sleep.dart')
         ..writeAsStringSync('''
 import 'dart:async';
 
 Future<void> main() => Future<void>.delayed(const Duration(seconds: 30));
 ''');
+      final parentScript = File('${directory.path}/spawn.dart')
+        ..writeAsStringSync('''
+import 'dart:io';
+
+Future<void> main(List<String> arguments) async {
+  final child = await Process.start(
+    arguments[0],
+    [arguments[1]],
+    mode: ProcessStartMode.inheritStdio,
+  );
+  File(arguments[2]).writeAsStringSync('\${child.pid}');
+  await child.exitCode;
+}
+''');
+      final childPidFile = File('${directory.path}/child.pid');
       addTearDown(() => directory.deleteSync(recursive: true));
       final stopwatch = Stopwatch()..start();
+      int? childPid;
 
-      await expectLater(
-        _runCheckedProcess(_dartExecutableForFixture(), [
-          script.path,
-        ], timeout: const Duration(milliseconds: 200)),
-        throwsA(isA<TimeoutException>()),
-      );
-      stopwatch.stop();
-      expect(stopwatch.elapsed, lessThan(const Duration(seconds: 5)));
+      try {
+        await expectLater(
+          _runCheckedProcess(_dartExecutableForFixture(), [
+            parentScript.path,
+            _dartExecutableForFixture(),
+            childScript.path,
+            childPidFile.path,
+          ], timeout: const Duration(seconds: 1)),
+          throwsA(isA<TimeoutException>()),
+        );
+        stopwatch.stop();
+        expect(childPidFile.existsSync(), isTrue);
+        childPid = int.parse(childPidFile.readAsStringSync());
+        await _waitForFixtureProcessExit(childPid);
+        expect(_fixtureProcessExists(childPid), isFalse);
+        expect(stopwatch.elapsed, lessThan(const Duration(seconds: 8)));
+      } finally {
+        if (childPid != null && _fixtureProcessExists(childPid)) {
+          _killFixtureProcess(childPid);
+        }
+      }
     },
-    timeout: const Timeout(Duration(seconds: 10)),
+    timeout: const Timeout(Duration(seconds: 15)),
+  );
+
+  test('Linux Gradle invocation does not require an executable wrapper', () {
+    final command = _gradleCommandForPlatform(_HostPlatform.linux);
+
+    expect(command.executable, 'sh');
+    expect(command.arguments.first, 'gradlew');
+    expect(command.runInShell, isFalse);
+  });
+
+  test(
+    'checked subprocess support is explicitly limited to Windows and Linux',
+    () {
+      final command = _isolatedCommandForPlatform(
+        'tool',
+        const ['argument'],
+        hostPlatform: _HostPlatform.linux,
+        runInShell: false,
+      );
+
+      expect(command.executable, 'setsid');
+      expect(command.arguments, ['tool', 'argument']);
+      expect(command.runInShell, isFalse);
+      expect(
+        () => _isolatedCommandForPlatform(
+          'tool',
+          const [],
+          hostPlatform: _HostPlatform.unsupported,
+          runInShell: false,
+        ),
+        throwsUnsupportedError,
+      );
+    },
+  );
+
+  test(
+    'manifest permission parser ignores comments and reads SDK variants',
+    () {
+      const manifest = '''
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+  <!-- <uses-permission android:name="android.permission.COMMENT_ONLY" /> -->
+  <uses-permission android:name="android.permission.INTERNET" />
+  <uses-permission-sdk-23 android:name="android.permission.CAMERA" />
+  <uses-permission-sdk-28
+      android:name="android.permission.ACCESS_NETWORK_STATE" />
+</manifest>
+''';
+
+      expect(_permissionsFromManifestDocuments([manifest]), {
+        'android.permission.INTERNET',
+        'android.permission.CAMERA',
+        'android.permission.ACCESS_NETWORK_STATE',
+      });
+    },
   );
 
   test('source permission union is not accepted as merged evidence', () {
@@ -465,12 +549,13 @@ _generateReleaseMainMergedManifest() async {
 
   final javaHome = await _flutterAndroidJavaHome();
   final stopwatch = Stopwatch()..start();
+  final gradleCommand = _gradleCommandForPlatform(_hostPlatform());
   await _runCheckedProcess(
-    Platform.isWindows ? 'gradlew.bat' : './gradlew',
-    const [':app:processReleaseMainManifest', '--no-daemon', '--console=plain'],
+    gradleCommand.executable,
+    gradleCommand.arguments,
     workingDirectory: Directory('android').absolute.path,
     environment: {...Platform.environment, 'JAVA_HOME': javaHome},
-    runInShell: Platform.isWindows,
+    runInShell: gradleCommand.runInShell,
     timeout: const Duration(minutes: 2),
   );
   stopwatch.stop();
@@ -517,12 +602,18 @@ Future<({String stdout, String stderr})> _runCheckedProcess(
   bool runInShell = false,
 }) async {
   final stopwatch = Stopwatch()..start();
-  final process = await Process.start(
+  final command = _isolatedCommandForPlatform(
     executable,
     arguments,
+    hostPlatform: _hostPlatform(),
+    runInShell: runInShell,
+  );
+  final process = await Process.start(
+    command.executable,
+    command.arguments,
     workingDirectory: workingDirectory,
     environment: environment,
-    runInShell: runInShell,
+    runInShell: command.runInShell,
   ).timeout(const Duration(seconds: 10));
   stderr.writeln(
     '[m12-process] start pid=${process.pid} timeout=${timeout.inMilliseconds}ms '
@@ -609,6 +700,70 @@ Future<({String stdout, String stderr})> _runCheckedProcess(
   return (stdout: stdout, stderr: processStderr);
 }
 
+typedef _ProcessCommand = ({
+  String executable,
+  List<String> arguments,
+  bool runInShell,
+});
+
+enum _HostPlatform { windows, linux, unsupported }
+
+_HostPlatform _hostPlatform() {
+  if (Platform.isWindows) return _HostPlatform.windows;
+  if (Platform.isLinux) return _HostPlatform.linux;
+  return _HostPlatform.unsupported;
+}
+
+_ProcessCommand _gradleCommandForPlatform(_HostPlatform hostPlatform) {
+  if (hostPlatform == _HostPlatform.unsupported) {
+    throw UnsupportedError(
+      'M12 Android evidence subprocesses support Windows and Linux hosts only.',
+    );
+  }
+  final isWindows = hostPlatform == _HostPlatform.windows;
+  return (
+    executable: isWindows ? 'gradlew.bat' : 'sh',
+    arguments: isWindows
+        ? const [
+            ':app:processReleaseMainManifest',
+            '--no-daemon',
+            '--console=plain',
+          ]
+        : const [
+            'gradlew',
+            ':app:processReleaseMainManifest',
+            '--no-daemon',
+            '--console=plain',
+          ],
+    runInShell: isWindows,
+  );
+}
+
+_ProcessCommand _isolatedCommandForPlatform(
+  String executable,
+  List<String> arguments, {
+  required _HostPlatform hostPlatform,
+  required bool runInShell,
+}) {
+  if (hostPlatform == _HostPlatform.unsupported) {
+    throw UnsupportedError(
+      'M12 Android evidence subprocesses support Windows and Linux hosts only.',
+    );
+  }
+  if (hostPlatform == _HostPlatform.windows) {
+    return (
+      executable: executable,
+      arguments: arguments,
+      runInShell: runInShell,
+    );
+  }
+  return (
+    executable: 'setsid',
+    arguments: [executable, ...arguments],
+    runInShell: false,
+  );
+}
+
 String _dartExecutableForFixture() {
   final executableName = Platform.isWindows ? 'dart.exe' : 'dart';
   var directory = File(Platform.resolvedExecutable).absolute.parent;
@@ -640,9 +795,46 @@ Future<void> _terminateProcessTree(Process process) async {
       killer.exitCode.then<void>((_) {}),
     ]).timeout(const Duration(seconds: 3));
   } else {
-    process.kill(ProcessSignal.sigkill);
+    Process.killPid(-process.pid, ProcessSignal.sigterm);
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    Process.killPid(-process.pid, ProcessSignal.sigkill);
   }
   process.kill(ProcessSignal.sigkill);
+}
+
+Future<void> _waitForFixtureProcessExit(int pid) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 2));
+  while (_fixtureProcessExists(pid) && DateTime.now().isBefore(deadline)) {
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+  }
+}
+
+bool _fixtureProcessExists(int pid) {
+  if (Platform.isWindows) {
+    final result = Process.runSync('tasklist.exe', [
+      '/FI',
+      'PID eq $pid',
+      '/FO',
+      'CSV',
+      '/NH',
+    ]);
+    return result.stdout.toString().contains('","$pid","');
+  }
+  return Process.runSync('sh', [
+        '-c',
+        'kill -0 "\$1" 2>/dev/null',
+        'rims-m12-process-check',
+        '$pid',
+      ]).exitCode ==
+      0;
+}
+
+void _killFixtureProcess(int pid) {
+  if (Platform.isWindows) {
+    Process.runSync('taskkill.exe', ['/PID', '$pid', '/T', '/F']);
+  } else {
+    Process.killPid(pid, ProcessSignal.sigkill);
+  }
 }
 
 Future<void> _settleProcessIo(
@@ -746,17 +938,23 @@ List<String> _pathSegments(String path) => path
     .toList(growable: false);
 
 Set<String> _permissionsFromManifestDocuments(Iterable<String> manifests) {
+  const androidNamespace = 'http://schemas.android.com/apk/res/android';
+  const sdkPermissionPrefix = 'uses-permission-sdk-';
   final permissions = <String>{};
-  final tagPattern = RegExp(
-    r'<uses-permission(?:-sdk-\d+)?\b[^>]*>',
-    multiLine: true,
-  );
-  final namePattern = RegExp(r'''android:name\s*=\s*["']([^"']+)["']''');
   for (final manifest in manifests) {
-    for (final tag in tagPattern.allMatches(manifest)) {
-      final name = namePattern.firstMatch(tag.group(0)!)?.group(1);
+    final document = XmlDocument.parse(manifest);
+    for (final element in document.descendants.whereType<XmlElement>()) {
+      final tagName = element.name.local;
+      final isSdkPermission =
+          tagName.startsWith(sdkPermissionPrefix) &&
+          tagName.length > sdkPermissionPrefix.length;
+      if (tagName != 'uses-permission' && !isSdkPermission) continue;
+
+      final name = element.getAttribute('name', namespace: androidNamespace);
       if (name == null || name.isEmpty) {
-        throw FormatException('Permission tag has no android:name: ${tag[0]}');
+        throw FormatException(
+          'Permission element has no android:name: ${element.toXmlString()}',
+        );
       }
       permissions.add(name);
     }
