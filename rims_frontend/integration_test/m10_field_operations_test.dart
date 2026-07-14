@@ -359,6 +359,7 @@ Future<void> _normalizeLoggedOutState(WidgetTester tester) async {
   await tapAndSettle(tester, const Key('bottom-nav-profile'));
   await scrollUntilVisible(tester, const Key('profile-logout-button'));
   await tapAndSettle(tester, const Key('profile-logout-button'));
+  await tapAndSettle(tester, const Key('profile-logout-retain-drafts'));
   await waitForKey(tester, const Key('login-username-field'));
 }
 
