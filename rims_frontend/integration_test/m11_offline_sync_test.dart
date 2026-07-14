@@ -118,6 +118,14 @@ void main() {
             description: 'online inventory seed',
             condition: () => !inventory.isLoading && inventory.items.isNotEmpty,
           );
+          final barcodeSeed = await inventory.lookupBarcode(
+            RimsE2eConfig.injectedBarcode,
+          );
+          expect(
+            barcodeSeed,
+            isNotNull,
+            reason: 'M11 offline scanner requires an online barcode cache seed',
+          );
           await tapAndSettle(tester, const Key('bottom-nav-reports'));
           final reports = await _viewModel<ReportsViewModel>(tester);
           await waitUntil(
