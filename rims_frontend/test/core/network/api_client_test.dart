@@ -102,6 +102,7 @@ void main() {
         );
       final client = ApiClient(
         dio: dio,
+        tokenReader: () async => 'current-token',
         eventBus: eventBus,
         enableLogging: false,
       );
@@ -145,6 +146,38 @@ void main() {
       expect(tokenExpiredEvents, 0);
     },
   );
+
+  test('does not expire a newer session for a delayed old-token 401', () async {
+    var token = 'old-token';
+    final eventBus = AppEventBus();
+    addTearDown(eventBus.dispose);
+    var tokenExpiredEvents = 0;
+    final subscription = eventBus.on<TokenExpiredEvent>().listen((_) {
+      tokenExpiredEvents += 1;
+    });
+    addTearDown(subscription.cancel);
+    final adapter = _DelayedStatusAdapter(
+      statusCode: 401,
+      body: '{"code":10001,"message":"登录已过期"}',
+    );
+    final client = ApiClient(
+      dio: Dio()..httpClientAdapter = adapter,
+      tokenReader: () async => token,
+      eventBus: eventBus,
+      enableLogging: false,
+    );
+
+    final request = client.get<dynamic>('/permissions');
+    await adapter.requestStarted;
+    expect(adapter.lastOptions?.headers['Authorization'], 'Bearer old-token');
+    token = 'new-token';
+    adapter.release();
+    final result = await request;
+    await Future<void>.delayed(Duration.zero);
+
+    expect(result.isFailure, isTrue);
+    expect(tokenExpiredEvents, 0);
+  });
 
   test('request observer receives success after the real request', () async {
     final adapter = _CapturingAdapter();
@@ -219,6 +252,41 @@ final class _StatusAdapter implements HttpClientAdapter {
     Stream<Uint8List>? requestStream,
     Future<void>? cancelFuture,
   ) async {
+    return ResponseBody.fromString(
+      body,
+      statusCode,
+      headers: {
+        Headers.contentTypeHeader: [Headers.jsonContentType],
+      },
+    );
+  }
+
+  @override
+  void close({bool force = false}) {}
+}
+
+final class _DelayedStatusAdapter implements HttpClientAdapter {
+  _DelayedStatusAdapter({required this.statusCode, required this.body});
+
+  final int statusCode;
+  final String body;
+  final Completer<void> _requestStarted = Completer<void>();
+  final Completer<void> _release = Completer<void>();
+  RequestOptions? lastOptions;
+
+  Future<void> get requestStarted => _requestStarted.future;
+
+  void release() => _release.complete();
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    lastOptions = options;
+    _requestStarted.complete();
+    await _release.future;
     return ResponseBody.fromString(
       body,
       statusCode,

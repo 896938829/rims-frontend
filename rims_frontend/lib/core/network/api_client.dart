@@ -51,7 +51,7 @@ final class ApiClient {
     required this.eventBus,
     required this.requestObserver,
     required bool enableLogging,
-  }) {
+  }) : _tokenReader = tokenReader {
     _dio.options = BaseOptions(
       baseUrl: ApiEndpoints.baseUrl,
       connectTimeout: const Duration(seconds: 15),
@@ -80,6 +80,7 @@ final class ApiClient {
 
   final Dio _dio;
   final ApiExceptionMapper _exceptionMapper;
+  final TokenReader? _tokenReader;
   final AppEventBus? eventBus;
   final ApiRequestObserver? requestObserver;
 
@@ -205,7 +206,8 @@ final class ApiClient {
       _observe(
         ApiRequestOutcome(path: path, succeeded: false, failure: failure),
       );
-      if (failure is AuthenticationFailure && _publishesTokenExpired(path)) {
+      if (failure is AuthenticationFailure &&
+          await _shouldPublishTokenExpired(path, error)) {
         eventBus?.publish(const TokenExpiredEvent());
       }
       return FailureResult<Response<T>>(failure);
@@ -214,6 +216,35 @@ final class ApiClient {
 
   bool _publishesTokenExpired(String path) {
     return path != ApiEndpoints.login;
+  }
+
+  Future<bool> _shouldPublishTokenExpired(String path, Object error) async {
+    if (!_publishesTokenExpired(path)) return false;
+    final tokenReader = _tokenReader;
+    if (tokenReader == null) return true;
+    final requestToken = _requestBearerToken(error);
+    if (requestToken == null) return true;
+    try {
+      return await tokenReader() == requestToken;
+    } on Object {
+      return true;
+    }
+  }
+
+  String? _requestBearerToken(Object error) {
+    if (error is! DioException) return null;
+    Object? authorization;
+    for (final entry in error.requestOptions.headers.entries) {
+      if (entry.key.toLowerCase() == 'authorization') {
+        authorization = entry.value;
+        break;
+      }
+    }
+    if (authorization is! String || !authorization.startsWith('Bearer ')) {
+      return null;
+    }
+    final token = authorization.substring('Bearer '.length);
+    return token.isEmpty ? null : token;
   }
 
   void _observe(ApiRequestOutcome outcome) {
