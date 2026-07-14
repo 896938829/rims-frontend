@@ -473,9 +473,9 @@ void main() {
         final lifecycleDraft = documents.recentDocuments.singleWhere(
           (document) => document.remark == remarks.lifecycle,
         );
-        await _fault('unreachable');
         final beforeLifecycle = await _operations(outbox, accountId);
         await _openDocumentDetail(tester, lifecycleDraft.id);
+        await _fault('unreachable');
         await scrollUntilVisible(
           tester,
           Key('document-complete-${lifecycleDraft.id}'),
