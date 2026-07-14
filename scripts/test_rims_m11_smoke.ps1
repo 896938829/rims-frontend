@@ -377,6 +377,16 @@ try {
       "!entity.path.endsWith('manifest.json')"
     ) `
     -Message 'Physical attachment evidence must exclude the staging manifest.'
+  Assert-True `
+    -Condition $integrationText.Contains(
+      'timeout: const Duration(milliseconds: 250)'
+    ) `
+    -Message 'The measured initial enqueue must retain the 250 ms deadline.'
+  Assert-True `
+    -Condition $integrationText.Contains(
+      'Duration timeout = const Duration(seconds: 12)'
+    ) `
+    -Message 'Non-performance queue scenarios need a stable functional timeout.'
   $autosaveStart = $integrationText.IndexOf('final autosaveWatch = Stopwatch()..start();')
   $autosaveMutation = $integrationText.IndexOf(
     "const Key('document-remark-field')"

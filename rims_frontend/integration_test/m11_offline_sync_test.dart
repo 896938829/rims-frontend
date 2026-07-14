@@ -264,6 +264,7 @@ void main() {
           tester,
           documents,
           beforeQueued,
+          timeout: const Duration(milliseconds: 250),
         );
         final queuedCreate = queuedResult.operation;
         outboxEnqueueLatencyMs = queuedResult.enqueueLatencyMs;
@@ -1177,8 +1178,9 @@ Future<void> _addProductBySku(
 Future<({OutboxOperation operation, int enqueueLatencyMs})> _queueCurrentDraft(
   WidgetTester tester,
   DocumentsViewModel documents,
-  List<OutboxOperation> before,
-) async {
+  List<OutboxOperation> before, {
+  Duration timeout = const Duration(seconds: 12),
+}) async {
   await scrollUntilVisible(
     tester,
     const Key('document-create-button'),
@@ -1201,7 +1203,7 @@ Future<({OutboxOperation operation, int enqueueLatencyMs})> _queueCurrentDraft(
   await tester.pump();
   List<OutboxOperation> after = const [];
   final previousIds = before.map((operation) => operation.operationId).toSet();
-  final deadline = DateTime.now().add(const Duration(milliseconds: 250));
+  final deadline = DateTime.now().add(timeout);
   do {
     after = await _operations(
       documents.outboxRepository!,
@@ -1217,11 +1219,20 @@ Future<({OutboxOperation operation, int enqueueLatencyMs})> _queueCurrentDraft(
     await tester.pump(const Duration(milliseconds: 10));
   } while (DateTime.now().isBefore(deadline));
   enqueueWatch.stop();
-  final operation = after.singleWhere(
-    (operation) =>
-        !previousIds.contains(operation.operationId) &&
-        operation.kind == OutboxOperationKind.documentCreate,
-  );
+  final created = after
+      .where(
+        (operation) =>
+            !previousIds.contains(operation.operationId) &&
+            operation.kind == OutboxOperationKind.documentCreate,
+      )
+      .toList(growable: false);
+  if (created.length != 1) {
+    throw TestFailure(
+      'Expected one new document create operation after '
+      '${enqueueWatch.elapsedMilliseconds} ms, found ${created.length}.',
+    );
+  }
+  final operation = created.single;
   await settleBounded(tester);
   return (
     operation: operation,
