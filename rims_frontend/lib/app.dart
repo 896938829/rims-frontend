@@ -11,7 +11,6 @@ import 'core/events/app_event.dart';
 import 'core/events/app_event_bus.dart';
 import 'core/network/api_client.dart';
 import 'core/network/api_endpoints.dart';
-import 'core/result/failure.dart';
 import 'core/result/result.dart';
 import 'core/storage/app_secure_storage.dart';
 import 'core/storage/pending_revocation_journal.dart';
@@ -36,10 +35,10 @@ import 'features/inventory/data/datasources/inventory_remote_datasource.dart';
 import 'features/inventory/data/repositories/inventory_repository_impl.dart';
 import 'features/inventory/domain/repositories/inventory_repository.dart';
 import 'features/offline/data/bootstrap/offline_runtime_bindings.dart';
-import 'features/offline/domain/services/offline_store.dart';
 import 'features/offline/data/datasources/operation_status_remote_datasource.dart';
-import 'features/offline/data/services/connectivity_network_status_service.dart';
+import 'features/offline/data/services/api_reachability_observer.dart';
 import 'features/offline/data/services/attachment_outbox_handler.dart';
+import 'features/offline/data/services/connectivity_network_status_service.dart';
 import 'features/offline/data/services/document_outbox_handler.dart';
 import 'features/offline/data/services/outbox_cleanup_coordinator.dart';
 import 'features/offline/data/services/outbox_review_invalidator.dart';
@@ -52,6 +51,7 @@ import 'features/offline/data/repositories/drift_document_draft_repository.dart'
 import 'features/offline/domain/repositories/document_draft_repository.dart';
 import 'features/offline/domain/repositories/outbox_repository.dart';
 import 'features/offline/domain/entities/outbox_operation.dart';
+import 'features/offline/domain/services/offline_store.dart';
 import 'features/offline/domain/entities/outbox_cleanup_intent.dart';
 import 'features/offline/domain/services/network_status_service.dart';
 import 'features/offline/domain/services/attachment_staging_protection.dart';
@@ -184,13 +184,7 @@ final class _MainAppState extends State<MainApp> {
           : null,
       warehouseIdReader: () async => _sessionController.currentWarehouse?.id,
       eventBus: _eventBus,
-      requestObserver: (outcome) {
-        if (outcome.succeeded) {
-          _networkStatusService.markOnlineFromRequest();
-        } else if (outcome.failure is NetworkFailure) {
-          unawaited(_networkStatusService.verify());
-        }
-      },
+      requestObserver: ApiReachabilityObserver(_networkStatusService).call,
     );
     final attachmentsRemoteDataSource = ApiAttachmentsRemoteDataSource(
       _apiClient,
