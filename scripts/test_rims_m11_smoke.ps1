@@ -356,6 +356,14 @@ try {
         "if (find.text('同步中心').evaluate().isNotEmpty) return;"
       )) `
     -Message 'Sync Center navigation must not confuse the Profile entry label with the page.'
+  Assert-True `
+    -Condition $integrationText.Contains("description: 'Sync Center page'") `
+    -Message 'Sync Center navigation must wait for the routed page to mount.'
+  Assert-True `
+    -Condition (-not $integrationText.Contains(
+        "await expectText(tester, '同步中心');"
+      )) `
+    -Message 'Sync Center navigation completion must not use the ambiguous entry label.'
   $autosaveStart = $integrationText.IndexOf('final autosaveWatch = Stopwatch()..start();')
   $autosaveMutation = $integrationText.IndexOf(
     "const Key('document-remark-field')"

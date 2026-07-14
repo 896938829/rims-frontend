@@ -1264,7 +1264,11 @@ Future<void> _openSyncCenter(WidgetTester tester) async {
   await tapAndSettle(tester, const Key('bottom-nav-profile'));
   await scrollUntilVisible(tester, const Key('profile-sync-center-entry'));
   await tapAndSettle(tester, const Key('profile-sync-center-entry'));
-  await expectText(tester, '同步中心');
+  await waitUntil(
+    tester,
+    description: 'Sync Center page',
+    condition: () => find.byType(SyncCenterPage).evaluate().isNotEmpty,
+  );
 }
 
 Future<bool> _operationVisibleInSyncCenter(
