@@ -7,6 +7,8 @@ import '../database/offline_database_factory.dart';
 import '../repositories/drift_outbox_repository.dart';
 import '../repositories/memory_outbox_repository.dart';
 
+const bool kSupportsOfflineFileMaintenance = true;
+
 OutboxRepository createOutboxRepository(OfflineStore store) {
   if (store is OutboxRepositoryOwner) {
     return (store as OutboxRepositoryOwner).outboxRepository;

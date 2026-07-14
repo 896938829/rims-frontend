@@ -386,7 +386,9 @@ final class _MainAppState extends State<MainApp> {
   Future<void> _restoreSessionAndMaintain() async {
     await _sessionController.restoreSession(_authRepository);
     final accountId = _sessionController.currentUser?.id.toString();
-    if (accountId != null && _sessionController.canAccessOfflineData) {
+    if (accountId != null &&
+        _sessionController.canAccessOfflineData &&
+        kSupportsOfflineFileMaintenance) {
       await _maintainOfflineFiles(accountId);
     }
   }

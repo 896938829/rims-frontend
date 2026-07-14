@@ -2,19 +2,19 @@ import 'dart:convert';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:integration_test/integration_test.dart';
 import 'package:rims_frontend/features/documents/presentation/view_models/documents_view_model.dart';
 import 'package:rims_frontend/features/inventory/presentation/widgets/inventory_product_tile.dart';
 import 'package:rims_frontend/features/offline/data/repositories/memory_offline_store.dart';
 import 'package:rims_frontend/main.dart';
 
 import 'support/rims_e2e_driver.dart';
-import 'support/rims_e2e_binding.dart';
 import 'support/rims_e2e_config.dart';
 
-late final RimsE2eBinding binding;
+late final IntegrationTestWidgetsFlutterBinding binding;
 
 void main() {
-  binding = RimsE2eBinding();
+  binding = IntegrationTestWidgetsFlutterBinding.ensureInitialized();
   testWidgets('local acceptance journey', (tester) async {
     await screenshotOnFailure(
       binding,
@@ -45,6 +45,8 @@ void main() {
 
         await waitForKey(tester, const Key('bottom-nav-home'));
         debugPrint('E2E stage: admin login');
+        await _selectAdminWarehouse(tester, '默认仓库');
+        await tapAndSettle(tester, const Key('bottom-nav-home'));
         await expectText(tester, '默认仓库');
 
         await _pumpFreshApp(tester, 'session-restore');
@@ -63,14 +65,7 @@ void main() {
         debugPrint('E2E stage: first inventory ${firstWarehouse.quantity}');
         expect(firstWarehouse.quantity, 2);
 
-        await tapAndSettle(tester, const Key('bottom-nav-profile'));
-        await tapAndSettle(tester, const Key('profile-warehouse-selector'));
-        await tapFinderAndSettle(
-          tester,
-          find.text(RimsE2eConfig.secondWarehouseName).last,
-          description: 'second warehouse option',
-        );
-        await expectText(tester, RimsE2eConfig.secondWarehouseName);
+        await _selectAdminWarehouse(tester, RimsE2eConfig.secondWarehouseName);
         debugPrint('E2E stage: warehouse switched');
 
         await tapAndSettle(tester, const Key('bottom-nav-inventory'));
@@ -153,10 +148,25 @@ void main() {
   });
 }
 
+Future<void> _selectAdminWarehouse(
+  WidgetTester tester,
+  String warehouseName,
+) async {
+  await tapAndSettle(tester, const Key('bottom-nav-profile'));
+  await tapAndSettle(tester, const Key('profile-warehouse-selector'));
+  await tapFinderAndSettle(
+    tester,
+    find.text(warehouseName).last,
+    description: '$warehouseName warehouse option',
+  );
+  await expectText(tester, warehouseName);
+}
+
 Future<void> _logout(WidgetTester tester) async {
   await tapAndSettle(tester, const Key('bottom-nav-profile'));
   await scrollUntilVisible(tester, const Key('profile-logout-button'));
   await tapAndSettle(tester, const Key('profile-logout-button'));
+  await tapAndSettle(tester, const Key('profile-logout-retain-drafts'));
   await waitForKey(tester, const Key('login-username-field'));
 }
 
@@ -337,6 +347,7 @@ Future<void> _normalizeLoggedOutState(WidgetTester tester) async {
   await settleBounded(tester);
   await scrollUntilVisible(tester, const Key('profile-logout-button'));
   await tapAndSettle(tester, const Key('profile-logout-button'));
+  await tapAndSettle(tester, const Key('profile-logout-retain-drafts'));
   await waitForKey(tester, const Key('login-username-field'));
 }
 

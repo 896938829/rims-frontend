@@ -7,6 +7,8 @@ import '../repositories/memory_outbox_repository.dart';
 typedef ReadOfflineDatabaseKey = Future<String?> Function();
 typedef WriteOfflineDatabaseKey = Future<void> Function(String value);
 
+const bool kSupportsOfflineFileMaintenance = false;
+
 OutboxRepository createOutboxRepository(OfflineStore store) {
   if (store is OutboxRepositoryOwner) {
     return (store as OutboxRepositoryOwner).outboxRepository;
