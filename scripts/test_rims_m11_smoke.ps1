@@ -128,7 +128,15 @@ Assert-Equal -Actual $plan.target -Expected 'android-m11' -Message 'Target.'
 Assert-Equal -Actual $plan.phase -Expected 'offline-sync' -Message 'Phase.'
 Assert-Equal -Actual $plan.androidDevice -Expected 'Medium_Phone_API_36.1' -Message 'AVD.'
 Assert-Equal -Actual $plan.backendPort -Expected 18080 -Message 'Backend port.'
+Assert-Equal -Actual $plan.backendTargetPort -Expected 18080 -Message 'Backend target port.'
+Assert-True `
+  -Condition ($plan.ownedBridgePort -ne $plan.faultProxyPort) `
+  -Message 'Owned bridge must be distinct from the fault proxy.'
 Assert-Equal -Actual $plan.faultProxyPort -Expected 18081 -Message 'Fault proxy port.'
+Assert-Equal `
+  -Actual $plan.connectionChain `
+  -Expected 'emulator->owned-fault-proxy->owned-host-bridge->verified-wsl-backend' `
+  -Message 'Owned network chain.'
 Assert-Equal `
   -Actual (@($plan.scenarios) -join '|') `
   -Expected 'airplane-mode|latency|packet-loss|unreachable-api|wifi-switch|process-recreation|stale-session|stale-permission|duplicate-delivery|server-conflict|database-corruption' `
@@ -276,6 +284,9 @@ try {
   Assert-Equal -Actual $report.ownership.backendOwned -Expected $true -Message 'Backend ownership.'
   Assert-Equal -Actual $report.ownership.emulatorOwned -Expected $true -Message 'Emulator ownership.'
   Assert-Equal -Actual $report.ownership.faultProxyOwned -Expected $true -Message 'Proxy ownership.'
+  Assert-Equal -Actual $report.backendTargetPort -Expected 18080 -Message 'Report backend target.'
+  Assert-Equal -Actual $report.ownedBridgePort -Expected $plan.ownedBridgePort -Message 'Report owned bridge.'
+  Assert-Equal -Actual $report.faultProxyPort -Expected 18081 -Message 'Report fault proxy.'
   Assert-Equal -Actual $report.cleanup.networkRestored -Expected $true -Message 'Network cleanup.'
   Assert-Equal -Actual $report.cleanup.ownedProcessesStopped -Expected $true -Message 'Owned process cleanup.'
   Assert-True -Condition ($report.evidence.cacheReadLatencyMs -is [ValueType]) -Message 'Cache metric must be numeric.'

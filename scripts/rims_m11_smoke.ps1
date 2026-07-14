@@ -71,13 +71,28 @@ if ($TestMode -and [string]::IsNullOrWhiteSpace($FixturePath)) {
   throw 'TestMode requires FixturePath.'
 }
 
+$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$repoRoot = (Resolve-Path -LiteralPath (Join-Path $scriptDir '..')).Path
+$androidWrapper = Join-Path $scriptDir 'rims_android_smoke.ps1'
+$androidPlan = (& $androidWrapper `
+    -ListPlan `
+    -Phase 'offline-sync' `
+    -AndroidDevice $AndroidDevice `
+    -BackendPort $BackendPort `
+    -FaultProxyPort $FaultProxyPort `
+    -Output Json) -join "`n" | ConvertFrom-Json
+
 $plan = [pscustomobject][ordered]@{
   schemaVersion = 1
   target = 'android-m11'
   phase = 'offline-sync'
   androidDevice = $AndroidDevice
   backendPort = $BackendPort
+  backendTargetPort = $androidPlan.backendTargetPort
+  ownedBridgePort = $androidPlan.ownedBridgePort
   faultProxyPort = $FaultProxyPort
+  connectionChain = $androidPlan.connectionChain
+  portOwnership = $androidPlan.portOwnership
   scenarios = $scenarioNames
   deterministicInjection = [pscustomobject][ordered]@{
     productionDefault = 'disabled'
@@ -102,9 +117,6 @@ if ($ListPlan) {
   exit 0
 }
 
-$scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$repoRoot = (Resolve-Path -LiteralPath (Join-Path $scriptDir '..')).Path
-$androidWrapper = Join-Path $scriptDir 'rims_android_smoke.ps1'
 $runtimeRoot = Join-Path $repoRoot '.runtime'
 if ([string]::IsNullOrWhiteSpace($ReportPath)) {
   $ReportPath = Join-Path $runtimeRoot 'reports\latest-m11-smoke.json'
@@ -531,6 +543,9 @@ if ($TestMode -and $FailStep -eq 'validate-evidence' -and $firstExitCode -eq 0) 
 Add-M11Command 'write-report'
 
 $forbidden = $evidenceErrors -contains 'M11 evidence contains a forbidden secret or raw key field.'
+$networkReport = if (-not $TestMode -and $null -ne $script:childReport) {
+  $script:childReport
+} else { $plan }
 $report = [pscustomobject][ordered]@{
   schemaVersion = 1
   target = 'android-m11'
@@ -541,7 +556,11 @@ $report = [pscustomobject][ordered]@{
   backendCommit = $backendCommit
   androidDevice = $AndroidDevice
   backendPort = $BackendPort
-  faultProxyPort = $FaultProxyPort
+  backendTargetPort = $networkReport.backendTargetPort
+  ownedBridgePort = $networkReport.ownedBridgePort
+  faultProxyPort = $networkReport.faultProxyPort
+  connectionChain = $networkReport.connectionChain
+  portOwnership = $networkReport.portOwnership
   ownership = $ownership
   cleanup = $cleanup
   thresholds = $thresholds

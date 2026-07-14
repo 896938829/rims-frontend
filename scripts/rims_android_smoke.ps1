@@ -24,6 +24,7 @@ param(
   [string]$TestFixtureResetFailure = 'none',
   [switch]$TestFixtureBaselineMismatch,
   [switch]$TestBridgeFailure,
+  [switch]$TestOwnedNetworkHarness,
   [string]$TestMarkerFixturePath,
   [ValidateSet('Result', 'Stage')]
   [string]$TestExpectedMarker = 'Result',
@@ -35,6 +36,49 @@ param(
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
+
+function Test-RimsLoopbackPortAvailable {
+  param([Parameter(Mandatory = $true)][int]$Port)
+  $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, $Port)
+  try {
+    $listener.Server.ExclusiveAddressUse = $true
+    $listener.Start()
+    return $true
+  } catch {
+    return $false
+  } finally {
+    $listener.Stop()
+  }
+}
+
+function Resolve-RimsOwnedBridgePort {
+  param(
+    [Parameter(Mandatory = $true)][int]$BackendTargetPort,
+    [Parameter(Mandatory = $true)][int]$ReservedFaultProxyPort,
+    [AllowNull()][scriptblock]$PortAvailableAction
+  )
+  $probe = if ($null -ne $PortAvailableAction) {
+    $PortAvailableAction
+  } else {
+    { param($candidate) Test-RimsLoopbackPortAvailable -Port $candidate }
+  }
+  $candidates = [Collections.Generic.List[int]]::new()
+  [void]$candidates.Add($BackendTargetPort)
+  $lastNearbyPort = [Math]::Min(65535, $BackendTargetPort + 256)
+  if ($BackendTargetPort -lt $lastNearbyPort) {
+    foreach ($candidate in (($BackendTargetPort + 1)..$lastNearbyPort)) {
+      [void]$candidates.Add($candidate)
+    }
+  }
+  foreach ($candidate in 30000..30255) {
+    if (-not $candidates.Contains($candidate)) { [void]$candidates.Add($candidate) }
+  }
+  foreach ($candidate in $candidates) {
+    if ($candidate -eq $ReservedFaultProxyPort) { continue }
+    if (& $probe $candidate) { return $candidate }
+  }
+  throw 'No exclusive Windows loopback port is available for the owned Android bridge.'
+}
 
 $stepNames = @(
   'doctor-android',
@@ -95,6 +139,12 @@ if ($FaultProxyPort -eq $BackendPort -or
     $FaultProxyPort -gt 65535) {
   throw 'FaultProxyPort must be a valid port distinct from BackendPort.'
 }
+$backendTargetPort = $BackendPort
+$ownedBridgePort = if ($Phase -eq 'offline-sync') {
+  Resolve-RimsOwnedBridgePort `
+    -BackendTargetPort $backendTargetPort `
+    -ReservedFaultProxyPort $FaultProxyPort
+} else { $BackendPort }
 
 $effectiveApiPort = if ($Phase -eq 'offline-sync') {
   $FaultProxyPort
@@ -143,6 +193,21 @@ $plan = [pscustomobject][ordered]@{
   phase = $Phase
   androidDevice = $AndroidDevice
   apiBaseUrl = $apiBaseUrl
+  backendTargetPort = $backendTargetPort
+  ownedBridgePort = $ownedBridgePort
+  faultProxyPort = $FaultProxyPort
+  connectionChain = if ($Phase -eq 'offline-sync') {
+    'emulator->owned-fault-proxy->owned-host-bridge->verified-wsl-backend'
+  } else { 'emulator->backend' }
+  portOwnership = [pscustomobject][ordered]@{
+    backendTarget = 'verified-managed-wsl-runtime'
+    hostBridge = if ($Phase -eq 'offline-sync') {
+      'run-owned-pid-and-start-time'
+    } else { 'on-demand' }
+    faultProxy = if ($Phase -eq 'offline-sync') {
+      'run-owned-pid-and-start-time'
+    } else { 'not-applicable' }
+  }
   preparation = 'backend-only-lifecycle+managed-emulator-helper'
   hostBridge = 'on-demand-owned-loopback-ipv4-to-wsl-ipv6-proxy'
   flutterLauncher = 'ProcessStartInfo.WorkingDirectory + cmd.exe -> resolved flutter.bat'
@@ -185,7 +250,8 @@ $plan = [pscustomobject][ordered]@{
   faultProxy = if ($Phase -eq 'offline-sync') {
     [pscustomobject][ordered]@{
       listenPort = $FaultProxyPort
-      upstreamPort = $BackendPort
+      upstreamPort = $ownedBridgePort
+      upstreamOwnership = 'validated-owned-host-bridge'
       ownership = 'start-and-stop-exact-owned-process'
       controlPath = '/__rims_m11'
     }
@@ -317,6 +383,7 @@ $artifactCollection = [pscustomobject][ordered]@{
 }
 $faultProxyProcess = $null
 $faultProxyIdentity = $null
+$routeValidation = $null
 $m11Commands = [Collections.Generic.List[string]]::new()
 $initialAirplaneMode = $null
 $initialWifiEnabled = $null
@@ -728,16 +795,21 @@ function Initialize-AndroidRuntime {
     }
     Add-M11Command 'health-wsl-ipv6-runtime'
     try {
-      if (-not (Test-WindowsHealthzOnce)) {
+      if ($Phase -eq 'offline-sync' -and $ownedBridgePort -ne $backendTargetPort) {
+        Add-M11Command "preserve-unowned-listener:$backendTargetPort"
+      } elseif (-not (Test-WindowsHealthzOnce -Port $backendTargetPort)) {
         Add-M11Command 'windows-health-unavailable-before-bridge'
       }
       Start-AndroidHostBridge
       if ($null -ne $script:hostBridgeIdentity) {
-        Add-M11Command "start-owned-host-bridge:$BackendPort"
+        Add-M11Command "start-owned-host-bridge:$ownedBridgePort"
       } else {
         Add-M11Command 'reuse-windows-backend-health'
       }
-      if (-not (Test-WindowsHealthzOnce)) {
+      $healthPort = if ($Phase -eq 'offline-sync') {
+        $ownedBridgePort
+      } else { $backendTargetPort }
+      if (-not (Test-WindowsHealthzOnce -Port $healthPort)) {
         throw 'Windows backend health remained unavailable after host bridge setup.'
       }
       Add-M11Command 'health-windows-after-bridge'
@@ -774,17 +846,26 @@ function Initialize-AndroidRuntime {
   }
   Add-M11Command 'validate-runtime-identity'
   Add-M11Command 'health-wsl-ipv6-runtime'
-  Add-M11Command 'windows-health-unavailable-before-bridge'
-  Add-M11Command "start-owned-host-bridge:$BackendPort"
-  $script:hostBridgeIdentity = [pscustomobject][ordered]@{
-    owned = $true
-    windowsPid = 4444
-    windowsProcessStartTimeUtc = '2026-07-14T00:00:00Z'
-    listenAddress = '127.0.0.1'
-    listenPort = $BackendPort
-    upstreamAddress = '::1'
-    upstreamPort = $BackendPort
+  if ($ownedBridgePort -ne $backendTargetPort) {
+    Add-M11Command "preserve-unowned-listener:$backendTargetPort"
+  } else {
+    Add-M11Command 'windows-health-unavailable-before-bridge'
   }
+  if ($TestOwnedNetworkHarness) {
+    Start-AndroidHostBridge
+  } else {
+    $script:hostBridgeIdentity = [pscustomobject][ordered]@{
+      owned = $true
+      windowsPid = 4444
+      windowsProcessStartTimeUtc = '2026-07-14T00:00:00Z'
+      listenAddress = '127.0.0.1'
+      listenPort = $ownedBridgePort
+      upstreamAddress = '::1'
+      upstreamPort = $backendTargetPort
+      backendIdentityValidated = $true
+    }
+  }
+  Add-M11Command "start-owned-host-bridge:$ownedBridgePort"
   if ($TestBridgeFailure) {
     $script:runtimeDisposition = if ($script:runtimeOwnedByRun) { 'start' } else { 'reject' }
     throw 'Injected Android host bridge failure.'
@@ -818,7 +899,7 @@ function Start-M11FaultProxy {
   if ($Phase -ne 'offline-sync') { return }
   Add-M11Command 'snapshot-airplane-mode'
   Add-M11Command 'snapshot-wifi'
-  if ($TestMode) {
+  if ($TestMode -and -not $TestOwnedNetworkHarness) {
     $script:initialAirplaneMode = '0'
     $script:initialWifiEnabled = $true
     $script:faultProxyIdentity = [pscustomobject][ordered]@{
@@ -827,7 +908,9 @@ function Start-M11FaultProxy {
       windowsProcessStartTimeUtc = '2026-07-14T00:00:00Z'
       listenAddress = '127.0.0.1'
       listenPort = $FaultProxyPort
-      upstreamPort = $BackendPort
+      upstreamAddress = '127.0.0.1'
+      upstreamPort = $ownedBridgePort
+      upstreamOwnership = 'validated-owned-host-bridge'
       controlPath = '/__rims_m11'
     }
     Add-M11Command "start-owned-fault-proxy:$FaultProxyPort"
@@ -844,14 +927,20 @@ function Start-M11FaultProxy {
     }
     return
   }
-  $script:initialAirplaneMode = Get-M11AdbText @(
-    'shell', 'settings', 'get', 'global', 'airplane_mode_on'
-  )
-  $wifiStatus = Get-M11AdbText @('shell', 'cmd', 'wifi', 'status')
-  $script:initialWifiEnabled = $wifiStatus -match '(?i)enabled'
-  $adb = Resolve-RimsAndroidTool `
-    -CommandName 'adb.exe' `
-    -SdkRelativePath 'platform-tools\adb.exe'
+  if ($TestOwnedNetworkHarness) {
+    $script:initialAirplaneMode = '0'
+    $script:initialWifiEnabled = $true
+    $adb = Join-Path $env:SystemRoot 'System32\where.exe'
+  } else {
+    $script:initialAirplaneMode = Get-M11AdbText @(
+      'shell', 'settings', 'get', 'global', 'airplane_mode_on'
+    )
+    $wifiStatus = Get-M11AdbText @('shell', 'cmd', 'wifi', 'status')
+    $script:initialWifiEnabled = $wifiStatus -match '(?i)enabled'
+    $adb = Resolve-RimsAndroidTool `
+      -CommandName 'adb.exe' `
+      -SdkRelativePath 'platform-tools\adb.exe'
+  }
   $source = @'
 using System;
 using System.Collections.Generic;
@@ -874,14 +963,15 @@ public static class RimsM11FaultProxy {
   static int networkGeneration = 0;
   static int activeNetworkActions = 0;
 
-  public static void Run(int listenPort, int backendPort, string adbPath,
+  public static void Run(int listenPort, int ownedBridgePort, string adbPath,
       string deviceSerial, string outputPath) {
-    upstreamPort = backendPort;
+    upstreamPort = ownedBridgePort;
     adb = adbPath;
     serial = deviceSerial;
     logPath = outputPath;
-    Log("proxy-start listen=" + listenPort + " upstream=" + backendPort);
+    Log("proxy-start listen=" + listenPort + " owned-bridge=" + ownedBridgePort);
     var listener = new TcpListener(IPAddress.Loopback, listenPort);
+    listener.Server.ExclusiveAddressUse = true;
     listener.Start();
     while (true) {
       var client = listener.AcceptTcpClient();
@@ -1008,15 +1098,9 @@ public static class RimsM11FaultProxy {
   }
 
   static TcpClient ConnectUpstream() {
-    try {
-      var ipv4 = new TcpClient(AddressFamily.InterNetwork);
-      ipv4.Connect(IPAddress.Loopback, upstreamPort);
-      return ipv4;
-    } catch {
-      var ipv6 = new TcpClient(AddressFamily.InterNetworkV6);
-      ipv6.Connect(IPAddress.IPv6Loopback, upstreamPort);
-      return ipv6;
-    }
+    var ownedBridge = new TcpClient(AddressFamily.InterNetwork);
+    ownedBridge.Connect(IPAddress.Loopback, upstreamPort);
+    return ownedBridge;
   }
 
   static byte[] ReadRequest(NetworkStream stream) {
@@ -1160,18 +1244,18 @@ public static class RimsM11FaultProxy {
 }
 '@
   $helper = @"
-param([int]`$ListenPort, [int]`$BackendPort, [string]`$Adb, [string]`$Serial, [string]`$LogPath)
+param([int]`$ListenPort, [int]`$OwnedBridgePort, [string]`$Adb, [string]`$Serial, [string]`$LogPath)
 `$ErrorActionPreference = 'Stop'
 Add-Type -TypeDefinition @'
 $source
 '@
-[RimsM11FaultProxy]::Run(`$ListenPort, `$BackendPort, `$Adb, `$Serial, `$LogPath)
+[RimsM11FaultProxy]::Run(`$ListenPort, `$OwnedBridgePort, `$Adb, `$Serial, `$LogPath)
 "@
   New-Item -ItemType Directory -Force -Path $ArtifactRoot | Out-Null
   Set-Content -LiteralPath $faultProxyHelperPath -Value $helper -Encoding UTF8
   $helperArguments = @(
     '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $faultProxyHelperPath,
-    '-ListenPort', "$FaultProxyPort", '-BackendPort', "$BackendPort",
+    '-ListenPort', "$FaultProxyPort", '-OwnedBridgePort', "$ownedBridgePort",
     '-Adb', $adb, '-Serial', $androidSerial, '-LogPath', $faultProxyLogPath
   ) | ForEach-Object { ConvertTo-RimsWindowsCommandLineArgument -Value "$_" }
   $script:faultProxyProcess = Start-Process `
@@ -1185,7 +1269,10 @@ $source
     windowsProcessStartTimeUtc = $script:faultProxyProcess.StartTime.ToUniversalTime().ToString('o')
     listenAddress = '127.0.0.1'
     listenPort = $FaultProxyPort
-    upstreamPort = $BackendPort
+    upstreamAddress = '127.0.0.1'
+    upstreamPort = $ownedBridgePort
+    upstreamOwnership = 'validated-owned-host-bridge'
+    backendTargetPort = $backendTargetPort
     controlPath = '/__rims_m11'
   }
   Add-M11Command "start-owned-fault-proxy:$FaultProxyPort"
@@ -1198,7 +1285,17 @@ $source
       $status = Invoke-RestMethod `
         -Uri "http://127.0.0.1:$FaultProxyPort/__rims_m11?action=status" `
         -TimeoutSec 2
-      if ($status.ok -eq $true) { return }
+      if ($status.ok -eq $true) {
+        if ($TestOwnedNetworkHarness) {
+          $script:routeValidation = Invoke-RestMethod `
+            -Uri "http://127.0.0.1:$FaultProxyPort/healthz" `
+            -TimeoutSec 3
+          if ($script:routeValidation.backend -ne 'A') {
+            throw 'Fault proxy did not route through the owned bridge to backend A.'
+          }
+        }
+        return
+      }
     } catch { }
     Start-Sleep -Milliseconds 200
   } while ([DateTime]::UtcNow -lt $deadline)
@@ -1213,23 +1310,26 @@ function Restore-M11FaultHarness {
   Add-M11Command 'restore-airplane-mode'
   Add-M11Command 'restore-wifi'
   Add-M11Command 'stop-owned-fault-proxy'
-  if (-not $TestMode -and $null -ne $faultProxyIdentity) {
+  if ((-not $TestMode -or $TestOwnedNetworkHarness) -and
+      $null -ne $faultProxyIdentity) {
     try {
       [void](Invoke-RestMethod `
           -Uri "http://127.0.0.1:$FaultProxyPort/__rims_m11?action=reset" `
           -TimeoutSec 12)
     } catch { [void]$restoreErrors.Add("proxy reset: $($_.Exception.Message)") }
-    try {
-      $airplaneAction = if ($initialAirplaneMode -eq '1') { 'enable' } else { 'disable' }
-      [void](Get-M11AdbText @('shell', 'cmd', 'connectivity', 'airplane-mode', $airplaneAction))
-    } catch { [void]$restoreErrors.Add("airplane mode: $($_.Exception.Message)") }
-    try {
-      $wifiAction = if ($initialWifiEnabled) { 'enable' } else { 'disable' }
-      [void](Get-M11AdbText @('shell', 'svc', 'wifi', $wifiAction))
-    } catch { [void]$restoreErrors.Add("wifi: $($_.Exception.Message)") }
+    if (-not $TestOwnedNetworkHarness) {
+      try {
+        $airplaneAction = if ($initialAirplaneMode -eq '1') { 'enable' } else { 'disable' }
+        [void](Get-M11AdbText @('shell', 'cmd', 'connectivity', 'airplane-mode', $airplaneAction))
+      } catch { [void]$restoreErrors.Add("airplane mode: $($_.Exception.Message)") }
+      try {
+        $wifiAction = if ($initialWifiEnabled) { 'enable' } else { 'disable' }
+        [void](Get-M11AdbText @('shell', 'svc', 'wifi', $wifiAction))
+      } catch { [void]$restoreErrors.Add("wifi: $($_.Exception.Message)") }
+    }
   }
   $script:faultProxyCleanup.attempted = $true
-  if (-not $TestMode -and $null -ne $faultProxyProcess) {
+  if ($null -ne $faultProxyProcess) {
     try {
       $process = Get-Process -Id $faultProxyIdentity.windowsPid -ErrorAction SilentlyContinue
       if ($null -ne $process) {
@@ -1435,9 +1535,10 @@ function Invoke-M11ProcessStages {
 
 
 function Test-WindowsHealthzOnce {
+  param([int]$Port = $backendTargetPort)
   try {
     $health = Invoke-RestMethod `
-      -Uri "http://127.0.0.1:$BackendPort/healthz" `
+      -Uri "http://127.0.0.1:$Port/healthz" `
       -TimeoutSec 2
     return $null -ne $health
   } catch {
@@ -1446,19 +1547,23 @@ function Test-WindowsHealthzOnce {
 }
 
 function Start-AndroidHostBridge {
-  if (Test-WindowsHealthzOnce) { return }
+  if ($Phase -ne 'offline-sync' -and
+      (Test-WindowsHealthzOnce -Port $backendTargetPort)) {
+    return
+  }
   $source = @'
 using System;
 using System.Net;
 using System.Net.Sockets;
 using System.Threading.Tasks;
 public static class RimsAndroidHostBridge {
-  public static void Run(int port) {
-    var listener = new TcpListener(IPAddress.Loopback, port);
+  public static void Run(int listenPort, int backendTargetPort) {
+    var listener = new TcpListener(IPAddress.Loopback, listenPort);
+    listener.Server.ExclusiveAddressUse = true;
     listener.Start();
     while (true) {
       var client = listener.AcceptTcpClient();
-      Task.Run(() => Handle(client, port));
+      Task.Run(() => Handle(client, backendTargetPort));
     }
   }
   private static async Task Handle(TcpClient client, int port) {
@@ -1474,7 +1579,7 @@ public static class RimsAndroidHostBridge {
   }
 }
 '@
-  $launcher = "Add-Type -TypeDefinition @'`n$source`n'@; [RimsAndroidHostBridge]::Run($BackendPort)"
+  $launcher = "Add-Type -TypeDefinition @'`n$source`n'@; [RimsAndroidHostBridge]::Run($ownedBridgePort, $backendTargetPort)"
   $encoded = [Convert]::ToBase64String(
     [Text.Encoding]::Unicode.GetBytes($launcher)
   )
@@ -1489,19 +1594,20 @@ public static class RimsAndroidHostBridge {
     windowsProcessStartTimeUtc = `
       $script:hostBridgeProcess.StartTime.ToUniversalTime().ToString('o')
     listenAddress = '127.0.0.1'
-    listenPort = $BackendPort
+    listenPort = $ownedBridgePort
     upstreamAddress = '::1'
-    upstreamPort = $BackendPort
+    upstreamPort = $backendTargetPort
+    backendIdentityValidated = $true
   }
   $deadline = [DateTime]::UtcNow.AddSeconds(15)
   do {
     if ($script:hostBridgeProcess.HasExited) {
       throw 'Android host bridge exited before becoming ready.'
     }
-    if (Test-WindowsHealthzOnce) { return }
+    if (Test-WindowsHealthzOnce -Port $ownedBridgePort) { return }
     Start-Sleep -Milliseconds 200
   } while ([DateTime]::UtcNow -lt $deadline)
-  throw "Android host bridge did not expose IPv4 port $BackendPort."
+  throw "Android host bridge did not expose owned IPv4 port $ownedBridgePort."
 }
 
 function Stop-AndroidHostBridge {
@@ -1530,16 +1636,24 @@ function Stop-AndroidHostBridge {
     $script:hostBridgeCleanup.ok = $false
     $script:hostBridgeCleanup.error = $_.Exception.Message
     throw
+  } finally {
+    if ($null -ne $script:hostBridgeProcess) {
+      $script:hostBridgeProcess.Dispose()
+      $script:hostBridgeProcess = $null
+    }
   }
 }
 
 function Test-EmulatorHealthz {
   [void](Invoke-Adb -Arguments @('-s', $androidSerial, 'shell', 'input', 'keyevent', '82'))
-  $healthUrl = "http://10.0.2.2:$BackendPort/healthz"
+  $emulatorBackendPort = if ($Phase -eq 'offline-sync') {
+    $ownedBridgePort
+  } else { $backendTargetPort }
+  $healthUrl = "http://10.0.2.2:$emulatorBackendPort/healthz"
   $commands = @(
     "curl -fsS '$healthUrl'",
     "toybox wget -q -O - '$healthUrl'",
-    "(echo -e 'GET /healthz HTTP/1.0\r\nHost: 10.0.2.2\r\nConnection: close\r\n\r\n'; sleep 2) | toybox nc -w 5 10.0.2.2 $BackendPort"
+    "(echo -e 'GET /healthz HTTP/1.0\r\nHost: 10.0.2.2\r\nConnection: close\r\n\r\n'; sleep 2) | toybox nc -w 5 10.0.2.2 $emulatorBackendPort"
   )
   foreach ($command in $commands) {
     $execution = Invoke-Adb `
@@ -1827,9 +1941,17 @@ function Restore-AndroidBaseline {
     }
     if ($null -ne $script:hostBridgeIdentity -and
         $script:hostBridgeIdentity.owned) {
-      $script:hostBridgeCleanup.attempted = $true
       Add-M11Command 'stop-owned-host-bridge'
-      $script:hostBridgeCleanup.ok = $true
+      if ($TestOwnedNetworkHarness) {
+        try {
+          Stop-AndroidHostBridge
+        } catch {
+          [void]$cleanupErrors.Add("host bridge: $($_.Exception.Message)")
+        }
+      } else {
+        $script:hostBridgeCleanup.attempted = $true
+        $script:hostBridgeCleanup.ok = $true
+      }
     }
     $action = if ($script:runtimeDisposition -in @('reuse', 'reject')) {
       'preserve-runtime'
@@ -1941,6 +2063,14 @@ function Write-AndroidReport {
     androidDevice = $AndroidDevice
     androidSerial = $script:androidSerial
     apiBaseUrl = $apiBaseUrl
+    backendTargetPort = $backendTargetPort
+    ownedBridgePort = $ownedBridgePort
+    faultProxyPort = $FaultProxyPort
+    connectionChain = if ($Phase -eq 'offline-sync') {
+      'emulator->owned-fault-proxy->owned-host-bridge->verified-wsl-backend'
+    } else { 'emulator->backend' }
+    portOwnership = $plan.portOwnership
+    routeValidation = $script:routeValidation
     emulator = $script:emulatorIdentity
     fixtureCounts = $script:fixtureCounts
     e2e = $script:e2eData
@@ -2060,7 +2190,10 @@ try {
       }
       'windows-healthz' {
         {
-          if (-not (Test-WindowsHealthzOnce)) {
+          $healthPort = if ($Phase -eq 'offline-sync') {
+            $ownedBridgePort
+          } else { $backendTargetPort }
+          if (-not (Test-WindowsHealthzOnce -Port $healthPort)) {
             throw 'Windows backend health is unavailable after host bridge setup.'
           }
         }

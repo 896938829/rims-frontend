@@ -20,6 +20,17 @@ $webWrapperText = Get-Content `
   -LiteralPath (Join-Path $scriptDir 'rims_web_e2e.ps1') `
   -Raw
 $androidWrapperText = Get-Content -LiteralPath $wrapper -Raw
+$windowsHealthAction = [regex]::Match(
+  $androidWrapperText,
+  "'windows-healthz'\s*\{\s*\{(?<body>.*?)\r?\n\s*\}\s*\}\s*'emulator-healthz'",
+  [Text.RegularExpressions.RegexOptions]::Singleline
+)
+if (-not $windowsHealthAction.Success -or
+    -not $windowsHealthAction.Groups['body'].Value.Contains(
+      'Test-WindowsHealthzOnce -Port $healthPort'
+    )) {
+  throw 'Windows health action must probe the selected owned bridge port.'
+}
 foreach ($resetEvidenceContract in @(
     'RIMS_M9_RESET_COUNTS',
     'Reset evidence must emit exactly one strict counts marker.',
@@ -27,6 +38,29 @@ foreach ($resetEvidenceContract in @(
   )) {
   if (-not $androidWrapperText.Contains($resetEvidenceContract)) {
     throw "Android baseline parser omitted '$resetEvidenceContract'."
+  }
+}
+
+function Get-FreeLoopbackPort {
+  $listener = [Net.Sockets.TcpListener]::new([Net.IPAddress]::Loopback, 0)
+  try {
+    $listener.Start()
+    return ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+  } finally {
+    $listener.Stop()
+  }
+}
+
+function Test-LoopbackPortClosed {
+  param([int]$Port)
+  $client = [Net.Sockets.TcpClient]::new()
+  try {
+    $connect = $client.BeginConnect([Net.IPAddress]::Loopback, $Port, $null, $null)
+    return -not ($connect.AsyncWaitHandle.WaitOne(500) -and $client.Connected)
+  } catch {
+    return $true
+  } finally {
+    $client.Dispose()
   }
 }
 if (-not $localText.Contains("'rims_android_smoke.ps1'")) {
@@ -161,6 +195,29 @@ Assert-Equal `
   -Actual $offlinePlan.phase `
   -Expected 'offline-sync' `
   -Message 'M11 Android phase.'
+Assert-Equal -Actual $offlinePlan.backendTargetPort -Expected 18080 -Message 'M11 backend target port.'
+Assert-Equal -Actual $offlinePlan.faultProxyPort -Expected 18081 -Message 'M11 fault proxy port.'
+$defaultOwnedBridgePort = [int]$offlinePlan.ownedBridgePort
+if ($defaultOwnedBridgePort -lt 1 -or $defaultOwnedBridgePort -gt 65535 -or
+    $defaultOwnedBridgePort -eq $offlinePlan.faultProxyPort) {
+  throw 'M11 plan selected an invalid owned bridge port.'
+}
+Assert-Equal `
+  -Actual $offlinePlan.connectionChain `
+  -Expected 'emulator->owned-fault-proxy->owned-host-bridge->verified-wsl-backend' `
+  -Message 'M11 owned connection chain.'
+Assert-Equal `
+  -Actual $offlinePlan.portOwnership.backendTarget `
+  -Expected 'verified-managed-wsl-runtime' `
+  -Message 'M11 backend target ownership.'
+Assert-Equal `
+  -Actual $offlinePlan.portOwnership.hostBridge `
+  -Expected 'run-owned-pid-and-start-time' `
+  -Message 'M11 host bridge ownership.'
+Assert-Equal `
+  -Actual $offlinePlan.portOwnership.faultProxy `
+  -Expected 'run-owned-pid-and-start-time' `
+  -Message 'M11 fault proxy ownership.'
 Assert-Equal `
   -Actual $offlinePlan.apiBaseUrl `
   -Expected 'http://10.0.2.2:18081/api/v1' `
@@ -228,6 +285,17 @@ $proxySourceMatch = [regex]::Match(
 )
 if (-not $proxySourceMatch.Success) {
   throw 'M11 fault proxy C# source could not be extracted for execution tests.'
+}
+if ($proxySourceMatch.Value.Contains('AddressFamily.InterNetworkV6') -or
+    -not $proxySourceMatch.Value.Contains(
+      'ownedBridge.Connect(IPAddress.Loopback, upstreamPort);'
+    )) {
+  throw 'M11 fault proxy still has an ambiguous upstream fallback.'
+}
+if (-not $proxySourceMatch.Value.Contains(
+    'listener.Server.ExclusiveAddressUse = true;'
+  )) {
+  throw 'M11 fault proxy listener is not exclusively owned by its recorded process.'
 }
 $proxySource = @'
 using System;
@@ -358,7 +426,148 @@ $tempRoot = Join-Path `
   ([IO.Path]::GetTempPath()) `
   ('rims-android-smoke-test-' + [guid]::NewGuid().ToString('N'))
 New-Item -ItemType Directory -Path $tempRoot | Out-Null
+$fixtureProcess = $null
 try {
+  $occupiedBackendPort = Get-FreeLoopbackPort
+  do {
+    $networkFaultProxyPort = Get-FreeLoopbackPort
+  } while ($networkFaultProxyPort -eq $occupiedBackendPort)
+  $fixtureHelper = Join-Path $tempRoot 'dual-backend-fixture.ps1'
+  $fixtureReady = Join-Path $tempRoot 'dual-backend-ready.txt'
+  $fixtureSource = @'
+using System;
+using System.IO;
+using System.Net;
+using System.Net.Sockets;
+using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
+public static class RimsDualBackendFixture {
+  public static void Run(int port, string readyPath) {
+    var ipv4 = new TcpListener(IPAddress.Loopback, port);
+    var ipv6 = new TcpListener(IPAddress.IPv6Loopback, port);
+    ipv6.Server.DualMode = false;
+    ipv4.Start();
+    ipv6.Start();
+    File.WriteAllText(readyPath, "ready");
+    Task.Factory.StartNew(
+      () => Loop(ipv4, "B"),
+      CancellationToken.None,
+      TaskCreationOptions.LongRunning,
+      TaskScheduler.Default);
+    Loop(ipv6, "A");
+  }
+  static void Loop(TcpListener listener, string identity) {
+    while (true) {
+      var client = listener.AcceptTcpClient();
+      Handle(client, identity);
+    }
+  }
+  static void Handle(TcpClient client, string identity) {
+    using (client) {
+      var stream = client.GetStream();
+      var buffer = new byte[4096];
+      stream.Read(buffer, 0, buffer.Length);
+      var body = Encoding.UTF8.GetBytes("{\"ok\":true,\"backend\":\"" + identity + "\"}");
+      var header = Encoding.ASCII.GetBytes("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: " + body.Length + "\r\nConnection: close\r\n\r\n");
+      stream.Write(header, 0, header.Length);
+      stream.Write(body, 0, body.Length);
+    }
+  }
+}
+'@
+  $fixtureHelperBody = @"
+param([int]`$Port, [string]`$ReadyPath)
+Add-Type -TypeDefinition @'
+$fixtureSource
+'@
+[RimsDualBackendFixture]::Run(`$Port, `$ReadyPath)
+"@
+  Set-Content -LiteralPath $fixtureHelper -Value $fixtureHelperBody -Encoding UTF8
+  $fixtureProcess = Start-Process `
+    -FilePath (Join-Path $PSHOME 'powershell.exe') `
+    -ArgumentList @(
+      '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $fixtureHelper,
+      '-Port', "$occupiedBackendPort", '-ReadyPath', $fixtureReady
+    ) `
+    -WindowStyle Hidden `
+    -PassThru
+  $fixtureDeadline = [DateTime]::UtcNow.AddSeconds(10)
+  while (-not (Test-Path -LiteralPath $fixtureReady -PathType Leaf) -and
+      -not $fixtureProcess.HasExited -and
+      [DateTime]::UtcNow -lt $fixtureDeadline) {
+    Start-Sleep -Milliseconds 100
+  }
+  if ($fixtureProcess.HasExited -or
+      -not (Test-Path -LiteralPath $fixtureReady -PathType Leaf)) {
+    throw 'Dual backend fixture did not start.'
+  }
+  $unownedHealth = Invoke-RestMethod `
+    -Uri "http://127.0.0.1:$occupiedBackendPort/healthz" `
+    -TimeoutSec 2
+  Assert-Equal -Actual $unownedHealth.backend -Expected 'B' -Message 'Unowned IPv4 backend fixture.'
+
+  $occupiedPlan = (& $wrapper `
+      -ListPlan `
+      -Phase 'offline-sync' `
+      -AndroidDevice 'Medium_Phone_API_36.1' `
+      -BackendPort $occupiedBackendPort `
+      -FaultProxyPort $networkFaultProxyPort `
+      -Output Json) -join "`n" | ConvertFrom-Json
+  Assert-Equal -Actual $occupiedPlan.backendTargetPort -Expected $occupiedBackendPort -Message 'Occupied plan backend target.'
+  if ($occupiedPlan.ownedBridgePort -eq $occupiedBackendPort -or
+      $occupiedPlan.ownedBridgePort -eq $networkFaultProxyPort) {
+    throw 'Occupied backend port was reused as the owned bridge endpoint.'
+  }
+
+  $networkReportPath = Join-Path $tempRoot 'owned-network-report.json'
+  $networkRecordPath = Join-Path $tempRoot 'owned-network-commands.json'
+  & $wrapper `
+    -AndroidDevice 'Medium_Phone_API_36.1' `
+    -Phase 'offline-sync' `
+    -BackendPort $occupiedBackendPort `
+    -FaultProxyPort $networkFaultProxyPort `
+    -TestMode `
+    -TestOwnedNetworkHarness `
+    -FailStep 'android-integration-test' `
+    -ReportPath $networkReportPath `
+    -ArtifactRoot (Join-Path $tempRoot 'owned-network-artifacts') `
+    -M11CommandRecordPath $networkRecordPath
+  Assert-Equal -Actual $LASTEXITCODE -Expected 23 -Message 'Owned network harness first failure.'
+  $networkReport = Get-Content -LiteralPath $networkReportPath -Raw | ConvertFrom-Json
+  Assert-Equal -Actual $networkReport.backendTargetPort -Expected $occupiedBackendPort -Message 'Report backend target.'
+  Assert-Equal -Actual $networkReport.ownedBridgePort -Expected $occupiedPlan.ownedBridgePort -Message 'Report owned bridge.'
+  Assert-Equal -Actual $networkReport.faultProxyPort -Expected $networkFaultProxyPort -Message 'Report fault proxy.'
+  Assert-Equal -Actual $networkReport.routeValidation.backend -Expected 'A' -Message 'Fault proxy routed to verified backend A.'
+  Assert-Equal -Actual $networkReport.hostBridge.owned -Expected $true -Message 'Owned bridge identity.'
+  Assert-Equal -Actual $networkReport.faultProxy.owned -Expected $true -Message 'Owned proxy identity.'
+  if ([int]$networkReport.hostBridge.windowsPid -le 0 -or
+      [string]::IsNullOrWhiteSpace(
+        [string]$networkReport.hostBridge.windowsProcessStartTimeUtc
+      )) {
+    throw 'Owned bridge report omitted PID/start-time identity.'
+  }
+  if ([int]$networkReport.faultProxy.windowsPid -le 0 -or
+      [string]::IsNullOrWhiteSpace(
+        [string]$networkReport.faultProxy.windowsProcessStartTimeUtc
+      )) {
+    throw 'Owned fault proxy report omitted PID/start-time identity.'
+  }
+  Assert-Equal -Actual $networkReport.hostBridgeCleanup.ok -Expected $true -Message 'Owned bridge cleanup.'
+  Assert-Equal -Actual $networkReport.faultProxyCleanup.ok -Expected $true -Message 'Owned proxy cleanup.'
+  Assert-Equal -Actual $networkReport.faultProxy.upstreamPort -Expected $networkReport.ownedBridgePort -Message 'Proxy upstream chain.'
+  if ($fixtureProcess.HasExited) { throw 'Runner stopped the unowned backend listener.' }
+  $preservedHealth = Invoke-RestMethod `
+    -Uri "http://127.0.0.1:$occupiedBackendPort/healthz" `
+    -TimeoutSec 2
+  Assert-Equal -Actual $preservedHealth.backend -Expected 'B' -Message 'Unowned listener preservation.'
+  if (-not (Test-LoopbackPortClosed -Port $networkReport.ownedBridgePort)) {
+    throw 'Owned bridge listener remained after cleanup.'
+  }
+  if (-not (Test-LoopbackPortClosed -Port $networkReport.faultProxyPort)) {
+    throw 'Owned fault proxy listener remained after cleanup.'
+  }
+
   $markerCases = @(
     @{ Name = 'missing'; Lines = @('ordinary output'); Exit = 1 },
     @{ Name = 'duplicate'; Lines = @(
@@ -508,7 +717,7 @@ try {
         'validate-runtime-identity',
         'health-wsl-ipv6-runtime',
         'windows-health-unavailable-before-bridge',
-        'start-owned-host-bridge:18080',
+        "start-owned-host-bridge:$defaultOwnedBridgePort",
         'health-windows-after-bridge',
         'reset-fixtures-initial',
         'reset-fixtures-final',
@@ -518,7 +727,7 @@ try {
         throw "$($runtimeBaselineCase.Name) omitted '$requiredCommand'."
       }
     }
-    if ($runtimeCommands.IndexOf('start-owned-host-bridge:18080') -gt
+    if ($runtimeCommands.IndexOf("start-owned-host-bridge:$defaultOwnedBridgePort") -gt
         $runtimeCommands.IndexOf('health-windows-after-bridge')) {
       throw "$($runtimeBaselineCase.Name) checked Windows health before its owned bridge."
     }
@@ -594,7 +803,7 @@ try {
   $bridgeFailureCommands = @(Get-Content -LiteralPath $bridgeFailureRecordPath -Raw |
       ConvertFrom-Json | ForEach-Object { $_ })
   Assert-Equal -Actual $bridgeFailureReport.runtimeDisposition -Expected 'reject' -Message 'Bridge failure disposition.'
-  foreach ($command in @('start-owned-host-bridge:18080', 'stop-owned-host-bridge', 'preserve-runtime')) {
+  foreach ($command in @("start-owned-host-bridge:$defaultOwnedBridgePort", 'stop-owned-host-bridge', 'preserve-runtime')) {
     if (-not ($bridgeFailureCommands -contains $command)) {
       throw "Bridge failure cleanup omitted '$command'."
     }
@@ -688,7 +897,7 @@ try {
   $offlineCommands = Get-Content -LiteralPath $offlineRecordPath -Raw | ConvertFrom-Json
   Assert-Equal `
     -Actual (@($offlineCommands) -join '|') `
-    -Expected 'inspect-runtime-state|start-owned-backend:18080|validate-runtime-identity|health-wsl-ipv6-runtime|windows-health-unavailable-before-bridge|start-owned-host-bridge:18080|health-windows-after-bridge|reset-fixtures-initial|snapshot-airplane-mode|snapshot-wifi|start-owned-fault-proxy:18081|prepare-clean-app-data|run-stage:seed|capture-pid:seed|force-stop:seed|confirm-stopped:seed|run-stage:offline-draft|capture-pid:offline-draft|force-stop:offline-draft|confirm-stopped:offline-draft|run-stage:recovery|capture-pid:recovery|force-stop:recovery|confirm-stopped:recovery|reset-fault-proxy|restore-airplane-mode|restore-wifi|stop-owned-fault-proxy|reset-fixtures-final|verify-fixture-baseline|stop-owned-host-bridge|stop-owned-runtime' `
+    -Expected "inspect-runtime-state|start-owned-backend:18080|validate-runtime-identity|health-wsl-ipv6-runtime|windows-health-unavailable-before-bridge|start-owned-host-bridge:$defaultOwnedBridgePort|health-windows-after-bridge|reset-fixtures-initial|snapshot-airplane-mode|snapshot-wifi|start-owned-fault-proxy:18081|prepare-clean-app-data|run-stage:seed|capture-pid:seed|force-stop:seed|confirm-stopped:seed|run-stage:offline-draft|capture-pid:offline-draft|force-stop:offline-draft|confirm-stopped:offline-draft|run-stage:recovery|capture-pid:recovery|force-stop:recovery|confirm-stopped:recovery|reset-fault-proxy|restore-airplane-mode|restore-wifi|stop-owned-fault-proxy|reset-fixtures-final|verify-fixture-baseline|stop-owned-host-bridge|stop-owned-runtime" `
     -Message 'M11 fault proxy and ADB restoration order.'
   Assert-Equal `
     -Actual $offlineReport.failedStep `
@@ -749,6 +958,11 @@ try {
     }
   }
 } finally {
+  if ($null -ne $fixtureProcess -and -not $fixtureProcess.HasExited) {
+    $fixtureProcess.Kill()
+    [void]$fixtureProcess.WaitForExit(5000)
+  }
+  if ($null -ne $fixtureProcess) { $fixtureProcess.Dispose() }
   Remove-Item -LiteralPath $tempRoot -Recurse -Force -ErrorAction SilentlyContinue
 }
 
