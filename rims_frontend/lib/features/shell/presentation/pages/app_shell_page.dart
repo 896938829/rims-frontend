@@ -122,6 +122,12 @@ final class _AppShellPageState extends State<AppShellPage> {
   @override
   void didUpdateWidget(covariant AppShellPage oldWidget) {
     super.didUpdateWidget(oldWidget);
+    if (widget.initialDraftId != null &&
+        widget.initialDraftId != oldWidget.initialDraftId) {
+      _currentTab = AppTab.documents;
+      _pendingDocumentActionLabel = null;
+      _pendingDocumentScanner = false;
+    }
     if (widget.eventBus != oldWidget.eventBus) {
       unawaited(_refreshSubscription?.cancel());
       _subscribeToRefreshEvents();

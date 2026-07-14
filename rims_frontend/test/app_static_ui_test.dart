@@ -642,6 +642,38 @@ void main() {
       expect(find.text('销售出库'), findsOneWidget);
     },
   );
+
+  testWidgets('opening a managed draft switches the retained shell to documents', (
+    tester,
+  ) async {
+    final store = MemoryOfflineStore();
+    final drafts = DriftDocumentDraftRepository(store: store);
+    await drafts.save(
+      _routeDraft('managed-draft', accountId: '1', docType: 1),
+      expectedVersion: 0,
+    );
+    final sessionController = AuthSessionController()..startSession(_session);
+
+    await _pumpApp(
+      tester,
+      initialLocation: RoutePaths.shell,
+      sessionController: sessionController,
+      documentDraftRepository: drafts,
+    );
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('我的'));
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('profile-draft-manager-entry')),
+      300,
+    );
+    await tester.tap(find.byKey(const Key('profile-draft-manager-entry')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byTooltip('打开'));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(const Key('tab-body-documents')), findsOneWidget);
+  });
 }
 
 Future<void> _scrollToProfileLogout(WidgetTester tester) async {
