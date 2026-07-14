@@ -46,7 +46,7 @@ later tasks, not statements that an M12 control is already implemented.
 
 | Boundary | Observed base behavior | M12 disposition |
 | --- | --- | --- |
-| Runtime permissions | Main manifest declares only `android.permission.INTERNET` and `android.permission.CAMERA`; camera hardware is optional. | OBSERVED inventory; purpose and denial rules are recorded in the classification registry |
+| Runtime permissions | Main manifest declarations are `android.permission.INTERNET` and `android.permission.CAMERA`; effective merged permissions are those two plus `android.permission.ACCESS_NETWORK_STATE` contributed by locked `connectivity_plus` 7.1.1; camera hardware is optional. | OBSERVED inventory; purpose and denial rules are recorded in the classification registry |
 | Backup and transport | Main application declares `android:allowBackup="false"`, `android:fullBackupContent="false"`, data extraction rules, and `android:usesCleartextTraffic="false"`. | OBSERVED baseline; artifact verification remains PLANNED - NOT YET EVIDENCE |
 | Screenshot/debug/integrity/store | No M12 `FLAG_SECURE` policy, production integrity provider, anti-debug decision, signing custody evidence, or store approval was established by this task. | PLANNED - NOT YET EVIDENCE; signing, integrity activation, and store review remain OPEN EXTERNAL |
 

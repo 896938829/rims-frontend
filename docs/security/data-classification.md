@@ -94,27 +94,27 @@ Versions are the observed locked/direct baseline where shown. License labels are
 from the package `LICENSE` files and are inventory facts, not legal approval.
 Transitive-license policy and notice generation remain a later M12 gate.
 
-| ID | Component | License | Purpose | Data handled | Network/provider behavior |
-| --- | --- | --- | --- | --- | --- |
-| `sdk.flutter` | Flutter 3.44.1 / Dart 3.12.1 | BSD-3-Clause | Android/Web UI and runtime | Rendered application state | No independent RIMS data recipient |
-| `sdk.dio` | dio 5.9.2 | MIT | Typed HTTP client and interceptors | API request/response metadata and authorized payloads | Sends only to configured RIMS API |
-| `sdk.flutter_secure_storage` | flutter_secure_storage 10.3.1 | BSD-3-Clause | OS-backed credential/key storage | credential.access, credential.refresh, local database key | Device keystore only; no independent network transfer |
-| `sdk.drift_sqlite3mc` | drift 2.34.1 + sqlite3mc source | MIT plus SQLite public-domain/sqlite3mc terms | Encrypted local relational persistence | identity, caches, drafts, outbox, scans | Device storage only; backup excluded |
-| `sdk.mobile_scanner` | mobile_scanner 7.2.0 | BSD-3-Clause | Camera barcode decoding | Transient camera frames and decoded barcode | Local decoding; no approved third-party transfer |
-| `sdk.image_picker` | image_picker 1.2.2 | BSD-3-Clause | User-selected camera/gallery attachment | Explicitly selected attachment source | Android picker/camera only; upload uses RIMS API after user action |
-| `sdk.file_picker` | file_picker 11.0.2 | MIT | User-selected document attachment | Explicitly selected file and metadata | System picker only; upload uses RIMS API after user action |
-| `sdk.share_plus` | share_plus 12.0.0 | BSD-3-Clause | Hand account export to user-selected target | export.account after generation | OS share sheet; destination chosen by user |
-| `sdk.connectivity_plus` | connectivity_plus 7.1.1 | BSD-3-Clause | Connectivity hint before bounded backend health verification | Network-type hint only | Does not establish backend reachability or authorize sync |
-| `sdk.crypto` | crypto 3.0.7 | BSD-3-Clause | Hashes and integrity fingerprints | Safe hashes of bytes/identifiers | Local computation only |
-| `sdk.drift_flutter` | drift_flutter 0.3.0 | MIT | Flutter lifecycle/bootstrap for Drift | Local database connection | Device storage only |
-| `sdk.fl_chart` | fl_chart 1.2.0 | MIT | Local report visualization | Already-authorized report values | No independent network transfer |
-| `sdk.go_router` | go_router 17.3.0 | BSD-3-Clause | In-app routing | Route names and arguments | No independent network transfer |
-| `sdk.intl` | intl 0.20.2 | BSD-3-Clause | Date/number localization | Display values | Local formatting only |
-| `sdk.json_annotation` | json_annotation 4.12.0 | BSD-3-Clause | Typed model serialization | Authorized API/local model fields | No independent transfer |
-| `sdk.path_provider` | path_provider 2.1.5 | BSD-3-Clause | Resolve app-private directories | Local path handles | Absolute paths must never enter logs/evidence |
-| `sdk.provider` | provider 6.1.5+1 | MIT | ViewModel and dependency state | In-memory application state | No independent transfer |
-| `sdk.shared_preferences` | shared_preferences 2.5.5 | BSD-3-Clause | Non-secret preferences and migration journals | Non-secret settings; no credentials | Device storage only; sensitive records prohibited |
-| `sdk.uuid` | uuid 4.5.3 | MIT | Client operation/request identifiers | Random identifiers, never credentials | Sent to RIMS API only where protocol requires |
+| ID | Package | Component | License | Purpose | Data handled | Network/provider behavior |
+| --- | --- | --- | --- | --- | --- | --- |
+| `sdk.flutter` | flutter | Flutter 3.44.1 / Dart 3.12.1 | BSD-3-Clause | Android/Web UI and runtime | Rendered application state | No independent RIMS data recipient |
+| `sdk.dio` | dio | dio 5.9.2 | MIT | Typed HTTP client and interceptors | API request/response metadata and authorized payloads | Sends only to configured RIMS API |
+| `sdk.flutter_secure_storage` | flutter_secure_storage | flutter_secure_storage 10.3.1 | BSD-3-Clause | OS-backed credential/key storage | credential.access, credential.refresh, local database key | Device keystore only; no independent network transfer |
+| `sdk.drift_sqlite3mc` | drift | drift 2.34.1 + sqlite3mc source | MIT plus SQLite public-domain/sqlite3mc terms | Encrypted local relational persistence | identity, caches, drafts, outbox, scans | Device storage only; backup excluded |
+| `sdk.mobile_scanner` | mobile_scanner | mobile_scanner 7.2.0 | BSD-3-Clause | Camera barcode decoding | Transient camera frames and decoded barcode | Local decoding; no approved third-party transfer |
+| `sdk.image_picker` | image_picker | image_picker 1.2.2 | BSD-3-Clause | User-selected camera/gallery attachment | Explicitly selected attachment source | Android picker/camera only; upload uses RIMS API after user action |
+| `sdk.file_picker` | file_picker | file_picker 11.0.2 | MIT | User-selected document attachment | Explicitly selected file and metadata | System picker only; upload uses RIMS API after user action |
+| `sdk.share_plus` | share_plus | share_plus 12.0.0 | BSD-3-Clause | Hand account export to user-selected target | export.account after generation | OS share sheet; destination chosen by user |
+| `sdk.connectivity_plus` | connectivity_plus | connectivity_plus 7.1.1 | BSD-3-Clause | Connectivity hint before bounded backend health verification | Network-type hint only | Does not establish backend reachability or authorize sync |
+| `sdk.crypto` | crypto | crypto 3.0.7 | BSD-3-Clause | Hashes and integrity fingerprints | Safe hashes of bytes/identifiers | Local computation only |
+| `sdk.drift_flutter` | drift_flutter | drift_flutter 0.3.0 | MIT | Flutter lifecycle/bootstrap for Drift | Local database connection | Device storage only |
+| `sdk.fl_chart` | fl_chart | fl_chart 1.2.0 | MIT | Local report visualization | Already-authorized report values | No independent network transfer |
+| `sdk.go_router` | go_router | go_router 17.3.0 | BSD-3-Clause | In-app routing | Route names and arguments | No independent network transfer |
+| `sdk.intl` | intl | intl 0.20.2 | BSD-3-Clause | Date/number localization | Display values | Local formatting only |
+| `sdk.json_annotation` | json_annotation | json_annotation 4.12.0 | BSD-3-Clause | Typed model serialization | Authorized API/local model fields | No independent transfer |
+| `sdk.path_provider` | path_provider | path_provider 2.1.5 | BSD-3-Clause | Resolve app-private directories | Local path handles | Absolute paths must never enter logs/evidence |
+| `sdk.provider` | provider | provider 6.1.5+1 | MIT | ViewModel and dependency state | In-memory application state | No independent transfer |
+| `sdk.shared_preferences` | shared_preferences | shared_preferences 2.5.5 | BSD-3-Clause | Non-secret preferences and migration journals | Non-secret settings; no credentials | Device storage only; sensitive records prohibited |
+| `sdk.uuid` | uuid | uuid 4.5.3 | MIT | Client operation/request identifiers | Random identifiers, never credentials | Sent to RIMS API only where protocol requires |
 
 ## Financial And Cost Field Policy
 
