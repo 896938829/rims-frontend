@@ -22,6 +22,7 @@ import 'package:rims_frontend/features/offline/presentation/pages/sync_center_pa
 import 'package:rims_frontend/features/offline/presentation/view_models/sync_center_view_model.dart';
 import 'package:rims_frontend/features/reports/presentation/view_models/reports_view_model.dart';
 
+import 'support/m11_fault_control.dart';
 import 'support/rims_e2e_config.dart';
 import 'support/rims_e2e_driver.dart';
 
@@ -919,6 +920,13 @@ Future<Map<String, dynamic>> _fault(
     final result = jsonDecode(body) as Map<String, dynamic>;
     expect(result['ok'], isTrue, reason: 'fault control $action');
     return result;
+  } on Object catch (error) {
+    if (!isExpectedNetworkFaultDisconnect(action, error)) rethrow;
+    return <String, dynamic>{
+      'ok': true,
+      'mode': action,
+      'responseInterrupted': true,
+    };
   } finally {
     client.close(force: true);
   }
@@ -943,9 +951,24 @@ Future<void> _verifyLocalTransportFaults(WidgetTester tester) async {
   }
 
   await _fault('wifi-switch', {'restoreMs': '1000'});
-  await Future<void>.delayed(const Duration(milliseconds: 1400));
-  await tester.pump();
-  await _probeBackendHealth();
+  await Future<void>.delayed(const Duration(milliseconds: 1200));
+  await _waitForBackendRecovery(tester);
+}
+
+Future<void> _waitForBackendRecovery(WidgetTester tester) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 5));
+  Object? lastError;
+  while (DateTime.now().isBefore(deadline)) {
+    try {
+      await _probeBackendHealth();
+      return;
+    } on Object catch (error) {
+      lastError = error;
+      await Future<void>.delayed(const Duration(milliseconds: 250));
+      await tester.pump();
+    }
+  }
+  throw TestFailure('Backend did not recover after network switch: $lastError');
 }
 
 Future<void> _probeBackendHealth() async {
