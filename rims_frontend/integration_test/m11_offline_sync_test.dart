@@ -781,10 +781,28 @@ void main() {
 
         final databaseBytes = await _databaseBytes();
         expect(databaseBytes, lessThanOrEqualTo(25 * 1024 * 1024));
+        final shell = tester.widget<AppShellPage>(find.byType(AppShellPage));
+        final sessionController = shell.sessionController;
         await tapAndSettle(tester, const Key('bottom-nav-profile'));
         await scrollUntilVisible(tester, const Key('profile-logout-button'));
         await tapAndSettle(tester, const Key('profile-logout-button'));
         await tapAndSettle(tester, const Key('profile-logout-delete-drafts'));
+        await waitUntil(
+          tester,
+          description: 'logout ownership cleanup',
+          condition: () =>
+              !sessionController.isAuthenticated ||
+              sessionController.ownershipFailure != null,
+          timeout: const Duration(seconds: 30),
+        );
+        if (sessionController.isAuthenticated) {
+          final report = sessionController.lastOwnershipReport;
+          throw TestFailure(
+            'Logout ownership cleanup failed: '
+            '${sessionController.ownershipFailure?.message ?? 'unknown'}; '
+            'steps=${report?.failures.map((failure) => '${failure.step.name}:${failure.message}').join('|') ?? 'none'}',
+          );
+        }
         await waitForKey(tester, const Key('login-username-field'));
         final ownershipStore = store as OfflineOwnershipStore;
         final cleanupSnapshot = await ownershipStore.inspectAccount(accountId);
