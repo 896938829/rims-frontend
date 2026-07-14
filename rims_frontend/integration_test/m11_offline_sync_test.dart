@@ -273,6 +273,7 @@ void main() {
           tester,
           documents,
           beforeQueued,
+          timeout: const Duration(milliseconds: 250),
         );
         final queuedCreate = queuedResult.operation;
         outboxEnqueueLatencyMs = queuedResult.enqueueLatencyMs;

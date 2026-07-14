@@ -1039,7 +1039,11 @@ public static class RimsM11FaultProxy {
         lock (Gate) {
           active = mode;
           activeDelay = delayMs;
-          if (active.EndsWith("-next", StringComparison.Ordinal)) mode = "normal";
+          if (ShouldConsumeNext(active, request)) {
+            if (active.EndsWith("-next", StringComparison.Ordinal)) mode = "normal";
+          } else {
+            active = "normal";
+          }
         }
         if (activeDelay > 0) Thread.Sleep(activeDelay);
         ObserveUnknownRequest(request, path, active);
@@ -1071,6 +1075,11 @@ public static class RimsM11FaultProxy {
         Log("proxy-error " + error.GetType().Name + " " + error.Message);
       }
     }
+  }
+
+  static bool ShouldConsumeNext(string active, byte[] request) {
+    if (active != "duplicate-delivery-next") return true;
+    return HeaderValue(request, "Idempotency-Key").Length > 0;
   }
 
   static void HandleControl(NetworkStream stream, string path) {

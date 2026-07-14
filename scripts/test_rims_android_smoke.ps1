@@ -575,6 +575,40 @@ function New-FaultProxyRequest {
   return ,([Text.Encoding]::UTF8.GetBytes($requestText))
 }
 
+$shouldConsumeNext = $proxyType.GetMethod('ShouldConsumeNext', $bindingFlags)
+if ($null -eq $shouldConsumeNext) {
+  throw 'Fault proxy omitted deterministic next-request targeting.'
+}
+$backgroundRequest = [Text.Encoding]::ASCII.GetBytes(
+  "GET /api/v1/roles HTTP/1.1`r`nHost: localhost`r`n`r`n"
+)
+$idempotentMutation = New-FaultProxyRequest `
+  -Method 'POST' `
+  -Target '/api/v1/documents' `
+  -IdempotencyKey $unknownKey `
+  -Body $unknownBody
+Assert-Equal `
+  -Actual $shouldConsumeNext.Invoke(
+    $null,
+    [object[]]@('duplicate-delivery-next', $backgroundRequest)
+  ) `
+  -Expected $false `
+  -Message 'Duplicate delivery skips background reads without an idempotency key.'
+Assert-Equal `
+  -Actual $shouldConsumeNext.Invoke(
+    $null,
+    [object[]]@('duplicate-delivery-next', $idempotentMutation)
+  ) `
+  -Expected $true `
+  -Message 'Duplicate delivery targets the next idempotent mutation.'
+Assert-Equal `
+  -Actual $shouldConsumeNext.Invoke(
+    $null,
+    [object[]]@('server-conflict-next', $backgroundRequest)
+  ) `
+  -Expected $true `
+  -Message 'Other one-shot faults preserve their existing request targeting.'
+
 function Reset-UnknownObservation {
   foreach ($fieldName in @(
       'unknownStatusProbeCount',
