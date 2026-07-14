@@ -1052,17 +1052,17 @@ public static class RimsM11FaultProxy {
         if (active == "unreachable") return;
         if (active == "stale-session-next") {
           WriteJson(client.GetStream(), 401, "Unauthorized",
-            "{\"code\":\"AUTHENTICATION_REQUIRED\",\"message\":\"Injected stale session\"}");
+            "{\"code\":10001,\"message\":\"Injected stale session\"}");
           return;
         }
         if (active == "stale-permission-next") {
           WriteJson(client.GetStream(), 403, "Forbidden",
-            "{\"code\":\"PERMISSION_DENIED\",\"message\":\"Injected stale permission\"}");
+            "{\"code\":10002,\"message\":\"Injected stale permission\"}");
           return;
         }
         if (active == "server-conflict-next") {
           WriteJson(client.GetStream(), 409, "Conflict",
-            "{\"code\":\"CONFLICT\",\"message\":\"Injected server conflict\"}");
+            "{\"code\":10005,\"message\":\"Injected server conflict\"}");
           return;
         }
         if (active == "unknown-response-next") {

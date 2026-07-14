@@ -427,6 +427,15 @@ if (-not $proxySourceMatch.Value.Contains(
   )) {
   throw 'M11 unreachable fault must close the transport without returning HTTP 503.'
 }
+foreach ($businessEnvelope in @(
+    '{\"code\":10001,\"message\":\"Injected stale session\"}',
+    '{\"code\":10002,\"message\":\"Injected stale permission\"}',
+    '{\"code\":10005,\"message\":\"Injected server conflict\"}'
+  )) {
+  if (-not $proxySourceMatch.Value.Contains($businessEnvelope)) {
+    throw "M11 fault proxy omitted numeric business envelope '$businessEnvelope'."
+  }
+}
 $proxySource = @'
 using System;
 using System.Collections.Generic;
