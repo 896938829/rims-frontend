@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -8,8 +9,8 @@ const _executionRecordPath =
     '../docs/superpowers/plans/2026-07-10-rims-m12-execution-record.md';
 const _externalChecklistPath = '../docs/security/external-launch-checklist.md';
 const _pubspecLockPath = 'pubspec.lock';
-const _pluginDependenciesPath = '.flutter-plugins-dependencies';
 const _mainAndroidManifestPath = 'android/app/src/main/AndroidManifest.xml';
+const _androidBuildPath = 'build/app/intermediates';
 
 const _dataClassIds = <String>{
   'credential.access',
@@ -42,6 +43,7 @@ const _allowedAndroidPermissions = <String>{
   'android.permission.INTERNET',
   'android.permission.ACCESS_NETWORK_STATE',
   'android.permission.CAMERA',
+  'com.example.rims_frontend.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION',
 };
 
 const _mainManifestPermissions = <String>{
@@ -77,22 +79,73 @@ const _externalApprovalIds = <String>{
 };
 
 void main() {
-  test('effective Android permissions are derived from manifest sources', () {
+  test(
+    'checked subprocess times out and terminates within a bound',
+    () async {
+      final directory = Directory.systemTemp.createTempSync(
+        'rims-m12-timeout-child-',
+      );
+      final script = File('${directory.path}/sleep.dart')
+        ..writeAsStringSync('''
+import 'dart:async';
+
+Future<void> main() => Future<void>.delayed(const Duration(seconds: 30));
+''');
+      addTearDown(() => directory.deleteSync(recursive: true));
+      final stopwatch = Stopwatch()..start();
+
+      await expectLater(
+        _runCheckedProcess(_dartExecutableForFixture(), [
+          script.path,
+        ], timeout: const Duration(milliseconds: 200)),
+        throwsA(isA<TimeoutException>()),
+      );
+      stopwatch.stop();
+      expect(stopwatch.elapsed, lessThan(const Duration(seconds: 5)));
+    },
+    timeout: const Timeout(Duration(seconds: 10)),
+  );
+
+  test('source permission union is not accepted as merged evidence', () {
+    const appManifest = '''
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+  <uses-permission
+      android:name="android.permission.POST_NOTIFICATIONS"
+      tools:node="remove" />
+</manifest>
+''';
     const pluginManifest = '''
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
   <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 </manifest>
 ''';
-    final effectivePermissions = _permissionsFromManifestDocuments([
+    const mergedManifest = '''
+<manifest xmlns:android="http://schemas.android.com/apk/res/android" />
+''';
+    final sourceUnion = _permissionsFromManifestDocuments([
+      appManifest,
       pluginManifest,
     ]);
+    final mergedPermissions = _permissionsFromManifestDocuments([
+      mergedManifest,
+    ]);
 
-    expect(pluginManifest, contains('android.permission.POST_NOTIFICATIONS'));
+    expect(sourceUnion, contains('android.permission.POST_NOTIFICATIONS'));
+    expect(mergedPermissions, isNot(sourceUnion));
     expect(
-      effectivePermissions,
-      contains('android.permission.POST_NOTIFICATIONS'),
-      reason: 'A permission contributed by a plugin manifest must be observed.',
+      mergedPermissions,
+      isNot(contains('android.permission.POST_NOTIFICATIONS')),
     );
+  });
+
+  test('missing release merged manifest is an acceptance failure', () {
+    final directory = Directory.systemTemp.createTempSync(
+      'rims-m12-missing-manifest-',
+    );
+    addTearDown(() => directory.deleteSync(recursive: true));
+
+    expect(() => _locateSingleReleaseMainManifest(directory), throwsStateError);
   });
 
   test('markdown table parsing does not accept rows from another section', () {
@@ -181,7 +234,7 @@ void main() {
 
   test(
     'security boundary inventories use stable environment and provider IDs',
-    () {
+    () async {
       final document = _readRequiredFile(_classificationPath);
       final environments = _rowsById(
         _parseMarkdownTable(
@@ -247,7 +300,16 @@ void main() {
       final mainPermissions = _permissionsFromManifestDocuments([
         _readRequiredFile(_mainAndroidManifestPath),
       ]);
-      final effectivePermissions = _effectiveAndroidPermissions();
+      final generatedManifest = await _generateReleaseMainMergedManifest();
+      final effectivePermissions = _permissionsFromManifestDocuments([
+        generatedManifest.file.readAsStringSync(),
+      ]);
+      // ignore: avoid_print
+      print(
+        'Generated release merged manifest in '
+        '${generatedManifest.duration.inMilliseconds} ms: '
+        '${generatedManifest.file.path}',
+      );
 
       _expectIds(environments, _environmentIds);
       expect(mainPermissions, _mainManifestPermissions);
@@ -271,6 +333,7 @@ void main() {
         }
       }
     },
+    timeout: const Timeout(Duration(minutes: 3)),
   );
 
   test('financial fields require explicit read and write capabilities', () {
@@ -354,10 +417,10 @@ void main() {
     final behavior = runtimePermissions[1].toLowerCase();
     expect(behavior, contains('main manifest'));
     expect(behavior, contains('effective merged permissions'));
-    expect(
-      runtimePermissions[1],
-      contains('android.permission.ACCESS_NETWORK_STATE'),
-    );
+    expect(behavior, contains('processreleasemainmanifest'));
+    for (final permission in _allowedAndroidPermissions) {
+      expect(runtimePermissions[1], contains(permission));
+    }
   });
 
   test('external launch actions stay open and name evidence owners', () {
@@ -395,37 +458,292 @@ String _readRequiredFile(String path) {
   return file.readAsStringSync();
 }
 
-Set<String> _effectiveAndroidPermissions() {
-  final metadata = jsonDecode(_readRequiredFile(_pluginDependenciesPath));
-  if (metadata is! Map<String, dynamic>) {
-    throw const FormatException('Invalid Flutter plugin metadata root.');
-  }
-  final plugins = metadata['plugins'];
-  if (plugins is! Map<String, dynamic>) {
-    throw const FormatException('Flutter plugin metadata has no plugins map.');
-  }
-  final androidPlugins = plugins['android'];
-  if (androidPlugins is! List) {
-    throw const FormatException('Flutter plugin metadata has no Android list.');
+Future<({File file, Duration duration})>
+_generateReleaseMainMergedManifest() async {
+  final buildDirectory = Directory(_androidBuildPath);
+  _deleteReleaseMainManifestOutputs(buildDirectory);
+
+  final javaHome = await _flutterAndroidJavaHome();
+  final stopwatch = Stopwatch()..start();
+  await _runCheckedProcess(
+    Platform.isWindows ? 'gradlew.bat' : './gradlew',
+    const [':app:processReleaseMainManifest', '--no-daemon', '--console=plain'],
+    workingDirectory: Directory('android').absolute.path,
+    environment: {...Platform.environment, 'JAVA_HOME': javaHome},
+    runInShell: Platform.isWindows,
+    timeout: const Duration(minutes: 2),
+  );
+  stopwatch.stop();
+
+  return (
+    file: _locateSingleReleaseMainManifest(buildDirectory),
+    duration: stopwatch.elapsed,
+  );
+}
+
+Future<String> _flutterAndroidJavaHome() async {
+  final override = Platform.environment['RIMS_ANDROID_JAVA_HOME'];
+  if (override != null && override.trim().isNotEmpty) {
+    return _validatedJavaHome(override.trim());
   }
 
-  final manifests = <String>[_readRequiredFile(_mainAndroidManifestPath)];
-  for (final value in androidPlugins) {
-    if (value is! Map<String, dynamic>) {
-      throw const FormatException('Invalid Android plugin metadata entry.');
-    }
-    if (value['dev_dependency'] == true) continue;
-    final path = value['path'];
-    if (path is! String || path.isEmpty) {
-      throw const FormatException('Android plugin entry has no path.');
-    }
-    final manifest = File.fromUri(
-      Directory(path).uri.resolve('android/src/main/AndroidManifest.xml'),
-    );
-    if (manifest.existsSync()) manifests.add(manifest.readAsStringSync());
+  final result = await _runCheckedProcess(
+    'flutter',
+    const ['doctor', '-v'],
+    runInShell: Platform.isWindows,
+    timeout: const Duration(seconds: 20),
+  );
+  final output = '${result.stdout}\n${result.stderr}';
+  final match = RegExp(r'Java binary at:\s*(.+)').firstMatch(output);
+  if (match == null) {
+    throw StateError('Flutter doctor did not report an Android Java binary.');
   }
-  return _permissionsFromManifestDocuments(manifests);
+  var javaBinary = File(match.group(1)!.trim());
+  if (Platform.isWindows && !javaBinary.existsSync()) {
+    javaBinary = File('${javaBinary.path}.exe');
+  }
+  if (!javaBinary.existsSync()) {
+    throw StateError('Flutter Android Java binary does not exist: $javaBinary');
+  }
+  return _validatedJavaHome(javaBinary.parent.parent.path);
 }
+
+Future<({String stdout, String stderr})> _runCheckedProcess(
+  String executable,
+  List<String> arguments, {
+  required Duration timeout,
+  String? workingDirectory,
+  Map<String, String>? environment,
+  bool runInShell = false,
+}) async {
+  final stopwatch = Stopwatch()..start();
+  final process = await Process.start(
+    executable,
+    arguments,
+    workingDirectory: workingDirectory,
+    environment: environment,
+    runInShell: runInShell,
+  ).timeout(const Duration(seconds: 10));
+  stderr.writeln(
+    '[m12-process] start pid=${process.pid} timeout=${timeout.inMilliseconds}ms '
+    'command=$executable ${arguments.join(' ')}',
+  );
+
+  final stdoutBuffer = StringBuffer();
+  final stderrBuffer = StringBuffer();
+  final stdoutDone = Completer<void>();
+  final stderrDone = Completer<void>();
+  final stdoutSubscription = process.stdout
+      .transform(utf8.decoder)
+      .listen(
+        stdoutBuffer.write,
+        onError: stdoutDone.completeError,
+        onDone: stdoutDone.complete,
+      );
+  final stderrSubscription = process.stderr
+      .transform(utf8.decoder)
+      .listen(
+        stderrBuffer.write,
+        onError: stderrDone.completeError,
+        onDone: stderrDone.complete,
+      );
+
+  int exitCode;
+  try {
+    exitCode = await process.exitCode.timeout(timeout);
+  } on TimeoutException {
+    stderr.writeln(
+      '[m12-process] timeout pid=${process.pid} after '
+      '${stopwatch.elapsedMilliseconds}ms',
+    );
+    await _terminateProcessTree(process);
+    await _settleProcessIo(
+      process,
+      stdoutDone.future,
+      stderrDone.future,
+      stdoutSubscription,
+      stderrSubscription,
+    );
+    throw TimeoutException(
+      'Timed out after ${timeout.inMilliseconds} ms: '
+      '$executable ${arguments.join(' ')}',
+      timeout,
+    );
+  }
+
+  try {
+    await Future.wait([
+      stdoutDone.future,
+      stderrDone.future,
+    ]).timeout(const Duration(seconds: 5));
+  } on TimeoutException {
+    await _terminateProcessTree(process);
+    await _settleProcessIo(
+      process,
+      stdoutDone.future,
+      stderrDone.future,
+      stdoutSubscription,
+      stderrSubscription,
+    );
+    throw TimeoutException(
+      'Process exited but output pipes did not close: '
+      '$executable ${arguments.join(' ')}',
+      const Duration(seconds: 5),
+    );
+  }
+  stopwatch.stop();
+  stderr.writeln(
+    '[m12-process] exit pid=${process.pid} code=$exitCode '
+    'duration=${stopwatch.elapsedMilliseconds}ms',
+  );
+  final stdout = stdoutBuffer.toString();
+  final processStderr = stderrBuffer.toString();
+  if (exitCode != 0) {
+    throw ProcessException(
+      executable,
+      arguments,
+      '$stdout\n$processStderr',
+      exitCode,
+    );
+  }
+  return (stdout: stdout, stderr: processStderr);
+}
+
+String _dartExecutableForFixture() {
+  final executableName = Platform.isWindows ? 'dart.exe' : 'dart';
+  var directory = File(Platform.resolvedExecutable).absolute.parent;
+  for (var depth = 0; depth < 8; depth++) {
+    final candidate = File.fromUri(
+      directory.uri.resolve('bin/cache/dart-sdk/bin/$executableName'),
+    );
+    if (candidate.existsSync()) return candidate.path;
+    if (directory.parent.path == directory.path) break;
+    directory = directory.parent;
+  }
+  throw StateError(
+    'Could not locate Flutter cached Dart from '
+    '${Platform.resolvedExecutable}.',
+  );
+}
+
+Future<void> _terminateProcessTree(Process process) async {
+  if (Platform.isWindows) {
+    final killer = await Process.start('taskkill.exe', [
+      '/PID',
+      '${process.pid}',
+      '/T',
+      '/F',
+    ]).timeout(const Duration(seconds: 2));
+    await Future.wait<void>([
+      killer.stdout.drain<void>(),
+      killer.stderr.drain<void>(),
+      killer.exitCode.then<void>((_) {}),
+    ]).timeout(const Duration(seconds: 3));
+  } else {
+    process.kill(ProcessSignal.sigkill);
+  }
+  process.kill(ProcessSignal.sigkill);
+}
+
+Future<void> _settleProcessIo(
+  Process process,
+  Future<void> stdoutDone,
+  Future<void> stderrDone,
+  StreamSubscription<String> stdoutSubscription,
+  StreamSubscription<String> stderrSubscription,
+) async {
+  try {
+    await Future.wait<void>([
+      process.exitCode.then<void>((_) {}),
+      stdoutDone,
+      stderrDone,
+    ]).timeout(const Duration(seconds: 2));
+  } on TimeoutException {
+    process.kill(ProcessSignal.sigkill);
+  }
+  try {
+    await Future.wait<void>([
+      stdoutSubscription.cancel(),
+      stderrSubscription.cancel(),
+    ]).timeout(const Duration(seconds: 2));
+  } on TimeoutException {
+    // The outer test timeout remains the final guard if the runtime cannot
+    // cancel a broken stream subscription.
+  }
+}
+
+String _validatedJavaHome(String path) {
+  final executable = File(
+    '$path${Platform.pathSeparator}bin${Platform.pathSeparator}'
+    '${Platform.isWindows ? 'java.exe' : 'java'}',
+  );
+  if (!executable.existsSync()) {
+    throw StateError('Android JAVA_HOME has no Java executable: $path');
+  }
+  return Directory(path).absolute.path;
+}
+
+void _deleteReleaseMainManifestOutputs(Directory buildDirectory) {
+  if (!buildDirectory.existsSync()) return;
+  final directories =
+      buildDirectory
+          .listSync(recursive: true, followLinks: false)
+          .whereType<Directory>()
+          .where((directory) {
+            final segments = _pathSegments(directory.path);
+            return segments.isNotEmpty &&
+                segments.last == 'processReleaseMainManifest' &&
+                segments.contains('release') &&
+                segments.any(
+                  (segment) =>
+                      segment == 'merged_manifest' ||
+                      segment == 'merged_manifests',
+                );
+          })
+          .toList()
+        ..sort((left, right) => right.path.length.compareTo(left.path.length));
+  for (final directory in directories) {
+    if (directory.existsSync()) directory.deleteSync(recursive: true);
+  }
+}
+
+File _locateSingleReleaseMainManifest(Directory buildDirectory) {
+  if (!buildDirectory.existsSync()) {
+    throw StateError(
+      'Release merged-manifest build directory is missing: '
+      '${buildDirectory.path}',
+    );
+  }
+  final manifests = buildDirectory
+      .listSync(recursive: true, followLinks: false)
+      .whereType<File>()
+      .where((file) {
+        final segments = _pathSegments(file.path);
+        return segments.isNotEmpty &&
+            segments.last == 'AndroidManifest.xml' &&
+            segments.contains('release') &&
+            segments.contains('processReleaseMainManifest') &&
+            segments.any(
+              (segment) =>
+                  segment == 'merged_manifest' || segment == 'merged_manifests',
+            );
+      })
+      .toList(growable: false);
+  if (manifests.length != 1) {
+    throw StateError(
+      'Expected exactly one release main merged manifest under '
+      '${buildDirectory.path}, found ${manifests.length}: '
+      '${manifests.map((file) => file.path).join(', ')}',
+    );
+  }
+  return manifests.single;
+}
+
+List<String> _pathSegments(String path) => path
+    .replaceAll('\\', '/')
+    .split('/')
+    .where((segment) => segment.isNotEmpty)
+    .toList(growable: false);
 
 Set<String> _permissionsFromManifestDocuments(Iterable<String> manifests) {
   final permissions = <String>{};
