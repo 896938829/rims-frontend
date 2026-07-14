@@ -571,7 +571,10 @@ try {
 }
 
 function Start-RimsLocalTlsProxyProcess {
-  param([Parameter(Mandatory = $true)][psobject]$Spec)
+  param(
+    [Parameter(Mandatory = $true)][psobject]$Spec,
+    [AllowNull()][scriptblock]$ProcessFactoryAction
+  )
 
   $powerShell = (Get-Process -Id $PID).Path
   $arguments = @(
@@ -592,16 +595,64 @@ function Start-RimsLocalTlsProxyProcess {
   $startInfo.CreateNoWindow = $true
   $startInfo.RedirectStandardOutput = $false
   $startInfo.RedirectStandardError = $false
-  $process = New-Object Diagnostics.Process
-  $process.StartInfo = $startInfo
-  [void]$process.Start()
-  $identity = [pscustomobject]@{
-    windowsPid = $process.Id
-    windowsProcessStartTimeUtc = $process.StartTime.ToUniversalTime().ToString('o')
-    commandLine = "$powerShell $($startInfo.Arguments)"
+  $process = if ($null -eq $ProcessFactoryAction) {
+    New-Object Diagnostics.Process
+  } else {
+    & $ProcessFactoryAction
   }
-  $process.Dispose()
-  return $identity
+  $process.StartInfo = $startInfo
+  $started = $false
+  $processId = $null
+  $processStartTimeUtc = $null
+  $commandLine = "$powerShell $($startInfo.Arguments)"
+  try {
+    [void]$process.Start()
+    $started = $true
+    $processId = $process.Id
+    $processStartTimeUtc = $process.StartTime.ToUniversalTime().ToString('o')
+    return [pscustomobject]@{
+      windowsPid = $processId
+      windowsProcessStartTimeUtc = $processStartTimeUtc
+      commandLine = $commandLine
+    }
+  } catch {
+    $startFailure = $_.Exception.Message
+    $cleanupFailure = $null
+    if ($started) {
+      try {
+        $process.Kill()
+        $process.WaitForExit()
+      } catch {
+        $cleanupFailure = $_.Exception.Message
+      }
+    }
+    $cleanupPending = $started -and -not [string]::IsNullOrWhiteSpace($cleanupFailure)
+    $partialState = if ($cleanupPending) {
+      [pscustomobject][ordered]@{
+        port = $Spec.tlsPort
+        backendPort = $Spec.backendPort
+        windowsPid = $processId
+        windowsProcessStartTimeUtc = $processStartTimeUtc
+        commandLine = $commandLine
+        ownershipMarker = $Spec.ownershipMarker
+        proxyScriptPath = $Spec.proxyScript
+        stderrLogPath = $Spec.stderrLogPath
+        cleanupPending = $true
+      }
+    } else { $null }
+    $detail = "TLS proxy process start or identity acquisition failed: $startFailure"
+    if ($cleanupPending) {
+      $detail = "$detail; process compensation failed: $cleanupFailure"
+    }
+    return [pscustomobject][ordered]@{
+      ok = $false
+      detail = $detail
+      cleanupPending = $cleanupPending
+      state = $partialState
+    }
+  } finally {
+    $process.Dispose()
+  }
 }
 
 function Start-RimsLocalTlsProxy {
@@ -654,6 +705,9 @@ function Start-RimsLocalTlsProxy {
       cleanupPending = $false
       state = $null
     }
+  }
+  if ($null -ne $start.PSObject.Properties['ok'] -and -not [bool]$start.ok) {
+    return $start
   }
   $state = [pscustomobject][ordered]@{
     workspaceId = $TlsPaths.workspaceId
@@ -1192,8 +1246,103 @@ function Remove-RimsAndroidUserCa {
     [Parameter(Mandatory = $true)][psobject]$TlsPaths,
     [AllowNull()][scriptblock]$EmulatorOwnershipAction,
     [AllowNull()][scriptblock]$AdbAction,
-    [AllowNull()][scriptblock]$FingerprintAction
+    [AllowNull()][scriptblock]$FingerprintAction,
+    [AllowNull()][scriptblock]$SubjectHashAction
   )
+
+  $cleanupScope = [string](Get-RimsObjectPropertyValue `
+      -Value $TrustState `
+      -Name 'cleanupScope' `
+      -DefaultValue '')
+  if ($cleanupScope -eq 'temporaryOnly') {
+    try {
+      $fixedTemporaryPath = Get-RimsAndroidCaTemporaryPath `
+        -WorkspaceId ([string]$TlsPaths.workspaceId)
+    } catch {
+      return [pscustomobject]@{
+        ok = $false
+        detail = 'Deterministic Android temp cleanup path is invalid; no ADB command was issued.'
+        cleanupPending = $true
+        state = $TrustState
+      }
+    }
+    $recordedTemporaryPath = [string](Get-RimsObjectPropertyValue `
+        -Value $TrustState `
+        -Name 'temporaryPath' `
+        -DefaultValue '')
+    if (-not [string]::IsNullOrWhiteSpace($recordedTemporaryPath) -and
+        $recordedTemporaryPath -cne $fixedTemporaryPath) {
+      return [pscustomobject]@{
+        ok = $false
+        detail = 'Recorded Android temp cleanup path does not match this workspace; no ADB command was issued.'
+        cleanupPending = $true
+        state = $TrustState
+      }
+    }
+    $TrustState | Add-Member `
+      -MemberType NoteProperty `
+      -Name temporaryPath `
+      -Value $fixedTemporaryPath `
+      -Force
+    try {
+      $owned = if ($null -eq $EmulatorOwnershipAction) {
+        Test-RimsOwnedEmulatorState -EmulatorState $EmulatorState
+      } else { [bool](& $EmulatorOwnershipAction $EmulatorState) }
+    } catch {
+      $owned = $false
+    }
+    $recordedSerial = [string](Get-RimsObjectPropertyValue `
+        -Value $TrustState `
+        -Name 'serial' `
+        -DefaultValue '')
+    $emulatorSerial = [string](Get-RimsObjectPropertyValue `
+        -Value $EmulatorState `
+        -Name 'serial' `
+        -DefaultValue '')
+    if (-not $owned -or [string]::IsNullOrWhiteSpace($recordedSerial) -or
+        $recordedSerial -ne $emulatorSerial) {
+      Set-RimsLocalTlsCleanupPending -State $TrustState -Value $true
+      return [pscustomobject]@{
+        ok = $false
+        detail = 'Android temp cleanup requires the exact owned emulator and recorded serial.'
+        cleanupPending = $true
+        state = $TrustState
+      }
+    }
+    $adb = if ($null -eq $AdbAction) {
+      { param($device, $arguments) Invoke-RimsAdbCommand -Serial $device -Arguments $arguments }
+    } else { $AdbAction }
+    try {
+      $rootResult = & $adb $recordedSerial @('root')
+      $removeResult = if ([int](Get-RimsObjectPropertyValue `
+          -Value $rootResult `
+          -Name 'exitCode' `
+          -DefaultValue -1) -eq 0) {
+        & $adb $recordedSerial @('shell', 'rm', '-f', $fixedTemporaryPath)
+      } else { $null }
+      $removed = $null -ne $removeResult -and
+        [int](Get-RimsObjectPropertyValue `
+          -Value $removeResult `
+          -Name 'exitCode' `
+          -DefaultValue -1) -eq 0
+    } catch {
+      $removed = $false
+    }
+    if (-not $removed) {
+      Set-RimsLocalTlsCleanupPending -State $TrustState -Value $true
+      return [pscustomobject]@{
+        ok = $false
+        detail = 'Deterministic Android temp PEM cleanup remains pending.'
+        cleanupPending = $true
+        state = $TrustState
+      }
+    }
+    return [pscustomobject]@{
+      ok = $true
+      detail = 'Removed the deterministic Android temp PEM without touching remote trust.'
+      cleanupPending = $false
+    }
+  }
 
   if (-not [bool](Get-RimsObjectPropertyValue `
       -Value $TrustState `
@@ -1204,18 +1353,53 @@ function Remove-RimsAndroidUserCa {
       detail = 'Pre-existing Android trust was preserved.'
     }
   }
-  $subjectHash = [string](Get-RimsObjectPropertyValue `
-      -Value $TrustState `
-      -Name 'subjectHash' `
-      -DefaultValue '')
+  if (-not (Test-RimsLocalTlsRuntimePath `
+      -Path ([string]$TlsPaths.caCertificate) `
+      -TlsPaths $TlsPaths) -or
+      -not (Test-Path -LiteralPath $TlsPaths.caCertificate -PathType Leaf)) {
+    return [pscustomobject]@{
+      ok = $false
+      detail = 'Workspace CA certificate is unavailable for Android trust ownership verification; no ADB command was issued.'
+      cleanupPending = $true
+      state = $TrustState
+    }
+  }
   try {
-    $fixedRemotePath = Get-RimsAndroidCaRemotePath -SubjectHash $subjectHash
+    $getLocalFingerprint = if ($null -eq $FingerprintAction) {
+      { param($path) Get-RimsLocalTlsCertificateFingerprint -CertificatePath $path }
+    } else { $FingerprintAction }
+    $getLocalSubjectHash = if ($null -eq $SubjectHashAction) {
+      { param($path) Get-RimsLocalTlsSubjectHash -CertificatePath $path }
+    } else { $SubjectHashAction }
+    $localCaFingerprint = [string](& $getLocalFingerprint $TlsPaths.caCertificate)
+    $localCaSubjectHash = [string](& $getLocalSubjectHash $TlsPaths.caCertificate)
+    $fixedRemotePath = Get-RimsAndroidCaRemotePath `
+      -SubjectHash $localCaSubjectHash
     $fixedTemporaryPath = Get-RimsAndroidCaTemporaryPath `
       -WorkspaceId ([string]$TlsPaths.workspaceId)
   } catch {
     return [pscustomobject]@{
       ok = $false
-      detail = 'Recorded Android trust paths are invalid; no ADB command was issued.'
+      detail = 'Workspace CA identity could not be recomputed safely; no ADB command was issued.'
+      cleanupPending = $true
+      state = $TrustState
+    }
+  }
+  $subjectHash = [string](Get-RimsObjectPropertyValue `
+      -Value $TrustState `
+      -Name 'subjectHash' `
+      -DefaultValue '')
+  $recordedFingerprint = [string](Get-RimsObjectPropertyValue `
+      -Value $TrustState `
+      -Name 'fingerprintSha256' `
+      -DefaultValue '')
+  if ($subjectHash -notmatch '\A[0-9a-fA-F]{8}\z' -or
+      $recordedFingerprint -notmatch '\A[0-9a-fA-F]{64}\z' -or
+      $subjectHash -ine $localCaSubjectHash -or
+      $recordedFingerprint -ine $localCaFingerprint) {
+    return [pscustomobject]@{
+      ok = $false
+      detail = 'Recorded Android trust identity does not match the workspace CA; no ADB command was issued.'
       cleanupPending = $true
       state = $TrustState
     }
@@ -1229,13 +1413,21 @@ function Remove-RimsAndroidUserCa {
       -Name 'temporaryPath' `
       -DefaultValue '')
   if ($recordedRemotePath -cne $fixedRemotePath -or
-      $recordedTemporaryPath -cne $fixedTemporaryPath) {
+      (-not [string]::IsNullOrWhiteSpace($recordedTemporaryPath) -and
+        $recordedTemporaryPath -cne $fixedTemporaryPath)) {
     return [pscustomobject]@{
       ok = $false
       detail = 'Recorded Android trust paths do not match deterministic workspace paths; no ADB command was issued.'
       cleanupPending = $true
       state = $TrustState
     }
+  }
+  if ([string]::IsNullOrWhiteSpace($recordedTemporaryPath)) {
+    $TrustState | Add-Member `
+      -MemberType NoteProperty `
+      -Name temporaryPath `
+      -Value $fixedTemporaryPath `
+      -Force
   }
   try {
     $owned = if ($null -eq $EmulatorOwnershipAction) {
@@ -1671,14 +1863,12 @@ function Invoke-RimsLocalTlsUp {
               -Value $EmulatorState `
               -Name 'serial' `
               -DefaultValue '')
-          fingerprintSha256 = $certificates.caFingerprintSha256
-          subjectHash = $caSubjectHash
-          remotePath = Get-RimsAndroidCaRemotePath -SubjectHash $caSubjectHash
           temporaryPath = Get-RimsAndroidCaTemporaryPath `
             -WorkspaceId ([string]$TlsPaths.workspaceId)
+          cleanupScope = 'temporaryOnly'
           preExisting = $false
-          installedByController = $true
-          remoteMutationAttempted = $true
+          installedByController = $false
+          remoteMutationAttempted = $false
           cleanupPending = $true
         }
       }
@@ -1696,8 +1886,12 @@ function Invoke-RimsLocalTlsUp {
           -Value $proxyCleanup `
           -Name 'ok' `
           -DefaultValue $false)
+      $trustPending = [bool](Get-RimsObjectPropertyValue `
+          -Value $trust `
+          -Name 'cleanupPending' `
+          -DefaultValue $false)
       $certificateCleanupOk = $true
-      if ($certificatesCreated) {
+      if ($certificatesCreated -and -not $trustPending) {
         try {
           $certificateCleanup = & $cleanupCertificates $TlsPaths
         } catch {
@@ -1711,10 +1905,6 @@ function Invoke-RimsLocalTlsUp {
             -Name 'ok' `
             -DefaultValue $false)
       }
-      $trustPending = [bool](Get-RimsObjectPropertyValue `
-          -Value $trust `
-          -Name 'cleanupPending' `
-          -DefaultValue $false)
       $cleanupPending = $trustPending -or -not $proxyCleanupOk -or
         -not $certificateCleanupOk
       return [pscustomobject][ordered]@{
@@ -1733,7 +1923,8 @@ function Invoke-RimsLocalTlsUp {
             serverFingerprintSha256 = $certificates.serverFingerprintSha256
             serverSpkiSha256 = $certificates.serverSpkiSha256
             caSubjectHash = $caSubjectHash
-            certificateCreated = $certificatesCreated -and -not $certificateCleanupOk
+            certificateCreated = $certificatesCreated -and
+              ($trustPending -or -not $certificateCleanupOk)
             requiredSans = @($certificates.requiredSans)
             proxy = if ($proxyCleanupOk) { $null } else { $proxy.state }
             androidTrust = Get-RimsObjectPropertyValue -Value $trust -Name 'state'

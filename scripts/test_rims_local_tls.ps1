@@ -384,6 +384,43 @@ try {
     -Expected 0 `
     -Message 'TLS proxy spawned despite an occupied unowned port.'
 
+  $script:startedProcessCompensated = $false
+  $fakeStartedProcess = [pscustomobject]@{
+    StartInfo = $null
+    Id = 4343
+    HasExited = $false
+  }
+  $fakeStartedProcess | Add-Member -MemberType ScriptMethod -Name Start -Value {
+    return $true
+  }
+  $fakeStartedProcess | Add-Member -MemberType ScriptProperty -Name StartTime -Value {
+    throw 'fake start-time read failure after process start'
+  }
+  $fakeStartedProcess | Add-Member -MemberType ScriptMethod -Name Kill -Value {
+    $script:startedProcessCompensated = $true
+  }
+  $fakeStartedProcess | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {}
+  $fakeStartedProcess | Add-Member -MemberType ScriptMethod -Name Dispose -Value {}
+  $startThenIdentityThrow = Start-RimsLocalTlsProxyProcess `
+    -Spec ([pscustomobject]@{
+      proxyScript = $pathsA.proxyScript
+      serverPfx = $pathsA.serverPfx
+      tlsPort = 8443
+      backendPort = 8080
+      ownershipMarker = "rims-local-tls-proxy:$($pathsA.workspaceId)"
+      stderrLogPath = $pathsA.proxyStderrLog
+    }) `
+    -ProcessFactoryAction { return $fakeStartedProcess }
+  Assert-False `
+    -Value $startThenIdentityThrow.ok `
+    -Message 'Proxy process identity read throw was reported as a successful start.'
+  Assert-True `
+    -Value $script:startedProcessCompensated `
+    -Message 'Started proxy process was not killed after identity acquisition threw.'
+  Assert-False `
+    -Value $startThenIdentityThrow.cleanupPending `
+    -Message 'Successfully compensated process start left cleanup pending.'
+
   $fakeStartedAt = '2026-07-15T01:02:03.0000000Z'
   $proxy = Start-RimsLocalTlsProxy `
     -TlsPaths $pathsA `
@@ -623,6 +660,7 @@ try {
     -TlsPaths $pathsA `
     -EmulatorOwnershipAction { param($state) return $true } `
     -FingerprintAction { param($path) return ('AA' * 32) } `
+    -SubjectHashAction { param($path) return $installed.state.subjectHash } `
     -AdbAction {
       param($serial, $arguments)
       [void]$adbCalls.Add(($arguments -join ' '))
@@ -693,6 +731,8 @@ try {
     -EmulatorState $wrongSerialEmulator `
     -TlsPaths $pathsA `
     -EmulatorOwnershipAction { param($state) return $true } `
+    -FingerprintAction { param($path) return ('AA' * 32) } `
+    -SubjectHashAction { param($path) return $installed.state.subjectHash } `
     -AdbAction {
       param($serial, $arguments)
       $script:wrongSerialCalls++
@@ -712,7 +752,12 @@ try {
     -EmulatorState $ownedEmulator `
     -TlsPaths $pathsA `
     -EmulatorOwnershipAction { param($state) return $true } `
-    -FingerprintAction { param($path) return ('BB' * 32) } `
+    -FingerprintAction {
+      param($path)
+      if ($path -eq $pathsA.caCertificate) { return ('AA' * 32) }
+      return ('BB' * 32)
+    } `
+    -SubjectHashAction { param($path) return $installed.state.subjectHash } `
     -AdbAction {
       param($serial, $arguments)
       [void]$replacementCalls.Add(($arguments -join ' '))
@@ -832,6 +877,8 @@ try {
       -EmulatorState $ownedEmulator `
       -TlsPaths $pathsA `
       -EmulatorOwnershipAction { param($state) return $true } `
+      -FingerprintAction { param($path) return ('AA' * 32) } `
+      -SubjectHashAction { param($path) return $installed.state.subjectHash } `
       -AdbAction {
         param($serial, $arguments)
         $script:tamperedAdbCalls++
@@ -846,12 +893,84 @@ try {
       -Message "Tampered $tamperedField state reached root/ADB."
   }
 
+  $coordinatedTamper = [pscustomobject][ordered]@{
+    serial = $installed.state.serial
+    fingerprintSha256 = ('BB' * 32)
+    subjectHash = 'deadbeef'
+    remotePath = (Get-RimsAndroidCaRemotePath -SubjectHash 'deadbeef')
+    temporaryPath = $installed.state.temporaryPath
+    preExisting = $false
+    installedByController = $true
+    remoteMutationAttempted = $true
+    cleanupPending = $true
+  }
+  $coordinatedTamperAdbCalls = 0
+  $coordinatedTamperRemoval = Remove-RimsAndroidUserCa `
+    -TrustState $coordinatedTamper `
+    -EmulatorState $ownedEmulator `
+    -TlsPaths $pathsA `
+    -EmulatorOwnershipAction { param($state) return $true } `
+    -FingerprintAction {
+      param($path)
+      if ($path -eq $pathsA.caCertificate) { return ('AA' * 32) }
+      return ('BB' * 32)
+    } `
+    -SubjectHashAction { param($path) return $installed.state.subjectHash } `
+    -AdbAction {
+      param($serial, $arguments)
+      $script:coordinatedTamperAdbCalls++
+      return [pscustomobject]@{ exitCode = 0; stdout = ''; stderr = '' }
+    }
+  Assert-False `
+    -Value $coordinatedTamperRemoval.ok `
+    -Message 'Coordinated subjectHash/remotePath/fingerprint tampering was accepted.'
+  Assert-Equal `
+    -Actual $coordinatedTamperAdbCalls `
+    -Expected 0 `
+    -Message 'Coordinated trust-state tampering reached root/ADB.'
+
+  $legacyTrustWithoutTemporaryPath = [pscustomobject][ordered]@{
+    serial = $installed.state.serial
+    fingerprintSha256 = $installed.state.fingerprintSha256
+    subjectHash = $installed.state.subjectHash
+    remotePath = $installed.state.remotePath
+    preExisting = $false
+    installedByController = $true
+    remoteMutationAttempted = $true
+    cleanupPending = $true
+  }
+  $legacyTemporaryCalls = New-Object 'Collections.Generic.List[string]'
+  $legacyTemporaryRemoval = Remove-RimsAndroidUserCa `
+    -TrustState $legacyTrustWithoutTemporaryPath `
+    -EmulatorState $ownedEmulator `
+    -TlsPaths $pathsA `
+    -EmulatorOwnershipAction { param($state) return $true } `
+    -FingerprintAction { param($path) return ('AA' * 32) } `
+    -SubjectHashAction { param($path) return $installed.state.subjectHash } `
+    -AdbAction {
+      param($serial, $arguments)
+      $commandText = $arguments -join ' '
+      [void]$legacyTemporaryCalls.Add($commandText)
+      if ($commandText -eq "shell test -f $($installed.state.remotePath)") {
+        return [pscustomobject]@{ exitCode = 1; stdout = ''; stderr = '' }
+      }
+      return [pscustomobject]@{ exitCode = 0; stdout = ''; stderr = '' }
+    }
+  Assert-True `
+    -Value $legacyTemporaryRemoval.ok `
+    -Message 'Legacy controller trust state without temporaryPath was rejected.'
+  Assert-True `
+    -Value (@($legacyTemporaryCalls) -contains "shell rm -f $($installed.state.temporaryPath)") `
+    -Message 'Legacy trust cleanup did not derive deterministic temporaryPath.'
+
   $partialRetryCalls = New-Object 'Collections.Generic.List[string]'
   $partialRetry = Remove-RimsAndroidUserCa `
     -TrustState $failedCompensation.state `
     -EmulatorState $ownedEmulator `
     -TlsPaths $pathsA `
     -EmulatorOwnershipAction { param($state) return $true } `
+    -FingerprintAction { param($path) return ('AA' * 32) } `
+    -SubjectHashAction { param($path) return $installed.state.subjectHash } `
     -AdbAction {
       param($serial, $arguments)
       $commandText = $arguments -join ' '
@@ -873,6 +992,8 @@ try {
     -EmulatorState $ownedEmulator `
     -TlsPaths $pathsA `
     -EmulatorOwnershipAction { param($state) return $true } `
+    -FingerprintAction { param($path) return ('AA' * 32) } `
+    -SubjectHashAction { param($path) return $installed.state.subjectHash } `
     -AdbAction {
       param($serial, $arguments)
       $commandText = $arguments -join ' '
@@ -1002,6 +1123,7 @@ try {
       -TlsPaths $pathsA `
       -EmulatorOwnershipAction { param($state) return $true } `
       -FingerprintAction { param($path) return ('AA' * 32) } `
+      -SubjectHashAction { param($path) return $installed.state.subjectHash } `
       -AdbAction {
         param($serial, $arguments)
         $commandKind = if ($arguments[0] -eq 'root') {
@@ -1036,6 +1158,8 @@ try {
     -EmulatorState $ownedEmulator `
     -TlsPaths $pathsA `
     -EmulatorOwnershipAction { param($state) return $true } `
+    -FingerprintAction { param($path) return ('AA' * 32) } `
+    -SubjectHashAction { param($path) return $installed.state.subjectHash } `
     -AdbAction { param($serial, $arguments) throw 'fake remove ADB throw' }
   Assert-False -Value $removeAdbThrow.ok -Message 'Remove ADB throw escaped.'
   Assert-True `
@@ -1056,6 +1180,8 @@ try {
     -EmulatorState $ownedEmulator `
     -TlsPaths $pathsA `
     -EmulatorOwnershipAction { param($state) return $true } `
+    -FingerprintAction { param($path) return ('AA' * 32) } `
+    -SubjectHashAction { param($path) return $installed.state.subjectHash } `
     -AdbAction { param($serial, $arguments) throw 'fake legacy-state ADB throw' }
   Assert-False `
     -Value $legacyTrustThrow.ok `
@@ -1070,7 +1196,12 @@ try {
     -EmulatorState $ownedEmulator `
     -TlsPaths $pathsA `
     -EmulatorOwnershipAction { param($state) return $true } `
-    -FingerprintAction { param($path) throw 'fake fingerprint throw' } `
+    -FingerprintAction {
+      param($path)
+      if ($path -eq $pathsA.caCertificate) { return ('AA' * 32) }
+      throw 'fake fingerprint throw'
+    } `
+    -SubjectHashAction { param($path) return $installed.state.subjectHash } `
     -AdbAction {
       param($serial, $arguments)
       $commandText = $arguments -join ' '
@@ -1484,6 +1615,88 @@ try {
     -Expected $proxy.state.windowsPid `
     -Message 'TLS up lost proxy state after trust compensation failed.'
 
+  [IO.File]::WriteAllText($pathsA.caCertificate, 'workspace CA retained for pending trust')
+  $pendingTrustCertificateCleanupCalls = 0
+  $pendingTrustUp = Invoke-RimsLocalTlsUp `
+    -TlsPaths $pathsA `
+    -BackendPort 8080 `
+    -TlsPort 8443 `
+    -Target android `
+    -EmulatorState $ownedEmulator `
+    -CertificateAction { param($paths) return $successfulCertificateState } `
+    -ProxyStartAction {
+      param($paths, $backendPort, $tlsPort)
+      return [pscustomobject]@{ ok = $true; state = $proxy.state }
+    } `
+    -TrustInstallAction {
+      param($paths, $emulator, $fingerprint, $subjectHash)
+      return [pscustomobject]@{
+        ok = $false
+        detail = 'fake owned trust cleanup pending'
+        cleanupPending = $true
+        state = $installed.state
+      }
+    } `
+    -ProxyStopAction { param($state) return [pscustomobject]@{ ok = $true } } `
+    -CertificateCleanupAction {
+      param($paths)
+      $script:pendingTrustCertificateCleanupCalls++
+      return [pscustomobject]@{ ok = $true }
+    }
+  Assert-Equal `
+    -Actual $pendingTrustCertificateCleanupCalls `
+    -Expected 0 `
+    -Message 'TLS up deleted local CA material while owned trust cleanup was pending.'
+  Assert-True `
+    -Value $pendingTrustUp.state.certificateCreated `
+    -Message 'TLS up did not retain certificate ownership state required for trust verification.'
+  Assert-True `
+    -Value (Test-Path -LiteralPath $pathsA.caCertificate -PathType Leaf) `
+    -Message 'TLS up removed the workspace CA before Android trust cleanup completed.'
+
+  $pendingTrustRetryCalls = New-Object 'Collections.Generic.List[string]'
+  $pendingTrustFinalCertificateCleanupCalls = 0
+  $pendingTrustRetry = Stop-RimsLocalTlsRuntime `
+    -State ([pscustomobject]@{
+      localTls = $pendingTrustUp.state
+      emulator = $ownedEmulator
+    }) `
+    -TlsPaths $pathsA `
+    -TrustRemoveAction {
+      param($trust, $emulator)
+      return Remove-RimsAndroidUserCa `
+        -TrustState $trust `
+        -EmulatorState $emulator `
+        -TlsPaths $pathsA `
+        -EmulatorOwnershipAction { param($state) return $true } `
+        -FingerprintAction { param($path) return ('AA' * 32) } `
+        -SubjectHashAction { param($path) return $installed.state.subjectHash } `
+        -AdbAction {
+          param($serial, $arguments)
+          $commandText = $arguments -join ' '
+          [void]$pendingTrustRetryCalls.Add($commandText)
+          if ($arguments[0] -eq 'pull') {
+            [IO.File]::WriteAllText([string]$arguments[2], 'verified remote CA')
+          }
+          return [pscustomobject]@{ exitCode = 0; stdout = ''; stderr = '' }
+        }
+    } `
+    -CertificateCleanupAction {
+      param($paths)
+      $script:pendingTrustFinalCertificateCleanupCalls++
+      return [pscustomobject]@{ ok = $true }
+    }
+  Assert-True `
+    -Value $pendingTrustRetry.ok `
+    -Message 'Pending owned trust could not be verified and removed on retry.'
+  Assert-True `
+    -Value (@($pendingTrustRetryCalls) -contains "shell rm -f $($installed.state.remotePath)") `
+    -Message 'Pending trust retry did not remove the verified remote CA.'
+  Assert-Equal `
+    -Actual $pendingTrustFinalCertificateCleanupCalls `
+    -Expected 1 `
+    -Message 'Certificate material was not cleaned after verified Android trust removal.'
+
   $upStartThrowCertificateCleanupCalls = 0
   $upStartThrow = Invoke-RimsLocalTlsUp `
     -TlsPaths $pathsA `
@@ -1532,6 +1745,7 @@ try {
     -Value $upCertificateCleanupThrow.state.certificateCreated `
     -Message 'Invoke Up certificate cleanup throw did not retain created material evidence.'
 
+  $unknownTrustCertificateCleanupCalls = 0
   $upTrustThrow = Invoke-RimsLocalTlsUp `
     -TlsPaths $pathsA `
     -BackendPort 8080 `
@@ -1548,7 +1762,11 @@ try {
       throw 'fake trust install throw'
     } `
     -ProxyStopAction { param($state) throw 'fake up proxy stop throw' } `
-    -CertificateCleanupAction { param($paths) throw 'fake up certificate cleanup throw' }
+    -CertificateCleanupAction {
+      param($paths)
+      $script:unknownTrustCertificateCleanupCalls++
+      return [pscustomobject]@{ ok = $true }
+    }
   Assert-False -Value $upTrustThrow.ok -Message 'Invoke Up trust install throw escaped.'
   Assert-True `
     -Value $upTrustThrow.cleanupPending `
@@ -1557,14 +1775,48 @@ try {
     -Actual $upTrustThrow.state.proxy.windowsPid `
     -Expected $proxy.state.windowsPid `
     -Message 'Invoke Up proxy stop throw lost proxy identity.'
+  Assert-False `
+    -Value $upTrustThrow.state.androidTrust.installedByController `
+    -Message 'Unknown trust install throw fabricated controller ownership.'
+  Assert-False `
+    -Value $upTrustThrow.state.androidTrust.remoteMutationAttempted `
+    -Message 'Unknown trust install throw fabricated a remote CA mutation.'
   Assert-Equal `
-    -Actual $upTrustThrow.state.androidTrust.remotePath `
-    -Expected (Get-RimsAndroidCaRemotePath -SubjectHash $successfulCertificateState.caSubjectHash) `
-    -Message 'Invoke Up trust throw did not persist deterministic remote cleanup state.'
+    -Actual $upTrustThrow.state.androidTrust.cleanupScope `
+    -Expected 'temporaryOnly' `
+    -Message 'Unknown trust throw did not constrain retry cleanup to deterministic temp PEM.'
+  Assert-True `
+    -Value ($null -eq $upTrustThrow.state.androidTrust.PSObject.Properties['remotePath']) `
+    -Message 'Unknown trust throw fabricated a remote CA path.'
   Assert-Equal `
     -Actual $upTrustThrow.state.androidTrust.temporaryPath `
     -Expected (Get-RimsAndroidCaTemporaryPath -WorkspaceId $pathsA.workspaceId) `
     -Message 'Invoke Up trust throw did not persist deterministic temp cleanup state.'
+  Assert-Equal `
+    -Actual $unknownTrustCertificateCleanupCalls `
+    -Expected 0 `
+    -Message 'Unknown trust cleanup pending deleted the local workspace CA.'
+
+  $unknownTrustCleanupCalls = New-Object 'Collections.Generic.List[string]'
+  $unknownTrustCleanup = Remove-RimsAndroidUserCa `
+    -TrustState $upTrustThrow.state.androidTrust `
+    -EmulatorState $ownedEmulator `
+    -TlsPaths $pathsA `
+    -EmulatorOwnershipAction { param($state) return $true } `
+    -AdbAction {
+      param($serial, $arguments)
+      [void]$unknownTrustCleanupCalls.Add(($arguments -join ' '))
+      return [pscustomobject]@{ exitCode = 0; stdout = ''; stderr = '' }
+    }
+  Assert-True `
+    -Value $unknownTrustCleanup.ok `
+    -Message 'Unknown trust throw temp-only cleanup failed on the exact owned emulator.'
+  Assert-True `
+    -Value (@($unknownTrustCleanupCalls) -contains "shell rm -f $($upTrustThrow.state.androidTrust.temporaryPath)") `
+    -Message 'Unknown trust throw did not retry deterministic temp PEM cleanup.'
+  Assert-False `
+    -Value ((@($unknownTrustCleanupCalls) -join '|').Contains('/data/misc/user/0/cacerts-added/')) `
+    -Message 'Unknown trust throw cleanup touched a remote CA path without ownership evidence.'
 
   $tlsComponentState = [pscustomobject]@{
     localTls = [pscustomobject]@{
