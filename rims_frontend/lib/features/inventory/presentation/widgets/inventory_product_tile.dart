@@ -1,7 +1,7 @@
 import 'package:flutter/material.dart';
 
+import '../../../../core/config/app_configuration_scope.dart';
 import '../../../../core/resources/app_images.dart';
-import '../../../../core/network/api_endpoints.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/theme/app_text_styles.dart';
 import '../../../../core/widgets/rims_card.dart';
@@ -104,7 +104,17 @@ final class _InventoryProductImage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final resolved = _resolveSameOriginImage(imageUrl);
+    if (imageUrl.trim().isEmpty) {
+      return const _FallbackImage();
+    }
+    final configuration = AppConfigurationScope.maybeOf(context)?.configuration;
+    if (configuration == null) {
+      return const _FallbackImage();
+    }
+    final resolved = _resolveSameOriginImage(
+      configuration.apiBaseUri,
+      imageUrl,
+    );
     if (resolved != null) {
       return Image.network(
         resolved.toString(),
@@ -119,11 +129,10 @@ final class _InventoryProductImage extends StatelessWidget {
     return const _FallbackImage();
   }
 
-  Uri? _resolveSameOriginImage(String value) {
+  Uri? _resolveSameOriginImage(Uri base, String value) {
     if (value.trim().isEmpty) return null;
-    final base = Uri.tryParse(ApiEndpoints.baseUrl);
     final raw = Uri.tryParse(value.trim());
-    if (base == null || raw == null || raw.hasFragment) return null;
+    if (raw == null || raw.hasFragment) return null;
     final origin = base.replace(path: '/', query: null, fragment: null);
     final resolved = raw.hasScheme
         ? raw

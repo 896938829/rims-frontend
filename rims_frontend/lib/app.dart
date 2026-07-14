@@ -8,6 +8,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 
 import 'core/config/app_environment.dart';
+import 'core/config/app_configuration_scope.dart';
 import 'core/events/app_event.dart';
 import 'core/events/app_event_bus.dart';
 import 'core/network/api_client.dart';
@@ -71,10 +72,10 @@ import 'routes/app_router.dart';
 class MainApp extends StatefulWidget {
   const MainApp({
     required this.offlineStore,
+    required this.configuration,
     this.networkStatusService,
     this.outboxHandlers = const [],
     this.offlineDatabaseKeyManager,
-    this.configuration,
     super.key,
   });
 
@@ -82,7 +83,7 @@ class MainApp extends StatefulWidget {
   final NetworkStatusService? networkStatusService;
   final List<OutboxOperationHandler> outboxHandlers;
   final OfflineDatabaseKeyManager? offlineDatabaseKeyManager;
-  final AppConfiguration? configuration;
+  final AppConfiguration configuration;
 
   @override
   State<MainApp> createState() => _MainAppState();
@@ -123,7 +124,7 @@ final class _MainAppState extends State<MainApp> {
   @override
   void initState() {
     super.initState();
-    _configuration = widget.configuration ?? AppConfiguration.localTest();
+    _configuration = widget.configuration;
     _networkStatusService =
         widget.networkStatusService ?? _createNetworkStatusService();
     final fieldConfig = FieldOperationsTestConfig.current;
@@ -190,7 +191,7 @@ final class _MainAppState extends State<MainApp> {
       warehouseIdReader: () async => _sessionController.currentWarehouse?.id,
       eventBus: _eventBus,
       requestObserver: ApiReachabilityObserver(_networkStatusService).call,
-      apiBaseUri: _configuration.apiBaseUri,
+      configuration: _configuration,
     );
     final attachmentsRemoteDataSource = ApiAttachmentsRemoteDataSource(
       _apiClient,
@@ -425,10 +426,13 @@ final class _MainAppState extends State<MainApp> {
 
   @override
   Widget build(BuildContext context) {
-    return MaterialApp.router(
-      title: 'RIMS',
-      theme: AppTheme.light,
-      routerConfig: _router,
+    return AppConfigurationScope(
+      configuration: _configuration,
+      child: MaterialApp.router(
+        title: 'RIMS',
+        theme: AppTheme.light,
+        routerConfig: _router,
+      ),
     );
   }
 }

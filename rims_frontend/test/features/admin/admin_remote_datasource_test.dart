@@ -20,7 +20,7 @@ void main() {
             '{"code":0,"message":"ok","data":{"id":10,"code":"SKU-WA-550","name":"矿泉水","unit":"瓶","category":"","spec":"","barcode":"","retailPrice":3.5,"costPrice":1.2,"imageUrl":"","status":1}}',
       );
       final dataSource = ApiAdminRemoteDataSource(
-        ApiClient(
+        ApiClient.test(
           dio: Dio()..httpClientAdapter = adapter,
           enableLogging: false,
         ),
@@ -50,7 +50,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiAdminRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.listUsers(keyword: 'alice', page: 2);
@@ -138,7 +138,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiAdminRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.createUser(
@@ -174,7 +174,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiAdminRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.createUser(
@@ -198,7 +198,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiAdminRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.createUser(
@@ -222,7 +222,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiAdminRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.changeOwnPassword(
@@ -247,7 +247,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiAdminRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.resetUserPassword(
@@ -267,7 +267,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiAdminRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.updateUser(
@@ -307,7 +307,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiAdminRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.updateUser(
@@ -327,7 +327,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiAdminRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.deleteUser(2);
@@ -346,7 +346,7 @@ void main() {
       );
       final dio = Dio()..httpClientAdapter = adapter;
       final dataSource = ApiAdminRemoteDataSource(
-        ApiClient(dio: dio, enableLogging: false),
+        ApiClient.test(dio: dio, enableLogging: false),
       );
 
       final result = await dataSource.listProducts(keyword: '矿泉水', page: 2);
@@ -375,7 +375,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiAdminRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.createProduct(
@@ -418,7 +418,7 @@ void main() {
       );
       final dio = Dio()..httpClientAdapter = adapter;
       final dataSource = ApiAdminRemoteDataSource(
-        ApiClient(dio: dio, enableLogging: false),
+        ApiClient.test(dio: dio, enableLogging: false),
       );
 
       final result = await dataSource.createProduct(
@@ -450,7 +450,7 @@ void main() {
       );
       final dio = Dio()..httpClientAdapter = adapter;
       final dataSource = ApiAdminRemoteDataSource(
-        ApiClient(dio: dio, enableLogging: false),
+        ApiClient.test(dio: dio, enableLogging: false),
       );
 
       final result = await dataSource.createProduct(
@@ -474,7 +474,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiAdminRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.updateProduct(
@@ -524,7 +524,7 @@ void main() {
       );
       final dio = Dio()..httpClientAdapter = adapter;
       final dataSource = ApiAdminRemoteDataSource(
-        ApiClient(dio: dio, enableLogging: false),
+        ApiClient.test(dio: dio, enableLogging: false),
       );
 
       final result = await dataSource.updateProduct(
@@ -552,7 +552,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiAdminRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.deleteProduct(10);
@@ -569,7 +569,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiAdminRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.listWarehouses(keyword: '上海', page: 2);
@@ -596,7 +596,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiAdminRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.createWarehouse(
@@ -630,7 +630,7 @@ void main() {
       );
       final dio = Dio()..httpClientAdapter = adapter;
       final dataSource = ApiAdminRemoteDataSource(
-        ApiClient(dio: dio, enableLogging: false),
+        ApiClient.test(dio: dio, enableLogging: false),
       );
 
       final result = await dataSource.createWarehouse(
@@ -655,7 +655,7 @@ void main() {
       );
       final dio = Dio()..httpClientAdapter = adapter;
       final dataSource = ApiAdminRemoteDataSource(
-        ApiClient(dio: dio, enableLogging: false),
+        ApiClient.test(dio: dio, enableLogging: false),
       );
 
       final result = await dataSource.createWarehouse(
@@ -679,7 +679,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiAdminRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.updateWarehouse(
@@ -715,7 +715,7 @@ void main() {
       );
       final dio = Dio()..httpClientAdapter = adapter;
       final dataSource = ApiAdminRemoteDataSource(
-        ApiClient(dio: dio, enableLogging: false),
+        ApiClient.test(dio: dio, enableLogging: false),
       );
 
       final result = await dataSource.updateWarehouse(
@@ -738,7 +738,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiAdminRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.deleteWarehouse(1);
@@ -755,7 +755,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiAdminRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.listWarehouseUsers(1, page: 2);
@@ -781,7 +781,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiAdminRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.bindWarehouseUsers(
@@ -802,7 +802,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiAdminRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.unbindWarehouseUser(
@@ -822,7 +822,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiAdminRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.listRoles();
@@ -847,7 +847,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiAdminRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.listRoles();
@@ -867,7 +867,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiAdminRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.listRoles();
@@ -886,7 +886,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiAdminRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.listPermissions();
@@ -912,7 +912,7 @@ void main() {
       );
       final dio = Dio()..httpClientAdapter = adapter;
       final dataSource = ApiAdminRemoteDataSource(
-        ApiClient(dio: dio, enableLogging: false),
+        ApiClient.test(dio: dio, enableLogging: false),
       );
 
       final result = await dataSource.listPermissions();
@@ -933,7 +933,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiAdminRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.updateRolePermissions(
@@ -998,7 +998,7 @@ Future<void> _expectMissingListPayloadFailure<R>({
   );
   final dio = Dio()..httpClientAdapter = adapter;
   final dataSource = ApiAdminRemoteDataSource(
-    ApiClient(dio: dio, enableLogging: false),
+    ApiClient.test(dio: dio, enableLogging: false),
   );
 
   final result = await request(dataSource);
@@ -1020,7 +1020,7 @@ Future<void> _expectMalformedListItemFailure<R>({
   );
   final dio = Dio()..httpClientAdapter = adapter;
   final dataSource = ApiAdminRemoteDataSource(
-    ApiClient(dio: dio, enableLogging: false),
+    ApiClient.test(dio: dio, enableLogging: false),
   );
 
   final result = await request(dataSource);

@@ -30,12 +30,15 @@ abstract final class ApiUrlPolicy {
     if (uri.path != '/api/v1') {
       throw const FormatException('API_BASE_URL path must be /api/v1.');
     }
-    if (!_isAscii(uri.host) || uri.authority.contains('%')) {
+    if (!_isAscii(uri.host) ||
+        uri.authority.contains('%') ||
+        uri.host.split('.').any((label) => label.startsWith('xn--')) ||
+        _isAmbiguousNumericHost(uri.host)) {
       throw const FormatException('API_BASE_URL host must be plain ASCII.');
     }
 
-    final localTarget = _isLocalTarget(uri.host);
-    if (!environment.isLocal && localTarget) {
+    final localTarget = _isAllowedLocalTarget(uri.host);
+    if (!environment.isLocal && _isNonPublicTarget(uri.host)) {
       throw const FormatException(
         'Staging and production cannot target a local API host.',
       );
@@ -47,9 +50,9 @@ abstract final class ApiUrlPolicy {
           'HTTP is allowed only for explicit local development targets.',
         );
       }
-      if (!uri.hasPort || uri.port != 8080) {
+      if (!uri.hasPort) {
         throw const FormatException(
-          'Local HTTP API_BASE_URL must use port 8080.',
+          'Local HTTP API_BASE_URL must use an explicit port.',
         );
       }
       return uri;
@@ -71,14 +74,22 @@ abstract final class ApiUrlPolicy {
     return value.codeUnits.every((unit) => unit >= 0x21 && unit <= 0x7e);
   }
 
-  static bool _isLocalTarget(String host) {
-    final normalized = host.toLowerCase();
+  static bool _isAllowedLocalTarget(String host) {
+    final normalized = _normalizeHost(host);
     if (normalized == 'localhost' || normalized.endsWith('.localhost')) {
       return true;
     }
     if (normalized == '::1') return true;
+    if (normalized.startsWith('fc') || normalized.startsWith('fd')) return true;
+    if (normalized.startsWith('::ffff:')) {
+      return _isAllowedLocalIPv4(_parseIPv4(normalized.substring(7)));
+    }
 
     final octets = _parseIPv4(normalized);
+    return _isAllowedLocalIPv4(octets);
+  }
+
+  static bool _isAllowedLocalIPv4(List<int>? octets) {
     if (octets == null) return false;
     final first = octets[0];
     final second = octets[1];
@@ -86,6 +97,46 @@ abstract final class ApiUrlPolicy {
         first == 10 ||
         (first == 172 && second >= 16 && second <= 31) ||
         (first == 192 && second == 168);
+  }
+
+  static bool _isNonPublicTarget(String host) {
+    final normalized = _normalizeHost(host);
+    if (normalized.contains(':')) {
+      return true;
+    }
+    if (_isAllowedLocalTarget(normalized) ||
+        normalized == '::' ||
+        normalized.startsWith('fe8') ||
+        normalized.startsWith('fe9') ||
+        normalized.startsWith('fea') ||
+        normalized.startsWith('feb')) {
+      return true;
+    }
+    final octets = _parseIPv4(normalized);
+    if (octets == null) return false;
+    return octets[0] == 0 ||
+        (octets[0] == 169 && octets[1] == 254) ||
+        octets[0] >= 224;
+  }
+
+  static String _normalizeHost(String host) {
+    var normalized = host.toLowerCase();
+    if (normalized.startsWith('[') && normalized.endsWith(']')) {
+      normalized = normalized.substring(1, normalized.length - 1);
+    }
+    while (normalized.endsWith('.')) {
+      normalized = normalized.substring(0, normalized.length - 1);
+    }
+    return normalized;
+  }
+
+  static bool _isAmbiguousNumericHost(String host) {
+    final normalized = _normalizeHost(host);
+    if (RegExp(r'^\d+$').hasMatch(normalized) || normalized.startsWith('0x')) {
+      return true;
+    }
+    return RegExp(r'^[0-9.]+$').hasMatch(normalized) &&
+        _parseIPv4(normalized) == null;
   }
 
   static List<int>? _parseIPv4(String host) {

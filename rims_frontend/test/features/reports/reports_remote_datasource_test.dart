@@ -14,7 +14,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiReportsRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.loadSalesStats(
@@ -45,7 +45,7 @@ void main() {
       final adapter = _CapturingAdapter(body: '{"code":0,"message":"ok"}');
       final dio = Dio()..httpClientAdapter = adapter;
       final dataSource = ApiReportsRemoteDataSource(
-        ApiClient(dio: dio, enableLogging: false),
+        ApiClient.test(dio: dio, enableLogging: false),
       );
 
       final result = await dataSource.loadSalesStats(
@@ -70,7 +70,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiReportsRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.loadSalesTrend(
@@ -97,7 +97,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiReportsRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.loadSalesTrend(
@@ -198,7 +198,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiReportsRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.loadSalesRanking(
@@ -230,7 +230,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiReportsRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.loadInventoryOverview();
@@ -255,7 +255,7 @@ void main() {
       final adapter = _CapturingAdapter(body: '{"code":0,"message":"ok"}');
       final dio = Dio()..httpClientAdapter = adapter;
       final dataSource = ApiReportsRemoteDataSource(
-        ApiClient(dio: dio, enableLogging: false),
+        ApiClient.test(dio: dio, enableLogging: false),
       );
 
       final result = await dataSource.loadInventoryOverview();
@@ -277,7 +277,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiReportsRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.loadInventoryTurnover(
@@ -310,7 +310,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiReportsRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.loadSlowMovingInventory(
@@ -350,7 +350,7 @@ Future<void> _expectMissingListPayload<T>({
   final adapter = _CapturingAdapter(body: '{"code":0,"message":"ok"}');
   final dio = Dio()..httpClientAdapter = adapter;
   final dataSource = ApiReportsRemoteDataSource(
-    ApiClient(dio: dio, enableLogging: false),
+    ApiClient.test(dio: dio, enableLogging: false),
   );
 
   final result = await load(dataSource);
@@ -373,7 +373,7 @@ Future<void> _expectNonObjectListItem<T>({
   );
   final dio = Dio()..httpClientAdapter = adapter;
   final dataSource = ApiReportsRemoteDataSource(
-    ApiClient(dio: dio, enableLogging: false),
+    ApiClient.test(dio: dio, enableLogging: false),
   );
 
   final result = await load(dataSource);

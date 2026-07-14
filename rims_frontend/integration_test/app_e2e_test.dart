@@ -1,9 +1,11 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart' show kReleaseMode;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:rims_frontend/features/documents/presentation/view_models/documents_view_model.dart';
+import 'package:rims_frontend/core/config/app_environment.dart';
 import 'package:rims_frontend/features/inventory/presentation/widgets/inventory_product_tile.dart';
 import 'package:rims_frontend/features/offline/data/repositories/memory_offline_store.dart';
 import 'package:rims_frontend/main.dart';
@@ -313,6 +315,9 @@ Future<void> _pumpFreshApp(WidgetTester tester, String instance) async {
     MainApp(
       key: ValueKey<String>(instance),
       offlineStore: MemoryOfflineStore(),
+      configuration: AppConfiguration.fromCompileTimeDefines(
+        isReleaseMode: kReleaseMode,
+      ),
     ),
   );
   await tester.pump();

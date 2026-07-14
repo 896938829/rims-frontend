@@ -1,5 +1,7 @@
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 
+import '../config/app_environment.dart';
 import '../events/app_event.dart';
 import '../events/app_event_bus.dart';
 import '../result/failure.dart';
@@ -26,6 +28,7 @@ final class ApiRequestOutcome {
 
 final class ApiClient {
   ApiClient({
+    required AppConfiguration configuration,
     Dio? dio,
     ApiExceptionMapper exceptionMapper = const ApiExceptionMapper(),
     TokenReader? tokenReader,
@@ -33,7 +36,6 @@ final class ApiClient {
     AppEventBus? eventBus,
     ApiRequestObserver? requestObserver,
     bool enableLogging = true,
-    Uri? apiBaseUri,
   }) : this._(
          dio: dio ?? Dio(),
          exceptionMapper: exceptionMapper,
@@ -42,7 +44,27 @@ final class ApiClient {
          eventBus: eventBus,
          requestObserver: requestObserver,
          enableLogging: enableLogging,
-         apiBaseUri: apiBaseUri ?? ApiEndpoints.baseUri,
+         apiBaseUri: configuration.apiBaseUri,
+       );
+
+  @visibleForTesting
+  ApiClient.test({
+    Dio? dio,
+    ApiExceptionMapper exceptionMapper = const ApiExceptionMapper(),
+    TokenReader? tokenReader,
+    WarehouseIdReader? warehouseIdReader,
+    AppEventBus? eventBus,
+    ApiRequestObserver? requestObserver,
+    bool enableLogging = true,
+  }) : this._(
+         dio: dio ?? Dio(),
+         exceptionMapper: exceptionMapper,
+         tokenReader: tokenReader,
+         warehouseIdReader: warehouseIdReader,
+         eventBus: eventBus,
+         requestObserver: requestObserver,
+         enableLogging: enableLogging,
+         apiBaseUri: AppConfiguration.localTest().apiBaseUri,
        );
 
   ApiClient._({

@@ -9,7 +9,7 @@ void main() {
   test('forwards cancellation and upload/download progress', () async {
     final adapter = _TransferAdapter();
     final dio = Dio()..httpClientAdapter = adapter;
-    final client = ApiClient(dio: dio, enableLogging: false);
+    final client = ApiClient.test(dio: dio, enableLogging: false);
     final cancelToken = CancelToken();
     final sent = <String>[];
     final received = <String>[];
@@ -35,7 +35,7 @@ void main() {
 
   test('cancelled request returns CancellationFailure', () async {
     final token = CancelToken()..cancel('user cancelled');
-    final client = ApiClient(dio: Dio(), enableLogging: false);
+    final client = ApiClient.test(dio: Dio(), enableLogging: false);
 
     final result = await client.get<Object>('/slow', cancelToken: token);
 

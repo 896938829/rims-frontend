@@ -283,7 +283,7 @@ void main() {
       final outbox = MemoryOutboxRepository(stateMachine: OutboxStateMachine());
       final repository = AttachmentsRepositoryImpl(
         remoteDataSource: ApiAttachmentsRemoteDataSource(
-          ApiClient(
+          ApiClient.test(
             dio: Dio()..httpClientAdapter = _TimeoutAttachmentAdapter(type),
             enableLogging: false,
           ),

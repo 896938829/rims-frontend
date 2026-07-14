@@ -17,7 +17,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiAuthRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.login(
@@ -52,7 +52,7 @@ void main() {
       );
       final dio = Dio()..httpClientAdapter = adapter;
       final dataSource = ApiAuthRemoteDataSource(
-        ApiClient(dio: dio, enableLogging: false),
+        ApiClient.test(dio: dio, enableLogging: false),
       );
 
       final result = await dataSource.loadCurrentUser();
@@ -85,7 +85,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiAuthRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.login(
@@ -109,7 +109,7 @@ void main() {
       );
       final dio = Dio()..httpClientAdapter = adapter;
       final dataSource = ApiAuthRemoteDataSource(
-        ApiClient(dio: dio, enableLogging: false),
+        ApiClient.test(dio: dio, enableLogging: false),
       );
 
       final result = await dataSource.loadCurrentUser();
@@ -133,7 +133,7 @@ void main() {
       );
       final dio = Dio()..httpClientAdapter = adapter;
       final dataSource = ApiAuthRemoteDataSource(
-        ApiClient(dio: dio, enableLogging: false),
+        ApiClient.test(dio: dio, enableLogging: false),
       );
 
       final result = await dataSource.loadWarehouses();
@@ -162,7 +162,7 @@ void main() {
       );
       final dio = Dio()..httpClientAdapter = adapter;
       final dataSource = ApiAuthRemoteDataSource(
-        ApiClient(dio: dio, enableLogging: false),
+        ApiClient.test(dio: dio, enableLogging: false),
       );
 
       final result = await dataSource.loadWarehouses();
@@ -209,7 +209,7 @@ void main() {
       );
       final dio = Dio()..httpClientAdapter = adapter;
       final dataSource = ApiAuthRemoteDataSource(
-        ApiClient(dio: dio, enableLogging: false),
+        ApiClient.test(dio: dio, enableLogging: false),
       );
 
       final result = await dataSource.switchCurrentWarehouse(2);
@@ -231,7 +231,7 @@ void main() {
       );
       final dio = Dio()..httpClientAdapter = adapter;
       final dataSource = ApiAuthRemoteDataSource(
-        ApiClient(
+        ApiClient.test(
           dio: dio,
           tokenReader: () async => throw StateError('global token gate closed'),
           enableLogging: false,
@@ -255,7 +255,7 @@ Future<void> _expectWarehouseListFailure({
   final adapter = _CapturingAdapter(body: body);
   final dio = Dio()..httpClientAdapter = adapter;
   final dataSource = ApiAuthRemoteDataSource(
-    ApiClient(dio: dio, enableLogging: false),
+    ApiClient.test(dio: dio, enableLogging: false),
   );
 
   final Result<List<WarehouseModel>> result = await dataSource.loadWarehouses();

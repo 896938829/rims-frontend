@@ -16,7 +16,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiInventoryRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.findProductByBarcode('6901234567890');
@@ -44,7 +44,7 @@ void main() {
       );
       final dio = Dio()..httpClientAdapter = adapter;
       final dataSource = ApiInventoryRemoteDataSource(
-        ApiClient(dio: dio, enableLogging: false),
+        ApiClient.test(dio: dio, enableLogging: false),
       );
 
       final result = await dataSource.findProductByBarcode('6901234567890');
@@ -67,7 +67,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiInventoryRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.listInventoryAlerts();
@@ -91,7 +91,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiInventoryRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.listInventory(keyword: '矿泉水', page: 2);
@@ -117,7 +117,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiInventoryRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     await dataSource.listInventory(keyword: ' SKU ', page: 2);
@@ -186,7 +186,7 @@ void main() {
       );
       final dio = Dio()..httpClientAdapter = adapter;
       final dataSource = ApiInventoryRemoteDataSource(
-        ApiClient(dio: dio, enableLogging: false),
+        ApiClient.test(dio: dio, enableLogging: false),
       );
 
       final result = await dataSource.listNonStandardInventory();
@@ -212,7 +212,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiInventoryRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.updateInventorySettings(
@@ -243,7 +243,7 @@ void main() {
       );
       final dio = Dio()..httpClientAdapter = adapter;
       final dataSource = ApiInventoryRemoteDataSource(
-        ApiClient(dio: dio, enableLogging: false),
+        ApiClient.test(dio: dio, enableLogging: false),
       );
 
       final result = await dataSource.updateInventorySettings(
@@ -275,7 +275,7 @@ Future<void> _expectMissingListPayload<T>({
   );
   final dio = Dio()..httpClientAdapter = adapter;
   final dataSource = ApiInventoryRemoteDataSource(
-    ApiClient(dio: dio, enableLogging: false),
+    ApiClient.test(dio: dio, enableLogging: false),
   );
 
   final result = await load(dataSource);
@@ -300,7 +300,7 @@ Future<void> _expectNonObjectListItem<T>({
   );
   final dio = Dio()..httpClientAdapter = adapter;
   final dataSource = ApiInventoryRemoteDataSource(
-    ApiClient(dio: dio, enableLogging: false),
+    ApiClient.test(dio: dio, enableLogging: false),
   );
 
   final result = await load(dataSource);

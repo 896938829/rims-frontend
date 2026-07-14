@@ -34,7 +34,7 @@ void main() {
           (
             name: 'private development target',
             environment: AppEnvironment.development,
-            url: 'http://192.168.20.4:8080/api/v1',
+            url: 'http://192.168.20.4:18080/api/v1',
             allowLocalHttp: true,
           ),
           (
@@ -160,9 +160,9 @@ void main() {
             allowLocalHttp: false,
           ),
           (
-            name: 'unexpected local HTTP port',
+            name: 'local HTTP missing explicit port',
             environment: AppEnvironment.development,
-            url: 'http://localhost:9090/api/v1',
+            url: 'http://localhost/api/v1',
             allowLocalHttp: true,
           ),
           (
@@ -175,6 +175,48 @@ void main() {
             name: 'surrounding whitespace',
             environment: AppEnvironment.production,
             url: ' https://api.rims.example/api/v1 ',
+            allowLocalHttp: false,
+          ),
+          (
+            name: 'production localhost trailing dot',
+            environment: AppEnvironment.production,
+            url: 'https://localhost./api/v1',
+            allowLocalHttp: false,
+          ),
+          (
+            name: 'production IPv4 mapped loopback',
+            environment: AppEnvironment.production,
+            url: 'https://[::ffff:127.0.0.1]/api/v1',
+            allowLocalHttp: false,
+          ),
+          (
+            name: 'production expanded IPv6 loopback',
+            environment: AppEnvironment.production,
+            url: 'https://[0:0:0:0:0:0:0:1]/api/v1',
+            allowLocalHttp: false,
+          ),
+          (
+            name: 'production IPv4 link local',
+            environment: AppEnvironment.production,
+            url: 'https://169.254.10.20/api/v1',
+            allowLocalHttp: false,
+          ),
+          (
+            name: 'production IPv6 link local',
+            environment: AppEnvironment.production,
+            url: 'https://[fe80::1]/api/v1',
+            allowLocalHttp: false,
+          ),
+          (
+            name: 'noncanonical integer loopback',
+            environment: AppEnvironment.production,
+            url: 'https://2130706433/api/v1',
+            allowLocalHttp: false,
+          ),
+          (
+            name: 'punycode host label',
+            environment: AppEnvironment.production,
+            url: 'https://xn--fsqu00a.xn--0zwm56d/api/v1',
             allowLocalHttp: false,
           ),
         ];

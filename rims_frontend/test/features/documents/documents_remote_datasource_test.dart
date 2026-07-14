@@ -24,7 +24,7 @@ void main() {
           body: '{"code":$code,"message":"rejected","data":null}',
         );
         final dataSource = ApiDocumentsRemoteDataSource(
-          ApiClient(
+          ApiClient.test(
             dio: Dio()..httpClientAdapter = adapter,
             enableLogging: false,
           ),
@@ -57,7 +57,10 @@ void main() {
           '{"code":0,"message":"ok","data":{"id":42,"docNo":"RK20260713001","docType":1,"docTypeName":"入库单","statusName":"草稿","lines":[{"id":101,"productId":7,"productCode":"SKU-7","productName":"矿泉水","quantity":3,"unit":"箱","remark":""}]}}',
     );
     final dataSource = ApiDocumentsRemoteDataSource(
-      ApiClient(dio: Dio()..httpClientAdapter = adapter, enableLogging: false),
+      ApiClient.test(
+        dio: Dio()..httpClientAdapter = adapter,
+        enableLogging: false,
+      ),
     );
 
     final result = await dataSource.getDocument(42);
@@ -75,7 +78,10 @@ void main() {
           '{"code":0,"message":"ok","data":{"id":42,"docNo":"RK20260713001","docType":1,"docTypeName":"入库单","statusName":"草稿"}}',
     );
     final dataSource = ApiDocumentsRemoteDataSource(
-      ApiClient(dio: Dio()..httpClientAdapter = adapter, enableLogging: false),
+      ApiClient.test(
+        dio: Dio()..httpClientAdapter = adapter,
+        enableLogging: false,
+      ),
     );
 
     expect((await dataSource.getDocument(42)).isFailure, isTrue);
@@ -88,7 +94,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiDocumentsRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.listRecentDocuments();
@@ -112,7 +118,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiDocumentsRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.listRecentDocuments(docType: 2, page: 3);
@@ -141,7 +147,7 @@ void main() {
       );
       final dio = Dio()..httpClientAdapter = adapter;
       final dataSource = ApiDocumentsRemoteDataSource(
-        ApiClient(dio: dio, enableLogging: false),
+        ApiClient.test(dio: dio, enableLogging: false),
       );
 
       final result = await dataSource.listRecentDocuments();
@@ -165,7 +171,7 @@ void main() {
       );
       final dio = Dio()..httpClientAdapter = adapter;
       final dataSource = ApiDocumentsRemoteDataSource(
-        ApiClient(dio: dio, enableLogging: false),
+        ApiClient.test(dio: dio, enableLogging: false),
       );
 
       final result = await dataSource.listRecentDocuments();
@@ -186,7 +192,7 @@ void main() {
     final adapter = _CapturingAdapter();
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiDocumentsRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.createDocument(
@@ -217,7 +223,7 @@ void main() {
     () async {
       final adapter = _CapturingAdapter();
       final dataSource = ApiDocumentsRemoteDataSource(
-        ApiClient(
+        ApiClient.test(
           dio: Dio()..httpClientAdapter = adapter,
           enableLogging: false,
         ),
@@ -261,7 +267,7 @@ void main() {
       );
       final dio = Dio()..httpClientAdapter = adapter;
       final dataSource = ApiDocumentsRemoteDataSource(
-        ApiClient(dio: dio, enableLogging: false),
+        ApiClient.test(dio: dio, enableLogging: false),
       );
 
       final result = await dataSource.createDocument(
@@ -290,7 +296,7 @@ void main() {
       final adapter = _CapturingAdapter();
       final dio = Dio()..httpClientAdapter = adapter;
       final dataSource = ApiDocumentsRemoteDataSource(
-        ApiClient(dio: dio, enableLogging: false),
+        ApiClient.test(dio: dio, enableLogging: false),
       );
 
       final result = await dataSource.createDocument(
@@ -319,7 +325,7 @@ void main() {
     final adapter = _CapturingAdapter();
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiDocumentsRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.createDocument(
@@ -347,7 +353,7 @@ void main() {
     final adapter = _CapturingAdapter();
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiDocumentsRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.createDocument(
@@ -374,7 +380,7 @@ void main() {
     final adapter = _CapturingAdapter();
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiDocumentsRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.createDocument(
@@ -403,7 +409,7 @@ void main() {
       final adapter = _CapturingAdapter(statusCode: 204, body: '');
       final dio = Dio()..httpClientAdapter = adapter;
       final dataSource = ApiDocumentsRemoteDataSource(
-        ApiClient(dio: dio, enableLogging: false),
+        ApiClient.test(dio: dio, enableLogging: false),
       );
 
       final result = await dataSource.completeDocument(
@@ -422,7 +428,7 @@ void main() {
     final adapter = _CapturingAdapter(statusCode: 204, body: '');
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiDocumentsRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.confirmDocument(
@@ -440,7 +446,7 @@ void main() {
     final adapter = _CapturingAdapter(statusCode: 204, body: '');
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiDocumentsRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.settleDocument(
@@ -461,7 +467,7 @@ void main() {
     );
     final dio = Dio()..httpClientAdapter = adapter;
     final dataSource = ApiDocumentsRemoteDataSource(
-      ApiClient(dio: dio, enableLogging: false),
+      ApiClient.test(dio: dio, enableLogging: false),
     );
 
     final result = await dataSource.listTransactions(keyword: 'XS2026');
@@ -492,7 +498,7 @@ void main() {
       );
       final dio = Dio()..httpClientAdapter = adapter;
       final dataSource = ApiDocumentsRemoteDataSource(
-        ApiClient(dio: dio, enableLogging: false),
+        ApiClient.test(dio: dio, enableLogging: false),
       );
 
       final result = await dataSource.listTransactions();
@@ -516,7 +522,7 @@ void main() {
       );
       final dio = Dio()..httpClientAdapter = adapter;
       final dataSource = ApiDocumentsRemoteDataSource(
-        ApiClient(dio: dio, enableLogging: false),
+        ApiClient.test(dio: dio, enableLogging: false),
       );
 
       final result = await dataSource.listTransactions();

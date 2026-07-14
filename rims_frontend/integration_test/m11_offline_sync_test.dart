@@ -2,12 +2,14 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
-import 'package:flutter/foundation.dart' show debugPrintSynchronously;
+import 'package:flutter/foundation.dart'
+    show debugPrintSynchronously, kReleaseMode;
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:integration_test/integration_test.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:rims_frontend/app.dart';
+import 'package:rims_frontend/core/config/app_environment.dart';
 import 'package:rims_frontend/features/attachments/presentation/view_models/attachments_view_model.dart';
 import 'package:rims_frontend/features/documents/presentation/view_models/documents_view_model.dart';
 import 'package:rims_frontend/features/inventory/presentation/view_models/inventory_view_model.dart';
@@ -1080,7 +1082,13 @@ Future<void> _pumpApp(
   await tester.pumpWidget(const SizedBox.shrink());
   await tester.pump();
   await tester.pumpWidget(
-    MainApp(key: ValueKey(instance), offlineStore: store),
+    MainApp(
+      key: ValueKey(instance),
+      offlineStore: store,
+      configuration: AppConfiguration.fromCompileTimeDefines(
+        isReleaseMode: kReleaseMode,
+      ),
+    ),
   );
   await tester.pump();
 }

@@ -1,8 +1,4 @@
 abstract final class ApiEndpoints {
-  static const String baseUrl = 'http://localhost:8080/api/v1';
-  static final Uri baseUri = Uri.parse(baseUrl);
-  static final Uri healthUri = healthUriFor(baseUri);
-
   static Uri healthUriFor(Uri apiBaseUri) {
     return apiBaseUri.replace(path: '/healthz', query: null, fragment: null);
   }

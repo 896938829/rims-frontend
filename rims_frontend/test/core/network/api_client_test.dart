@@ -5,6 +5,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rims_frontend/core/events/app_event.dart';
 import 'package:rims_frontend/core/events/app_event_bus.dart';
+import 'package:rims_frontend/core/config/app_environment.dart';
 import 'package:rims_frontend/core/network/api_client.dart';
 import 'package:rims_frontend/core/network/api_endpoints.dart';
 import 'package:rims_frontend/core/network/interceptors/auth_interceptor.dart';
@@ -12,9 +13,12 @@ import 'package:rims_frontend/core/network/interceptors/logging_interceptor.dart
 import 'package:rims_frontend/core/network/interceptors/warehouse_interceptor.dart';
 
 void main() {
-  test('defaults API base URL to localhost for local backend integration', () {
-    expect(ApiEndpoints.baseUrl, 'http://localhost:8080/api/v1');
-    expect(ApiEndpoints.healthUri, Uri.parse('http://localhost:8080/healthz'));
+  test('test client uses the explicit local test configuration', () {
+    final dio = Dio();
+
+    ApiClient.test(dio: dio, enableLogging: false);
+
+    expect(dio.options.baseUrl, 'http://localhost:8080/api/v1');
   });
 
   test('derives health URI from the validated API base URI', () {
@@ -29,7 +33,12 @@ void main() {
 
     ApiClient(
       dio: dio,
-      apiBaseUri: Uri.parse('https://api.rims.example/api/v1'),
+      configuration: AppConfiguration.fromValues(
+        environment: 'production',
+        apiBaseUrl: 'https://api.rims.example/api/v1',
+        allowLocalHttp: false,
+        isReleaseMode: true,
+      ),
       enableLogging: false,
     );
 
@@ -39,7 +48,7 @@ void main() {
   test('attaches logging interceptor by default', () {
     final dio = Dio();
 
-    ApiClient(dio: dio);
+    ApiClient.test(dio: dio);
 
     expect(dio.interceptors.whereType<SafeLoggingInterceptor>(), hasLength(1));
   });
@@ -47,7 +56,7 @@ void main() {
   test('does not attach logging interceptor when logging is disabled', () {
     final dio = Dio();
 
-    ApiClient(dio: dio, enableLogging: false);
+    ApiClient.test(dio: dio, enableLogging: false);
 
     expect(dio.interceptors.whereType<SafeLoggingInterceptor>(), isEmpty);
   });
@@ -55,7 +64,11 @@ void main() {
   test('attaches auth interceptor when token reader is provided', () {
     final dio = Dio();
 
-    ApiClient(dio: dio, tokenReader: () async => 'token', enableLogging: false);
+    ApiClient.test(
+      dio: dio,
+      tokenReader: () async => 'token',
+      enableLogging: false,
+    );
 
     expect(dio.interceptors.whereType<AuthInterceptor>(), hasLength(1));
   });
@@ -63,7 +76,7 @@ void main() {
   test('attaches warehouse interceptor when warehouse reader is provided', () {
     final dio = Dio();
 
-    ApiClient(
+    ApiClient.test(
       dio: dio,
       warehouseIdReader: () async => 12,
       enableLogging: false,
@@ -77,7 +90,7 @@ void main() {
     () async {
       final adapter = _CapturingAdapter();
       final dio = Dio()..httpClientAdapter = adapter;
-      final client = ApiClient(
+      final client = ApiClient.test(
         dio: dio,
         tokenReader: () async => 'token',
         enableLogging: false,
@@ -95,7 +108,7 @@ void main() {
     () async {
       final adapter = _CapturingAdapter();
       final dio = Dio()..httpClientAdapter = adapter;
-      final client = ApiClient(
+      final client = ApiClient.test(
         dio: dio,
         warehouseIdReader: () async => 12,
         enableLogging: false,
@@ -119,7 +132,7 @@ void main() {
           statusCode: 401,
           body: '{"code":10001,"message":"登录已过期","traceId":"trace-auth"}',
         );
-      final client = ApiClient(
+      final client = ApiClient.test(
         dio: dio,
         tokenReader: () async => 'current-token',
         eventBus: eventBus,
@@ -149,7 +162,7 @@ void main() {
           statusCode: 401,
           body: '{"code":10001,"message":"用户名或密码错误","traceId":"trace-login"}',
         );
-      final client = ApiClient(
+      final client = ApiClient.test(
         dio: dio,
         eventBus: eventBus,
         enableLogging: false,
@@ -179,7 +192,7 @@ void main() {
       statusCode: 401,
       body: '{"code":10001,"message":"登录已过期"}',
     );
-    final client = ApiClient(
+    final client = ApiClient.test(
       dio: Dio()..httpClientAdapter = adapter,
       tokenReader: () async => token,
       eventBus: eventBus,
@@ -201,7 +214,7 @@ void main() {
   test('request observer receives success after the real request', () async {
     final adapter = _CapturingAdapter();
     final outcomes = <ApiRequestOutcome>[];
-    final client = ApiClient(
+    final client = ApiClient.test(
       dio: Dio()..httpClientAdapter = adapter,
       requestObserver: outcomes.add,
       enableLogging: false,
@@ -220,7 +233,7 @@ void main() {
     'request observer receives mapped failure after the real request',
     () async {
       final outcomes = <ApiRequestOutcome>[];
-      final client = ApiClient(
+      final client = ApiClient.test(
         dio: Dio()
           ..httpClientAdapter = const _StatusAdapter(
             statusCode: 503,

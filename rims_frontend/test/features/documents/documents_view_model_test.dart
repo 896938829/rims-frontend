@@ -1224,7 +1224,7 @@ void main() {
         );
         final repository = DocumentsRepositoryImpl(
           remoteDataSource: ApiDocumentsRemoteDataSource(
-            ApiClient(
+            ApiClient.test(
               dio: Dio()..httpClientAdapter = adapter,
               enableLogging: false,
             ),

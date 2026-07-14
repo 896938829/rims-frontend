@@ -2,6 +2,8 @@ import 'dart:async';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:rims_frontend/core/config/app_configuration_scope.dart';
+import 'package:rims_frontend/core/config/app_environment.dart';
 import 'package:rims_frontend/core/result/failure.dart';
 import 'package:rims_frontend/core/result/result.dart';
 import 'package:rims_frontend/core/pagination/page_data.dart';
@@ -28,14 +30,30 @@ void main() {
         statusLabel: '标准',
         imageUrl: '/uploads/product-10.jpg',
       );
+      final configuration = AppConfiguration.fromValues(
+        environment: 'production',
+        apiBaseUrl: 'https://api.rims.example/api/v1',
+        allowLocalHttp: false,
+        isReleaseMode: true,
+      );
       await tester.pumpWidget(
-        const MaterialApp(
-          home: Scaffold(body: InventoryProductTile(product: sameOrigin)),
+        AppConfigurationScope(
+          configuration: configuration,
+          child: const MaterialApp(
+            home: Scaffold(body: InventoryProductTile(product: sameOrigin)),
+          ),
         ),
       );
       expect(
         find.byKey(const Key('inventory-product-network-image')),
         findsOneWidget,
+      );
+      final image = tester.widget<Image>(
+        find.byKey(const Key('inventory-product-network-image')),
+      );
+      expect(
+        (image.image as NetworkImage).url,
+        'https://api.rims.example/uploads/product-10.jpg',
       );
 
       const external = InventoryItem(
@@ -49,8 +67,11 @@ void main() {
         imageUrl: 'https://external.example/product.jpg',
       );
       await tester.pumpWidget(
-        const MaterialApp(
-          home: Scaffold(body: InventoryProductTile(product: external)),
+        AppConfigurationScope(
+          configuration: configuration,
+          child: const MaterialApp(
+            home: Scaffold(body: InventoryProductTile(product: external)),
+          ),
         ),
       );
       expect(

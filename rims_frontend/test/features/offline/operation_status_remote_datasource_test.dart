@@ -233,7 +233,7 @@ void main() {
 ApiOperationStatusRemoteDataSource _dataSource(_StatusAdapter adapter) {
   final dio = Dio()..httpClientAdapter = adapter;
   return ApiOperationStatusRemoteDataSource(
-    ApiClient(dio: dio, enableLogging: false),
+    ApiClient.test(dio: dio, enableLogging: false),
   );
 }
 

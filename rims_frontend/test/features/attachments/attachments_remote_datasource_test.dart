@@ -246,7 +246,7 @@ void main() {
 ApiAttachmentsRemoteDataSource _dataSource(_AttachmentAdapter adapter) {
   final dio = Dio()..httpClientAdapter = adapter;
   return ApiAttachmentsRemoteDataSource(
-    ApiClient(dio: dio, enableLogging: false),
+    ApiClient.test(dio: dio, enableLogging: false),
   );
 }
 
