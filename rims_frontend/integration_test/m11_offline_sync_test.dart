@@ -1204,7 +1204,17 @@ Future<void> _tapDocumentDetailAction(
   final deadline = DateTime.now().add(const Duration(seconds: 12));
   do {
     if (action.evaluate().isNotEmpty) {
-      await scrollUntilVisible(tester, actionKey);
+      try {
+        await scrollUntilVisible(
+          tester,
+          actionKey,
+          timeout: const Duration(seconds: 1),
+        );
+      } on TestFailure {
+        if (action.evaluate().isEmpty) continue;
+        rethrow;
+      }
+      if (action.hitTestable().evaluate().isEmpty) continue;
       await tester.tap(action.hitTestable().first);
       await settleBounded(tester);
       return;
