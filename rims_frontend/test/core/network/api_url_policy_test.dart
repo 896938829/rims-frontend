@@ -202,6 +202,24 @@ void main() {
             allowLocalHttp: false,
           ),
           (
+            name: 'production IPv4 mapped link local',
+            environment: AppEnvironment.production,
+            url: 'https://[::ffff:169.254.10.20]/api/v1',
+            allowLocalHttp: false,
+          ),
+          (
+            name: 'production IPv4 mapped unspecified address',
+            environment: AppEnvironment.production,
+            url: 'https://[::ffff:0.0.0.0]/api/v1',
+            allowLocalHttp: false,
+          ),
+          (
+            name: 'production IPv4 mapped multicast',
+            environment: AppEnvironment.production,
+            url: 'https://[::ffff:224.0.0.1]/api/v1',
+            allowLocalHttp: false,
+          ),
+          (
             name: 'production expanded IPv6 loopback',
             environment: AppEnvironment.production,
             url: 'https://[0:0:0:0:0:0:0:1]/api/v1',

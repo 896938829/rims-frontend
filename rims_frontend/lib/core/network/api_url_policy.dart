@@ -113,13 +113,19 @@ abstract final class ApiUrlPolicy {
     }
     final ipv6 = _parseIPv6(normalized);
     if (ipv6 != null) {
-      return ipv6.every((byte) => byte == 0) ||
+      final mappedIPv4 = _mappedIPv4(ipv6);
+      return (mappedIPv4 != null && _isNonPublicIPv4(mappedIPv4)) ||
+          ipv6.every((byte) => byte == 0) ||
           (ipv6[0] == 0xfe && (ipv6[1] & 0xc0) == 0x80) ||
           ipv6[0] == 0xff;
     }
     final octets = _parseIPv4(normalized);
-    if (octets == null) return false;
-    return octets[0] == 0 ||
+    return octets != null && _isNonPublicIPv4(octets);
+  }
+
+  static bool _isNonPublicIPv4(List<int> octets) {
+    return _isAllowedLocalIPv4(octets) ||
+        octets[0] == 0 ||
         (octets[0] == 169 && octets[1] == 254) ||
         octets[0] >= 224;
   }
