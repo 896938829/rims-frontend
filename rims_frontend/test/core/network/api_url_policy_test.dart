@@ -178,6 +178,18 @@ void main() {
             allowLocalHttp: true,
           ),
           (
+            name: 'local HTTP zero port',
+            environment: AppEnvironment.development,
+            url: 'http://localhost:0/api/v1',
+            allowLocalHttp: true,
+          ),
+          (
+            name: 'local HTTP port above TCP range',
+            environment: AppEnvironment.development,
+            url: 'http://localhost:65536/api/v1',
+            allowLocalHttp: true,
+          ),
+          (
             name: 'production loopback HTTPS',
             environment: AppEnvironment.production,
             url: 'https://127.0.0.1/api/v1',
@@ -232,9 +244,39 @@ void main() {
             allowLocalHttp: false,
           ),
           (
+            name: 'production carrier grade NAT IPv4',
+            environment: AppEnvironment.production,
+            url: 'https://100.64.0.1/api/v1',
+            allowLocalHttp: false,
+          ),
+          (
+            name: 'production benchmark IPv4',
+            environment: AppEnvironment.production,
+            url: 'https://198.18.0.1/api/v1',
+            allowLocalHttp: false,
+          ),
+          (
+            name: 'production mapped benchmark IPv4',
+            environment: AppEnvironment.production,
+            url: 'https://[::ffff:198.18.0.1]/api/v1',
+            allowLocalHttp: false,
+          ),
+          (
             name: 'production IPv6 link local',
             environment: AppEnvironment.production,
             url: 'https://[fe80::1]/api/v1',
+            allowLocalHttp: false,
+          ),
+          (
+            name: 'production deprecated IPv6 site local',
+            environment: AppEnvironment.production,
+            url: 'https://[fec0::1]/api/v1',
+            allowLocalHttp: false,
+          ),
+          (
+            name: 'production IPv6 discard-only address',
+            environment: AppEnvironment.production,
+            url: 'https://[100::1]/api/v1',
             allowLocalHttp: false,
           ),
           (

@@ -27,6 +27,14 @@ abstract final class ApiUrlPolicy {
         'API_BASE_URL must not contain userinfo, query, or fragment data.',
       );
     }
+    if (uri.hasPort) {
+      final port = uri.port;
+      if (port < 1 || port > 65535) {
+        throw const FormatException(
+          'API_BASE_URL port must be within the TCP port range.',
+        );
+      }
+    }
     if (uri.path != '/api/v1') {
       throw const FormatException('API_BASE_URL path must be /api/v1.');
     }
@@ -117,6 +125,29 @@ abstract final class ApiUrlPolicy {
       return (mappedIPv4 != null && _isNonPublicIPv4(mappedIPv4)) ||
           ipv6.every((byte) => byte == 0) ||
           (ipv6[0] == 0xfe && (ipv6[1] & 0xc0) == 0x80) ||
+          (ipv6[0] == 0xfe && (ipv6[1] & 0xc0) == 0xc0) ||
+          _hasIPv6Prefix(ipv6, const [0x00], 8) ||
+          _hasIPv6Prefix(ipv6, const [
+            0x00,
+            0x64,
+            0xff,
+            0x9b,
+            0x00,
+            0x01,
+          ], 48) ||
+          _hasIPv6Prefix(ipv6, const [
+            0x01,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+            0x00,
+          ], 64) ||
+          _hasIPv6Prefix(ipv6, const [0x20, 0x01, 0x0d, 0xb8], 32) ||
+          _hasIPv6Prefix(ipv6, const [0x20, 0x02], 16) ||
+          _hasIPv6Prefix(ipv6, const [0x3f, 0xff, 0x00], 20) ||
           ipv6[0] == 0xff;
     }
     final octets = _parseIPv4(normalized);
@@ -124,10 +155,20 @@ abstract final class ApiUrlPolicy {
   }
 
   static bool _isNonPublicIPv4(List<int> octets) {
+    final first = octets[0];
+    final second = octets[1];
+    final third = octets[2];
     return _isAllowedLocalIPv4(octets) ||
-        octets[0] == 0 ||
-        (octets[0] == 169 && octets[1] == 254) ||
-        octets[0] >= 224;
+        first == 0 ||
+        (first == 100 && second >= 64 && second <= 127) ||
+        (first == 169 && second == 254) ||
+        (first == 192 && second == 0 && third == 0) ||
+        (first == 192 && second == 0 && third == 2) ||
+        (first == 192 && second == 88 && third == 99) ||
+        (first == 198 && (second == 18 || second == 19)) ||
+        (first == 198 && second == 51 && third == 100) ||
+        (first == 203 && second == 0 && third == 113) ||
+        first >= 224;
   }
 
   static String _normalizeHost(String host) {
@@ -189,5 +230,20 @@ abstract final class ApiUrlPolicy {
       return null;
     }
     return bytes.sublist(12);
+  }
+
+  static bool _hasIPv6Prefix(
+    List<int> address,
+    List<int> prefix,
+    int prefixBits,
+  ) {
+    final wholeBytes = prefixBits ~/ 8;
+    for (var index = 0; index < wholeBytes; index++) {
+      if (address[index] != prefix[index]) return false;
+    }
+    final remainingBits = prefixBits % 8;
+    if (remainingBits == 0) return true;
+    final mask = 0xff << (8 - remainingBits) & 0xff;
+    return address[wholeBytes] & mask == prefix[wholeBytes] & mask;
   }
 }

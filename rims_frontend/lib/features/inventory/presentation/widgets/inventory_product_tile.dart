@@ -132,7 +132,7 @@ final class _InventoryProductImage extends StatelessWidget {
   Uri? _resolveSameOriginImage(Uri base, String value) {
     if (value.trim().isEmpty) return null;
     final raw = Uri.tryParse(value.trim());
-    if (raw == null || raw.hasFragment) return null;
+    if (raw == null || raw.userInfo.isNotEmpty || raw.hasFragment) return null;
     final origin = base.replace(path: '/', query: null, fragment: null);
     final resolved = raw.hasScheme
         ? raw

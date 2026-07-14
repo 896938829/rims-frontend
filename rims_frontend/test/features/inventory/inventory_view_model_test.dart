@@ -81,6 +81,74 @@ void main() {
     },
   );
 
+  testWidgets('inventory thumbnail rejects unsafe image URLs', (tester) async {
+    final configuration = AppConfiguration.fromValues(
+      environment: 'production',
+      apiBaseUrl: 'https://api.rims.example/api/v1',
+      allowLocalHttp: false,
+      isReleaseMode: true,
+    );
+    const unsafeUrls = <String>[
+      'http://api.rims.example/uploads/downgrade.jpg',
+      'https://api.rims.example:8443/uploads/wrong-port.jpg',
+      '//external.example/uploads/scheme-relative.jpg',
+      'https://user:password@api.rims.example/uploads/userinfo.jpg',
+      '/uploads/fragment.jpg#hidden',
+    ];
+
+    for (final imageUrl in unsafeUrls) {
+      final product = InventoryItem(
+        id: 72,
+        productId: 12,
+        productName: '不安全图片',
+        sku: 'SKU-UNSAFE',
+        availableQuantity: 1,
+        stockQuantity: 1,
+        statusLabel: '标准',
+        imageUrl: imageUrl,
+      );
+      await tester.pumpWidget(
+        AppConfigurationScope(
+          configuration: configuration,
+          child: MaterialApp(
+            home: Scaffold(body: InventoryProductTile(product: product)),
+          ),
+        ),
+      );
+      expect(
+        find.byKey(const Key('inventory-product-image-fallback')),
+        findsOneWidget,
+        reason: imageUrl,
+      );
+    }
+  });
+
+  testWidgets('inventory thumbnail falls back without configuration', (
+    tester,
+  ) async {
+    const product = InventoryItem(
+      id: 73,
+      productId: 13,
+      productName: '无配置图片',
+      sku: 'SKU-NO-CONFIG',
+      availableQuantity: 1,
+      stockQuantity: 1,
+      statusLabel: '标准',
+      imageUrl: '/uploads/no-config.jpg',
+    );
+
+    await tester.pumpWidget(
+      const MaterialApp(
+        home: Scaffold(body: InventoryProductTile(product: product)),
+      ),
+    );
+
+    expect(
+      find.byKey(const Key('inventory-product-image-fallback')),
+      findsOneWidget,
+    );
+  });
+
   test(
     'InventoryViewModel ignores an async load completion after dispose',
     () async {
