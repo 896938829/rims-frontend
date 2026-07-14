@@ -2798,6 +2798,17 @@ void main() {
     expect(find.text('矿泉水 550ml'), findsOneWidget);
     expect(find.text('x3'), findsWidgets);
     expect(find.text('完成单据'), findsOneWidget);
+    expect(
+      find.byKey(const Key('document-detail-close-button')),
+      findsOneWidget,
+    );
+
+    await tester.tap(find.byKey(const Key('document-detail-close-button')));
+    await tester.pumpAndSettle();
+    expect(find.text('单据详情'), findsNothing);
+
+    await tester.tap(find.text('SO-20260626-001 · 矿泉水 550ml x3'));
+    await tester.pumpAndSettle();
 
     await tester.tap(find.text('完成单据'));
     await tester.pumpAndSettle();

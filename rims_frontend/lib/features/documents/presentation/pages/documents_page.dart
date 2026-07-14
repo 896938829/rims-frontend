@@ -705,6 +705,7 @@ final class _DocumentDetailSheetState extends State<_DocumentDetailSheet> {
                     child: Text('单据详情', style: AppTextStyles.headingMedium),
                   ),
                   IconButton(
+                    key: const Key('document-detail-close-button'),
                     tooltip: '关闭',
                     onPressed: () => Navigator.of(context).pop(),
                     icon: const Icon(Icons.close),

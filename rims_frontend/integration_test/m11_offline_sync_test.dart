@@ -127,8 +127,7 @@ void main() {
           stockBefore = await _stockQuantity(documents);
           final cachedDetailId = documents.recentDocuments.first.id;
           await _openDocumentDetail(tester, cachedDetailId);
-          await tester.pageBack();
-          await settleBounded(tester);
+          await _closeDocumentDetail(tester);
           await _verifyLocalTransportFaults(tester);
           await _fault('airplane-mode', {'restoreMs': '3500'});
           await tester.pump(const Duration(milliseconds: 500));
@@ -424,8 +423,7 @@ void main() {
             serverAttachment.fileHash.toLowerCase() ==
                 stagedAttachmentHash.toLowerCase();
         expect(serverAttachmentVerified, isTrue);
-        await tester.pageBack();
-        await settleBounded(tester);
+        await _closeDocumentDetail(tester);
         await _fault('unreachable');
         final beforeLifecycle = await _operations(outbox, accountId);
         await _openDocumentDetail(tester, created.id);
@@ -1070,8 +1068,7 @@ Future<int> _verifyCachedReads(
   await _openDocumentDetail(tester, cachedDetailId);
   detailWatch.stop();
   latencies.add(detailWatch.elapsedMilliseconds);
-  await tester.pageBack();
-  await settleBounded(tester);
+  await _closeDocumentDetail(tester);
   return latencies.reduce((left, right) => left > right ? left : right);
 }
 
@@ -1091,6 +1088,10 @@ Future<void> _openDocumentDetail(WidgetTester tester, int documentId) async {
         find.byKey(const Key('document-detail-loading')).evaluate().isEmpty &&
         find.byKey(const Key('document-detail-error')).evaluate().isEmpty,
   );
+}
+
+Future<void> _closeDocumentDetail(WidgetTester tester) async {
+  await tapAndSettle(tester, const Key('document-detail-close-button'));
 }
 
 Future<void> _prepareDraft(
