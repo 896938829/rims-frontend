@@ -476,13 +476,9 @@ void main() {
         final beforeLifecycle = await _operations(outbox, accountId);
         await _openDocumentDetail(tester, lifecycleDraft.id);
         await _fault('unreachable');
-        await _openDocumentDetail(tester, lifecycleDraft.id);
-        await scrollUntilVisible(
+        await _tapDocumentDetailAction(
           tester,
-          Key('document-complete-${lifecycleDraft.id}'),
-        );
-        await tapAndSettle(
-          tester,
+          lifecycleDraft.id,
           Key('document-complete-${lifecycleDraft.id}'),
         );
         await expectText(tester, '完成单据');
@@ -1197,6 +1193,26 @@ Future<void> _openDocumentDetail(WidgetTester tester, int documentId) async {
     await tester.pump(const Duration(milliseconds: 100));
   } while (DateTime.now().isBefore(deadline));
   throw TestFailure('Timed out recovering document detail $documentId.');
+}
+
+Future<void> _tapDocumentDetailAction(
+  WidgetTester tester,
+  int documentId,
+  Key actionKey,
+) async {
+  final action = find.byKey(actionKey);
+  final deadline = DateTime.now().add(const Duration(seconds: 12));
+  do {
+    if (action.evaluate().isNotEmpty) {
+      await scrollUntilVisible(tester, actionKey);
+      await tester.tap(action.hitTestable().first);
+      await settleBounded(tester);
+      return;
+    }
+    await _openDocumentDetail(tester, documentId);
+    await tester.pump(const Duration(milliseconds: 100));
+  } while (DateTime.now().isBefore(deadline));
+  throw TestFailure('Timed out recovering document detail action $actionKey.');
 }
 
 Future<void> _closeDocumentDetail(WidgetTester tester) async {
