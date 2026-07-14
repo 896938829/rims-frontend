@@ -5,6 +5,8 @@ import 'package:rims_frontend/features/offline/data/repositories/cache_fallback.
 import 'package:rims_frontend/features/offline/data/repositories/memory_offline_store.dart';
 import 'package:rims_frontend/features/offline/data/services/cache_policy.dart';
 import 'package:rims_frontend/features/offline/domain/entities/cache_snapshot.dart';
+import 'package:rims_frontend/features/offline/domain/services/offline_write_barrier.dart';
+import 'package:rims_frontend/features/offline/domain/services/offline_ownership_service.dart';
 
 void main() {
   const key = CacheKey(
@@ -40,6 +42,34 @@ void main() {
     final cached = await store.readCache(key, schemaVersion: 3);
     expect(cached?.payload, const {'value': 4});
     expect(cached?.expiresAt, now.add(const Duration(hours: 1)));
+  });
+
+  test('network success survives a logout cache-write barrier', () async {
+    final rawStore = MemoryOfflineStore();
+    final barrier = OfflineWriteBarrier();
+    final store = WriteBarrierOfflineStore(
+      delegate: rawStore,
+      barrier: barrier,
+    );
+    final block = barrier.blockMutations(
+      const OfflineMutationScope.account('7'),
+    );
+    addTearDown(block.release);
+
+    final result = await cacheNetworkFirst<int>(
+      store: store,
+      key: key,
+      policy: policy,
+      now: () => now,
+      loadNetwork: () async => const Success(4),
+      encode: (value) => {'value': value},
+      decode: (payload) => payload['value']! as int,
+    );
+
+    final snapshot = _success(result);
+    expect(snapshot.value, 4);
+    expect(snapshot.source, DataSourceKind.network);
+    expect(await rawStore.readCache(key, schemaVersion: 3), isNull);
   });
 
   test(

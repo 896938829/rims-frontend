@@ -1,6 +1,7 @@
 import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
 import '../../domain/entities/cache_snapshot.dart';
+import '../../domain/services/offline_write_barrier.dart';
 import '../../domain/services/offline_store.dart';
 import '../services/cache_policy.dart';
 
@@ -30,13 +31,17 @@ Future<Result<CacheSnapshot<T>>> cacheNetworkFirst<T>({
         fetchedAt: fetchedAt,
         expiresAt: policy.expiresAt(fetchedAt),
       );
-      await store.writeCache(record);
-      await store.enforceCacheLimit(
-        accountId: key.accountId,
-        warehouseId: key.warehouseId,
-        namespace: key.namespace,
-        maxRecords: policy.maxRecords,
-      );
+      try {
+        await store.writeCache(record);
+        await store.enforceCacheLimit(
+          accountId: key.accountId,
+          warehouseId: key.warehouseId,
+          namespace: key.namespace,
+          maxRecords: policy.maxRecords,
+        );
+      } on OfflineWriteBlockedException {
+        // Ownership cleanup wins over best-effort cache maintenance.
+      }
       return Success(
         CacheSnapshot(
           value: data,
