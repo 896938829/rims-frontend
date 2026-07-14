@@ -279,8 +279,10 @@ function Get-M11EvidenceErrors($Candidate) {
   if ($null -eq $recoveryBoundary -or
       $recoveryBoundary.Value -isnot [string] -or
       $recoveryBoundary.Value -cne
-      'integration-entry-before-native-drift-open') {
-    [void]$errors.Add('Process recovery boundary must begin before native Drift reopen.')
+      'restored-shell-frame-before-draft-navigation') {
+    [void]$errors.Add(
+      'Process recovery boundary must begin after the restored shell frame and before draft navigation.'
+    )
   }
   $unknownHash = $Candidate.PSObject.Properties['unknownIdempotencyKeyHash']
   if ($null -eq $unknownHash -or $unknownHash.Value -isnot [string] -or

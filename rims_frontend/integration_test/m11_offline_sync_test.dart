@@ -38,8 +38,7 @@ void main() {
 
     await screenshotOnFailure(binding, 'm11-offline-sync-failure', () async {
       const processRecoveryBoundary =
-          'integration-entry-before-native-drift-open';
-      final processRecoveryWatch = Stopwatch()..start();
+          'restored-shell-frame-before-draft-navigation';
       final expectedStage = RimsE2eConfig.m11ProcessStage;
       expect(const {
         'seed',
@@ -233,6 +232,7 @@ void main() {
         autosaveCompleted = checkpoint['autosaveCompleted'] == true;
         await _pumpApp(tester, store, 'm11-recovery');
         await waitForKey(tester, const Key('bottom-nav-home'));
+        final processRecoveryWatch = Stopwatch()..start();
         nativeDatabaseReopened = store is OfflineDatabase;
         await tapAndSettle(tester, const Key('bottom-nav-profile'));
         await scrollUntilVisible(
