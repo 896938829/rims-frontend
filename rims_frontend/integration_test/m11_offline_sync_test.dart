@@ -553,6 +553,12 @@ void main() {
           find.byTooltip('丢弃记录').first,
           description: 'discard conflicted operation',
         );
+        await _waitForOperationRemoval(
+          tester,
+          outbox,
+          accountId,
+          conflicted.operationId,
+        );
         conflictResolved = !(await _operations(
           outbox,
           accountId,
@@ -1521,6 +1527,24 @@ Future<OutboxOperation> _operation(
     repository,
     accountId,
   )).singleWhere((operation) => operation.operationId == operationId);
+}
+
+Future<void> _waitForOperationRemoval(
+  WidgetTester tester,
+  OutboxRepository repository,
+  String accountId,
+  String operationId,
+) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 12));
+  do {
+    final exists = (await _operations(
+      repository,
+      accountId,
+    )).any((operation) => operation.operationId == operationId);
+    if (!exists) return;
+    await tester.pump(const Duration(milliseconds: 100));
+  } while (DateTime.now().isBefore(deadline));
+  throw TestFailure('Timed out discarding outbox operation $operationId.');
 }
 
 void _recordOperation(
