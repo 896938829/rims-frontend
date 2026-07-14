@@ -279,9 +279,9 @@ function Get-M11EvidenceErrors($Candidate) {
   if ($null -eq $recoveryBoundary -or
       $recoveryBoundary.Value -isnot [string] -or
       $recoveryBoundary.Value -cne
-      'restored-shell-frame-before-draft-navigation') {
+      'draft-manager-frame-before-open-command') {
     [void]$errors.Add(
-      'Process recovery boundary must begin after the restored shell frame and before draft navigation.'
+      'Process recovery boundary must begin after the draft manager frame and before the open command.'
     )
   }
   $unknownHash = $Candidate.PSObject.Properties['unknownIdempotencyKeyHash']

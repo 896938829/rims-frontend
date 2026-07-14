@@ -38,7 +38,7 @@ void main() {
 
     await screenshotOnFailure(binding, 'm11-offline-sync-failure', () async {
       const processRecoveryBoundary =
-          'restored-shell-frame-before-draft-navigation';
+          'draft-manager-frame-before-open-command';
       final expectedStage = RimsE2eConfig.m11ProcessStage;
       expect(const {
         'seed',
@@ -232,7 +232,6 @@ void main() {
         autosaveCompleted = checkpoint['autosaveCompleted'] == true;
         await _pumpApp(tester, store, 'm11-recovery');
         await waitForKey(tester, const Key('bottom-nav-home'));
-        final processRecoveryWatch = Stopwatch()..start();
         nativeDatabaseReopened = store is OfflineDatabase;
         await tapAndSettle(tester, const Key('bottom-nav-profile'));
         await scrollUntilVisible(
@@ -241,6 +240,7 @@ void main() {
         );
         await tapAndSettle(tester, const Key('profile-draft-manager-entry'));
         await expectText(tester, '草稿管理');
+        final processRecoveryWatch = Stopwatch()..start();
         await tapFinderAndSettle(
           tester,
           find.byTooltip('打开').first,

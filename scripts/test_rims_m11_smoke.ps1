@@ -281,7 +281,7 @@ try {
     observedStockDecrease = 2
     draftAutosaveDebounceMs = 300
     draftAutosaveEndToEndMs = 380
-    processRecoveryBoundary = 'restored-shell-frame-before-draft-navigation'
+    processRecoveryBoundary = 'draft-manager-frame-before-open-command'
     processStages = @(
       [ordered]@{ stage = 'seed'; processId = 101; startedAt = '2026-07-14T00:00:00Z' },
       [ordered]@{ stage = 'offline-draft'; processId = 202; startedAt = '2026-07-14T00:01:00Z' },
@@ -331,7 +331,7 @@ try {
   foreach ($journeyContract in @(
       'draftAutosaveDebounceMs',
       'draftAutosaveEndToEndMs',
-      'restored-shell-frame-before-draft-navigation',
+      'draft-manager-frame-before-open-command',
       'unknownStatusProbeCount',
       'unknownReplayRequestCount',
       'unknownRequestFingerprintHash',
@@ -358,19 +358,19 @@ try {
   $recoveryStart = $integrationText.IndexOf(
     'final processRecoveryWatch = Stopwatch()..start();'
   )
-  $restoredShell = $integrationText.IndexOf(
-    "await waitForKey(tester, const Key('bottom-nav-home'));",
+  $draftManagerFrame = $integrationText.IndexOf(
+    "await expectText(tester, '草稿管理');",
     $integrationText.IndexOf("expect(nextStage, 'recovery');")
   )
-  $draftNavigation = $integrationText.IndexOf(
-    "await tapAndSettle(tester, const Key('bottom-nav-profile'));",
-    $restoredShell
+  $draftOpenCommand = $integrationText.IndexOf(
+    'await tapFinderAndSettle(',
+    $draftManagerFrame
   )
   Assert-True `
-    -Condition ($restoredShell -ge 0 -and
-      $recoveryStart -gt $restoredShell -and
-      $draftNavigation -gt $recoveryStart) `
-    -Message 'Recovery timing must begin after the restored shell frame and before draft navigation.'
+    -Condition ($draftManagerFrame -ge 0 -and
+      $recoveryStart -gt $draftManagerFrame -and
+      $draftOpenCommand -gt $recoveryStart) `
+    -Message 'Recovery timing must begin after the draft manager frame and before the open command.'
 
   $validNetworkEvidence = [ordered]@{
     backendTargetPort = 18080
