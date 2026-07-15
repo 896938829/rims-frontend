@@ -400,6 +400,105 @@ void main() {
   });
 
   test(
+    'FormData is cloned before a real adapter consumes both sends',
+    () async {
+      final storage = _InterceptorCredentialStorage(_credential());
+      final repository = _InterceptorRefreshRepository();
+      final adapter = _BodyConsumingRotatingAdapter();
+      final dio = _dioWithCoordinator(storage, repository, adapter);
+
+      final response = await dio.post<dynamic>(
+        '/multipart',
+        data: FormData.fromMap({
+          'name': 'alpha',
+          'file': MultipartFile.fromBytes([1, 2, 3], filename: 'sample.bin'),
+        }),
+        options: Options(headers: {'Idempotency-Key': 'multipart-1'}),
+      );
+
+      expect(response.statusCode, 200);
+      expect(adapter.bodies, hasLength(2));
+      expect(adapter.bodies, everyElement(isNotEmpty));
+      expect(adapter.bodies[0], containsAll(adapter.bodies[1]));
+      expect(adapter.bodies[1], containsAll(adapter.bodies[0]));
+    },
+  );
+
+  test('single-subscription stream never enters replay executor', () async {
+    final storage = _InterceptorCredentialStorage(_credential());
+    final repository = _InterceptorRefreshRepository();
+    final adapter = _BodyConsumingRotatingAdapter(alwaysUnauthorized: true);
+    var replayExecutions = 0;
+    final dio = _dioWithCoordinator(
+      storage,
+      repository,
+      adapter,
+      onReplayExecution: () => replayExecutions += 1,
+    );
+    final controller = StreamController<Uint8List>()
+      ..add(Uint8List.fromList([1, 2, 3]))
+      ..close();
+
+    await expectLater(
+      dio.post<dynamic>(
+        '/stream',
+        data: controller.stream,
+        options: Options(headers: {'Idempotency-Key': 'stream-1'}),
+      ),
+      throwsA(isA<DioException>()),
+    );
+
+    expect(repository.calls, 1);
+    expect(replayExecutions, 0);
+    expect(adapter.fetchCount, 1);
+  });
+
+  test('a replay 401 propagates the replay request and response', () async {
+    final storage = _InterceptorCredentialStorage(_credential());
+    final repository = _InterceptorRefreshRepository();
+    final adapter = _ReplayFailureAdapter(secondStatus: 401);
+    final dio = _dioWithCoordinator(storage, repository, adapter);
+
+    late DioException failure;
+    try {
+      await dio.get<dynamic>('/replay-401');
+      fail('expected replay failure');
+    } on DioException catch (error) {
+      failure = error;
+    }
+
+    expect(failure.requestOptions.headers['Authorization'], 'Bearer access-2');
+    expect(failure.requestOptions.extra[AuthRequestPolicy.replayed], isTrue);
+    expect(failure.response?.statusCode, 401);
+    expect(failure.response?.data, 'replay-failure');
+  });
+
+  test(
+    'a replay transport error is not replaced by the original 401',
+    () async {
+      final storage = _InterceptorCredentialStorage(_credential());
+      final repository = _InterceptorRefreshRepository();
+      final adapter = _ReplayFailureAdapter(throwTransportOnReplay: true);
+      final dio = _dioWithCoordinator(storage, repository, adapter);
+
+      late DioException failure;
+      try {
+        await dio.get<dynamic>('/replay-transport');
+        fail('expected replay failure');
+      } on DioException catch (error) {
+        failure = error;
+      }
+
+      expect(failure.type, DioExceptionType.connectionError);
+      expect(
+        failure.requestOptions.headers['Authorization'],
+        'Bearer access-2',
+      );
+      expect(failure.requestOptions.extra[AuthRequestPolicy.replayed], isTrue);
+    },
+  );
+
+  test(
     'queued writes never replay and refresh only from Sync Center',
     () async {
       final backgroundStorage = _InterceptorCredentialStorage(_credential());
@@ -464,6 +563,7 @@ Dio _dioWithCoordinator(
   HttpClientAdapter adapter, {
   TokenReader? tokenReader,
   int Function()? authEpochReader,
+  void Function()? onReplayExecution,
 }) {
   final dio = Dio()..httpClientAdapter = adapter;
   final epochReader = authEpochReader ?? () => 1;
@@ -491,7 +591,10 @@ Dio _dioWithCoordinator(
         );
       },
       refreshCoordinator: coordinator,
-      requestExecutor: dio.fetch,
+      requestExecutor: (options) {
+        onReplayExecution?.call();
+        return dio.fetch(options);
+      },
     ),
   );
   return dio;
@@ -638,6 +741,68 @@ final class _BlockingUnauthorizedAdapter implements HttpClientAdapter {
     started.complete();
     await release.future;
     return ResponseBody.fromString('unauthorized', 401);
+  }
+
+  @override
+  void close({bool force = false}) {}
+}
+
+final class _BodyConsumingRotatingAdapter implements HttpClientAdapter {
+  _BodyConsumingRotatingAdapter({this.alwaysUnauthorized = false});
+
+  final bool alwaysUnauthorized;
+  final List<List<int>> bodies = [];
+  int fetchCount = 0;
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    fetchCount += 1;
+    final body = <int>[];
+    await for (final bytes in requestStream ?? const Stream.empty()) {
+      body.addAll(bytes);
+    }
+    bodies.add(body);
+    final authorized = options.headers['Authorization'] == 'Bearer access-2';
+    return ResponseBody.fromString(
+      'response',
+      !alwaysUnauthorized && authorized ? 200 : 401,
+    );
+  }
+
+  @override
+  void close({bool force = false}) {}
+}
+
+final class _ReplayFailureAdapter implements HttpClientAdapter {
+  _ReplayFailureAdapter({
+    this.secondStatus = 500,
+    this.throwTransportOnReplay = false,
+  });
+
+  final int secondStatus;
+  final bool throwTransportOnReplay;
+  int fetchCount = 0;
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    fetchCount += 1;
+    if (fetchCount == 1) return ResponseBody.fromString('original', 401);
+    if (throwTransportOnReplay) {
+      throw DioException(
+        requestOptions: options,
+        type: DioExceptionType.connectionError,
+        error: StateError('replay transport failed'),
+      );
+    }
+    return ResponseBody.fromString('replay-failure', secondStatus);
   }
 
   @override

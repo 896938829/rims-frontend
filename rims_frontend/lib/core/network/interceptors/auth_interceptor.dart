@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
 
@@ -65,7 +66,12 @@ final class AuthInterceptor extends Interceptor {
       options.extra
         ..remove(AuthRequestPolicy.credentialSnapshot)
         ..remove(AuthRequestPolicy.authenticationEpoch)
-        ..remove(AuthRequestPolicy.authenticatedRequestLease);
+        ..remove(AuthRequestPolicy.authenticatedRequestLease)
+        ..remove(AuthRequestPolicy.repeatableBodyTemplate);
+      if (options.data case final FormData formData) {
+        options.extra[AuthRequestPolicy.repeatableBodyTemplate] = formData
+            .clone();
+      }
       if (AuthRequestPolicy.isQueuedWrite) {
         options.extra.putIfAbsent(AuthRequestPolicy.queuedWrite, () => true);
       }
@@ -175,6 +181,7 @@ final class AuthInterceptor extends Interceptor {
       coordinator.observeStableLease(activeLease);
 
       final replay = options.copyWith(
+        data: _cloneReplayBody(options),
         headers: {
           ...options.headers,
           'Authorization': 'Bearer ${credential.accessToken}',
@@ -186,13 +193,27 @@ final class AuthInterceptor extends Interceptor {
           AuthRequestPolicy.replayed: true,
         },
       );
-      handler.resolve(await executor(replay));
+      try {
+        handler.resolve(await executor(replay));
+      } on DioException catch (replayError) {
+        handler.next(replayError);
+      } on Object catch (replayError, stackTrace) {
+        handler.next(
+          DioException(
+            requestOptions: replay,
+            type: DioExceptionType.unknown,
+            error: replayError,
+            stackTrace: stackTrace,
+          ),
+        );
+      }
     } on Object {
       handler.next(error);
     }
   }
 
   bool _canReplay(RequestOptions options) {
+    if (!_hasRepeatableBody(options)) return false;
     switch (options.method.toUpperCase()) {
       case 'GET':
       case 'HEAD':
@@ -207,6 +228,32 @@ final class AuthInterceptor extends Interceptor {
       }
     }
     return false;
+  }
+
+  bool _hasRepeatableBody(RequestOptions options) {
+    final data = options.data;
+    if (data == null || data is String || data is num || data is bool) {
+      return true;
+    }
+    if (data is Uint8List || data is Map || data is List) return true;
+    if (data is FormData) {
+      return options.extra[AuthRequestPolicy.repeatableBodyTemplate]
+          is FormData;
+    }
+    return false;
+  }
+
+  Object? _cloneReplayBody(RequestOptions options) {
+    final data = options.data;
+    if (data is FormData) {
+      return (options.extra[AuthRequestPolicy.repeatableBodyTemplate]
+              as FormData)
+          .clone();
+    }
+    if (data is Uint8List) return Uint8List.fromList(data);
+    if (data is Map) return Map<Object?, Object?>.from(data);
+    if (data is List) return List<Object?>.from(data);
+    return data;
   }
 
   bool _hasAuthorizationHeader(RequestOptions options) =>

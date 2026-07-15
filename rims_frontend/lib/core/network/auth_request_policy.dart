@@ -9,6 +9,8 @@ abstract final class AuthRequestPolicy {
   static const String authenticationEpoch = 'rims.auth.authentication_epoch';
   static const String authenticatedRequestLease =
       'rims.auth.authenticated_request_lease';
+  static const String repeatableBodyTemplate =
+      'rims.auth.repeatable_body_template';
   static const String replayed = 'rims.auth.replayed';
 
   static final Object _queuedWriteZoneKey = Object();
