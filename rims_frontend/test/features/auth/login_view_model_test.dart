@@ -356,6 +356,64 @@ void main() {
     });
 
     test(
+      'accepted transactional session keeps its prepared auth epoch',
+      () async {
+        final sessionController = AuthSessionController();
+        final preparedEpoch = sessionController.beginAuthenticationAttempt();
+
+        expect(
+          await sessionController.startSession(
+            _session,
+            expectedEpoch: preparedEpoch,
+          ),
+          isTrue,
+        );
+
+        expect(sessionController.authEpoch, preparedEpoch);
+      },
+    );
+
+    test(
+      'logout closes the authentication gate before remote cleanup',
+      () async {
+        final releaseLogout = Completer<void>();
+        final repository = _FakeAuthRepository(
+          logoutFuture: releaseLogout.future,
+        );
+        final sessionController = AuthSessionController();
+        await sessionController.startSession(_session);
+        var notifications = 0;
+        sessionController.addListener(() => notifications += 1);
+
+        final logout = sessionController.logout(authRepository: repository);
+        await Future<void>.delayed(Duration.zero);
+
+        expect(sessionController.canAuthenticateRequests, isFalse);
+        expect(notifications, greaterThan(0));
+        releaseLogout.complete();
+        await logout;
+      },
+    );
+
+    test('an old logout completion cannot clear a newer session', () async {
+      final releaseLogout = Completer<void>();
+      final repository = _FakeAuthRepository(
+        logoutFuture: releaseLogout.future,
+      );
+      final sessionController = AuthSessionController();
+      await sessionController.startSession(_session);
+
+      final logout = sessionController.logout(authRepository: repository);
+      await Future<void>.delayed(Duration.zero);
+      expect(await sessionController.startSession(_newSession), isTrue);
+      releaseLogout.complete();
+      await logout;
+
+      expect(sessionController.session, _newSession);
+      expect(sessionController.canAuthenticateRequests, isTrue);
+    });
+
+    test(
       'logout keeps the real session and repository credentials until ownership cleanup succeeds',
       () async {
         final ownership = OfflineOwnershipService(
@@ -661,6 +719,13 @@ const _session = AuthSession(
   warehouses: [_warehouse],
 );
 
+const _newSession = AuthSession(
+  accessToken: 'token-new',
+  user: _user,
+  currentWarehouse: _warehouse,
+  warehouses: [_warehouse],
+);
+
 const _multiWarehouseSession = AuthSession(
   accessToken: 'token-123',
   user: _user,
@@ -684,6 +749,7 @@ final class _FakeAuthRepository implements AuthRepository {
     ),
     this.restoreFuture,
     this.switchFuture,
+    this.logoutFuture,
   }) : _result = result ?? const FailureResult<AuthSession>(UnknownFailure()),
        _restoreResult =
            restoreResult ?? const FailureResult<AuthSession?>(UnknownFailure());
@@ -693,6 +759,7 @@ final class _FakeAuthRepository implements AuthRepository {
   final Result<Warehouse> switchWarehouseResult;
   final Future<Result<AuthSession?>>? restoreFuture;
   final Future<Result<Warehouse>>? switchFuture;
+  final Future<void>? logoutFuture;
   int loginCallCount = 0;
   int restoreCallCount = 0;
   int logoutCallCount = 0;
@@ -726,6 +793,7 @@ final class _FakeAuthRepository implements AuthRepository {
   @override
   Future<void> logout() async {
     logoutCallCount += 1;
+    await logoutFuture;
   }
 }
 

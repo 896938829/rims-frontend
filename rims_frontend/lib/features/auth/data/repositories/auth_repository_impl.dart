@@ -306,7 +306,9 @@ final class AuthRepositoryImpl
     Object? markerError;
     if (rotatingRemote != null && current != null) {
       try {
-        final result = await rotatingRemote.logout();
+        final result = await rotatingRemote.logout(
+          accessToken: current.accessToken,
+        );
         remoteRevocationFailed = result is FailureResult<void>;
       } on Object {
         remoteRevocationFailed = true;
@@ -314,14 +316,25 @@ final class AuthRepositoryImpl
       if (remoteRevocationFailed) {
         if (secureStorage case final PendingRevocationStorage pending) {
           try {
-            await pending.savePendingRevocationAccountId(current.accountId);
+            final active = await deviceStorage?.readDeviceCredential();
+            if (_sameCredential(active, current)) {
+              await pending.savePendingRevocationAccountId(current.accountId);
+            }
           } on Object catch (error) {
             markerError = error;
           }
         }
       }
     }
-    await secureStorage.clearAccessToken();
+    if (deviceStorage != null && current != null) {
+      await deviceStorage.clearDeviceCredentialIfMatches(
+        accountId: current.accountId,
+        sessionId: current.sessionId,
+        generation: current.generation,
+      );
+    } else {
+      await secureStorage.clearAccessToken();
+    }
     if (markerError != null) {
       throw RevocationCleanupFailure(
         message: 'Unable to retain pending credential revocation.',
@@ -332,6 +345,11 @@ final class AuthRepositoryImpl
 
   @override
   Future<void> expireCredentials() => logout();
+
+  bool _sameCredential(DeviceCredential? active, DeviceCredential expected) =>
+      active?.accountId == expected.accountId &&
+      active?.sessionId == expected.sessionId &&
+      active?.generation == expected.generation;
 
   Future<void> _clearLoginToken({
     required String token,

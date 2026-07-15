@@ -127,11 +127,19 @@ abstract interface class AuthenticatedAccountTransactionStorage {
     required String accountId,
     required String ownerId,
     required int attemptVersion,
+    int? authEpoch,
   });
 
   Future<bool> clearAuthenticatedAccountProjection({
     required String ownerId,
     required int attemptVersion,
+  });
+}
+
+abstract interface class ConditionalAuthenticatedAccountStorage {
+  Future<bool> clearAuthenticatedAccountIfMatches({
+    required String accountId,
+    required int authEpoch,
   });
 }
 
@@ -157,6 +165,7 @@ final class AppSecureStorage
         OfflineDatabaseKeyStorage,
         AuthenticatedAccountStorage,
         AuthenticatedAccountTransactionStorage,
+        ConditionalAuthenticatedAccountStorage,
         PendingRevocationStorage,
         ConditionalPendingRevocationStorage,
         DeviceCredentialStorage {
@@ -536,6 +545,7 @@ final class AppSecureStorage
     required String accountId,
     required String ownerId,
     required int attemptVersion,
+    int? authEpoch,
   }) => _SecureStorageKeyMutex.run(kAuthenticatedAccountIdKey, () async {
     final raw = await _storage.read(key: kAuthenticatedAccountIdKey);
     if (raw != null && raw.trimLeft().startsWith('{')) {
@@ -551,10 +561,11 @@ final class AppSecureStorage
     await _storage.write(
       key: kAuthenticatedAccountIdKey,
       value: jsonEncode({
-        'version': 2,
+        'version': authEpoch == null ? 2 : 3,
         'account_id': accountId,
         'owner_id': ownerId,
         'attempt_version': attemptVersion,
+        'auth_epoch': ?authEpoch,
       }),
     );
     return true;
@@ -568,12 +579,15 @@ final class AppSecureStorage
       if (raw == null || !raw.trimLeft().startsWith('{')) return raw;
       final decoded = jsonDecode(raw);
       if (decoded is! Map ||
-          (decoded['version'] != 1 && decoded['version'] != 2) ||
+          (decoded['version'] != 1 &&
+              decoded['version'] != 2 &&
+              decoded['version'] != 3) ||
           decoded['account_id'] is! String ||
           (decoded['version'] == 1 && decoded['projection_id'] is! String) ||
-          (decoded['version'] == 2 &&
+          ((decoded['version'] == 2 || decoded['version'] == 3) &&
               (decoded['owner_id'] is! String ||
-                  decoded['attempt_version'] is! int))) {
+                  decoded['attempt_version'] is! int)) ||
+          (decoded['version'] == 3 && decoded['auth_epoch'] is! int)) {
         throw const FormatException('Invalid authenticated account record.');
       }
       return decoded['account_id']! as String;
@@ -585,6 +599,24 @@ final class AppSecureStorage
     kAuthenticatedAccountIdKey,
     () => _storage.delete(key: kAuthenticatedAccountIdKey),
   );
+
+  @override
+  Future<bool> clearAuthenticatedAccountIfMatches({
+    required String accountId,
+    required int authEpoch,
+  }) => _SecureStorageKeyMutex.run(kAuthenticatedAccountIdKey, () async {
+    final raw = await _storage.read(key: kAuthenticatedAccountIdKey);
+    if (raw == null || !raw.trimLeft().startsWith('{')) return false;
+    final decoded = jsonDecode(raw);
+    if (decoded is! Map ||
+        decoded['version'] != 3 ||
+        decoded['account_id'] != accountId ||
+        decoded['auth_epoch'] != authEpoch) {
+      return false;
+    }
+    await _storage.delete(key: kAuthenticatedAccountIdKey);
+    return true;
+  });
 
   @override
   Future<bool> clearAuthenticatedAccountProjection({

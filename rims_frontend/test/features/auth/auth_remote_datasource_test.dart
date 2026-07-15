@@ -64,7 +64,7 @@ void main() {
     expect(adapter.lastExtra?[AuthRequestPolicy.skipRefresh], isTrue);
   });
 
-  test('logout posts the authenticated session revocation endpoint', () async {
+  test('logout uses its captured token and cannot enter refresh', () async {
     final adapter = _CapturingAdapter(
       body: '{"code":0,"message":"success","data":null}',
     );
@@ -72,16 +72,17 @@ void main() {
     final dataSource = ApiAuthRemoteDataSource(
       ApiClient.test(
         dio: dio,
-        tokenReader: () async => 'active-access',
+        tokenReader: () async => 'new-session-access',
         enableLogging: false,
       ),
     );
 
-    final result = await dataSource.logout();
+    final result = await dataSource.logout(accessToken: 'old-session-access');
 
     expect(result.isSuccess, isTrue);
     expect(adapter.lastPath, '/auth/logout');
-    expect(adapter.lastAuthorization, 'Bearer active-access');
+    expect(adapter.lastAuthorization, 'Bearer old-session-access');
+    expect(adapter.lastExtra?[AuthRequestPolicy.skipRefresh], isTrue);
   });
 
   test(

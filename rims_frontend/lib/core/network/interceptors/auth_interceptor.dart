@@ -81,6 +81,7 @@ final class AuthInterceptor extends Interceptor {
       }
       final lease = await _authenticatedRequestLeaseReader?.call();
       if (lease != null) {
+        _coordinator?.observeStableLease(lease);
         options.headers['Authorization'] = 'Bearer ${lease.token}';
         options.extra[AuthRequestPolicy.authenticatedRequestLease] = lease;
       } else if (_authenticatedRequestLeaseReader == null) {
@@ -136,6 +137,19 @@ final class AuthInterceptor extends Interceptor {
         : SessionRefreshOrigin.request;
 
     try {
+      final activeBeforeRefresh = await _authenticatedRequestLeaseReader
+          ?.call();
+      if (activeBeforeRefresh == null ||
+          activeBeforeRefresh.authEpoch != failedLease.authEpoch ||
+          activeBeforeRefresh.token != failedLease.token ||
+          !_sameCredential(
+            activeBeforeRefresh.credential,
+            failedLease.credential,
+          )) {
+        handler.next(error);
+        return;
+      }
+      coordinator.observeStableLease(activeBeforeRefresh);
       final refreshed = await coordinator.refreshAfterUnauthorized(
         failedCredential: failedLease.credential,
         failedAuthEpoch: failedLease.authEpoch,
@@ -158,6 +172,7 @@ final class AuthInterceptor extends Interceptor {
         handler.next(error);
         return;
       }
+      coordinator.observeStableLease(activeLease);
 
       final replay = options.copyWith(
         headers: {

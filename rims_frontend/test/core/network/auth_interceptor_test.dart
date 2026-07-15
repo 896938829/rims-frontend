@@ -287,6 +287,28 @@ void main() {
     expect(adapter.fetchCount, 1);
   });
 
+  test('auth epoch change before 401 handling prevents refresh', () async {
+    final storage = _InterceptorCredentialStorage(_credential());
+    final repository = _InterceptorRefreshRepository();
+    final adapter = _BlockingUnauthorizedAdapter();
+    var authEpoch = 1;
+    final dio = _dioWithCoordinator(
+      storage,
+      repository,
+      adapter,
+      authEpochReader: () => authEpoch,
+    );
+
+    final request = dio.get<dynamic>('/epoch-changes-before-refresh');
+    await adapter.started.future;
+    authEpoch = 2;
+    adapter.release.complete();
+
+    await expectLater(request, throwsA(isA<DioException>()));
+    expect(repository.calls, 0);
+    expect(adapter.fetchCount, 1);
+  });
+
   test(
     'late-bound coordinator supports production composition order',
     () async {
@@ -595,6 +617,27 @@ final class _RotatingAdapter implements HttpClientAdapter {
         ? 401
         : 200;
     return ResponseBody.fromString('response', status);
+  }
+
+  @override
+  void close({bool force = false}) {}
+}
+
+final class _BlockingUnauthorizedAdapter implements HttpClientAdapter {
+  final Completer<void> started = Completer<void>();
+  final Completer<void> release = Completer<void>();
+  int fetchCount = 0;
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    fetchCount += 1;
+    started.complete();
+    await release.future;
+    return ResponseBody.fromString('unauthorized', 401);
   }
 
   @override

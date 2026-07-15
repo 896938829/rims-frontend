@@ -247,10 +247,15 @@ final class _MainAppState extends State<MainApp> {
       tokenStorage: _secureStorage,
       pendingRevocationStorage: _secureStorage,
       repository: authRepository,
-      blockAuthentication: (accountId) {
-        if (_sessionController.currentUser?.id.toString() == accountId) {
-          _sessionController.invalidateExpiredSession();
+      blockAuthentication: (lease) {
+        if (_sessionController.authEpoch != lease.authEpoch ||
+            !_sessionController.canAuthenticateRequests ||
+            _sessionController.currentUser?.id.toString() !=
+                lease.credential.accountId) {
+          return null;
         }
+        _sessionController.invalidateExpiredSession();
+        return _sessionController.authEpoch;
       },
       failureRecovery: cachedAuthRepository,
     );

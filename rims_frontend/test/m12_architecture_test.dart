@@ -85,7 +85,8 @@ void main() {
     final source = _readRequiredFile(_appCompositionPath);
 
     expect(source, contains('failureRecovery: cachedAuthRepository'));
-    expect(source, contains('blockAuthentication: (accountId)'));
+    expect(source, contains('blockAuthentication: (lease)'));
+    expect(source, contains('_sessionController.authEpoch != lease.authEpoch'));
     expect(source, contains('_sessionController.invalidateExpiredSession()'));
     expect(
       source.indexOf('final cachedAuthRepository = CachedAuthRepository('),

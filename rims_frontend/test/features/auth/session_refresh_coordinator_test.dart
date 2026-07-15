@@ -5,6 +5,7 @@ import 'package:rims_frontend/core/result/failure.dart';
 import 'package:rims_frontend/core/result/result.dart';
 import 'package:rims_frontend/core/storage/app_secure_storage.dart';
 import 'package:rims_frontend/features/auth/domain/repositories/auth_repository.dart';
+import 'package:rims_frontend/features/auth/domain/services/authenticated_request_lease.dart';
 import 'package:rims_frontend/features/auth/domain/services/session_refresh_coordinator.dart';
 
 void main() {
@@ -70,6 +71,7 @@ void main() {
       blockAuthentication: (_) {
         order.add('block');
         canAuthenticate = false;
+        return 1;
       },
       failureRecovery: recovery,
     );
@@ -81,7 +83,15 @@ void main() {
 
     expect(result.isFailure, isTrue);
     expect(canAuthenticate, isFalse);
-    expect(order, ['read', 'remote', 'block', 'pending', 'clear', 'ownership']);
+    expect(order, [
+      'read',
+      'remote',
+      'read',
+      'block',
+      'pending',
+      'clear',
+      'ownership',
+    ]);
     expect(recovery.credentialQuarantined, isTrue);
   });
 
@@ -106,6 +116,7 @@ void main() {
         blockAuthentication: (_) {
           order.add('block');
           canAuthenticate = false;
+          return 1;
         },
         failureRecovery: recovery,
       );
@@ -172,7 +183,10 @@ void main() {
       tokenStorage: storage,
       pendingRevocationStorage: storage,
       repository: repository,
-      blockAuthentication: (_) => canAuthenticate = false,
+      blockAuthentication: (_) {
+        canAuthenticate = false;
+        return 1;
+      },
     );
 
     final result = await coordinator.refreshAfterUnauthorized(
@@ -222,6 +236,40 @@ void main() {
     expect((merged as Success<DeviceCredential>).data.generation, 2);
     expect(repository.calls, 1);
   });
+
+  test(
+    'refresh quarantine has a bounded oldest-entry eviction policy',
+    () async {
+      final storage = _CoordinatorStorage(_credential())
+        ..conditionalClearError = StateError('conditional clear failed')
+        ..fallbackClearError = StateError('fallback clear failed');
+      final repository = _RefreshRepository(
+        result: const FailureResult(AuthenticationFailure()),
+      );
+      final coordinator = _coordinator(storage, repository);
+
+      for (var epoch = 0; epoch < 129; epoch += 1) {
+        await coordinator.refreshAfterUnauthorized(
+          failedCredential: _credential(),
+          failedAuthEpoch: epoch,
+          origin: SessionRefreshOrigin.request,
+        );
+      }
+      storage
+        ..conditionalClearError = null
+        ..fallbackClearError = null;
+      repository.result = Success(_credential(generation: 2));
+
+      final evictedOldest = await coordinator.refreshAfterUnauthorized(
+        failedCredential: _credential(),
+        failedAuthEpoch: 0,
+        origin: SessionRefreshOrigin.request,
+      );
+
+      expect(evictedOldest, isA<Success<DeviceCredential>>());
+      expect(repository.calls, 130);
+    },
+  );
 
   test(
     'throwing refresh repository returns a typed fail-closed result',
@@ -333,7 +381,7 @@ void main() {
       expect(results.last.isSuccess, isTrue);
       expect(storage.credential?.accountId, '8');
       expect(storage.credential?.generation, 2);
-      expect(storage.pendingAccountId, '7');
+      expect(storage.pendingAccountId, isNull);
       expect(cleanupCalls, 0);
     },
   );
@@ -563,15 +611,17 @@ final class _CoordinatorFailureRecovery implements SessionFailureRecovery {
   bool? credentialQuarantined;
 
   @override
-  Future<Failure?> retainPendingRevocation(String accountId) async {
+  Future<Failure?> retainPendingRevocation(
+    AuthenticatedSessionCleanupLease expected,
+  ) async {
     order.add('pending');
-    storage.pendingAccountId = accountId;
+    storage.pendingAccountId = expected.request.credential.accountId;
     return null;
   }
 
   @override
   Future<Failure?> completeOwnershipCleanup({
-    required String accountId,
+    required AuthenticatedSessionCleanupLease expected,
     required bool credentialQuarantined,
   }) async {
     order.add('ownership');

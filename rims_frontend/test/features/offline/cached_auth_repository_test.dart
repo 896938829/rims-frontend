@@ -16,6 +16,7 @@ import 'package:rims_frontend/features/auth/domain/entities/app_user.dart';
 import 'package:rims_frontend/features/auth/domain/entities/auth_session.dart';
 import 'package:rims_frontend/features/auth/domain/entities/warehouse.dart';
 import 'package:rims_frontend/features/auth/domain/repositories/auth_repository.dart';
+import 'package:rims_frontend/features/auth/domain/services/authenticated_request_lease.dart';
 import 'package:rims_frontend/features/auth/domain/services/session_refresh_coordinator.dart';
 import 'package:rims_frontend/features/auth/presentation/view_models/auth_session_controller.dart';
 import 'package:rims_frontend/features/offline/data/repositories/cached_auth_repository.dart';
@@ -29,6 +30,28 @@ import 'package:rims_frontend/features/offline/domain/services/offline_store.dar
 import 'package:rims_frontend/features/offline/domain/services/offline_write_barrier.dart';
 import 'package:shared_preferences_platform_interface/in_memory_shared_preferences_async.dart';
 import 'package:shared_preferences_platform_interface/shared_preferences_async_platform_interface.dart';
+
+AuthenticatedSessionCleanupLease _cleanupLease() {
+  final credential = DeviceCredential(
+    accessToken: 'access-1',
+    refreshToken: 'refresh-1',
+    accountId: '7',
+    sessionId: 'session-7',
+    accessExpiresAt: DateTime.utc(2026, 7, 15, 3),
+    refreshExpiresAt: DateTime.utc(2026, 8, 15, 3),
+    tokenVersion: 5,
+    generation: 1,
+    biometricPolicy: BiometricCredentialPolicy.disabled,
+  );
+  return AuthenticatedSessionCleanupLease(
+    request: AuthenticatedRequestLease(
+      token: credential.accessToken,
+      credential: credential,
+      authEpoch: 0,
+    ),
+    cleanupEpoch: 0,
+  );
+}
 
 void main() {
   final now = DateTime.utc(2026, 7, 13, 12);
@@ -624,9 +647,10 @@ void main() {
       );
       final recovery = repository as SessionFailureRecovery;
 
-      final retained = await recovery.retainPendingRevocation('7');
+      final cleanupLease = _cleanupLease();
+      final retained = await recovery.retainPendingRevocation(cleanupLease);
       final completed = await recovery.completeOwnershipCleanup(
-        accountId: '7',
+        expected: cleanupLease,
         credentialQuarantined: true,
       );
 
@@ -661,7 +685,7 @@ void main() {
       );
       final recovery = repository as SessionFailureRecovery;
 
-      final failure = await recovery.retainPendingRevocation('7');
+      final failure = await recovery.retainPendingRevocation(_cleanupLease());
 
       expect(failure, isA<RevocationCleanupFailure>());
       expect(storage.pendingRevocationAccountId, isNull);
@@ -2287,6 +2311,7 @@ final class _FakeSessionStorage
     required String accountId,
     required String ownerId,
     required int attemptVersion,
+    int? authEpoch,
   }) async {
     if (failAccountProjectionWrites) {
       throw StateError('account projection write failed');

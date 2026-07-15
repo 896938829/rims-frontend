@@ -461,6 +461,39 @@ void main() {
     },
   );
 
+  test(
+    'authenticated account cleanup requires the persisted auth epoch',
+    () async {
+      final storage = AppSecureStorage(storage: _MemoryFlutterSecureStorage());
+      expect(
+        await storage.saveAuthenticatedAccountProjection(
+          accountId: '7',
+          ownerId: 'owner-a',
+          attemptVersion: 3,
+          authEpoch: 11,
+        ),
+        isTrue,
+      );
+
+      expect(
+        await storage.clearAuthenticatedAccountIfMatches(
+          accountId: '7',
+          authEpoch: 10,
+        ),
+        isFalse,
+      );
+      expect(await storage.readAuthenticatedAccountId(), '7');
+      expect(
+        await storage.clearAuthenticatedAccountIfMatches(
+          accountId: '7',
+          authEpoch: 11,
+        ),
+        isTrue,
+      );
+      expect(await storage.readAuthenticatedAccountId(), isNull);
+    },
+  );
+
   test('a new auth attempt safely migrates a legacy committed token', () async {
     final raw = _MemoryFlutterSecureStorage()
       ..values[AppSecureStorage.kAccessTokenKey] = 'legacy-token';

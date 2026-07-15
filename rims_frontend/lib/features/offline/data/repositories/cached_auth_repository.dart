@@ -8,6 +8,7 @@ import '../../../auth/domain/entities/auth_session.dart';
 import '../../../auth/domain/entities/warehouse.dart';
 import '../../../auth/domain/repositories/auth_repository.dart';
 import '../../../auth/domain/services/session_refresh_coordinator.dart';
+import '../../../auth/domain/services/authenticated_request_lease.dart';
 import '../../domain/entities/cache_snapshot.dart';
 import '../../domain/services/offline_store.dart';
 import '../../domain/services/offline_ownership_service.dart';
@@ -42,6 +43,7 @@ final class CachedAuthRepository
   static const String _projectionIdField = '_local_projection_id';
   static const String _projectionAttemptVersionField =
       '_local_transaction_attempt_version';
+  static const String _authEpochField = '_local_auth_epoch';
 
   final AuthRepository delegate;
   final OfflineStore store;
@@ -493,6 +495,7 @@ final class CachedAuthRepository
 
   @override
   Future<void> logout() async {
+    final operationEpoch = authEpochReader?.call();
     final accountId = await accountStorage.readAuthenticatedAccountId();
     Failure? cleanupFailure;
     try {
@@ -501,10 +504,26 @@ final class CachedAuthRepository
       onSessionExpired?.call();
       cleanupFailure = accountId == null
           ? failure
-          : await retainPendingRevocation(accountId);
+          : await _retainPendingRevocationAccount(accountId);
     }
-    if (accountId != null) await accountStorage.clearAuthenticatedAccountId();
-    _clearMetadata();
+    if (operationEpoch != null && !_isCurrentEpoch(operationEpoch)) return;
+    if (accountId != null) {
+      await _deleteSessionProjectionIfEpoch(accountId, operationEpoch ?? 0);
+      if (accountStorage
+          case final ConditionalAuthenticatedAccountStorage cas) {
+        await cas.clearAuthenticatedAccountIfMatches(
+          accountId: accountId,
+          authEpoch: operationEpoch ?? 0,
+        );
+      } else if (operationEpoch == null || _isCurrentEpoch(operationEpoch)) {
+        if (await accountStorage.readAuthenticatedAccountId() == accountId) {
+          await accountStorage.clearAuthenticatedAccountId();
+        }
+      }
+    }
+    if (operationEpoch == null || _isCurrentEpoch(operationEpoch)) {
+      _clearMetadata();
+    }
     if (cleanupFailure != null) throw cleanupFailure;
   }
 
@@ -528,6 +547,7 @@ final class CachedAuthRepository
     final fetchedAt = now().toUtc();
     final accountId = session.user.id.toString();
     final payload = <String, Object?>{..._encodeSession(session)};
+    if (expectedEpoch != null) payload[_authEpochField] = expectedEpoch;
     if (projectionId != null) {
       payload[_projectionIdField] = projectionId;
       if (projectionAttemptVersion != null) {
@@ -579,6 +599,7 @@ final class CachedAuthRepository
         accountId: accountId,
         ownerId: projectionId,
         attemptVersion: projectionAttemptVersion,
+        authEpoch: expectedEpoch,
       );
       if (!saved) throw const _StaleAuthOperation();
     } else {
@@ -679,7 +700,15 @@ final class CachedAuthRepository
   }
 
   @override
-  Future<Failure?> retainPendingRevocation(String accountId) async {
+  Future<Failure?> retainPendingRevocation(
+    AuthenticatedSessionCleanupLease expected,
+  ) async {
+    if (!await _isCleanupCurrent(expected)) return null;
+    final accountId = expected.request.credential.accountId;
+    return _retainPendingRevocationAccount(accountId);
+  }
+
+  Future<Failure?> _retainPendingRevocationAccount(String accountId) async {
     _volatilePendingRevocationAccountIds.add(accountId);
     _revocationInvalidated = true;
     final errors = <Object>[];
@@ -712,9 +741,11 @@ final class CachedAuthRepository
 
   @override
   Future<Failure?> completeOwnershipCleanup({
-    required String accountId,
+    required AuthenticatedSessionCleanupLease expected,
     required bool credentialQuarantined,
   }) async {
+    if (!await _isCleanupCurrent(expected)) return null;
+    final accountId = expected.request.credential.accountId;
     Object? firstError;
     if (!credentialQuarantined) {
       firstError = const RevocationCleanupFailure(
@@ -722,17 +753,31 @@ final class CachedAuthRepository
       );
     }
     try {
-      await accountStorage.clearAuthenticatedAccountId();
-    } on Object catch (error) {
-      firstError ??= error;
-    }
-    try {
-      await _deleteSessionProjection(accountId);
+      if (await _isCleanupCurrent(expected)) {
+        await _deleteSessionProjectionIfEpoch(
+          accountId,
+          expected.request.authEpoch,
+        );
+      }
     } on OfflineWriteBlockedException {
       // The active fail-closed transition already blocks offline writes.
     } on Object catch (error) {
       firstError ??= error;
     }
+    try {
+      if (accountStorage
+          case final ConditionalAuthenticatedAccountStorage cas) {
+        await cas.clearAuthenticatedAccountIfMatches(
+          accountId: accountId,
+          authEpoch: expected.request.authEpoch,
+        );
+      } else if (await _isCleanupCurrent(expected)) {
+        await accountStorage.clearAuthenticatedAccountId();
+      }
+    } on Object catch (error) {
+      firstError ??= error;
+    }
+    if (!_isCleanupEpochCurrent(expected)) return null;
     final ownershipFailure = await _applyOwnership(
       OfflineOwnershipIntent.tokenExpiry(accountId: accountId),
     );
@@ -762,7 +807,7 @@ final class CachedAuthRepository
     bool notifyRevocation = true,
   }) async {
     if (notifyRevocation) onSessionRevoked();
-    Object? firstError = await retainPendingRevocation(accountId);
+    Object? firstError = await _retainPendingRevocationAccount(accountId);
     // Quarantine every independently recoverable projection before cleanup.
     try {
       await _expireDelegateCredentials();
@@ -878,6 +923,32 @@ final class CachedAuthRepository
   Future<void> _releasePendingRevocation(String accountId) async {
     await revocationJournal?.removeAccountId(accountId);
     await _clearPendingRevocationIfMatches(accountId);
+  }
+
+  Future<bool> _isCleanupCurrent(
+    AuthenticatedSessionCleanupLease expected,
+  ) async {
+    if (!_isCleanupEpochCurrent(expected)) return false;
+    return await accountStorage.readAuthenticatedAccountId() ==
+        expected.request.credential.accountId;
+  }
+
+  bool _isCleanupEpochCurrent(AuthenticatedSessionCleanupLease expected) =>
+      authEpochReader == null ||
+      authEpochReader?.call() == expected.cleanupEpoch;
+
+  Future<void> _deleteSessionProjectionIfEpoch(
+    String accountId,
+    int authEpoch,
+  ) async {
+    if (store case final ConditionalCacheRecordStorage conditional) {
+      await conditional.deleteCacheRecordIfPayloadMatches(
+        key: _cacheKey(accountId),
+        schemaVersion: CachePolicy.references.schemaVersion,
+        payloadField: _authEpochField,
+        expectedValue: authEpoch,
+      );
+    }
   }
 
   Future<Failure?> _applyOwnership(OfflineOwnershipIntent intent) async {

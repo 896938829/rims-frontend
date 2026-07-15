@@ -2622,6 +2622,7 @@ final class _SessionStorage
     required String accountId,
     required String ownerId,
     required int attemptVersion,
+    int? authEpoch,
   }) async {
     if ((accountAttemptVersion ?? -1) > attemptVersion) return false;
     this.accountId = accountId;

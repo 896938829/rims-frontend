@@ -24,7 +24,7 @@ abstract interface class AuthRemoteDataSource {
 abstract interface class RotatingAuthRemoteDataSource {
   Future<Result<LoginResponseModel>> refresh({required String refreshToken});
 
-  Future<Result<void>> logout();
+  Future<Result<void>> logout({required String accessToken});
 }
 
 final class ApiAuthRemoteDataSource
@@ -78,8 +78,14 @@ final class ApiAuthRemoteDataSource
   }
 
   @override
-  Future<Result<void>> logout() async {
-    final result = await _apiClient.post<dynamic>(ApiEndpoints.logout);
+  Future<Result<void>> logout({required String accessToken}) async {
+    final result = await _apiClient.post<dynamic>(
+      ApiEndpoints.logout,
+      options: Options(
+        headers: {'Authorization': 'Bearer $accessToken'},
+        extra: {AuthRequestPolicy.skipRefresh: true},
+      ),
+    );
     return _mapEnvelope<void>(result, (_) {});
   }
 

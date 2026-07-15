@@ -114,6 +114,9 @@ final class AuthSessionController extends ChangeNotifier {
         epoch = _authEpoch;
       }
       if (!_isCurrent(epoch)) return;
+      if (result is Success<AuthSession?> && _credentialsInvalidated) {
+        return;
+      }
 
       switch (result) {
         case Success<AuthSession?>(data: final session):
@@ -211,7 +214,7 @@ final class AuthSessionController extends ChangeNotifier {
       }
       return false;
     }
-    final epoch = ++_authEpoch;
+    final epoch = expectedEpoch ?? ++_authEpoch;
     final previous = _session;
     final OwnershipPreparedAuthSessionTransaction? ownershipTransaction =
         transaction is OwnershipPreparedAuthSessionTransaction
@@ -480,7 +483,10 @@ final class AuthSessionController extends ChangeNotifier {
     required AuthRepository authRepository,
     DraftRetentionChoice draftRetention = DraftRetentionChoice.delete,
   }) async {
-    ++_authEpoch;
+    final operationEpoch = _authEpoch;
+    final previous = _session;
+    _credentialsInvalidated = true;
+    notifyListeners();
     if (_session == null &&
         _restoreFailure == null &&
         _sessionMessage == null) {
@@ -488,7 +494,6 @@ final class AuthSessionController extends ChangeNotifier {
       return null;
     }
 
-    final previous = _session;
     final accountId = previous?.user.id.toString();
     final report = accountId == null
         ? null
@@ -500,6 +505,7 @@ final class AuthSessionController extends ChangeNotifier {
           );
     if (report != null && !report.completed) return report;
     await authRepository.logout();
+    if (!_isCurrent(operationEpoch)) return report;
     _session = null;
     _credentialsInvalidated = true;
     _restoreFailure = null;

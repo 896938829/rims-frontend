@@ -1,23 +1,31 @@
+import 'dart:collection';
+
 import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
 import '../../../../core/storage/app_secure_storage.dart';
 import '../repositories/auth_repository.dart';
+import 'authenticated_request_lease.dart';
 
 enum SessionRefreshOrigin { request, queuedWrite, syncCenter }
 
 typedef SessionFailClosedCallback = Future<void> Function(String accountId);
-typedef SessionAuthenticationBlocker = void Function(String accountId);
+typedef SessionAuthenticationBlocker =
+    int? Function(AuthenticatedRequestLease expected);
 
 abstract interface class SessionFailureRecovery {
-  Future<Failure?> retainPendingRevocation(String accountId);
+  Future<Failure?> retainPendingRevocation(
+    AuthenticatedSessionCleanupLease expected,
+  );
 
   Future<Failure?> completeOwnershipCleanup({
-    required String accountId,
+    required AuthenticatedSessionCleanupLease expected,
     required bool credentialQuarantined,
   });
 }
 
 final class SessionRefreshCoordinator {
+  static const int _maxQuarantinedLeases = 128;
+
   SessionRefreshCoordinator({
     required this.credentialStorage,
     required this.tokenStorage,
@@ -37,10 +45,15 @@ final class SessionRefreshCoordinator {
   final SessionFailClosedCallback? onFailClosed;
 
   final Map<String, Future<Result<DeviceCredential>>> _inFlight = {};
-  final Set<String> _quarantinedCredentials = {};
+  final LinkedHashSet<String> _quarantinedCredentials = LinkedHashSet();
 
   Future<DeviceCredential?> readCurrentCredential() =>
       credentialStorage.readDeviceCredential();
+
+  void observeStableLease(AuthenticatedRequestLease lease) {
+    final stableKey = _flightKey(lease.credential, lease.authEpoch);
+    _quarantinedCredentials.removeWhere((key) => key != stableKey);
+  }
 
   Future<Result<DeviceCredential>> refreshAfterUnauthorized({
     required DeviceCredential failedCredential,
@@ -215,18 +228,41 @@ final class SessionRefreshCoordinator {
     _quarantine(expected, authEpoch);
     final errors = <Object>[];
     final recovery = failureRecovery;
-    var shouldBlockAuthentication = true;
+    final requestLease = AuthenticatedRequestLease(
+      token: expected.accessToken,
+      credential: expected,
+      authEpoch: authEpoch,
+    );
     try {
-      blockAuthentication?.call(expected.accountId);
+      final active = await credentialStorage.readDeviceCredential();
+      if (active != null && !_sameCredential(active, expected)) return null;
     } on Object catch (error) {
       errors.add(error);
     }
+    final int cleanupEpoch;
+    if (blockAuthentication case final blocker?) {
+      try {
+        final blockedEpoch = blocker(requestLease);
+        if (blockedEpoch == null) return null;
+        cleanupEpoch = blockedEpoch;
+      } on Object catch (error) {
+        return RevocationCleanupFailure(
+          message: 'Unable to block the failed authentication lease.',
+          cause: error,
+        );
+      }
+    } else {
+      cleanupEpoch = authEpoch;
+    }
+    final cleanupLease = AuthenticatedSessionCleanupLease(
+      request: requestLease,
+      cleanupEpoch: cleanupEpoch,
+    );
+    var shouldBlockAuthentication = true;
 
     if (recovery != null) {
       try {
-        final failure = await recovery.retainPendingRevocation(
-          expected.accountId,
-        );
+        final failure = await recovery.retainPendingRevocation(cleanupLease);
         if (failure != null) errors.add(failure);
       } on Object catch (error) {
         errors.add(error);
@@ -276,7 +312,7 @@ final class SessionRefreshCoordinator {
     if (recovery != null) {
       try {
         final failure = await recovery.completeOwnershipCleanup(
-          accountId: expected.accountId,
+          expected: cleanupLease,
           credentialQuarantined: credentialQuarantined,
         );
         if (failure != null) errors.add(failure);
@@ -302,11 +338,20 @@ final class SessionRefreshCoordinator {
   bool _sameIdentity(DeviceCredential left, DeviceCredential right) =>
       left.accountId == right.accountId && left.sessionId == right.sessionId;
 
+  bool _sameCredential(DeviceCredential left, DeviceCredential right) =>
+      _sameIdentity(left, right) && left.generation == right.generation;
+
   String _flightKey(DeviceCredential credential, int authEpoch) =>
       '${credential.accountId}\u0000${credential.sessionId}\u0000'
       '${credential.generation}\u0000$authEpoch';
 
   void _quarantine(DeviceCredential credential, int authEpoch) {
-    _quarantinedCredentials.add(_flightKey(credential, authEpoch));
+    final key = _flightKey(credential, authEpoch);
+    _quarantinedCredentials
+      ..remove(key)
+      ..add(key);
+    while (_quarantinedCredentials.length > _maxQuarantinedLeases) {
+      _quarantinedCredentials.remove(_quarantinedCredentials.first);
+    }
   }
 }

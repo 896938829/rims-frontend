@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
@@ -18,6 +19,7 @@ import 'package:rims_frontend/features/auth/domain/services/authenticated_reques
 import 'package:rims_frontend/features/auth/presentation/view_models/auth_session_controller.dart';
 import 'package:rims_frontend/features/offline/data/repositories/cached_auth_repository.dart';
 import 'package:rims_frontend/features/offline/data/repositories/memory_offline_store.dart';
+import 'package:rims_frontend/features/offline/domain/entities/cache_snapshot.dart';
 import 'package:rims_frontend/features/offline/domain/services/offline_ownership_service.dart';
 
 void main() {
@@ -33,6 +35,7 @@ void main() {
       final controller = AuthSessionController(ownershipCoordinator: ownership);
       addTearDown(controller.dispose);
       expect(await controller.startSession(_session), isTrue);
+      storage.accountEpoch = controller.authEpoch;
       events.clear();
       ownership.intents.clear();
       final fixture = _buildFixture(
@@ -64,7 +67,7 @@ void main() {
           'journal-add',
           'primary-marker',
           'credential-clear',
-          'account-clear',
+          'account-cas-clear',
           'ownership',
         ]),
       );
@@ -81,6 +84,7 @@ void main() {
     final controller = AuthSessionController(ownershipCoordinator: ownership);
     addTearDown(controller.dispose);
     expect(await controller.startSession(_session), isTrue);
+    storage.accountEpoch = controller.authEpoch;
     events.clear();
     ownership.intents.clear();
     final fixture = _buildFixture(
@@ -93,6 +97,7 @@ void main() {
 
     final result = await fixture.coordinator.refreshAfterUnauthorized(
       failedCredential: _credential(),
+      failedAuthEpoch: controller.authEpoch,
       origin: SessionRefreshOrigin.request,
     );
 
@@ -116,6 +121,7 @@ void main() {
     final controller = AuthSessionController(ownershipCoordinator: ownership);
     addTearDown(controller.dispose);
     expect(await controller.startSession(_session), isTrue);
+    storage.accountEpoch = controller.authEpoch;
     events.clear();
     ownership.intents.clear();
     final fixture = _buildFixture(
@@ -140,6 +146,150 @@ void main() {
     expect(storage.credential, isNotNull);
     expect(fixture.adapter.fetchCount, 2);
   });
+
+  test(
+    'failed old refresh preserves a completed same-account new session',
+    () async {
+      final events = <String>[];
+      final storage = _ChainStorage(_credential(), events: events)
+        ..accountId = '7';
+      final ownership = _ChainOwnership(events);
+      final controller = AuthSessionController(ownershipCoordinator: ownership);
+      addTearDown(controller.dispose);
+      expect(await controller.startSession(_session), isTrue);
+      storage.accountEpoch = controller.authEpoch;
+      final store = MemoryOfflineStore();
+      final releaseRefresh = Completer<void>();
+      final fixture = _buildFixture(
+        storage: storage,
+        journal: _ChainJournal(events),
+        ownership: ownership,
+        controller: controller,
+        events: events,
+        store: store,
+        refreshBlocker: releaseRefresh,
+      );
+
+      final oldRequest = fixture.dio.get<dynamic>('/old-refresh');
+      await fixture.remote.refreshStarted.future;
+      expect(await controller.startSession(_newSession), isTrue);
+      storage
+        ..credential = _credential(
+          accessToken: 'access-new',
+          refreshToken: 'refresh-new',
+          sessionId: 'session-new',
+        )
+        ..accountId = '7';
+      await store.writeCache(
+        CacheRecord(
+          key: const CacheKey(
+            accountId: '7',
+            namespace: 'auth.session',
+            entityKey: 'projection',
+          ),
+          payload: const {'owner': 'new-session'},
+          schemaVersion: 1,
+          fetchedAt: DateTime.utc(2026, 7, 15),
+          expiresAt: DateTime.utc(2026, 7, 16),
+        ),
+      );
+      final ownershipCount = ownership.intents.length;
+      releaseRefresh.complete();
+
+      await expectLater(oldRequest, throwsA(isA<DioException>()));
+      expect(controller.session?.accessToken, 'access-new');
+      expect(controller.canAuthenticateRequests, isTrue);
+      expect(storage.credential?.sessionId, 'session-new');
+      expect(storage.accountId, '7');
+      expect(
+        (await store.readCache(
+          const CacheKey(
+            accountId: '7',
+            namespace: 'auth.session',
+            entityKey: 'projection',
+          ),
+          schemaVersion: 1,
+        ))?.payload['owner'],
+        'new-session',
+      );
+      expect(ownership.intents.length, ownershipCount);
+      expect(storage.pendingAccountId, isNull);
+    },
+  );
+
+  test(
+    'old logout completion preserves a same-account new session projection',
+    () async {
+      final events = <String>[];
+      final storage = _ChainStorage(_credential(), events: events)
+        ..accountId = '7'
+        ..accountEpoch = 1;
+      final ownership = _ChainOwnership(events);
+      final controller = AuthSessionController(ownershipCoordinator: ownership);
+      addTearDown(controller.dispose);
+      expect(await controller.startSession(_session), isTrue);
+      final store = MemoryOfflineStore();
+      final releaseLogout = Completer<void>();
+      final fixture = _buildFixture(
+        storage: storage,
+        journal: _ChainJournal(events),
+        ownership: ownership,
+        controller: controller,
+        events: events,
+        store: store,
+        logoutBlocker: releaseLogout,
+      );
+
+      final oldLogout = controller.logout(authRepository: fixture.repository);
+      await fixture.remote.logoutStarted.future;
+      expect(controller.canAuthenticateRequests, isFalse);
+      expect(await controller.startSession(_newSession), isTrue);
+      storage
+        ..credential = _credential(
+          accessToken: 'access-new',
+          refreshToken: 'refresh-new',
+          sessionId: 'session-new',
+        )
+        ..accountId = '7'
+        ..accountEpoch = controller.authEpoch;
+      await store.writeCache(
+        CacheRecord(
+          key: const CacheKey(
+            accountId: '7',
+            namespace: 'auth.session',
+            entityKey: 'projection',
+          ),
+          payload: {
+            'owner': 'new-session',
+            '_local_auth_epoch': controller.authEpoch,
+          },
+          schemaVersion: 1,
+          fetchedAt: DateTime.utc(2026, 7, 15),
+          expiresAt: DateTime.utc(2026, 7, 16),
+        ),
+      );
+      releaseLogout.complete();
+      await oldLogout;
+
+      expect(fixture.remote.lastLogoutAccessToken, 'access-1');
+      expect(controller.session, _newSession);
+      expect(controller.canAuthenticateRequests, isTrue);
+      expect(storage.credential?.sessionId, 'session-new');
+      expect(storage.accountId, '7');
+      expect(storage.accountEpoch, controller.authEpoch);
+      expect(
+        (await store.readCache(
+          const CacheKey(
+            accountId: '7',
+            namespace: 'auth.session',
+            entityKey: 'projection',
+          ),
+          schemaVersion: 1,
+        ))?.payload['owner'],
+        'new-session',
+      );
+    },
+  );
 }
 
 _ChainFixture _buildFixture({
@@ -148,15 +298,21 @@ _ChainFixture _buildFixture({
   required _ChainOwnership ownership,
   required AuthSessionController controller,
   required List<String> events,
+  MemoryOfflineStore? store,
+  Completer<void>? refreshBlocker,
+  Completer<void>? logoutBlocker,
 }) {
-  final remote = _FailingRotatingRemote();
+  final remote = _FailingRotatingRemote(
+    refreshBlocker: refreshBlocker,
+    logoutBlocker: logoutBlocker,
+  );
   final rawRepository = AuthRepositoryImpl(
     remoteDataSource: remote,
     secureStorage: storage,
   );
   final cachedRepository = CachedAuthRepository(
     delegate: rawRepository,
-    store: MemoryOfflineStore(),
+    store: store ?? MemoryOfflineStore(),
     tokenStorage: storage,
     accountStorage: storage,
     revocationStorage: storage,
@@ -171,11 +327,15 @@ _ChainFixture _buildFixture({
     tokenStorage: storage,
     pendingRevocationStorage: storage,
     repository: rawRepository,
-    blockAuthentication: (accountId) {
-      if (controller.currentUser?.id.toString() == accountId) {
-        events.add('block');
-        controller.invalidateExpiredSession();
+    blockAuthentication: (lease) {
+      if (controller.authEpoch != lease.authEpoch ||
+          !controller.canAuthenticateRequests ||
+          controller.currentUser?.id.toString() != lease.credential.accountId) {
+        return null;
       }
+      events.add('block');
+      controller.invalidateExpiredSession();
+      return controller.authEpoch;
     },
     failureRecovery: cachedRepository,
   );
@@ -201,6 +361,7 @@ _ChainFixture _buildFixture({
   return _ChainFixture(
     dio: dio,
     coordinator: coordinator,
+    repository: cachedRepository,
     remote: remote,
     adapter: adapter,
   );
@@ -210,12 +371,14 @@ final class _ChainFixture {
   const _ChainFixture({
     required this.dio,
     required this.coordinator,
+    required this.repository,
     required this.remote,
     required this.adapter,
   });
 
   final Dio dio;
   final SessionRefreshCoordinator coordinator;
+  final CachedAuthRepository repository;
   final _FailingRotatingRemote remote;
   final _AlwaysUnauthorizedAdapter adapter;
 }
@@ -225,12 +388,14 @@ final class _ChainStorage
         DeviceCredentialStorage,
         TokenStorage,
         AuthenticatedAccountStorage,
+        ConditionalAuthenticatedAccountStorage,
         PendingRevocationStorage {
   _ChainStorage(this.credential, {required this.events});
 
   final List<String> events;
   DeviceCredential? credential;
   String? accountId;
+  int? accountEpoch;
   String? pendingAccountId;
   bool failPrimaryMarker = false;
   bool failConditionalClear = false;
@@ -307,6 +472,19 @@ final class _ChainStorage
   Future<void> clearAuthenticatedAccountId() async {
     events.add('account-clear');
     accountId = null;
+    accountEpoch = null;
+  }
+
+  @override
+  Future<bool> clearAuthenticatedAccountIfMatches({
+    required String accountId,
+    required int authEpoch,
+  }) async {
+    events.add('account-cas-clear');
+    if (this.accountId != accountId || accountEpoch != authEpoch) return false;
+    this.accountId = null;
+    accountEpoch = null;
+    return true;
   }
 
   @override
@@ -376,18 +554,32 @@ final class _ChainOwnership implements OfflineOwnershipCoordinator {
 
 final class _FailingRotatingRemote
     implements AuthRemoteDataSource, RotatingAuthRemoteDataSource {
+  _FailingRotatingRemote({this.refreshBlocker, this.logoutBlocker});
+
+  final Completer<void>? refreshBlocker;
+  final Completer<void>? logoutBlocker;
+  final Completer<void> refreshStarted = Completer<void>();
+  final Completer<void> logoutStarted = Completer<void>();
   int refreshCalls = 0;
+  String? lastLogoutAccessToken;
 
   @override
   Future<Result<LoginResponseModel>> refresh({
     required String refreshToken,
   }) async {
     refreshCalls += 1;
+    if (!refreshStarted.isCompleted) refreshStarted.complete();
+    await refreshBlocker?.future;
     return const FailureResult(AuthenticationFailure());
   }
 
   @override
-  Future<Result<void>> logout() async => const Success(null);
+  Future<Result<void>> logout({required String accessToken}) async {
+    lastLogoutAccessToken = accessToken;
+    if (!logoutStarted.isCompleted) logoutStarted.complete();
+    await logoutBlocker?.future;
+    return const Success(null);
+  }
 
   @override
   Future<Result<LoginResponseModel>> login({
@@ -427,11 +619,15 @@ final class _AlwaysUnauthorizedAdapter implements HttpClientAdapter {
   void close({bool force = false}) {}
 }
 
-DeviceCredential _credential() => DeviceCredential(
-  accessToken: 'access-1',
-  refreshToken: 'refresh-1',
+DeviceCredential _credential({
+  String accessToken = 'access-1',
+  String refreshToken = 'refresh-1',
+  String sessionId = 'session-7',
+}) => DeviceCredential(
+  accessToken: accessToken,
+  refreshToken: refreshToken,
   accountId: '7',
-  sessionId: 'session-7',
+  sessionId: sessionId,
   accessExpiresAt: DateTime.utc(2026, 7, 15, 3),
   refreshExpiresAt: DateTime.utc(2026, 8, 15, 3),
   tokenVersion: 5,
@@ -448,6 +644,19 @@ const _warehouse = Warehouse(
 
 const _session = AuthSession(
   accessToken: 'access-1',
+  user: AppUser(
+    id: 7,
+    username: 'alice',
+    realName: 'Alice',
+    roleCode: 'user',
+    roleName: 'User',
+  ),
+  currentWarehouse: _warehouse,
+  warehouses: [_warehouse],
+);
+
+const _newSession = AuthSession(
+  accessToken: 'access-new',
   user: AppUser(
     id: 7,
     username: 'alice',

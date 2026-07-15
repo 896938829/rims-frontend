@@ -19,6 +19,16 @@ final class AuthenticatedRequestLease {
       );
 }
 
+final class AuthenticatedSessionCleanupLease {
+  const AuthenticatedSessionCleanupLease({
+    required this.request,
+    required this.cleanupEpoch,
+  });
+
+  final AuthenticatedRequestLease request;
+  final int cleanupEpoch;
+}
+
 typedef AuthenticatedRequestLeaseReader =
     Future<AuthenticatedRequestLease?> Function();
 

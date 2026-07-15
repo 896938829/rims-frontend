@@ -169,6 +169,42 @@ void main() {
     );
 
     test(
+      'old logout sends the old token and preserves a newer credential',
+      () async {
+        final storage = _FakeDeviceCredentialStorage()
+          ..credential = _deviceCredential()
+          ..accessToken = 'access-1'
+          ..tokenCommitted = true;
+        final releaseLogout = Completer<void>();
+        final remoteDataSource = _FakeRotatingAuthRemoteDataSource(
+          refreshResult: const FailureResult(AuthenticationFailure()),
+          logoutBlocker: releaseLogout,
+        );
+        final repository = AuthRepositoryImpl(
+          remoteDataSource: remoteDataSource,
+          secureStorage: storage,
+        );
+
+        final oldLogout = repository.logout();
+        await remoteDataSource.logoutStarted.future;
+        storage
+          ..credential = _deviceCredential(
+            accessToken: 'access-new',
+            refreshToken: 'refresh-new',
+            sessionId: 'session-new',
+          )
+          ..accessToken = 'access-new';
+        releaseLogout.complete();
+        await oldLogout;
+
+        expect(remoteDataSource.lastLogoutAccessToken, 'access-1');
+        expect(storage.credential?.sessionId, 'session-new');
+        expect(await storage.readAccessToken(), 'access-new');
+        expect(storage.pendingAccountId, isNull);
+      },
+    );
+
+    test(
       'restoreSession rebuilds session from stored token and backend data',
       () async {
         final storage = _FakeTokenStorage(accessToken: 'stored-token');
@@ -1089,13 +1125,17 @@ final class _FakeRotatingAuthRemoteDataSource extends _FakeAuthRemoteDataSource
     required this.refreshResult,
     this.logoutResult = const Success(null),
     this.refreshBlocker,
+    this.logoutBlocker,
   });
 
   final Result<LoginResponseModel> refreshResult;
   final Result<void> logoutResult;
   final Completer<void>? refreshBlocker;
+  final Completer<void>? logoutBlocker;
   final Completer<void> refreshStarted = Completer<void>();
+  final Completer<void> logoutStarted = Completer<void>();
   String? lastRefreshToken;
+  String? lastLogoutAccessToken;
   int logoutCalls = 0;
 
   @override
@@ -1109,8 +1149,11 @@ final class _FakeRotatingAuthRemoteDataSource extends _FakeAuthRemoteDataSource
   }
 
   @override
-  Future<Result<void>> logout() async {
+  Future<Result<void>> logout({required String accessToken}) async {
     logoutCalls += 1;
+    lastLogoutAccessToken = accessToken;
+    if (!logoutStarted.isCompleted) logoutStarted.complete();
+    await logoutBlocker?.future;
     return logoutResult;
   }
 }
@@ -1189,11 +1232,15 @@ LoginResponseModel _rotatingLoginModel({
   ),
 );
 
-DeviceCredential _deviceCredential() => DeviceCredential(
-  accessToken: 'access-1',
-  refreshToken: 'refresh-1',
+DeviceCredential _deviceCredential({
+  String accessToken = 'access-1',
+  String refreshToken = 'refresh-1',
+  String sessionId = 'session-7',
+}) => DeviceCredential(
+  accessToken: accessToken,
+  refreshToken: refreshToken,
   accountId: '7',
-  sessionId: 'session-7',
+  sessionId: sessionId,
   accessExpiresAt: DateTime.utc(2026, 7, 15, 3),
   refreshExpiresAt: DateTime.utc(2026, 8, 15, 3),
   tokenVersion: 5,
