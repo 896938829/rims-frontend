@@ -1,14 +1,23 @@
 import 'package:flutter/foundation.dart';
 
+import '../../../../core/result/result.dart';
 import '../../domain/entities/device_session.dart';
 import '../../domain/repositories/auth_repository.dart';
+import '../device_session_display_sanitizer.dart';
 
 enum DeviceSessionsCommandOutcome { completed, terminal, failed, ignored }
 
+typedef TerminalSessionRevocationRunner =
+    Future<Result<void>> Function(Future<Result<void>> Function() command);
+
 final class DeviceSessionsViewModel extends ChangeNotifier {
-  DeviceSessionsViewModel({required this.repository});
+  DeviceSessionsViewModel({
+    required this.repository,
+    required this.runTerminalRevocation,
+  });
 
   final AuthRepository repository;
+  final TerminalSessionRevocationRunner runTerminalRevocation;
   List<DeviceSession> _sessions = const [];
   bool _isBusy = false;
   bool _hasLoaded = false;
@@ -29,19 +38,13 @@ final class DeviceSessionsViewModel extends ChangeNotifier {
   String? get successMessage => _successMessage;
 
   String deviceLabelFor(DeviceSession session) =>
-      _safeDeviceLabel(session.deviceLabel);
+      DeviceSessionDisplaySanitizer.deviceLabel(session.deviceLabel);
 
-  String platformLabelFor(DeviceSession session) {
-    return switch (session.platform.trim().toLowerCase()) {
-      'android' => 'Android',
-      'ios' || 'iphone' || 'ipad' => 'iOS',
-      'windows' => 'Windows',
-      'macos' || 'macintosh' => 'macOS',
-      'linux' => 'Linux',
-      'web' => 'Web',
-      _ => '未知平台',
-    };
-  }
+  String platformLabelFor(DeviceSession session) =>
+      DeviceSessionDisplaySanitizer.platformLabel(session.platform);
+
+  String userAgentLabelFor(DeviceSession session) =>
+      DeviceSessionDisplaySanitizer.userAgentLabel(session.userAgentFamily);
 
   String createdLabelFor(DeviceSession session) =>
       _formatDateTime(session.createdAt);
@@ -96,7 +99,11 @@ final class DeviceSessionsViewModel extends ChangeNotifier {
     final generation = _beginOperation();
     if (generation == null) return DeviceSessionsCommandOutcome.ignored;
     try {
-      final result = await repository.revokeDeviceSession(session.id);
+      final result = session.current
+          ? await runTerminalRevocation(
+              () => repository.revokeDeviceSession(session.id),
+            )
+          : await repository.revokeDeviceSession(session.id);
       if (!_isCurrent(generation)) return DeviceSessionsCommandOutcome.ignored;
       return result.when(
         success: (_) {
@@ -108,7 +115,8 @@ final class DeviceSessionsViewModel extends ChangeNotifier {
             _isTerminal = true;
             return DeviceSessionsCommandOutcome.terminal;
           }
-          _successMessage = '已撤销 ${_safeDeviceLabel(session.deviceLabel)}';
+          _successMessage =
+              '已撤销 ${DeviceSessionDisplaySanitizer.deviceLabel(session.deviceLabel)}';
           return DeviceSessionsCommandOutcome.completed;
         },
         failure: (_) => _commandFailure('撤销设备失败，请重试'),
@@ -150,7 +158,15 @@ final class DeviceSessionsViewModel extends ChangeNotifier {
     final generation = _beginOperation();
     if (generation == null) return DeviceSessionsCommandOutcome.ignored;
     try {
-      final result = await repository.revokeAllDeviceSessions();
+      final result = await runTerminalRevocation(() async {
+        final result = await repository.revokeAllDeviceSessions();
+        return switch (result) {
+          Success<int>() => const Success<void>(null),
+          FailureResult<int>(failure: final failure) => FailureResult<void>(
+            failure,
+          ),
+        };
+      });
       if (!_isCurrent(generation)) return DeviceSessionsCommandOutcome.ignored;
       return result.when(
         success: (_) {
@@ -190,13 +206,6 @@ final class DeviceSessionsViewModel extends ChangeNotifier {
     if (generation == null || !_isCurrent(generation)) return;
     _isBusy = false;
     notifyListeners();
-  }
-
-  String _safeDeviceLabel(String value) {
-    final label = value.trim();
-    return label.isEmpty || label.toLowerCase() == 'unknown device'
-        ? '未知设备'
-        : label;
   }
 
   String _formatDateTime(DateTime value) {

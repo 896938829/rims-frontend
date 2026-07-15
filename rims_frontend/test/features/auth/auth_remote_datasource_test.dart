@@ -350,6 +350,22 @@ void main() {
       );
     });
   }
+
+  for (final invalidCount in const ['1.0', '-1', '"1"', 'NaN', 'Infinity']) {
+    test('revoke count rejects $invalidCount with a typed failure', () async {
+      final adapter = _CapturingAdapter(
+        body: '{"code":0,"message":"ok","data":{"revoked":$invalidCount}}',
+      );
+      final dio = Dio()..httpClientAdapter = adapter;
+      final dataSource = ApiAuthRemoteDataSource(
+        ApiClient.test(dio: dio, enableLogging: false),
+      );
+
+      final result = await dataSource.revokeAllDeviceSessions();
+
+      expect(result, isA<FailureResult<int>>());
+    });
+  }
 }
 
 Future<void> _expectWarehouseListFailure({

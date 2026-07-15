@@ -238,7 +238,6 @@ final class ApiAuthRemoteDataSource
     final payload = _requiredMap(data, 'session revocation');
     final revoked = payload['revoked'];
     if (revoked is int && revoked >= 0) return revoked;
-    if (revoked is num && revoked >= 0) return revoked.round();
     throw const FormatException('Invalid session revocation response');
   }
 

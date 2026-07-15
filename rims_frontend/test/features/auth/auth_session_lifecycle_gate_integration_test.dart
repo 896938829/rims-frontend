@@ -2,12 +2,17 @@ import 'dart:async';
 
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:rims_frontend/core/result/failure.dart';
 import 'package:rims_frontend/core/result/result.dart';
 import 'package:rims_frontend/core/storage/app_secure_storage.dart';
 import 'package:rims_frontend/core/storage/pending_revocation_journal.dart';
 import 'package:rims_frontend/features/auth/data/datasources/auth_remote_datasource.dart';
 import 'package:rims_frontend/features/auth/data/models/auth_models.dart';
 import 'package:rims_frontend/features/auth/data/repositories/auth_repository_impl.dart';
+import 'package:rims_frontend/features/auth/domain/entities/auth_session.dart';
+import 'package:rims_frontend/features/auth/domain/entities/device_session.dart';
+import 'package:rims_frontend/features/auth/domain/entities/warehouse.dart';
+import 'package:rims_frontend/features/auth/domain/repositories/auth_repository.dart';
 import 'package:rims_frontend/features/auth/domain/services/authenticated_request_lease.dart';
 import 'package:rims_frontend/features/auth/domain/services/auth_session_lifecycle_gate.dart';
 import 'package:rims_frontend/features/auth/domain/services/session_refresh_coordinator.dart';
@@ -154,6 +159,100 @@ void main() {
       expect(await refreshing, isA<FailureResult<DeviceCredential>>());
       expect(fixture.remote.refreshCalls, 0);
       expect(await fixture.storage.readDeviceCredential(), isNull);
+    },
+  );
+
+  test(
+    'terminal revocation holds refresh login and logout in the shared gate',
+    () async {
+      final fixture = await _LifecycleFixture.create();
+      addTearDown(fixture.controller.dispose);
+      final repository = _CountingAuthRepository(fixture.repository);
+      final remoteStarted = Completer<void>();
+      final releaseRemote = Completer<void>();
+
+      final revoking = fixture.controller.runSessionRevocation(
+        authRepository: repository,
+        remoteRevocation: () async {
+          remoteStarted.complete();
+          await releaseRemote.future;
+          return const Success(null);
+        },
+      );
+      await remoteStarted.future;
+
+      final refreshing = fixture.controller.refreshSession(repository);
+      final loggingIn = fixture.controller.login(
+        authRepository: repository,
+        username: 'new-user',
+        password: 'secret',
+      );
+      final loggingOut = fixture.controller.logout(authRepository: repository);
+      await Future<void>.delayed(Duration.zero);
+
+      expect(repository.restoreCalls, 0);
+      expect(repository.loginCalls, 0);
+      expect(repository.logoutCalls, 0);
+      expect(repository.expireCalls, 0);
+      expect(fixture.controller.isAuthenticated, isTrue);
+
+      releaseRemote.complete();
+      await fixture.remote.logoutStarted.future;
+      fixture.remote.releaseLogout.complete();
+      expect(await revoking, isA<Success<void>>());
+      expect(repository.expireCalls, 1);
+      expect(fixture.controller.isAuthenticated, isFalse);
+
+      await refreshing;
+      await loggingIn;
+      await loggingOut;
+      expect(repository.restoreCalls, 1);
+      expect(repository.loginCalls, 1);
+      expect(repository.logoutCalls, 1);
+    },
+  );
+
+  test(
+    'remote revocation failure skips local cleanup and logout state',
+    () async {
+      final fixture = await _LifecycleFixture.create();
+      addTearDown(fixture.controller.dispose);
+      final repository = _CountingAuthRepository(fixture.repository);
+
+      final result = await fixture.controller.runSessionRevocation(
+        authRepository: repository,
+        remoteRevocation: () async => const FailureResult(
+          NetworkFailure(message: 'remote revoke failed'),
+        ),
+      );
+
+      expect(result, isA<FailureResult<void>>());
+      expect(repository.expireCalls, 0);
+      expect(fixture.ownership.revocationCalls, 0);
+      expect(fixture.controller.isAuthenticated, isTrue);
+    },
+  );
+
+  test(
+    'credential cleanup failure does not publish logged-out state',
+    () async {
+      final fixture = await _LifecycleFixture.create();
+      addTearDown(fixture.controller.dispose);
+      final repository = _CountingAuthRepository(
+        fixture.repository,
+        failCredentialCleanup: true,
+      );
+
+      final result = await fixture.controller.runSessionRevocation(
+        authRepository: repository,
+        remoteRevocation: () async => const Success(null),
+      );
+
+      expect(result, isA<FailureResult<void>>());
+      expect(repository.expireCalls, 1);
+      expect(fixture.ownership.revocationCalls, 1);
+      expect(fixture.controller.isAuthenticated, isTrue);
+      expect(fixture.controller.currentUser?.username, 'old-user');
     },
   );
 }
@@ -343,11 +442,15 @@ final class _LifecycleRemote
 final class _BlockingLogoutOwnership
     implements OfflineOwnershipCoordinator, OfflineReauthenticationCoordinator {
   bool blockLogout = false;
+  int revocationCalls = 0;
   final Completer<void> logoutStarted = Completer<void>();
   final Completer<void> releaseLogout = Completer<void>();
 
   @override
   Future<OfflineOwnershipReport> apply(OfflineOwnershipIntent intent) async {
+    if (intent.reason == OfflineOwnershipReason.revocation) {
+      revocationCalls += 1;
+    }
     if (blockLogout && intent.reason == OfflineOwnershipReason.logout) {
       if (!logoutStarted.isCompleted) logoutStarted.complete();
       await releaseLogout.future;
@@ -370,6 +473,69 @@ final class _BlockingLogoutOwnership
   Future<OfflineReauthenticationLease> prepareReauthentication({
     required String accountId,
   }) async => _ImmediateReauthenticationLease(accountId);
+}
+
+final class _CountingAuthRepository
+    implements AuthRepository, AuthCredentialInvalidator {
+  _CountingAuthRepository(this.delegate, {this.failCredentialCleanup = false});
+
+  final AuthRepository delegate;
+  final bool failCredentialCleanup;
+  int restoreCalls = 0;
+  int loginCalls = 0;
+  int logoutCalls = 0;
+  int expireCalls = 0;
+
+  @override
+  Future<Result<AuthSession?>> restoreSession() {
+    restoreCalls += 1;
+    return delegate.restoreSession();
+  }
+
+  @override
+  Future<Result<AuthSession>> login({
+    required String username,
+    required String password,
+  }) {
+    loginCalls += 1;
+    return delegate.login(username: username, password: password);
+  }
+
+  @override
+  Future<void> logout() {
+    logoutCalls += 1;
+    return delegate.logout();
+  }
+
+  @override
+  Future<void> expireCredentials() async {
+    expireCalls += 1;
+    if (failCredentialCleanup) {
+      throw StateError('credential cleanup failed');
+    }
+    final invalidator = delegate as AuthCredentialInvalidator;
+    await invalidator.expireCredentials();
+  }
+
+  @override
+  Future<Result<List<DeviceSession>>> listDeviceSessions() =>
+      delegate.listDeviceSessions();
+
+  @override
+  Future<Result<void>> revokeDeviceSession(String sessionId) =>
+      delegate.revokeDeviceSession(sessionId);
+
+  @override
+  Future<Result<int>> revokeOtherDeviceSessions() =>
+      delegate.revokeOtherDeviceSessions();
+
+  @override
+  Future<Result<int>> revokeAllDeviceSessions() =>
+      delegate.revokeAllDeviceSessions();
+
+  @override
+  Future<Result<Warehouse>> switchCurrentWarehouse(Warehouse warehouse) =>
+      delegate.switchCurrentWarehouse(warehouse);
 }
 
 final class _ImmediateReauthenticationLease

@@ -28,13 +28,61 @@ void main() {
 
     expect(find.text('Current tablet'), findsOneWidget);
     expect(find.text('Android'), findsOneWidget);
+    expect(find.text('RIMS Android 客户端'), findsOneWidget);
     expect(find.text('当前设备'), findsOneWidget);
     expect(find.text('未知设备'), findsOneWidget);
     expect(find.text('未知平台'), findsOneWidget);
+    expect(find.text('未知客户端'), findsOneWidget);
     expect(find.textContaining('2026-07-15 09:30'), findsOneWidget);
     expect(find.textContaining('10.24.16.8'), findsNothing);
     expect(find.textContaining('IP'), findsNothing);
   });
+
+  testWidgets(
+    'redacts embedded network addresses from text semantics tooltip and dialog',
+    (tester) async {
+      final semantics = tester.ensureSemantics();
+      final repository = _FakeAuthRepository(
+        sessions: [_ipv4LabelSession, _ipv6LabelSession, _ipv6PortLabelSession],
+      );
+      await _pumpPage(tester, repository: repository);
+
+      expect(find.text('未知设备'), findsNWidgets(3));
+      expect(find.text('Chrome 浏览器'), findsNWidgets(3));
+      expect(find.byTooltip('撤销 未知设备'), findsNWidgets(3));
+      final renderedText = tester
+          .widgetList<Text>(find.byType(Text))
+          .map((widget) => widget.data ?? '')
+          .join(' ');
+      final semanticsText = ['ipv4', 'ipv6', 'ipv6-port']
+          .map((id) {
+            return tester
+                .getSemantics(find.byKey(Key('device-session-card-$id')))
+                .toStringDeep();
+          })
+          .join(' ');
+
+      for (final secret in [
+        '10.24.16.8',
+        '2001:db8::1',
+        '2001:db8:85a3::8a2e:370:7334',
+      ]) {
+        expect(renderedText, isNot(contains(secret)));
+        expect(semanticsText, isNot(contains(secret)));
+      }
+
+      await tester.tap(
+        find.byKey(const Key('device-session-revoke-ipv6-port')),
+      );
+      await tester.pumpAndSettle();
+      final confirmText = tester
+          .widgetList<Text>(find.byType(Text))
+          .map((widget) => widget.data ?? '')
+          .join(' ');
+      expect(confirmText, isNot(contains('2001:db8::1')));
+      semantics.dispose();
+    },
+  );
 
   testWidgets('requires confirmation before revoking one device', (
     tester,
@@ -77,7 +125,13 @@ void main() {
     repository.releaseRevokeOthers();
     await tester.pumpAndSettle();
     expect(repository.revokeOthersCalls, 1);
+    await tester.pump(const Duration(seconds: 5));
+    await tester.pumpAndSettle();
 
+    await tester.ensureVisible(
+      find.byKey(const Key('device-sessions-revoke-all')),
+    );
+    await tester.pumpAndSettle();
     await tester.tap(find.byKey(const Key('device-sessions-revoke-all')));
     await tester.pumpAndSettle();
     expect(find.text('撤销全部设备？'), findsOneWidget);
@@ -367,6 +421,39 @@ final _unknownSession = DeviceSession(
   deviceLabel: ' ',
   platform: ' ',
   userAgentFamily: 'unknown',
+  createdAt: DateTime.utc(2026, 7, 3, 8),
+  lastUsedAt: DateTime.utc(2026, 7, 13, 8),
+  expiresAt: DateTime.utc(2026, 8, 3, 8),
+  current: false,
+);
+
+final _ipv4LabelSession = DeviceSession(
+  id: 'ipv4',
+  deviceLabel: 'Scanner 10.24.16.8:8443 primary',
+  platform: 'windows',
+  userAgentFamily: 'Chrome',
+  createdAt: DateTime.utc(2026, 7, 3, 8),
+  lastUsedAt: DateTime.utc(2026, 7, 13, 8),
+  expiresAt: DateTime.utc(2026, 8, 3, 8),
+  current: false,
+);
+
+final _ipv6LabelSession = DeviceSession(
+  id: 'ipv6',
+  deviceLabel: 'Scanner 2001:db8:85a3::8a2e:370:7334 primary',
+  platform: 'windows',
+  userAgentFamily: 'Chrome',
+  createdAt: DateTime.utc(2026, 7, 3, 8),
+  lastUsedAt: DateTime.utc(2026, 7, 13, 8),
+  expiresAt: DateTime.utc(2026, 8, 3, 8),
+  current: false,
+);
+
+final _ipv6PortLabelSession = DeviceSession(
+  id: 'ipv6-port',
+  deviceLabel: 'Scanner [2001:db8::1]:443 primary',
+  platform: 'windows',
+  userAgentFamily: 'Chrome',
   createdAt: DateTime.utc(2026, 7, 3, 8),
   lastUsedAt: DateTime.utc(2026, 7, 13, 8),
   expiresAt: DateTime.utc(2026, 8, 3, 8),

@@ -29,7 +29,14 @@ final class _DeviceSessionsPageState extends State<DeviceSessionsPage> {
   @override
   void initState() {
     super.initState();
-    _viewModel = DeviceSessionsViewModel(repository: widget.authRepository);
+    _viewModel = DeviceSessionsViewModel(
+      repository: widget.authRepository,
+      runTerminalRevocation: (command) =>
+          widget.sessionController.runSessionRevocation(
+            authRepository: widget.authRepository,
+            remoteRevocation: command,
+          ),
+    );
     unawaited(_viewModel.load());
   }
 
@@ -208,9 +215,7 @@ final class _DeviceSessionsPageState extends State<DeviceSessionsPage> {
         if (refreshAfterSuccess) await _viewModel.refresh();
         if (mounted && message != null) _showMessage(message);
       case DeviceSessionsCommandOutcome.terminal:
-        await widget.sessionController.completeSessionRevocation(
-          authRepository: widget.authRepository,
-        );
+        break;
       case DeviceSessionsCommandOutcome.failed:
         final message = _viewModel.errorMessage;
         if (message != null) _showMessage(message, isError: true);
@@ -316,6 +321,10 @@ final class _DeviceSessionCard extends StatelessWidget {
             _MetadataLine(
               icon: Icons.devices_outlined,
               text: viewModel.platformLabelFor(session),
+            ),
+            _MetadataLine(
+              icon: Icons.web_outlined,
+              text: viewModel.userAgentLabelFor(session),
             ),
             _MetadataLine(
               icon: Icons.schedule_outlined,

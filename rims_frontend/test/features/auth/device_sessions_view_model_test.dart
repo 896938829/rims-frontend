@@ -15,7 +15,7 @@ void main() {
       final repository = _FakeAuthRepository(
         sessionsResult: Success([_currentSession, _otherSession]),
       );
-      final viewModel = DeviceSessionsViewModel(repository: repository);
+      final viewModel = _viewModel(repository);
 
       await viewModel.load();
 
@@ -26,8 +26,8 @@ void main() {
     });
 
     test('builds safe device platform and time display values', () {
-      final viewModel = DeviceSessionsViewModel(
-        repository: _FakeAuthRepository(sessionsResult: const Success([])),
+      final viewModel = _viewModel(
+        _FakeAuthRepository(sessionsResult: const Success([])),
       );
       final untrusted = DeviceSession(
         id: 's-unsafe',
@@ -47,13 +47,50 @@ void main() {
       expect(viewModel.lastUsedLabelFor(untrusted), '2026-07-15 09:30');
       expect(viewModel.expiresLabelFor(untrusted), '2026-08-01 08:00');
       expect(viewModel.revokedLabelFor(untrusted), '2026-07-15 10:00');
+      expect(viewModel.userAgentLabelFor(untrusted), '未知客户端');
+    });
+
+    test('redacts an entire device label containing IPv4 or IPv6', () {
+      final viewModel = _viewModel(
+        _FakeAuthRepository(sessionsResult: const Success([])),
+      );
+      final unsafeLabels = [
+        'Scanner 10.24.16.8:8443 primary',
+        'Scanner [2001:db8::1]:443 primary',
+        'Scanner 2001:db8:85a3::8a2e:370:7334 primary',
+      ];
+
+      for (var index = 0; index < unsafeLabels.length; index += 1) {
+        final session = DeviceSession(
+          id: 'unsafe-$index',
+          deviceLabel: unsafeLabels[index],
+          platform: 'android',
+          userAgentFamily: 'Chrome',
+          createdAt: DateTime.utc(2026, 7, 1),
+          lastUsedAt: DateTime.utc(2026, 7, 1),
+          expiresAt: DateTime.utc(2026, 8, 1),
+          current: false,
+        );
+        expect(viewModel.deviceLabelFor(session), '未知设备');
+      }
+    });
+
+    test('maps platform and client family through fixed allowlists', () {
+      final viewModel = _viewModel(
+        _FakeAuthRepository(sessionsResult: const Success([])),
+      );
+
+      expect(viewModel.platformLabelFor(_currentSession), 'Android');
+      expect(viewModel.userAgentLabelFor(_currentSession), 'RIMS Android 客户端');
+      expect(viewModel.userAgentLabelFor(_otherSession), 'Chrome 浏览器');
+      expect(viewModel.userAgentLabelFor(_unknownSessionForDisplay), '未知客户端');
     });
 
     test('refresh failure retains previously loaded sessions', () async {
       final repository = _FakeAuthRepository(
         sessionsResult: Success([_currentSession, _otherSession]),
       );
-      final viewModel = DeviceSessionsViewModel(repository: repository);
+      final viewModel = _viewModel(repository);
       await viewModel.load();
       repository.sessionsResult = const FailureResult(
         NetworkFailure(message: 'private upstream detail'),
@@ -70,7 +107,7 @@ void main() {
       final repository = _FakeAuthRepository(
         sessionsResult: Success([_currentSession, _otherSession]),
       );
-      final viewModel = DeviceSessionsViewModel(repository: repository);
+      final viewModel = _viewModel(repository);
       await viewModel.load();
       final refresh = Completer<Result<List<DeviceSession>>>();
       repository.pendingSessionsResult = refresh;
@@ -91,7 +128,7 @@ void main() {
         sessionsResult: const Success([]),
         pendingSessionsResult: pending,
       );
-      final viewModel = DeviceSessionsViewModel(repository: repository);
+      final viewModel = _viewModel(repository);
       var notifications = 0;
       viewModel.addListener(() => notifications += 1);
 
@@ -109,7 +146,7 @@ void main() {
       final repository = _FakeAuthRepository(
         sessionsResult: Success([_currentSession, _otherSession]),
       );
-      final viewModel = DeviceSessionsViewModel(repository: repository);
+      final viewModel = _viewModel(repository);
       await viewModel.load();
 
       final outcome = await viewModel.revokeSession(_otherSession);
@@ -123,7 +160,7 @@ void main() {
       final repository = _FakeAuthRepository(
         sessionsResult: Success([_currentSession, _otherSession]),
       );
-      final currentViewModel = DeviceSessionsViewModel(repository: repository);
+      final currentViewModel = _viewModel(repository);
       await currentViewModel.load();
 
       expect(
@@ -132,7 +169,7 @@ void main() {
       );
       expect(currentViewModel.isTerminal, isTrue);
 
-      final allViewModel = DeviceSessionsViewModel(repository: repository);
+      final allViewModel = _viewModel(repository);
       await allViewModel.load();
       expect(
         await allViewModel.revokeAll(),
@@ -147,7 +184,7 @@ void main() {
         final repository = _FakeAuthRepository(
           sessionsResult: Success([_currentSession, _otherSession]),
         );
-        final viewModel = DeviceSessionsViewModel(repository: repository);
+        final viewModel = _viewModel(repository);
         await viewModel.load();
 
         final outcome = await viewModel.revokeOthers();
@@ -158,6 +195,13 @@ void main() {
       },
     );
   });
+}
+
+DeviceSessionsViewModel _viewModel(AuthRepository repository) {
+  return DeviceSessionsViewModel(
+    repository: repository,
+    runTerminalRevocation: (command) => command(),
+  );
 }
 
 final _currentSession = DeviceSession(
@@ -176,6 +220,17 @@ final _otherSession = DeviceSession(
   deviceLabel: 'Warehouse tablet',
   platform: 'windows',
   userAgentFamily: 'Chrome',
+  createdAt: DateTime.utc(2026, 7, 2, 8),
+  lastUsedAt: DateTime.utc(2026, 7, 14, 10, 45),
+  expiresAt: DateTime.utc(2026, 8, 2, 8),
+  current: false,
+);
+
+final _unknownSessionForDisplay = DeviceSession(
+  id: 's-unknown-display',
+  deviceLabel: 'Safe label',
+  platform: 'plan9',
+  userAgentFamily: 'PrivateCrawler/10.24.16.8',
   createdAt: DateTime.utc(2026, 7, 2, 8),
   lastUsedAt: DateTime.utc(2026, 7, 14, 10, 45),
   expiresAt: DateTime.utc(2026, 8, 2, 8),
