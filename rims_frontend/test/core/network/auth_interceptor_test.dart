@@ -8,6 +8,7 @@ import 'package:rims_frontend/core/result/result.dart';
 import 'package:rims_frontend/core/storage/app_secure_storage.dart';
 import 'package:rims_frontend/features/auth/domain/repositories/auth_repository.dart';
 import 'package:rims_frontend/features/auth/domain/services/session_refresh_coordinator.dart';
+import 'package:rims_frontend/features/auth/domain/services/authenticated_request_lease.dart';
 
 void main() {
   test('adds bearer authorization header when token is nonempty', () async {
@@ -296,7 +297,17 @@ void main() {
       SessionRefreshCoordinator? coordinator;
       dio.interceptors.add(
         AuthInterceptor(
-          tokenReader: storage.readAccessToken,
+          authenticatedRequestLeaseReader: () async {
+            final credential = await storage.readDeviceCredential();
+            final token = await storage.readAccessToken();
+            return credential == null || token != credential.accessToken
+                ? null
+                : AuthenticatedRequestLease(
+                    token: token!,
+                    credential: credential,
+                    authEpoch: 1,
+                  );
+          },
           refreshCoordinatorReader: () => coordinator,
           requestExecutor: dio.fetch,
         ),
@@ -433,6 +444,8 @@ Dio _dioWithCoordinator(
   int Function()? authEpochReader,
 }) {
   final dio = Dio()..httpClientAdapter = adapter;
+  final epochReader = authEpochReader ?? () => 1;
+  final activeTokenReader = tokenReader ?? storage.readAccessToken;
   final coordinator = SessionRefreshCoordinator(
     credentialStorage: storage,
     tokenStorage: storage,
@@ -441,8 +454,20 @@ Dio _dioWithCoordinator(
   );
   dio.interceptors.add(
     AuthInterceptor(
-      tokenReader: tokenReader ?? storage.readAccessToken,
-      authEpochReader: authEpochReader,
+      authenticatedRequestLeaseReader: () async {
+        final token = await activeTokenReader();
+        final credential = await storage.readDeviceCredential();
+        if (token == null ||
+            token.isEmpty ||
+            token != credential?.accessToken) {
+          return null;
+        }
+        return AuthenticatedRequestLease(
+          token: token,
+          credential: credential!,
+          authEpoch: epochReader(),
+        );
+      },
       refreshCoordinator: coordinator,
       requestExecutor: dio.fetch,
     ),

@@ -9,6 +9,7 @@ import '../result/result.dart';
 import 'api_endpoints.dart';
 import 'api_exception_mapper.dart';
 import 'interceptors/auth_interceptor.dart';
+import '../../features/auth/domain/services/authenticated_request_lease.dart';
 import 'interceptors/logging_interceptor.dart';
 import 'interceptors/warehouse_interceptor.dart';
 
@@ -32,8 +33,8 @@ final class ApiClient {
     Dio? dio,
     ApiExceptionMapper exceptionMapper = const ApiExceptionMapper(),
     TokenReader? tokenReader,
+    AuthenticatedRequestLeaseReader? authenticatedRequestLeaseReader,
     SessionRefreshCoordinatorReader? refreshCoordinatorReader,
-    AuthEpochReader? authEpochReader,
     WarehouseIdReader? warehouseIdReader,
     AppEventBus? eventBus,
     ApiRequestObserver? requestObserver,
@@ -42,8 +43,8 @@ final class ApiClient {
          dio: dio ?? Dio(),
          exceptionMapper: exceptionMapper,
          tokenReader: tokenReader,
+         authenticatedRequestLeaseReader: authenticatedRequestLeaseReader,
          refreshCoordinatorReader: refreshCoordinatorReader,
-         authEpochReader: authEpochReader,
          warehouseIdReader: warehouseIdReader,
          eventBus: eventBus,
          requestObserver: requestObserver,
@@ -56,8 +57,8 @@ final class ApiClient {
     Dio? dio,
     ApiExceptionMapper exceptionMapper = const ApiExceptionMapper(),
     TokenReader? tokenReader,
+    AuthenticatedRequestLeaseReader? authenticatedRequestLeaseReader,
     SessionRefreshCoordinatorReader? refreshCoordinatorReader,
-    AuthEpochReader? authEpochReader,
     WarehouseIdReader? warehouseIdReader,
     AppEventBus? eventBus,
     ApiRequestObserver? requestObserver,
@@ -66,8 +67,8 @@ final class ApiClient {
          dio: dio ?? Dio(),
          exceptionMapper: exceptionMapper,
          tokenReader: tokenReader,
+         authenticatedRequestLeaseReader: authenticatedRequestLeaseReader,
          refreshCoordinatorReader: refreshCoordinatorReader,
-         authEpochReader: authEpochReader,
          warehouseIdReader: warehouseIdReader,
          eventBus: eventBus,
          requestObserver: requestObserver,
@@ -79,8 +80,8 @@ final class ApiClient {
     required this._dio,
     required this._exceptionMapper,
     required TokenReader? tokenReader,
+    required AuthenticatedRequestLeaseReader? authenticatedRequestLeaseReader,
     required SessionRefreshCoordinatorReader? refreshCoordinatorReader,
-    required AuthEpochReader? authEpochReader,
     required WarehouseIdReader? warehouseIdReader,
     required this.eventBus,
     required this.requestObserver,
@@ -102,12 +103,12 @@ final class ApiClient {
       _dio.interceptors.add(buildLoggingInterceptor());
     }
 
-    if (tokenReader != null) {
+    if (tokenReader != null || authenticatedRequestLeaseReader != null) {
       _dio.interceptors.add(
         AuthInterceptor(
           tokenReader: tokenReader,
+          authenticatedRequestLeaseReader: authenticatedRequestLeaseReader,
           refreshCoordinatorReader: refreshCoordinatorReader,
-          authEpochReader: authEpochReader,
           requestExecutor: _dio.fetch,
         ),
       );

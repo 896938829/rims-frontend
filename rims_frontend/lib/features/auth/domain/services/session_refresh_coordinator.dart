@@ -44,6 +44,7 @@ final class SessionRefreshCoordinator {
 
   Future<Result<DeviceCredential>> refreshAfterUnauthorized({
     required DeviceCredential failedCredential,
+    int failedAuthEpoch = 0,
     required SessionRefreshOrigin origin,
   }) async {
     if (origin == SessionRefreshOrigin.queuedWrite) {
@@ -57,7 +58,10 @@ final class SessionRefreshCoordinator {
     try {
       current = await credentialStorage.readDeviceCredential();
     } on Object catch (error) {
-      final cleanupFailure = await _failClosed(failedCredential);
+      final cleanupFailure = await _failClosed(
+        failedCredential,
+        failedAuthEpoch,
+      );
       return FailureResult(
         cleanupFailure == null
             ? LocalStorageFailure(
@@ -78,13 +82,15 @@ final class SessionRefreshCoordinator {
     if (current.generation > failedCredential.generation) {
       return Success(current);
     }
-    if (_quarantinedCredentials.contains(_flightKey(failedCredential))) {
+    if (_quarantinedCredentials.contains(
+      _flightKey(failedCredential, failedAuthEpoch),
+    )) {
       return const FailureResult(
         AuthenticationFailure(message: 'The device session is quarantined.'),
       );
     }
     if (current.generation < failedCredential.generation) {
-      final cleanupFailure = await _failClosed(current);
+      final cleanupFailure = await _failClosed(current, failedAuthEpoch);
       return FailureResult(
         cleanupFailure == null
             ? const StateFailure(message: 'The credential generation is stale.')
@@ -95,10 +101,10 @@ final class SessionRefreshCoordinator {
       );
     }
 
-    final key = _flightKey(current);
+    final key = _flightKey(current, failedAuthEpoch);
     final active = _inFlight[key];
     if (active != null) return active;
-    final operation = _refresh(current);
+    final operation = _refresh(current, failedAuthEpoch);
     _inFlight[key] = operation;
     try {
       return await operation;
@@ -132,12 +138,15 @@ final class SessionRefreshCoordinator {
     }
   }
 
-  Future<Result<DeviceCredential>> _refresh(DeviceCredential current) async {
+  Future<Result<DeviceCredential>> _refresh(
+    DeviceCredential current,
+    int authEpoch,
+  ) async {
     final Result<DeviceCredential> refreshed;
     try {
       refreshed = await repository.refreshCredential(current);
     } on Object catch (error) {
-      final cleanupFailure = await _failClosed(current);
+      final cleanupFailure = await _failClosed(current, authEpoch);
       return FailureResult(
         cleanupFailure ??
             UnknownFailure(
@@ -149,7 +158,7 @@ final class SessionRefreshCoordinator {
     if (refreshed case FailureResult<DeviceCredential>(
       failure: final failure,
     )) {
-      final cleanupFailure = await _failClosed(current);
+      final cleanupFailure = await _failClosed(current, authEpoch);
       return FailureResult(
         cleanupFailure == null
             ? failure
@@ -162,7 +171,7 @@ final class SessionRefreshCoordinator {
     final next = (refreshed as Success<DeviceCredential>).data;
     if (!_sameIdentity(current, next) ||
         next.generation != current.generation + 1) {
-      await _failClosed(current);
+      await _failClosed(current, authEpoch);
       return const FailureResult(
         AuthenticationFailure(message: 'Invalid rotated credential identity.'),
       );
@@ -181,7 +190,7 @@ final class SessionRefreshCoordinator {
           latest.generation > current.generation) {
         return Success(latest);
       }
-      await _failClosed(current);
+      await _failClosed(current, authEpoch);
       if (latest == null) {
         return const FailureResult(
           AuthenticationFailure(message: 'The device session was invalidated.'),
@@ -191,7 +200,7 @@ final class SessionRefreshCoordinator {
         StateFailure(message: 'Credential rotation was superseded.'),
       );
     } on Object catch (error) {
-      final cleanupFailure = await _failClosed(current);
+      final cleanupFailure = await _failClosed(current, authEpoch);
       return FailureResult(
         cleanupFailure ??
             LocalStorageFailure(
@@ -202,8 +211,8 @@ final class SessionRefreshCoordinator {
     }
   }
 
-  Future<Failure?> _failClosed(DeviceCredential expected) async {
-    _quarantine(expected);
+  Future<Failure?> _failClosed(DeviceCredential expected, int authEpoch) async {
+    _quarantine(expected, authEpoch);
     final errors = <Object>[];
     final recovery = failureRecovery;
     var shouldBlockAuthentication = true;
@@ -293,11 +302,11 @@ final class SessionRefreshCoordinator {
   bool _sameIdentity(DeviceCredential left, DeviceCredential right) =>
       left.accountId == right.accountId && left.sessionId == right.sessionId;
 
-  String _flightKey(DeviceCredential credential) =>
+  String _flightKey(DeviceCredential credential, int authEpoch) =>
       '${credential.accountId}\u0000${credential.sessionId}\u0000'
-      '${credential.generation}';
+      '${credential.generation}\u0000$authEpoch';
 
-  void _quarantine(DeviceCredential credential) {
-    _quarantinedCredentials.add(_flightKey(credential));
+  void _quarantine(DeviceCredential credential, int authEpoch) {
+    _quarantinedCredentials.add(_flightKey(credential, authEpoch));
   }
 }

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:dio/dio.dart';
 
 import '../../../features/auth/domain/services/session_refresh_coordinator.dart';
+import '../../../features/auth/domain/services/authenticated_request_lease.dart';
 import '../../result/result.dart';
 import '../../storage/app_secure_storage.dart';
 import '../auth_request_policy.dart';
@@ -10,38 +11,37 @@ import '../auth_request_policy.dart';
 export '../auth_request_policy.dart';
 
 typedef TokenReader = Future<String?> Function();
-typedef AuthEpochReader = int Function();
 typedef AuthRequestExecutor =
     Future<Response<dynamic>> Function(RequestOptions options);
 typedef SessionRefreshCoordinatorReader = SessionRefreshCoordinator? Function();
 
 final class AuthInterceptor extends Interceptor {
   const AuthInterceptor({
-    required TokenReader tokenReader,
+    TokenReader? tokenReader,
+    AuthenticatedRequestLeaseReader? authenticatedRequestLeaseReader,
     SessionRefreshCoordinator? refreshCoordinator,
     SessionRefreshCoordinatorReader? refreshCoordinatorReader,
-    AuthEpochReader? authEpochReader,
     AuthRequestExecutor? requestExecutor,
   }) : this._(
          tokenReader,
+         authenticatedRequestLeaseReader,
          refreshCoordinator,
          refreshCoordinatorReader,
-         authEpochReader,
          requestExecutor,
        );
 
   const AuthInterceptor._(
     this._tokenReader,
+    this._authenticatedRequestLeaseReader,
     this._refreshCoordinator,
     this._refreshCoordinatorReader,
-    this._authEpochReader,
     this._requestExecutor,
-  );
+  ) : assert(_tokenReader != null || _authenticatedRequestLeaseReader != null);
 
-  final TokenReader _tokenReader;
+  final TokenReader? _tokenReader;
+  final AuthenticatedRequestLeaseReader? _authenticatedRequestLeaseReader;
   final SessionRefreshCoordinator? _refreshCoordinator;
   final SessionRefreshCoordinatorReader? _refreshCoordinatorReader;
-  final AuthEpochReader? _authEpochReader;
   final AuthRequestExecutor? _requestExecutor;
 
   SessionRefreshCoordinator? get _coordinator =>
@@ -64,7 +64,8 @@ final class AuthInterceptor extends Interceptor {
     try {
       options.extra
         ..remove(AuthRequestPolicy.credentialSnapshot)
-        ..remove(AuthRequestPolicy.authenticationEpoch);
+        ..remove(AuthRequestPolicy.authenticationEpoch)
+        ..remove(AuthRequestPolicy.authenticatedRequestLease);
       if (AuthRequestPolicy.isQueuedWrite) {
         options.extra.putIfAbsent(AuthRequestPolicy.queuedWrite, () => true);
       }
@@ -78,20 +79,14 @@ final class AuthInterceptor extends Interceptor {
         handler.next(options);
         return;
       }
-      final token = await _tokenReader();
-
-      if (token != null && token.isNotEmpty) {
-        options.headers['Authorization'] = 'Bearer $token';
-        final coordinator = _coordinator;
-        if (coordinator != null) {
-          final credential = await coordinator.readCurrentCredential();
-          if (credential?.accessToken == token) {
-            options.extra[AuthRequestPolicy.credentialSnapshot] = credential;
-            final authEpoch = _authEpochReader?.call();
-            if (authEpoch != null) {
-              options.extra[AuthRequestPolicy.authenticationEpoch] = authEpoch;
-            }
-          }
+      final lease = await _authenticatedRequestLeaseReader?.call();
+      if (lease != null) {
+        options.headers['Authorization'] = 'Bearer ${lease.token}';
+        options.extra[AuthRequestPolicy.authenticatedRequestLease] = lease;
+      } else if (_authenticatedRequestLeaseReader == null) {
+        final token = await _tokenReader?.call();
+        if (token != null && token.isNotEmpty) {
+          options.headers['Authorization'] = 'Bearer $token';
         }
       }
 
@@ -124,9 +119,9 @@ final class AuthInterceptor extends Interceptor {
       return;
     }
 
-    final failedCredential =
-        options.extra[AuthRequestPolicy.credentialSnapshot];
-    if (failedCredential is! DeviceCredential) {
+    final failedLease =
+        options.extra[AuthRequestPolicy.authenticatedRequestLease];
+    if (failedLease is! AuthenticatedRequestLease) {
       handler.next(error);
       return;
     }
@@ -142,7 +137,8 @@ final class AuthInterceptor extends Interceptor {
 
     try {
       final refreshed = await coordinator.refreshAfterUnauthorized(
-        failedCredential: failedCredential,
+        failedCredential: failedLease.credential,
+        failedAuthEpoch: failedLease.authEpoch,
         origin: origin,
       );
       if (refreshed is! Success<DeviceCredential>) {
@@ -154,13 +150,11 @@ final class AuthInterceptor extends Interceptor {
         handler.next(error);
         return;
       }
-      final activeToken = await _tokenReader();
-      final activeCredential = await coordinator.readCurrentCredential();
-      final expectedEpoch =
-          options.extra[AuthRequestPolicy.authenticationEpoch];
-      if (activeToken != credential.accessToken ||
-          !_sameCredential(activeCredential, credential) ||
-          (expectedEpoch is int && _authEpochReader?.call() != expectedEpoch)) {
+      final activeLease = await _authenticatedRequestLeaseReader?.call();
+      if (activeLease == null ||
+          activeLease.authEpoch != failedLease.authEpoch ||
+          activeLease.token != credential.accessToken ||
+          !_sameCredential(activeLease.credential, credential)) {
         handler.next(error);
         return;
       }
@@ -172,7 +166,8 @@ final class AuthInterceptor extends Interceptor {
         },
         extra: {
           ...options.extra,
-          AuthRequestPolicy.credentialSnapshot: credential,
+          AuthRequestPolicy.authenticatedRequestLease: failedLease
+              .withCredential(credential),
           AuthRequestPolicy.replayed: true,
         },
       );

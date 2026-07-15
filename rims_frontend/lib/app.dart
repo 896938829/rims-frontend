@@ -30,6 +30,7 @@ import 'features/auth/data/datasources/auth_remote_datasource.dart';
 import 'features/auth/data/repositories/auth_repository_impl.dart';
 import 'features/auth/domain/repositories/auth_repository.dart';
 import 'features/auth/domain/services/session_refresh_coordinator.dart';
+import 'features/auth/domain/services/authenticated_request_lease.dart';
 import 'features/auth/presentation/view_models/auth_session_controller.dart';
 import 'features/documents/data/datasources/documents_remote_datasource.dart';
 import 'features/documents/data/repositories/documents_repository_impl.dart';
@@ -185,13 +186,18 @@ final class _MainAppState extends State<MainApp> {
     );
     _attachmentShareService = PlatformAttachmentShareService();
     unawaited(_attachmentPicker.recoverLostData());
+    final authenticatedRequestLeaseReader =
+        StableAuthenticatedRequestLeaseReader(
+          credentialStorage: _secureStorage,
+          tokenStorage: _secureStorage,
+          authEpochReader: () => _sessionController.authEpoch,
+          canAuthenticateReader: () =>
+              _sessionController.canAuthenticateRequests,
+          accountIdReader: () => _sessionController.currentUser?.id.toString(),
+        );
     _apiClient = ApiClient(
-      tokenReader: () async => _sessionController.canAuthenticateRequests
-          ? await _secureStorage.readAccessToken() ??
-                _sessionController.accessToken
-          : null,
+      authenticatedRequestLeaseReader: authenticatedRequestLeaseReader.read,
       refreshCoordinatorReader: () => _sessionRefreshCoordinator,
-      authEpochReader: () => _sessionController.authEpoch,
       warehouseIdReader: () async => _sessionController.currentWarehouse?.id,
       eventBus: _eventBus,
       requestObserver: ApiReachabilityObserver(_networkStatusService).call,

@@ -14,6 +14,7 @@ import 'package:rims_frontend/features/auth/domain/entities/app_user.dart';
 import 'package:rims_frontend/features/auth/domain/entities/auth_session.dart';
 import 'package:rims_frontend/features/auth/domain/entities/warehouse.dart';
 import 'package:rims_frontend/features/auth/domain/services/session_refresh_coordinator.dart';
+import 'package:rims_frontend/features/auth/domain/services/authenticated_request_lease.dart';
 import 'package:rims_frontend/features/auth/presentation/view_models/auth_session_controller.dart';
 import 'package:rims_frontend/features/offline/data/repositories/cached_auth_repository.dart';
 import 'package:rims_frontend/features/offline/data/repositories/memory_offline_store.dart';
@@ -182,10 +183,17 @@ _ChainFixture _buildFixture({
   final dio = Dio()..httpClientAdapter = adapter;
   dio.interceptors.add(
     AuthInterceptor(
-      tokenReader: () async => controller.canAuthenticateRequests
-          ? await storage.readAccessToken() ?? controller.accessToken
-          : null,
-      authEpochReader: () => controller.authEpoch,
+      authenticatedRequestLeaseReader: () async {
+        if (!controller.canAuthenticateRequests) return null;
+        final credential = await storage.readDeviceCredential();
+        final token = await storage.readAccessToken();
+        if (credential == null || token != credential.accessToken) return null;
+        return AuthenticatedRequestLease(
+          token: token!,
+          credential: credential,
+          authEpoch: controller.authEpoch,
+        );
+      },
       refreshCoordinator: coordinator,
       requestExecutor: dio.fetch,
     ),
