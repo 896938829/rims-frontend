@@ -94,14 +94,15 @@ void main() {
         ..conditionalClearError = StateError('conditional clear failed')
         ..fallbackClearError = StateError('fallback clear failed');
       final recovery = _CoordinatorFailureRecovery(storage, order);
+      final repository = _RefreshRepository(
+        result: const FailureResult(AuthenticationFailure()),
+      );
       var canAuthenticate = true;
       final coordinator = SessionRefreshCoordinator(
         credentialStorage: storage,
         tokenStorage: storage,
         pendingRevocationStorage: storage,
-        repository: _RefreshRepository(
-          result: const FailureResult(AuthenticationFailure()),
-        ),
+        repository: repository,
         blockAuthentication: (_) {
           order.add('block');
           canAuthenticate = false;
@@ -130,8 +131,97 @@ void main() {
         'fallback-clear',
         'ownership',
       ]);
+
+      final quarantined = await coordinator.refreshAfterUnauthorized(
+        failedCredential: _credential(),
+        origin: SessionRefreshOrigin.request,
+      );
+
+      expect(quarantined, isA<FailureResult<DeviceCredential>>());
+      expect(repository.calls, 1);
+
+      storage
+        ..credential = _credential(sessionId: 'new-session')
+        ..conditionalClearError = null
+        ..fallbackClearError = null;
+      repository.result = Success(
+        _credential(
+          accessToken: 'access-new-2',
+          refreshToken: 'refresh-new-2',
+          sessionId: 'new-session',
+          generation: 2,
+        ),
+      );
+      final newSession = await coordinator.refreshAfterUnauthorized(
+        failedCredential: _credential(sessionId: 'new-session'),
+        origin: SessionRefreshOrigin.request,
+      );
+
+      expect(newSession, isA<Success<DeviceCredential>>());
+      expect(repository.calls, 2);
     },
   );
+
+  test('initial credential read failure executes typed fail closed', () async {
+    final storage = _CoordinatorStorage(_credential())
+      ..nextReadError = StateError('secure read failed');
+    final repository = _RefreshRepository();
+    var canAuthenticate = true;
+    final coordinator = SessionRefreshCoordinator(
+      credentialStorage: storage,
+      tokenStorage: storage,
+      pendingRevocationStorage: storage,
+      repository: repository,
+      blockAuthentication: (_) => canAuthenticate = false,
+    );
+
+    final result = await coordinator.refreshAfterUnauthorized(
+      failedCredential: _credential(),
+      origin: SessionRefreshOrigin.request,
+    );
+
+    expect(result, isA<FailureResult<DeviceCredential>>());
+    expect((result as FailureResult<DeviceCredential>).failure, isA<Failure>());
+    expect(canAuthenticate, isFalse);
+    expect(storage.credential, isNull);
+    expect(storage.pendingAccountId, '7');
+    expect(repository.calls, 0);
+  });
+
+  test('higher generation still merges after an older quarantine', () async {
+    final storage = _CoordinatorStorage(_credential())
+      ..conditionalClearError = StateError('conditional clear failed')
+      ..fallbackClearError = StateError('fallback clear failed');
+    final repository = _RefreshRepository(
+      result: const FailureResult(AuthenticationFailure()),
+    );
+    final coordinator = _coordinator(storage, repository);
+
+    expect(
+      await coordinator.refreshAfterUnauthorized(
+        failedCredential: _credential(),
+        origin: SessionRefreshOrigin.request,
+      ),
+      isA<FailureResult<DeviceCredential>>(),
+    );
+    storage
+      ..credential = _credential(
+        accessToken: 'access-2',
+        refreshToken: 'refresh-2',
+        generation: 2,
+      )
+      ..conditionalClearError = null
+      ..fallbackClearError = null;
+
+    final merged = await coordinator.refreshAfterUnauthorized(
+      failedCredential: _credential(),
+      origin: SessionRefreshOrigin.request,
+    );
+
+    expect(merged, isA<Success<DeviceCredential>>());
+    expect((merged as Success<DeviceCredential>).data.generation, 2);
+    expect(repository.calls, 1);
+  });
 
   test(
     'throwing refresh repository returns a typed fail-closed result',
@@ -336,7 +426,7 @@ SessionRefreshCoordinator _coordinator(
 final class _RefreshRepository implements SessionCredentialRepository {
   _RefreshRepository({this.result, this.release, this.throwError, this.order});
 
-  final Result<DeviceCredential>? result;
+  Result<DeviceCredential>? result;
   final Completer<void>? release;
   final Object? throwError;
   final List<String>? order;
@@ -374,6 +464,7 @@ final class _CoordinatorStorage
   Object? rotateError;
   Object? conditionalClearError;
   Object? fallbackClearError;
+  Object? nextReadError;
   bool logClearAttempts = false;
   bool logReads = false;
   final List<String>? order;
@@ -415,6 +506,10 @@ final class _CoordinatorStorage
   @override
   Future<DeviceCredential?> readDeviceCredential() async {
     if (logReads) order?.add('read');
+    if (nextReadError case final error?) {
+      nextReadError = null;
+      throw error;
+    }
     return credential;
   }
 

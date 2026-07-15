@@ -191,6 +191,7 @@ final class _MainAppState extends State<MainApp> {
                 _sessionController.accessToken
           : null,
       refreshCoordinatorReader: () => _sessionRefreshCoordinator,
+      authEpochReader: () => _sessionController.authEpoch,
       warehouseIdReader: () async => _sessionController.currentWarehouse?.id,
       eventBus: _eventBus,
       requestObserver: ApiReachabilityObserver(_networkStatusService).call,

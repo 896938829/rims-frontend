@@ -6,6 +6,7 @@ abstract final class AuthRequestPolicy {
   static const String skipRefresh = 'rims.auth.skip_refresh';
 
   static const String credentialSnapshot = 'rims.auth.credential_snapshot';
+  static const String authenticationEpoch = 'rims.auth.authentication_epoch';
   static const String replayed = 'rims.auth.replayed';
 
   static final Object _queuedWriteZoneKey = Object();

@@ -77,6 +77,134 @@ void main() {
     expect(adapter.newCredentialCalls, 10);
   });
 
+  test('null token gate never binds a secure credential snapshot', () async {
+    final storage = _InterceptorCredentialStorage(_credential());
+    final repository = _InterceptorRefreshRepository();
+    final adapter = _RotatingAdapter(alwaysUnauthorized: true);
+    final dio = _dioWithCoordinator(
+      storage,
+      repository,
+      adapter,
+      tokenReader: () async => null,
+    );
+
+    await expectLater(dio.get<dynamic>('/gated'), throwsA(isA<DioException>()));
+
+    expect(repository.calls, 0);
+    expect(adapter.fetchCount, 1);
+  });
+
+  test('explicit authorization cannot refresh the current account', () async {
+    final storage = _InterceptorCredentialStorage(_credential());
+    final repository = _InterceptorRefreshRepository();
+    final adapter = _RotatingAdapter(alwaysUnauthorized: true);
+    final dio = _dioWithCoordinator(storage, repository, adapter);
+
+    await expectLater(
+      dio.get<dynamic>(
+        '/other-account',
+        options: Options(headers: {'Authorization': 'Bearer account-8-access'}),
+      ),
+      throwsA(isA<DioException>()),
+    );
+
+    expect(repository.calls, 0);
+    expect(adapter.fetchCount, 1);
+  });
+
+  test(
+    'token and credential mismatch cannot bind a refresh snapshot',
+    () async {
+      final storage = _InterceptorCredentialStorage(_credential());
+      final repository = _InterceptorRefreshRepository();
+      final adapter = _RotatingAdapter(alwaysUnauthorized: true);
+      final dio = _dioWithCoordinator(
+        storage,
+        repository,
+        adapter,
+        tokenReader: () async => 'account-8-access',
+      );
+
+      await expectLater(
+        dio.get<dynamic>('/switched-account'),
+        throwsA(isA<DioException>()),
+      );
+
+      expect(repository.calls, 0);
+      expect(adapter.fetchCount, 1);
+    },
+  );
+
+  test('closed authentication gate prevents replay after refresh', () async {
+    final storage = _InterceptorCredentialStorage(_credential());
+    final releaseRefresh = Completer<void>();
+    final repository = _InterceptorRefreshRepository(release: releaseRefresh);
+    final adapter = _RotatingAdapter();
+    var gateOpen = true;
+    final dio = _dioWithCoordinator(
+      storage,
+      repository,
+      adapter,
+      tokenReader: () =>
+          gateOpen ? storage.readAccessToken() : Future<String?>.value(),
+    );
+
+    final request = dio.get<dynamic>('/gate-closes');
+    await repository.started.future;
+    gateOpen = false;
+    releaseRefresh.complete();
+
+    await expectLater(request, throwsA(isA<DioException>()));
+    expect(storage.credential?.accessToken, 'access-2');
+    expect(adapter.fetchCount, 1);
+  });
+
+  test('account switch prevents replay after refresh', () async {
+    final storage = _InterceptorCredentialStorage(_credential());
+    final releaseRefresh = Completer<void>();
+    final repository = _InterceptorRefreshRepository(release: releaseRefresh);
+    final adapter = _RotatingAdapter();
+    var activeToken = 'access-1';
+    final dio = _dioWithCoordinator(
+      storage,
+      repository,
+      adapter,
+      tokenReader: () async => activeToken,
+    );
+
+    final request = dio.get<dynamic>('/account-switches');
+    await repository.started.future;
+    activeToken = 'account-8-access';
+    releaseRefresh.complete();
+
+    await expectLater(request, throwsA(isA<DioException>()));
+    expect(storage.credential?.accessToken, 'access-2');
+    expect(adapter.fetchCount, 1);
+  });
+
+  test('auth epoch change prevents replay after refresh', () async {
+    final storage = _InterceptorCredentialStorage(_credential());
+    final releaseRefresh = Completer<void>();
+    final repository = _InterceptorRefreshRepository(release: releaseRefresh);
+    final adapter = _RotatingAdapter();
+    var authEpoch = 1;
+    final dio = _dioWithCoordinator(
+      storage,
+      repository,
+      adapter,
+      authEpochReader: () => authEpoch,
+    );
+
+    final request = dio.get<dynamic>('/epoch-changes');
+    await repository.started.future;
+    authEpoch = 2;
+    releaseRefresh.complete();
+
+    await expectLater(request, throwsA(isA<DioException>()));
+    expect(storage.credential?.accessToken, 'access-2');
+    expect(adapter.fetchCount, 1);
+  });
+
   test(
     'late-bound coordinator supports production composition order',
     () async {
@@ -219,8 +347,10 @@ Dio _dioWithAuthInterceptor({
 Dio _dioWithCoordinator(
   _InterceptorCredentialStorage storage,
   _InterceptorRefreshRepository repository,
-  HttpClientAdapter adapter,
-) {
+  HttpClientAdapter adapter, {
+  TokenReader? tokenReader,
+  int Function()? authEpochReader,
+}) {
   final dio = Dio()..httpClientAdapter = adapter;
   final coordinator = SessionRefreshCoordinator(
     credentialStorage: storage,
@@ -230,7 +360,8 @@ Dio _dioWithCoordinator(
   );
   dio.interceptors.add(
     AuthInterceptor(
-      tokenReader: storage.readAccessToken,
+      tokenReader: tokenReader ?? storage.readAccessToken,
+      authEpochReader: authEpochReader,
       refreshCoordinator: coordinator,
       requestExecutor: dio.fetch,
     ),
@@ -240,6 +371,10 @@ Dio _dioWithCoordinator(
 
 final class _InterceptorRefreshRepository
     implements SessionCredentialRepository {
+  _InterceptorRefreshRepository({this.release});
+
+  final Completer<void>? release;
+  final Completer<void> started = Completer<void>();
   int calls = 0;
 
   @override
@@ -247,6 +382,8 @@ final class _InterceptorRefreshRepository
     DeviceCredential current,
   ) async {
     calls += 1;
+    if (!started.isCompleted) started.complete();
+    await release?.future;
     await Future<void>.delayed(const Duration(milliseconds: 10));
     return Success(
       _credential(

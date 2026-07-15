@@ -37,6 +37,7 @@ final class SessionRefreshCoordinator {
   final SessionFailClosedCallback? onFailClosed;
 
   final Map<String, Future<Result<DeviceCredential>>> _inFlight = {};
+  final Set<String> _quarantinedCredentials = {};
 
   Future<DeviceCredential?> readCurrentCredential() =>
       credentialStorage.readDeviceCredential();
@@ -52,7 +53,23 @@ final class SessionRefreshCoordinator {
         ),
       );
     }
-    final current = await credentialStorage.readDeviceCredential();
+    final DeviceCredential? current;
+    try {
+      current = await credentialStorage.readDeviceCredential();
+    } on Object catch (error) {
+      final cleanupFailure = await _failClosed(failedCredential);
+      return FailureResult(
+        cleanupFailure == null
+            ? LocalStorageFailure(
+                message: 'Unable to read the current device credential.',
+                cause: error,
+              )
+            : RevocationCleanupFailure(
+                message: cleanupFailure.message,
+                cause: [error, cleanupFailure],
+              ),
+      );
+    }
     if (current == null || !_sameIdentity(current, failedCredential)) {
       return const FailureResult(
         AuthenticationFailure(message: 'The device session is unavailable.'),
@@ -60,6 +77,11 @@ final class SessionRefreshCoordinator {
     }
     if (current.generation > failedCredential.generation) {
       return Success(current);
+    }
+    if (_quarantinedCredentials.contains(_flightKey(failedCredential))) {
+      return const FailureResult(
+        AuthenticationFailure(message: 'The device session is quarantined.'),
+      );
     }
     if (current.generation < failedCredential.generation) {
       final cleanupFailure = await _failClosed(current);
@@ -181,6 +203,7 @@ final class SessionRefreshCoordinator {
   }
 
   Future<Failure?> _failClosed(DeviceCredential expected) async {
+    _quarantine(expected);
     final errors = <Object>[];
     final recovery = failureRecovery;
     var shouldBlockAuthentication = true;
@@ -273,4 +296,8 @@ final class SessionRefreshCoordinator {
   String _flightKey(DeviceCredential credential) =>
       '${credential.accountId}\u0000${credential.sessionId}\u0000'
       '${credential.generation}';
+
+  void _quarantine(DeviceCredential credential) {
+    _quarantinedCredentials.add(_flightKey(credential));
+  }
 }

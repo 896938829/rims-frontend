@@ -10,6 +10,7 @@ import '../auth_request_policy.dart';
 export '../auth_request_policy.dart';
 
 typedef TokenReader = Future<String?> Function();
+typedef AuthEpochReader = int Function();
 typedef AuthRequestExecutor =
     Future<Response<dynamic>> Function(RequestOptions options);
 typedef SessionRefreshCoordinatorReader = SessionRefreshCoordinator? Function();
@@ -19,11 +20,13 @@ final class AuthInterceptor extends Interceptor {
     required TokenReader tokenReader,
     SessionRefreshCoordinator? refreshCoordinator,
     SessionRefreshCoordinatorReader? refreshCoordinatorReader,
+    AuthEpochReader? authEpochReader,
     AuthRequestExecutor? requestExecutor,
   }) : this._(
          tokenReader,
          refreshCoordinator,
          refreshCoordinatorReader,
+         authEpochReader,
          requestExecutor,
        );
 
@@ -31,12 +34,14 @@ final class AuthInterceptor extends Interceptor {
     this._tokenReader,
     this._refreshCoordinator,
     this._refreshCoordinatorReader,
+    this._authEpochReader,
     this._requestExecutor,
   );
 
   final TokenReader _tokenReader;
   final SessionRefreshCoordinator? _refreshCoordinator;
   final SessionRefreshCoordinatorReader? _refreshCoordinatorReader;
+  final AuthEpochReader? _authEpochReader;
   final AuthRequestExecutor? _requestExecutor;
 
   SessionRefreshCoordinator? get _coordinator =>
@@ -66,15 +71,8 @@ final class AuthInterceptor extends Interceptor {
           () => true,
         );
       }
-      final coordinator = _coordinator;
-      if (coordinator != null &&
-          options.extra[AuthRequestPolicy.credentialSnapshot] == null) {
-        final credential = await coordinator.readCurrentCredential();
-        if (credential != null) {
-          options.extra[AuthRequestPolicy.credentialSnapshot] = credential;
-        }
-      }
-      if (options.headers.containsKey('Authorization')) {
+      if (_hasAuthorizationHeader(options)) {
+        options.extra.remove(AuthRequestPolicy.credentialSnapshot);
         handler.next(options);
         return;
       }
@@ -82,6 +80,18 @@ final class AuthInterceptor extends Interceptor {
 
       if (token != null && token.isNotEmpty) {
         options.headers['Authorization'] = 'Bearer $token';
+        final coordinator = _coordinator;
+        if (coordinator != null &&
+            options.extra[AuthRequestPolicy.credentialSnapshot] == null) {
+          final credential = await coordinator.readCurrentCredential();
+          if (credential?.accessToken == token) {
+            options.extra[AuthRequestPolicy.credentialSnapshot] = credential;
+            final authEpoch = _authEpochReader?.call();
+            if (authEpoch != null) {
+              options.extra[AuthRequestPolicy.authenticationEpoch] = authEpoch;
+            }
+          }
+        }
       }
 
       handler.next(options);
@@ -143,6 +153,16 @@ final class AuthInterceptor extends Interceptor {
         handler.next(error);
         return;
       }
+      final activeToken = await _tokenReader();
+      final activeCredential = await coordinator.readCurrentCredential();
+      final expectedEpoch =
+          options.extra[AuthRequestPolicy.authenticationEpoch];
+      if (activeToken != credential.accessToken ||
+          !_sameCredential(activeCredential, credential) ||
+          (expectedEpoch is int && _authEpochReader?.call() != expectedEpoch)) {
+        handler.next(error);
+        return;
+      }
 
       final replay = options.copyWith(
         headers: {
@@ -177,4 +197,13 @@ final class AuthInterceptor extends Interceptor {
     }
     return false;
   }
+
+  bool _hasAuthorizationHeader(RequestOptions options) =>
+      options.headers.keys.any((name) => name.toLowerCase() == 'authorization');
+
+  bool _sameCredential(DeviceCredential? active, DeviceCredential expected) =>
+      active?.accountId == expected.accountId &&
+      active?.sessionId == expected.sessionId &&
+      active?.generation == expected.generation &&
+      active?.accessToken == expected.accessToken;
 }
