@@ -30,6 +30,8 @@ import 'package:rims_frontend/features/reports/domain/repositories/reports_repos
 import 'package:rims_frontend/routes/app_router.dart';
 import 'package:rims_frontend/routes/route_paths.dart';
 
+import 'support/unsupported_device_sessions.dart';
+
 void main() {
   testWidgets('app starts on login page', (tester) async {
     await _pumpApp(tester);
@@ -893,7 +895,9 @@ const _upperCaseAdminSession = AuthSession(
   warehouses: [Warehouse(id: 1, code: 'SH', name: '上海仓', isDefault: true)],
 );
 
-final class _FakeAuthRepository implements AuthRepository {
+final class _FakeAuthRepository
+    with UnsupportedDeviceSessions
+    implements AuthRepository {
   _FakeAuthRepository({
     this.restoreFuture,
     this.switchWarehouseResult = const FailureResult<Warehouse>(

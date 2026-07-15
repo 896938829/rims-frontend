@@ -11,6 +11,8 @@ import 'package:rims_frontend/features/auth/presentation/view_models/auth_sessio
 import 'package:rims_frontend/features/auth/presentation/view_models/login_view_model.dart';
 import 'package:rims_frontend/features/offline/domain/services/offline_ownership_service.dart';
 
+import '../../support/unsupported_device_sessions.dart';
+
 void main() {
   group('LoginViewModel', () {
     test('rejects empty credentials', () async {
@@ -756,7 +758,9 @@ const _beijingActiveSession = AuthSession(
   warehouses: [_warehouse, _beijingWarehouse],
 );
 
-final class _FakeAuthRepository implements AuthRepository {
+final class _FakeAuthRepository
+    with UnsupportedDeviceSessions
+    implements AuthRepository {
   _FakeAuthRepository({
     Result<AuthSession>? result,
     Result<AuthSession?>? restoreResult,
@@ -814,6 +818,7 @@ final class _FakeAuthRepository implements AuthRepository {
 }
 
 final class _TransactionalAuthRepository
+    with UnsupportedDeviceSessions
     implements AuthRepository, TransactionalAuthRepository {
   _TransactionalAuthRepository({required this.transaction, this.prepared});
 

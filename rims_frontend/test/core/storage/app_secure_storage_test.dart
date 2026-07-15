@@ -14,6 +14,8 @@ import 'package:rims_frontend/features/offline/data/repositories/memory_offline_
 import 'package:shared_preferences_platform_interface/in_memory_shared_preferences_async.dart';
 import 'package:shared_preferences_platform_interface/shared_preferences_async_platform_interface.dart';
 
+import '../../support/unsupported_device_sessions.dart';
+
 void main() {
   group('session revocation cleanup leases', () {
     const oldLease = SessionRevocationLease(
@@ -688,7 +690,9 @@ DeviceCredential _credential({
   biometricPolicy: BiometricCredentialPolicy.disabled,
 );
 
-final class _NullAuthRepository implements AuthRepository {
+final class _NullAuthRepository
+    with UnsupportedDeviceSessions
+    implements AuthRepository {
   const _NullAuthRepository();
 
   @override

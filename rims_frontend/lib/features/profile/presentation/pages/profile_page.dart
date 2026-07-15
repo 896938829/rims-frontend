@@ -468,7 +468,20 @@ final class _SettingsCard extends StatelessWidget {
       child: Column(
         children: [
           _SettingRow(label: '个人信息', value: viewModel.userName),
-          _SettingRow(label: '当前角色', value: viewModel.roleName),
+          _SettingRow(
+            label: '当前角色',
+            value: viewModel.roleName,
+            action: TextButton.icon(
+              key: const Key('profile-device-sessions-entry'),
+              onPressed: () => context.push(RoutePaths.deviceSessions),
+              style: TextButton.styleFrom(
+                minimumSize: const Size(48, 48),
+                padding: const EdgeInsets.symmetric(horizontal: 6),
+              ),
+              icon: const Icon(Icons.devices_outlined, size: 20),
+              label: const Text('登录设备'),
+            ),
+          ),
           if (viewModel.canSwitchWarehouse)
             _WarehouseSelectorRow(
               viewModel: viewModel,
@@ -869,15 +882,16 @@ final class _ChangePasswordDialogState extends State<_ChangePasswordDialog> {
 }
 
 final class _SettingRow extends StatelessWidget {
-  const _SettingRow({required this.label, required this.value});
+  const _SettingRow({required this.label, required this.value, this.action});
 
   final String label;
   final String value;
+  final Widget? action;
 
   @override
   Widget build(BuildContext context) {
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 11),
+      padding: EdgeInsets.symmetric(vertical: action == null ? 11 : 0),
       child: Row(
         children: [
           Expanded(
@@ -898,6 +912,7 @@ final class _SettingRow extends StatelessWidget {
               style: AppTextStyles.bodySmall,
             ),
           ),
+          if (action case final action?) ...[const SizedBox(width: 4), action],
         ],
       ),
     );

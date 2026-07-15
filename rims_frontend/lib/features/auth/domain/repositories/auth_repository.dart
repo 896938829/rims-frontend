@@ -1,6 +1,7 @@
 import '../../../../core/result/result.dart';
 import '../../../../core/storage/app_secure_storage.dart';
 import '../entities/auth_session.dart';
+import '../entities/device_session.dart';
 import '../entities/warehouse.dart';
 
 enum AuthSessionSource { network, cache }
@@ -63,6 +64,14 @@ abstract interface class AuthRepository {
     required String username,
     required String password,
   });
+
+  Future<Result<List<DeviceSession>>> listDeviceSessions();
+
+  Future<Result<void>> revokeDeviceSession(String sessionId);
+
+  Future<Result<int>> revokeOtherDeviceSessions();
+
+  Future<Result<int>> revokeAllDeviceSessions();
 
   Future<void> logout();
 }

@@ -6,6 +6,11 @@ abstract final class ApiEndpoints {
   static const String login = '/auth/login';
   static const String refresh = '/auth/refresh';
   static const String logout = '/auth/logout';
+  static const String authSessions = '/auth/sessions';
+  static String authSession(String sessionId) =>
+      '$authSessions/${Uri.encodeComponent(sessionId)}';
+  static const String revokeOtherAuthSessions = '$authSessions/revoke-others';
+  static const String revokeAllAuthSessions = '$authSessions/revoke-all';
   static const String currentUser = '/users/me';
   static const String currentUserPassword = '/users/me/password';
   static const String users = '/users';

@@ -10,6 +10,7 @@ import '../features/attachments/domain/services/attachment_picker.dart';
 import '../features/attachments/domain/services/attachment_share_service.dart';
 import '../features/attachments/domain/services/attachment_staging_store.dart';
 import '../features/auth/domain/repositories/auth_repository.dart';
+import '../features/auth/presentation/pages/device_sessions_page.dart';
 import '../features/auth/presentation/pages/login_page.dart';
 import '../features/auth/presentation/view_models/auth_session_controller.dart';
 import '../features/documents/domain/repositories/documents_repository.dart';
@@ -95,6 +96,13 @@ GoRouter createAppRouter({
         builder: (context, state) => _SyncCenterRoute(
           repository: outboxRepository,
           executor: outboxExecutor,
+          sessionController: sessionController,
+        ),
+      ),
+      GoRoute(
+        path: RoutePaths.deviceSessions,
+        builder: (context, state) => DeviceSessionsPage(
+          authRepository: authRepository,
           sessionController: sessionController,
         ),
       ),

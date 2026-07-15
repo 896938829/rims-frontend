@@ -28,8 +28,21 @@ abstract interface class RotatingAuthRemoteDataSource {
   Future<Result<void>> logout({required String accessToken});
 }
 
+abstract interface class DeviceSessionsRemoteDataSource {
+  Future<Result<List<DeviceSessionModel>>> listDeviceSessions();
+
+  Future<Result<void>> revokeDeviceSession(String sessionId);
+
+  Future<Result<int>> revokeOtherDeviceSessions();
+
+  Future<Result<int>> revokeAllDeviceSessions();
+}
+
 final class ApiAuthRemoteDataSource
-    implements AuthRemoteDataSource, RotatingAuthRemoteDataSource {
+    implements
+        AuthRemoteDataSource,
+        RotatingAuthRemoteDataSource,
+        DeviceSessionsRemoteDataSource {
   const ApiAuthRemoteDataSource(this._apiClient);
 
   final ApiClient _apiClient;
@@ -87,7 +100,37 @@ final class ApiAuthRemoteDataSource
         extra: {AuthRequestPolicy.skipRefresh: true},
       ),
     );
-    return _mapEnvelope<void>(result, (_) {});
+    return _mapNoContent(result);
+  }
+
+  @override
+  Future<Result<List<DeviceSessionModel>>> listDeviceSessions() async {
+    final result = await _apiClient.get<dynamic>(ApiEndpoints.authSessions);
+    return _mapEnvelope(result, _parseDeviceSessions);
+  }
+
+  @override
+  Future<Result<void>> revokeDeviceSession(String sessionId) async {
+    final result = await _apiClient.delete<dynamic>(
+      ApiEndpoints.authSession(sessionId),
+    );
+    return _mapNoContent(result);
+  }
+
+  @override
+  Future<Result<int>> revokeOtherDeviceSessions() async {
+    final result = await _apiClient.post<dynamic>(
+      ApiEndpoints.revokeOtherAuthSessions,
+    );
+    return _mapEnvelope(result, _parseRevokedCount);
+  }
+
+  @override
+  Future<Result<int>> revokeAllDeviceSessions() async {
+    final result = await _apiClient.post<dynamic>(
+      ApiEndpoints.revokeAllAuthSessions,
+    );
+    return _mapEnvelope(result, _parseRevokedCount);
   }
 
   @override
@@ -166,6 +209,37 @@ final class ApiAuthRemoteDataSource
       },
       failure: FailureResult<T>.new,
     );
+  }
+
+  Result<void> _mapNoContent(Result<Response<dynamic>> responseResult) {
+    return responseResult.when(
+      success: (_) => const Success<void>(null),
+      failure: FailureResult<void>.new,
+    );
+  }
+
+  List<DeviceSessionModel> _parseDeviceSessions(Object? data) {
+    if (data is! List) {
+      throw const FormatException('Invalid device sessions response');
+    }
+    return data
+        .map((item) {
+          if (item is Map) {
+            return DeviceSessionModel.fromJson(
+              Map<dynamic, dynamic>.from(item),
+            );
+          }
+          throw const FormatException('Invalid device sessions response');
+        })
+        .toList(growable: false);
+  }
+
+  int _parseRevokedCount(Object? data) {
+    final payload = _requiredMap(data, 'session revocation');
+    final revoked = payload['revoked'];
+    if (revoked is int && revoked >= 0) return revoked;
+    if (revoked is num && revoked >= 0) return revoked.round();
+    throw const FormatException('Invalid session revocation response');
   }
 
   List<WarehouseModel> _parseWarehouses(Object? data) {

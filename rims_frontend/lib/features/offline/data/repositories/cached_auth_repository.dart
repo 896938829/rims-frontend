@@ -8,6 +8,7 @@ import '../../../../core/storage/pending_revocation_journal.dart';
 import 'package:uuid/uuid.dart';
 import '../../../auth/domain/entities/app_user.dart';
 import '../../../auth/domain/entities/auth_session.dart';
+import '../../../auth/domain/entities/device_session.dart';
 import '../../../auth/domain/entities/warehouse.dart';
 import '../../../auth/domain/repositories/auth_repository.dart';
 import '../../../auth/domain/services/session_refresh_coordinator.dart';
@@ -444,6 +445,22 @@ final class CachedAuthRepository
       );
     }
   }
+
+  @override
+  Future<Result<List<DeviceSession>>> listDeviceSessions() =>
+      delegate.listDeviceSessions();
+
+  @override
+  Future<Result<void>> revokeDeviceSession(String sessionId) =>
+      delegate.revokeDeviceSession(sessionId);
+
+  @override
+  Future<Result<int>> revokeOtherDeviceSessions() =>
+      delegate.revokeOtherDeviceSessions();
+
+  @override
+  Future<Result<int>> revokeAllDeviceSessions() =>
+      delegate.revokeAllDeviceSessions();
 
   Future<Result<Warehouse>> _switchCurrentWarehouse(Warehouse warehouse) async {
     final operationEpoch = authEpochReader?.call();

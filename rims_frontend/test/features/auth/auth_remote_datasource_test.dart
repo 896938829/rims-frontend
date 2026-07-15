@@ -288,6 +288,68 @@ void main() {
       expect(adapter.lastAuthorization, 'Bearer fresh-response-token');
     },
   );
+
+  test('device sessions map the backend safe projection exactly', () async {
+    final adapter = _CapturingAdapter(
+      body:
+          '{"code":0,"message":"ok","data":[{"id":"session-7","deviceLabel":"Warehouse tablet","platform":"android","userAgentFamily":"RIMS Android","createdAt":"2026-07-01T08:00:00Z","lastUsedAt":"2026-07-15T09:30:00Z","expiresAt":"2026-08-01T08:00:00Z","current":true}]}',
+    );
+    final dio = Dio()..httpClientAdapter = adapter;
+    final dataSource = ApiAuthRemoteDataSource(
+      ApiClient.test(dio: dio, enableLogging: false),
+    );
+
+    final result = await dataSource.listDeviceSessions();
+
+    expect(adapter.lastPath, '/auth/sessions');
+    result.when(
+      success: (sessions) {
+        expect(sessions.single.id, 'session-7');
+        expect(sessions.single.deviceLabel, 'Warehouse tablet');
+        expect(sessions.single.platform, 'android');
+        expect(sessions.single.userAgentFamily, 'RIMS Android');
+        expect(sessions.single.current, isTrue);
+      },
+      failure: (failure) => fail(failure.message),
+    );
+  });
+
+  test('revoke one encodes the session id and accepts backend 204', () async {
+    final adapter = _CapturingAdapter(body: '', statusCode: 204);
+    final dio = Dio()..httpClientAdapter = adapter;
+    final dataSource = ApiAuthRemoteDataSource(
+      ApiClient.test(dio: dio, enableLogging: false),
+    );
+
+    final result = await dataSource.revokeDeviceSession('session/7');
+
+    expect(result.isSuccess, isTrue);
+    expect(adapter.lastMethod, 'DELETE');
+    expect(adapter.lastPath, '/auth/sessions/session%2F7');
+  });
+
+  for (final command in const {'revoke-others': 2, 'revoke-all': 3}.entries) {
+    test('${command.key} returns the backend revoked count', () async {
+      final adapter = _CapturingAdapter(
+        body: '{"code":0,"message":"ok","data":{"revoked":${command.value}}}',
+      );
+      final dio = Dio()..httpClientAdapter = adapter;
+      final dataSource = ApiAuthRemoteDataSource(
+        ApiClient.test(dio: dio, enableLogging: false),
+      );
+
+      final result = command.key == 'revoke-others'
+          ? await dataSource.revokeOtherDeviceSessions()
+          : await dataSource.revokeAllDeviceSessions();
+
+      expect(adapter.lastMethod, 'POST');
+      expect(adapter.lastPath, '/auth/sessions/${command.key}');
+      result.when(
+        success: (count) => expect(count, command.value),
+        failure: (failure) => fail(failure.message),
+      );
+    });
+  }
 }
 
 Future<void> _expectWarehouseListFailure({
@@ -311,10 +373,12 @@ Future<void> _expectWarehouseListFailure({
 }
 
 final class _CapturingAdapter implements HttpClientAdapter {
-  _CapturingAdapter({required this.body});
+  _CapturingAdapter({required this.body, this.statusCode = 200});
 
   final String body;
+  final int statusCode;
   String? lastPath;
+  String? lastMethod;
   String? lastAuthorization;
   String? lastBody;
   Map<String, dynamic>? lastExtra;
@@ -326,6 +390,7 @@ final class _CapturingAdapter implements HttpClientAdapter {
     Future<void>? cancelFuture,
   ) async {
     lastPath = options.path;
+    lastMethod = options.method;
     lastAuthorization = options.headers['Authorization']?.toString();
     lastExtra = Map<String, dynamic>.from(options.extra);
     if (requestStream != null) {
@@ -336,7 +401,7 @@ final class _CapturingAdapter implements HttpClientAdapter {
 
     return ResponseBody.fromString(
       body,
-      200,
+      statusCode,
       headers: {
         Headers.contentTypeHeader: [Headers.jsonContentType],
       },

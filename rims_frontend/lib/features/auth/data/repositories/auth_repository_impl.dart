@@ -5,6 +5,7 @@ import '../../../../core/storage/app_secure_storage.dart';
 import 'package:uuid/uuid.dart';
 import '../../domain/entities/app_user.dart';
 import '../../domain/entities/auth_session.dart';
+import '../../domain/entities/device_session.dart';
 import '../../domain/entities/warehouse.dart';
 import '../../domain/repositories/auth_repository.dart';
 import '../datasources/auth_remote_datasource.dart';
@@ -176,6 +177,84 @@ final class AuthRepositoryImpl
       );
     }
   }
+
+  DeviceSessionsRemoteDataSource? get _deviceSessionsRemote =>
+      remoteDataSource is DeviceSessionsRemoteDataSource
+      ? remoteDataSource as DeviceSessionsRemoteDataSource
+      : null;
+
+  @override
+  Future<Result<List<DeviceSession>>> listDeviceSessions() async {
+    final remote = _deviceSessionsRemote;
+    if (remote == null) {
+      return const FailureResult(
+        StateFailure(message: 'Device session management is unavailable.'),
+      );
+    }
+    try {
+      final result = await remote.listDeviceSessions();
+      return result.when(
+        success: (sessions) => Success(
+          sessions.map((session) => session.toEntity()).toList(growable: false),
+        ),
+        failure: FailureResult<List<DeviceSession>>.new,
+      );
+    } on Object catch (error) {
+      return _deviceSessionFailure(error);
+    }
+  }
+
+  @override
+  Future<Result<void>> revokeDeviceSession(String sessionId) async {
+    final remote = _deviceSessionsRemote;
+    if (remote == null) {
+      return const FailureResult(
+        StateFailure(message: 'Device session management is unavailable.'),
+      );
+    }
+    try {
+      return await remote.revokeDeviceSession(sessionId);
+    } on Object catch (error) {
+      return _deviceSessionFailure(error);
+    }
+  }
+
+  @override
+  Future<Result<int>> revokeOtherDeviceSessions() async {
+    final remote = _deviceSessionsRemote;
+    if (remote == null) {
+      return const FailureResult(
+        StateFailure(message: 'Device session management is unavailable.'),
+      );
+    }
+    try {
+      return await remote.revokeOtherDeviceSessions();
+    } on Object catch (error) {
+      return _deviceSessionFailure(error);
+    }
+  }
+
+  @override
+  Future<Result<int>> revokeAllDeviceSessions() async {
+    final remote = _deviceSessionsRemote;
+    if (remote == null) {
+      return const FailureResult(
+        StateFailure(message: 'Device session management is unavailable.'),
+      );
+    }
+    try {
+      return await remote.revokeAllDeviceSessions();
+    } on Object catch (error) {
+      return _deviceSessionFailure(error);
+    }
+  }
+
+  FailureResult<T> _deviceSessionFailure<T>(Object error) => FailureResult<T>(
+    UnknownFailure(
+      message: 'Unable to manage device sessions.',
+      cause: sanitizeTransportCause(error),
+    ),
+  );
 
   Future<Result<AuthSession>> _sessionFromLoginResult(
     Result<LoginResponseModel> loginResult, {

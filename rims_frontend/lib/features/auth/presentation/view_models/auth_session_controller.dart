@@ -634,6 +634,58 @@ final class AuthSessionController extends ChangeNotifier {
     return _authEpoch;
   });
 
+  Future<OfflineOwnershipReport?> completeSessionRevocation({
+    required AuthRepository authRepository,
+    String message = '当前登录设备已撤销，请重新登录',
+  }) => lifecycleGate.run(
+    () => _completeSessionRevocation(
+      authRepository: authRepository,
+      message: message,
+    ),
+  );
+
+  Future<OfflineOwnershipReport?> _completeSessionRevocation({
+    required AuthRepository authRepository,
+    required String message,
+  }) async {
+    ++_authEpoch;
+    final previous = _session;
+    final accountId = previous?.user.id.toString();
+    _session = null;
+    _credentialsInvalidated = true;
+    _restoreFailure = const AuthorizationFailure();
+    _switchWarehouseFailure = null;
+    _sessionMessage = message;
+    _clearSourceMetadata();
+    _publishOwnershipChanges(previous, null);
+    notifyListeners();
+
+    OfflineOwnershipReport? report;
+    try {
+      if (accountId != null) {
+        report = await _runOwnership(
+          OfflineOwnershipIntent.revocation(accountId: accountId),
+        );
+      }
+      try {
+        if (authRepository case final AuthCredentialInvalidator invalidator) {
+          await invalidator.expireCredentials();
+        } else {
+          await authRepository.logout();
+        }
+      } on Object catch (error) {
+        _restoreFailure = LocalStorageFailure(
+          message: '登录凭据清理失败，请重试',
+          cause: sanitizeTransportCause(error),
+        );
+        _sessionMessage = '$message；${_restoreFailure!.message}';
+      }
+      return report;
+    } finally {
+      notifyListeners();
+    }
+  }
+
   Future<int> invalidateExpiredSession() => lifecycleGate.run(() async {
     ++_authEpoch;
     final previous = _session;

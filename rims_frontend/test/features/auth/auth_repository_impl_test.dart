@@ -14,6 +14,34 @@ import 'package:rims_frontend/features/auth/domain/services/session_refresh_coor
 
 void main() {
   group('AuthRepositoryImpl', () {
+    test(
+      'device session datasource exceptions become typed failures',
+      () async {
+        final repository = AuthRepositoryImpl(
+          remoteDataSource: _ThrowingDeviceSessionsRemoteDataSource(),
+          secureStorage: _FakeDeviceCredentialStorage(),
+        );
+
+        final results = <Result<Object?>>[
+          await repository.listDeviceSessions(),
+          await repository.revokeDeviceSession('session-7'),
+          await repository.revokeOtherDeviceSessions(),
+          await repository.revokeAllDeviceSessions(),
+        ];
+
+        for (final result in results) {
+          expect(result.isFailure, isTrue);
+          result.when(
+            success: (_) => fail('Expected a typed device session failure'),
+            failure: (failure) {
+              expect(failure, isA<UnknownFailure>());
+              expect(failure.cause, isNot(isA<StateError>()));
+            },
+          );
+        }
+      },
+    );
+
     test('rotating login commits one owner-bound device credential', () async {
       final storage = _FakeDeviceCredentialStorage();
       final remoteDataSource = _FakeAuthRemoteDataSource(
@@ -1314,6 +1342,26 @@ final class _FakeRotatingAuthRemoteDataSource extends _FakeAuthRemoteDataSource
     await logoutBlocker?.future;
     return logoutResult;
   }
+}
+
+final class _ThrowingDeviceSessionsRemoteDataSource
+    extends _FakeAuthRemoteDataSource
+    implements DeviceSessionsRemoteDataSource {
+  @override
+  Future<Result<List<DeviceSessionModel>>> listDeviceSessions() =>
+      throw StateError('raw transport detail');
+
+  @override
+  Future<Result<void>> revokeDeviceSession(String sessionId) =>
+      throw StateError('raw transport detail');
+
+  @override
+  Future<Result<int>> revokeOtherDeviceSessions() =>
+      throw StateError('raw transport detail');
+
+  @override
+  Future<Result<int>> revokeAllDeviceSessions() =>
+      throw StateError('raw transport detail');
 }
 
 final class _DelayedLoginRemoteDataSource implements AuthRemoteDataSource {

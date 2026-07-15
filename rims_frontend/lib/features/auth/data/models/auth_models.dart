@@ -92,10 +92,12 @@ final class DeviceSessionModel {
       'last_used_at',
     ]);
     final expiresAt = _readDateTime(json, const ['expiresAt', 'expires_at']);
+    final current = _readBool(json, const ['current']);
     if (id == null ||
         createdAt == null ||
         lastUsedAt == null ||
-        expiresAt == null) {
+        expiresAt == null ||
+        current == null) {
       throw const FormatException('Invalid device session response');
     }
     return DeviceSessionModel(
@@ -111,7 +113,7 @@ final class DeviceSessionModel {
       lastUsedAt: lastUsedAt,
       expiresAt: expiresAt,
       revokedAt: _readDateTime(json, const ['revokedAt', 'revoked_at']),
-      current: _readBool(json, const ['current']) ?? false,
+      current: current,
     );
   }
 

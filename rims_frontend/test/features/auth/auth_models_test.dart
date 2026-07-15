@@ -4,6 +4,55 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:rims_frontend/features/auth/data/models/auth_models.dart';
 
 void main() {
+  group('DeviceSessionModel', () {
+    test('requires the backend current marker', () {
+      expect(
+        () => DeviceSessionModel.fromJson({
+          'id': 'session-7',
+          'deviceLabel': 'Warehouse tablet',
+          'platform': 'android',
+          'userAgentFamily': 'RIMS Android',
+          'createdAt': '2026-07-01T08:00:00Z',
+          'lastUsedAt': '2026-07-15T09:30:00Z',
+          'expiresAt': '2026-08-01T08:00:00Z',
+        }),
+        throwsFormatException,
+      );
+    });
+
+    test('maps the complete safe backend projection', () {
+      final model = DeviceSessionModel.fromJson({
+        'id': 'session-7',
+        'deviceLabel': 'Warehouse tablet',
+        'platform': 'android',
+        'userAgentFamily': 'RIMS Android',
+        'createdAt': '2026-07-01T08:00:00Z',
+        'lastUsedAt': '2026-07-15T09:30:00Z',
+        'expiresAt': '2026-08-01T08:00:00Z',
+        'revokedAt': '2026-07-15T10:00:00Z',
+        'current': true,
+        'clientIp': '10.24.16.8',
+        'tokenHash': 'must-not-cross-the-boundary',
+      });
+
+      final session = model.toEntity();
+      expect(session.id, 'session-7');
+      expect(session.deviceLabel, 'Warehouse tablet');
+      expect(session.platform, 'android');
+      expect(session.userAgentFamily, 'RIMS Android');
+      expect(session.createdAt, DateTime.utc(2026, 7, 1, 8));
+      expect(session.lastUsedAt, DateTime.utc(2026, 7, 15, 9, 30));
+      expect(session.expiresAt, DateTime.utc(2026, 8, 1, 8));
+      expect(session.revokedAt, DateTime.utc(2026, 7, 15, 10));
+      expect(session.current, isTrue);
+      expect(session.toString(), isNot(contains('10.24.16.8')));
+      expect(
+        session.toString(),
+        isNot(contains('must-not-cross-the-boundary')),
+      );
+    });
+  });
+
   group('LoginResponseModel', () {
     test('parses rotating backend credentials and device session', () {
       final payload = base64Url

@@ -28,6 +28,8 @@ import 'package:rims_frontend/features/offline/domain/services/outbox_state_mach
 import 'package:rims_frontend/features/offline/domain/services/offline_write_barrier.dart';
 import 'package:rims_frontend/features/inventory/domain/entities/inventory_item.dart';
 import 'package:rims_frontend/features/scanner/domain/entities/scan_data.dart';
+
+import '../../support/unsupported_device_sessions.dart';
 import 'package:rims_frontend/features/scanner/domain/services/scan_lookup_cache.dart';
 import 'package:rims_frontend/features/scanner/domain/services/scan_session_store.dart';
 
@@ -2664,6 +2666,7 @@ final class _SessionStorage
 }
 
 final class _PendingAuthRepository
+    with UnsupportedDeviceSessions
     implements
         AuthRepository,
         TransactionalAuthRepository,

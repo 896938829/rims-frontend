@@ -31,6 +31,8 @@ import 'package:rims_frontend/features/offline/domain/services/offline_write_bar
 import 'package:shared_preferences_platform_interface/in_memory_shared_preferences_async.dart';
 import 'package:shared_preferences_platform_interface/shared_preferences_async_platform_interface.dart';
 
+import '../../support/unsupported_device_sessions.dart';
+
 AuthenticatedSessionCleanupLease _cleanupLease() {
   final credential = DeviceCredential(
     accessToken: 'access-1',
@@ -3086,7 +3088,9 @@ final class _BlockingReviewInvalidator implements OfflineReviewInvalidator {
   }
 }
 
-final class _FakeAuthRepository implements AuthRepository {
+final class _FakeAuthRepository
+    with UnsupportedDeviceSessions
+    implements AuthRepository {
   _FakeAuthRepository({
     required this.restoreResult,
     this.loginResult = const FailureResult(UnknownFailure()),
@@ -3129,6 +3133,7 @@ final class _FakeAuthRepository implements AuthRepository {
 }
 
 final class _ConcurrentLoginAuthRepository
+    with UnsupportedDeviceSessions
     implements
         AuthRepository,
         TransactionalAuthRepository,
@@ -3214,6 +3219,7 @@ final class _ConcurrentLoginAuthRepository
 }
 
 final class _ImmediateProvisionalAuthRepository
+    with UnsupportedDeviceSessions
     implements
         AuthRepository,
         TransactionalAuthRepository,
@@ -3364,6 +3370,7 @@ final class _FakeStoredSessionTransaction
 }
 
 final class _ThrowingCredentialRepository
+    with UnsupportedDeviceSessions
     implements AuthRepository, AuthCredentialInvalidator {
   bool failExpiry = true;
 
