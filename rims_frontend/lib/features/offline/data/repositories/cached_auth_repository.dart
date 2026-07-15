@@ -25,6 +25,7 @@ final class CachedAuthRepository
         AuthRepository,
         AuthSessionRestoreMetadata,
         AuthCredentialInvalidator,
+        OwnerBoundCredentialQuarantine,
         TransactionalAuthRepository,
         SessionFailureRecovery {
   CachedAuthRepository({
@@ -589,12 +590,50 @@ final class CachedAuthRepository
 
   @override
   Future<void> expireCredentials() async {
-    if (delegate case final AuthCredentialInvalidator invalidator) {
-      await invalidator.expireCredentials();
-    } else {
-      await delegate.logout();
+    final expected = await captureCredentialForQuarantine();
+    if (expected != null) {
+      if (await quarantineCredential(expected)) return;
+      throw const RevocationCleanupFailure(
+        message: 'Unable to quarantine the owner-bound device credential.',
+      );
     }
+    await _quarantineCapturedAccessToken();
     _clearMetadata();
+  }
+
+  @override
+  Future<DeviceCredential?> captureCredentialForQuarantine() async {
+    if (delegate case final OwnerBoundCredentialQuarantine quarantine) {
+      return quarantine.captureCredentialForQuarantine();
+    }
+    return _readCurrentCredential();
+  }
+
+  @override
+  Future<bool> quarantineCredential(DeviceCredential expected) async {
+    final bool quarantined;
+    if (delegate case final OwnerBoundCredentialQuarantine quarantine) {
+      quarantined = await quarantine.quarantineCredential(expected);
+    } else if (tokenStorage case final DeviceCredentialStorage storage) {
+      final active = await storage.readDeviceCredential();
+      if (!_sameFullCredential(active, expected)) return active == null;
+      quarantined = tokenStorage is ConditionalTokenStorage
+          ? await (tokenStorage as ConditionalTokenStorage)
+                .clearAccessTokenIfMatches(expected.accessToken)
+          : await storage.clearDeviceCredentialIfMatches(
+              accountId: expected.accountId,
+              sessionId: expected.sessionId,
+              generation: expected.generation,
+            );
+    } else if (tokenStorage case final ConditionalTokenStorage conditional) {
+      quarantined = await conditional.clearAccessTokenIfMatches(
+        expected.accessToken,
+      );
+    } else {
+      quarantined = false;
+    }
+    if (quarantined) _clearMetadata();
+    return quarantined;
   }
 
   Future<CacheRecord> _writeSession(
@@ -743,20 +782,29 @@ final class CachedAuthRepository
   Future<void> _expireDelegateCredentials() async {
     Object? firstError;
     try {
-      await tokenStorage.clearAccessToken();
+      await _quarantineCapturedAccessToken();
     } on Object catch (error) {
       firstError = error;
     }
     try {
       if (delegate case final AuthCredentialInvalidator invalidator) {
         await invalidator.expireCredentials();
-      } else {
-        await delegate.logout();
       }
     } on Object catch (error) {
       firstError ??= error;
     }
     if (firstError != null) throw firstError;
+  }
+
+  Future<void> _quarantineCapturedAccessToken() async {
+    final accessToken = await tokenStorage.readAccessToken();
+    if (accessToken == null || accessToken.isEmpty) return;
+    if (tokenStorage case final ConditionalTokenStorage conditional) {
+      if (await conditional.clearAccessTokenIfMatches(accessToken)) return;
+    }
+    throw const RevocationCleanupFailure(
+      message: 'Unable to quarantine the captured access token.',
+    );
   }
 
   @override
@@ -925,9 +973,14 @@ final class CachedAuthRepository
     required SessionRevocationLease markerLease,
     required AuthenticatedSessionCleanupLease cleanupLease,
     required bool credentialQuarantined,
+    bool ownershipCompleted = false,
   }) async {
     final expected = cleanupLease;
-    if (!await _isCleanupCurrent(expected, allowCredentialMissing: true)) {
+    if (!await _isCleanupCurrent(
+      expected,
+      allowCredentialMissing: true,
+      requireAccount: false,
+    )) {
       return _handleSupersededCleanup(markerLease, expected);
     }
     final accountId = expected.request.credential.accountId;
@@ -938,7 +991,11 @@ final class CachedAuthRepository
       );
     }
     try {
-      if (await _isCleanupCurrent(expected, allowCredentialMissing: true)) {
+      if (await _isCleanupCurrent(
+        expected,
+        allowCredentialMissing: true,
+        requireAccount: false,
+      )) {
         await _deleteSessionProjectionIfEpoch(accountId, markerLease.authEpoch);
       }
     } on OfflineWriteBlockedException {
@@ -946,7 +1003,11 @@ final class CachedAuthRepository
     } on Object catch (error) {
       firstError ??= error;
     }
-    if (!await _isCleanupCurrent(expected, allowCredentialMissing: true)) {
+    if (!await _isCleanupCurrent(
+      expected,
+      allowCredentialMissing: true,
+      requireAccount: false,
+    )) {
       return _handleSupersededCleanup(markerLease, expected);
     }
     try {
@@ -959,6 +1020,7 @@ final class CachedAuthRepository
       } else if (await _isCleanupCurrent(
         expected,
         allowCredentialMissing: true,
+        requireAccount: false,
       )) {
         await accountStorage.clearAuthenticatedAccountId();
       }
@@ -972,9 +1034,11 @@ final class CachedAuthRepository
     )) {
       return _handleSupersededCleanup(markerLease, expected);
     }
-    final ownershipFailure = await _applyOwnership(
-      OfflineOwnershipIntent.tokenExpiry(accountId: accountId),
-    );
+    final ownershipFailure = ownershipCompleted
+        ? null
+        : await _applyOwnership(
+            OfflineOwnershipIntent.tokenExpiry(accountId: accountId),
+          );
     if (!await _isCleanupCurrent(
       expected,
       allowCredentialMissing: true,

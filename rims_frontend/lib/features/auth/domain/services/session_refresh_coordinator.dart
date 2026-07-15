@@ -25,6 +25,7 @@ abstract interface class SessionFailureRecovery {
     required SessionRevocationLease markerLease,
     required AuthenticatedSessionCleanupLease cleanupLease,
     required bool credentialQuarantined,
+    bool ownershipCompleted = false,
   });
 }
 

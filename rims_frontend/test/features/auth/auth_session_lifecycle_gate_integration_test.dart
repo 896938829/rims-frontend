@@ -11,6 +11,7 @@ import 'package:rims_frontend/features/auth/data/models/auth_models.dart';
 import 'package:rims_frontend/features/auth/data/repositories/auth_repository_impl.dart';
 import 'package:rims_frontend/features/auth/domain/entities/auth_session.dart';
 import 'package:rims_frontend/features/auth/domain/entities/device_session.dart';
+import 'package:rims_frontend/features/auth/domain/entities/terminal_session_revocation.dart';
 import 'package:rims_frontend/features/auth/domain/entities/warehouse.dart';
 import 'package:rims_frontend/features/auth/domain/repositories/auth_repository.dart';
 import 'package:rims_frontend/features/auth/domain/services/authenticated_request_lease.dart';
@@ -197,14 +198,17 @@ void main() {
       expect(fixture.controller.isAuthenticated, isTrue);
 
       releaseRemote.complete();
-      await fixture.remote.logoutStarted.future;
-      fixture.remote.releaseLogout.complete();
-      expect(await revoking, isA<Success<void>>());
+      expect(
+        (await revoking).status,
+        TerminalSessionRevocationStatus.completed,
+      );
       expect(repository.expireCalls, 1);
       expect(fixture.controller.isAuthenticated, isFalse);
 
       await refreshing;
       await loggingIn;
+      await fixture.remote.logoutStarted.future;
+      fixture.remote.releaseLogout.complete();
       await loggingOut;
       expect(repository.restoreCalls, 1);
       expect(repository.loginCalls, 1);
@@ -226,7 +230,7 @@ void main() {
         ),
       );
 
-      expect(result, isA<FailureResult<void>>());
+      expect(result.status, TerminalSessionRevocationStatus.remoteRejected);
       expect(repository.expireCalls, 0);
       expect(fixture.ownership.revocationCalls, 0);
       expect(fixture.controller.isAuthenticated, isTrue);
@@ -234,7 +238,7 @@ void main() {
   );
 
   test(
-    'credential cleanup failure does not publish logged-out state',
+    'credential cleanup failure remains terminal after remote success',
     () async {
       final fixture = await _LifecycleFixture.create();
       addTearDown(fixture.controller.dispose);
@@ -242,17 +246,65 @@ void main() {
         fixture.repository,
         failCredentialCleanup: true,
       );
+      var remoteRevocationCalls = 0;
 
       final result = await fixture.controller.runSessionRevocation(
         authRepository: repository,
-        remoteRevocation: () async => const Success(null),
+        remoteRevocation: () async {
+          remoteRevocationCalls += 1;
+          return const Success(null);
+        },
       );
 
-      expect(result, isA<FailureResult<void>>());
+      expect(
+        result.status,
+        TerminalSessionRevocationStatus.terminalWithCleanupDebt,
+      );
       expect(repository.expireCalls, 1);
       expect(fixture.ownership.revocationCalls, 1);
-      expect(fixture.controller.isAuthenticated, isTrue);
-      expect(fixture.controller.currentUser?.username, 'old-user');
+      expect(fixture.controller.isAuthenticated, isFalse);
+      expect(fixture.controller.currentUser, isNull);
+      expect(fixture.controller.canAuthenticateRequests, isFalse);
+      expect(remoteRevocationCalls, 1);
+      expect(fixture.remote.logoutCalls, 0);
+      expect(await fixture.journal.readLeases(), hasLength(1));
+
+      final restartedOwnership = _BlockingLogoutOwnership();
+      final restartedController = AuthSessionController(
+        ownershipCoordinator: restartedOwnership,
+      );
+      addTearDown(restartedController.dispose);
+      final restartedRaw = AuthRepositoryImpl(
+        remoteDataSource: fixture.remote,
+        secureStorage: fixture.storage,
+        authEpochReader: () => restartedController.authEpoch,
+      );
+      final restartedRepository = CachedAuthRepository(
+        delegate: restartedRaw,
+        store: fixture.store,
+        tokenStorage: fixture.storage,
+        accountStorage: fixture.storage,
+        revocationStorage: fixture.storage,
+        revocationJournal: fixture.journal,
+        ownershipCoordinator: restartedOwnership,
+        authEpochReader: () => restartedController.authEpoch,
+        onSessionRevoked: restartedController.invalidateRevokedSession,
+      );
+
+      await restartedController.restoreSession(restartedRepository);
+
+      expect(restartedController.isAuthenticated, isFalse);
+      expect(await fixture.storage.readDeviceCredential(), isNull);
+      expect(
+        await fixture.journal.readLeases(),
+        isEmpty,
+        reason:
+            'restore=${restartedController.restoreFailure} '
+            'ownership=${restartedController.ownershipFailure} '
+            'epoch=${restartedController.authEpoch}',
+      );
+      expect(fixture.remote.loadCurrentUserCalls, 0);
+      expect(fixture.remote.logoutCalls, 0);
     },
   );
 }
@@ -266,6 +318,8 @@ final class _LifecycleFixture {
     required this.coordinator,
     required this.ownership,
     required this.credential,
+    required this.journal,
+    required this.store,
   });
 
   static Future<_LifecycleFixture> create() async {
@@ -277,6 +331,8 @@ final class _LifecycleFixture {
       lifecycleGate: gate,
     );
     final remote = _LifecycleRemote();
+    final journal = MemoryPendingRevocationJournal();
+    final store = MemoryOfflineStore();
     final raw = AuthRepositoryImpl(
       remoteDataSource: remote,
       secureStorage: storage,
@@ -284,11 +340,11 @@ final class _LifecycleFixture {
     );
     final repository = CachedAuthRepository(
       delegate: raw,
-      store: MemoryOfflineStore(),
+      store: store,
       tokenStorage: storage,
       accountStorage: storage,
       revocationStorage: storage,
-      revocationJournal: MemoryPendingRevocationJournal(),
+      revocationJournal: journal,
       ownershipCoordinator: ownership,
       authEpochReader: () => controller.authEpoch,
       onSessionRevoked: controller.invalidateRevokedSession,
@@ -329,6 +385,8 @@ final class _LifecycleFixture {
       ),
       ownership: ownership,
       credential: credential,
+      journal: journal,
+      store: store,
     );
   }
 
@@ -339,6 +397,8 @@ final class _LifecycleFixture {
   final SessionRefreshCoordinator coordinator;
   final _BlockingLogoutOwnership ownership;
   final DeviceCredential credential;
+  final MemoryPendingRevocationJournal journal;
+  final MemoryOfflineStore store;
 }
 
 final class _LifecycleRemote
@@ -351,6 +411,8 @@ final class _LifecycleRemote
   String? lastLogoutAccessToken;
   bool blockRefresh = false;
   int refreshCalls = 0;
+  int logoutCalls = 0;
+  int loadCurrentUserCalls = 0;
 
   @override
   Future<Result<LoginResponseModel>> login({
@@ -371,6 +433,7 @@ final class _LifecycleRemote
 
   @override
   Future<Result<void>> logout({required String accessToken}) async {
+    logoutCalls += 1;
     lastLogoutAccessToken = accessToken;
     if (!logoutStarted.isCompleted) logoutStarted.complete();
     await releaseLogout.future;
@@ -395,8 +458,10 @@ final class _LifecycleRemote
   }
 
   @override
-  Future<Result<AppUserModel>> loadCurrentUser() async =>
-      throw UnsupportedError('not used');
+  Future<Result<AppUserModel>> loadCurrentUser() async {
+    loadCurrentUserCalls += 1;
+    throw UnsupportedError('not used');
+  }
 
   @override
   Future<Result<List<WarehouseModel>>> loadWarehouses({
@@ -476,7 +541,11 @@ final class _BlockingLogoutOwnership
 }
 
 final class _CountingAuthRepository
-    implements AuthRepository, AuthCredentialInvalidator {
+    implements
+        AuthRepository,
+        AuthCredentialInvalidator,
+        OwnerBoundCredentialQuarantine,
+        SessionFailureRecovery {
   _CountingAuthRepository(this.delegate, {this.failCredentialCleanup = false});
 
   final AuthRepository delegate;
@@ -515,6 +584,50 @@ final class _CountingAuthRepository
     }
     final invalidator = delegate as AuthCredentialInvalidator;
     await invalidator.expireCredentials();
+  }
+
+  @override
+  Future<DeviceCredential?> captureCredentialForQuarantine() {
+    final quarantine = delegate as OwnerBoundCredentialQuarantine;
+    return quarantine.captureCredentialForQuarantine();
+  }
+
+  @override
+  Future<bool> quarantineCredential(DeviceCredential expected) async {
+    expireCalls += 1;
+    if (failCredentialCleanup) {
+      throw StateError('credential cleanup failed');
+    }
+    final quarantine = delegate as OwnerBoundCredentialQuarantine;
+    return quarantine.quarantineCredential(expected);
+  }
+
+  @override
+  Future<Failure?> retainPendingRevocation({
+    required SessionRevocationLease markerLease,
+    required AuthenticatedSessionCleanupLease cleanupLease,
+  }) {
+    final recovery = delegate as SessionFailureRecovery;
+    return recovery.retainPendingRevocation(
+      markerLease: markerLease,
+      cleanupLease: cleanupLease,
+    );
+  }
+
+  @override
+  Future<Failure?> completeOwnershipCleanup({
+    required SessionRevocationLease markerLease,
+    required AuthenticatedSessionCleanupLease cleanupLease,
+    required bool credentialQuarantined,
+    bool ownershipCompleted = false,
+  }) {
+    final recovery = delegate as SessionFailureRecovery;
+    return recovery.completeOwnershipCleanup(
+      markerLease: markerLease,
+      cleanupLease: cleanupLease,
+      credentialQuarantined: credentialQuarantined,
+      ownershipCompleted: ownershipCompleted,
+    );
   }
 
   @override

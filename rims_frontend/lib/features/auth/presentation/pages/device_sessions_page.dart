@@ -1,7 +1,6 @@
 import 'dart:async';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 
 import '../../../../core/theme/app_text_styles.dart';
 import '../../domain/entities/device_session.dart';
@@ -109,7 +108,8 @@ final class _DeviceSessionsPageState extends State<DeviceSessionsPage> {
               _DeviceSessionCard(
                 session: session,
                 viewModel: _viewModel,
-                onRevoke: _viewModel.isBusy
+                onRevoke:
+                    _viewModel.isBusy || !_viewModel.canRevokeSession(session)
                     ? null
                     : () => _confirmRevokeSession(session),
               ),
@@ -119,7 +119,7 @@ final class _DeviceSessionsPageState extends State<DeviceSessionsPage> {
           const SizedBox(height: 4),
           OutlinedButton.icon(
             key: const Key('device-sessions-revoke-others'),
-            onPressed: _viewModel.isBusy || _viewModel.sessions.length < 2
+            onPressed: _viewModel.isBusy || !_viewModel.canRevokeOthers
                 ? null
                 : _confirmRevokeOthers,
             style: OutlinedButton.styleFrom(
@@ -215,6 +215,7 @@ final class _DeviceSessionsPageState extends State<DeviceSessionsPage> {
         if (refreshAfterSuccess) await _viewModel.refresh();
         if (mounted && message != null) _showMessage(message);
       case DeviceSessionsCommandOutcome.terminal:
+      case DeviceSessionsCommandOutcome.terminalWithCleanupDebt:
         break;
       case DeviceSessionsCommandOutcome.failed:
         final message = _viewModel.errorMessage;
@@ -293,26 +294,15 @@ final class _DeviceSessionCard extends StatelessWidget {
                   button: true,
                   label: '撤销 ${viewModel.deviceLabelFor(session)}',
                   excludeSemantics: true,
-                  child: Focus(
-                    onKeyEvent: (node, event) {
-                      if (event is KeyDownEvent &&
-                          (event.logicalKey == LogicalKeyboardKey.enter ||
-                              event.logicalKey == LogicalKeyboardKey.space)) {
-                        onRevoke?.call();
-                        return KeyEventResult.handled;
-                      }
-                      return KeyEventResult.ignored;
-                    },
-                    child: IconButton(
-                      key: Key('device-session-revoke-${session.id}'),
-                      tooltip: '撤销 ${viewModel.deviceLabelFor(session)}',
-                      constraints: const BoxConstraints(
-                        minWidth: 48,
-                        minHeight: 48,
-                      ),
-                      onPressed: onRevoke,
-                      icon: const Icon(Icons.logout),
+                  child: IconButton(
+                    key: Key('device-session-revoke-${session.id}'),
+                    tooltip: '撤销 ${viewModel.deviceLabelFor(session)}',
+                    constraints: const BoxConstraints(
+                      minWidth: 48,
+                      minHeight: 48,
                     ),
+                    onPressed: onRevoke,
+                    icon: const Icon(Icons.logout),
                   ),
                 ),
               ],

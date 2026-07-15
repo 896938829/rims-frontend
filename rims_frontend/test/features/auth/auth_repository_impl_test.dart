@@ -154,6 +154,32 @@ void main() {
     );
 
     test(
+      'credential expiry quarantines locally without logout or pending marker',
+      () async {
+        final storage = _FakeDeviceCredentialStorage()
+          ..credential = _deviceCredential()
+          ..accessToken = 'access-1'
+          ..tokenCommitted = true;
+        final remoteDataSource = _FakeRotatingAuthRemoteDataSource(
+          refreshResult: const FailureResult(AuthenticationFailure()),
+          logoutResult: const Success(null),
+        );
+        final repository = AuthRepositoryImpl(
+          remoteDataSource: remoteDataSource,
+          secureStorage: storage,
+        );
+
+        await (repository as AuthCredentialInvalidator).expireCredentials();
+
+        expect(remoteDataSource.logoutCalls, 0);
+        expect(storage.conditionalClearAttempts, ['access-1']);
+        expect(storage.credential, isNull);
+        expect(await storage.readAccessToken(), isNull);
+        expect(storage.pendingAccountId, isNull);
+      },
+    );
+
+    test(
       'real repository logout cannot be undone by an in-flight refresh',
       () async {
         final storage = _FakeDeviceCredentialStorage()

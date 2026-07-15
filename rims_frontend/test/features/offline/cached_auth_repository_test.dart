@@ -466,7 +466,8 @@ void main() {
 
       await repository.expireCredentials();
 
-      expect(delegate.logoutCalls, 1);
+      expect(delegate.logoutCalls, 0);
+      expect(storage.token, isNull);
       expect(storage.accountId, '7');
     },
   );
@@ -574,7 +575,7 @@ void main() {
       final result = await repository.restoreSession();
 
       expect(result, isA<FailureResult<AuthSession?>>());
-      expect(delegate.logoutCalls, 1);
+      expect(delegate.logoutCalls, 0);
       expect(storage.token, isNull);
       expect(storage.accountId, isNull);
       expect(storage.pendingRevocationAccountId, '7');

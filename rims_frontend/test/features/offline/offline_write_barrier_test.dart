@@ -2516,6 +2516,7 @@ final class _NoopReviews implements OfflineReviewInvalidator {
 final class _SessionStorage
     implements
         TokenStorage,
+        ConditionalTokenStorage,
         AuthTokenTransactionStorage,
         AuthenticatedAccountStorage,
         AuthenticatedAccountTransactionStorage,
@@ -2538,6 +2539,13 @@ final class _SessionStorage
     tokenOwnerId = null;
     tokenAttemptVersion = null;
     tokenCommitted = false;
+  }
+
+  @override
+  Future<bool> clearAccessTokenIfMatches(String expectedToken) async {
+    if (token != expectedToken) return false;
+    await clearAccessToken();
+    return true;
   }
 
   @override

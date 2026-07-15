@@ -5,11 +5,15 @@ import '../../../../core/events/app_event_bus.dart';
 import '../../../../core/network/sanitized_transport_cause.dart';
 import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
+import '../../../../core/storage/app_secure_storage.dart';
 import '../../domain/entities/app_user.dart';
 import '../../domain/entities/auth_session.dart';
+import '../../domain/entities/terminal_session_revocation.dart';
 import '../../domain/entities/warehouse.dart';
 import '../../domain/repositories/auth_repository.dart';
+import '../../domain/services/authenticated_request_lease.dart';
 import '../../domain/services/auth_session_lifecycle_gate.dart';
+import '../../domain/services/session_refresh_coordinator.dart';
 import '../../../offline/domain/services/offline_ownership_service.dart';
 
 final class AuthSessionController extends ChangeNotifier {
@@ -634,7 +638,7 @@ final class AuthSessionController extends ChangeNotifier {
     return _authEpoch;
   });
 
-  Future<Result<void>> runSessionRevocation({
+  Future<TerminalSessionRevocationResult> runSessionRevocation({
     required AuthRepository authRepository,
     required Future<Result<void>> Function() remoteRevocation,
     String message = '当前登录设备已撤销，请重新登录',
@@ -646,45 +650,46 @@ final class AuthSessionController extends ChangeNotifier {
     ),
   );
 
-  Future<Result<void>> _runSessionRevocation({
+  Future<TerminalSessionRevocationResult> _runSessionRevocation({
     required AuthRepository authRepository,
     required Future<Result<void>> Function() remoteRevocation,
     required String message,
   }) async {
-    final remoteResult = await remoteRevocation();
-    if (remoteResult case FailureResult<void>(failure: final failure)) {
-      return FailureResult<void>(failure);
+    final quarantine = switch (authRepository) {
+      final OwnerBoundCredentialQuarantine value => value,
+      _ => null,
+    };
+    if (quarantine == null) {
+      return const TerminalSessionRevocationResult.remoteRejected(
+        StateFailure(message: '无法建立本机凭据安全清理事务'),
+      );
     }
-
-    final previous = _session;
-    final accountId = previous?.user.id.toString();
+    final DeviceCredential? expectedCredential;
     try {
-      if (accountId != null) {
-        final report = await _runOwnership(
-          OfflineOwnershipIntent.revocation(accountId: accountId),
-        );
-        if (report != null && !report.completed) {
-          return FailureResult<void>(
-            _ownershipFailure ??
-                const LocalStorageFailure(message: '离线数据安全清理失败，请重试'),
-          );
-        }
-      }
-      if (authRepository case final AuthCredentialInvalidator invalidator) {
-        await invalidator.expireCredentials();
-      } else {
-        await authRepository.logout();
-      }
+      expectedCredential = await quarantine.captureCredentialForQuarantine();
     } on Object catch (error) {
-      return FailureResult<void>(
+      return TerminalSessionRevocationResult.remoteRejected(
         LocalStorageFailure(
-          message: '登录凭据清理失败，请重试',
+          message: '读取本机登录凭据失败，请重试',
           cause: sanitizeTransportCause(error),
         ),
       );
     }
+    if (expectedCredential == null) {
+      return const TerminalSessionRevocationResult.remoteRejected(
+        AuthenticationFailure(message: '当前登录凭据不可用'),
+      );
+    }
 
-    ++_authEpoch;
+    final remoteResult = await remoteRevocation();
+    if (remoteResult case FailureResult<void>(failure: final failure)) {
+      return TerminalSessionRevocationResult.remoteRejected(failure);
+    }
+
+    final requestEpoch = _authEpoch;
+    final previous = _session;
+    final accountId = expectedCredential.accountId;
+    final cleanupEpoch = ++_authEpoch;
     _session = null;
     _credentialsInvalidated = true;
     _restoreFailure = const AuthorizationFailure();
@@ -693,7 +698,115 @@ final class AuthSessionController extends ChangeNotifier {
     _clearSourceMetadata();
     _publishOwnershipChanges(previous, null);
     notifyListeners();
-    return const Success<void>(null);
+
+    final requestLease = AuthenticatedRequestLease(
+      token: expectedCredential.accessToken,
+      credential: expectedCredential,
+      authEpoch: requestEpoch,
+    );
+    final cleanupLease = AuthenticatedSessionCleanupLease(
+      request: requestLease,
+      cleanupEpoch: cleanupEpoch,
+    );
+    final markerLease = SessionRevocationLease(
+      accountId: expectedCredential.accountId,
+      sessionId: expectedCredential.sessionId,
+      generation: expectedCredential.generation,
+      authEpoch: requestEpoch,
+    );
+    final recovery = switch (authRepository) {
+      final SessionFailureRecovery value => value,
+      _ => null,
+    };
+    Failure? retentionFailure;
+    if (recovery != null) {
+      try {
+        retentionFailure = await recovery.retainPendingRevocation(
+          markerLease: markerLease,
+          cleanupLease: cleanupLease,
+        );
+      } on Object catch (error) {
+        retentionFailure = RevocationCleanupFailure(
+          message: '本机安全清理记录保存失败',
+          cause: sanitizeTransportCause(error),
+        );
+      }
+    }
+
+    var ownershipCompleted = true;
+    Failure? directCleanupFailure;
+    try {
+      final report = await _runOwnership(
+        OfflineOwnershipIntent.revocation(accountId: accountId),
+      );
+      ownershipCompleted = report?.completed ?? true;
+      if (!ownershipCompleted) {
+        directCleanupFailure =
+            _ownershipFailure ??
+            const RevocationCleanupFailure(message: '离线数据安全清理失败');
+      }
+    } on Object catch (error) {
+      ownershipCompleted = false;
+      directCleanupFailure = RevocationCleanupFailure(
+        message: '离线数据安全清理失败',
+        cause: sanitizeTransportCause(error),
+      );
+    }
+
+    var credentialQuarantined = false;
+    try {
+      credentialQuarantined = await quarantine.quarantineCredential(
+        expectedCredential,
+      );
+      if (!credentialQuarantined) {
+        directCleanupFailure ??= const RevocationCleanupFailure(
+          message: '本机登录凭据尚未完成隔离',
+        );
+      }
+    } on Object catch (error) {
+      directCleanupFailure ??= RevocationCleanupFailure(
+        message: '本机登录凭据隔离失败',
+        cause: sanitizeTransportCause(error),
+      );
+    }
+
+    Failure? completionFailure;
+    if (recovery != null) {
+      try {
+        completionFailure = await recovery.completeOwnershipCleanup(
+          markerLease: markerLease,
+          cleanupLease: cleanupLease,
+          credentialQuarantined: credentialQuarantined,
+          ownershipCompleted: ownershipCompleted,
+        );
+      } on Object catch (error) {
+        completionFailure = RevocationCleanupFailure(
+          message: '本机安全清理未完成',
+          cause: sanitizeTransportCause(error),
+        );
+      }
+    }
+
+    final cleanupFailure = recovery == null
+        ? directCleanupFailure
+        : completionFailure == null
+        ? null
+        : RevocationCleanupFailure(
+            message: completionFailure.message,
+            cause: [
+              if (retentionFailure != null)
+                sanitizeTransportCause(retentionFailure),
+              sanitizeTransportCause(completionFailure),
+            ],
+          );
+    if (cleanupFailure != null) {
+      _restoreFailure = cleanupFailure;
+      _sessionMessage = '当前登录已撤销；本机安全清理将在下次登录前继续';
+      notifyListeners();
+      return TerminalSessionRevocationResult.cleanupDebt(cleanupFailure);
+    }
+    _ownershipFailure = null;
+    return const TerminalSessionRevocationResult.completed();
   }
 
   Future<int> invalidateExpiredSession() => lifecycleGate.run(() async {

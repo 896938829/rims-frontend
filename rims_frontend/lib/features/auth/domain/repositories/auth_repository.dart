@@ -18,6 +18,12 @@ abstract interface class AuthCredentialInvalidator {
   Future<void> expireCredentials();
 }
 
+abstract interface class OwnerBoundCredentialQuarantine {
+  Future<DeviceCredential?> captureCredentialForQuarantine();
+
+  Future<bool> quarantineCredential(DeviceCredential expected);
+}
+
 abstract interface class SessionCredentialRepository {
   Future<Result<DeviceCredential>> refreshCredential(DeviceCredential current);
 }

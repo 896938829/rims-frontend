@@ -4,6 +4,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:go_router/go_router.dart';
 import 'package:rims_frontend/core/result/failure.dart';
 import 'package:rims_frontend/core/result/result.dart';
+import 'package:rims_frontend/core/storage/app_secure_storage.dart';
 import 'package:rims_frontend/core/theme/app_theme.dart';
 import 'package:rims_frontend/features/auth/domain/entities/app_user.dart';
 import 'package:rims_frontend/features/auth/domain/entities/auth_session.dart';
@@ -33,7 +34,10 @@ void main() {
     expect(find.text('未知设备'), findsOneWidget);
     expect(find.text('未知平台'), findsOneWidget);
     expect(find.text('未知客户端'), findsOneWidget);
-    expect(find.textContaining('2026-07-15 09:30'), findsOneWidget);
+    expect(
+      find.textContaining(_pageLocalTimeLabel(_currentSession.lastUsedAt)),
+      findsOneWidget,
+    );
     expect(find.textContaining('10.24.16.8'), findsNothing);
     expect(find.textContaining('IP'), findsNothing);
   });
@@ -83,6 +87,47 @@ void main() {
       semantics.dispose();
     },
   );
+
+  testWidgets('redacts invisible format characters from every display surface', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    final repository = _FakeAuthRepository(
+      sessions: [_bidiLabelSession, _controlLabelSession, _formatLabelSession],
+    );
+    await _pumpPage(tester, repository: repository);
+
+    expect(find.text('未知设备'), findsNWidgets(3));
+    expect(find.byTooltip('撤销 未知设备'), findsNWidgets(3));
+    final unsafeLabels = repository.sessions
+        .map((session) => session.deviceLabel)
+        .toList(growable: false);
+    final visibleAndSemanticText =
+        '${tester.widgetList<Text>(find.byType(Text)).map((widget) => widget.data ?? '').join(' ')} '
+        '${['bidi', 'control', 'format'].map((id) => tester.getSemantics(find.byKey(Key('device-session-card-$id'))).toStringDeep()).join(' ')}';
+    for (final label in unsafeLabels) {
+      expect(visibleAndSemanticText, isNot(contains(label)));
+    }
+
+    await tester.tap(find.byKey(const Key('device-session-revoke-bidi')));
+    await tester.pumpAndSettle();
+    for (final label in unsafeLabels) {
+      expect(
+        tester
+            .widgetList<Text>(find.byType(Text))
+            .map((widget) => widget.data ?? '')
+            .join(' '),
+        isNot(contains(label)),
+      );
+    }
+    await tester.tap(find.byKey(const Key('device-sessions-confirm')));
+    await tester.pumpAndSettle();
+    expect(find.text('已撤销 未知设备'), findsOneWidget);
+    for (final label in unsafeLabels) {
+      expect(find.textContaining(label), findsNothing);
+    }
+    semantics.dispose();
+  });
 
   testWidgets('requires confirmation before revoking one device', (
     tester,
@@ -227,6 +272,49 @@ void main() {
     expect(ownership.reasons, [OfflineOwnershipReason.revocation]);
   });
 
+  testWidgets('cleanup failure after remote revoke still redirects to login', (
+    tester,
+  ) async {
+    final repository = _FakeAuthRepository(
+      sessions: [_currentSession],
+      failCredentialCleanup: true,
+    );
+    final controller = AuthSessionController();
+    await controller.startSession(_authSession);
+    final router = GoRouter(
+      initialLocation: RoutePaths.deviceSessions,
+      refreshListenable: controller,
+      redirect: (context, state) =>
+          !controller.isAuthenticated ? RoutePaths.login : null,
+      routes: [
+        GoRoute(
+          path: RoutePaths.login,
+          builder: (context, state) => const Scaffold(body: Text('登录页')),
+        ),
+        GoRoute(
+          path: RoutePaths.deviceSessions,
+          builder: (context, state) => DeviceSessionsPage(
+            authRepository: repository,
+            sessionController: controller,
+          ),
+        ),
+      ],
+    );
+    await tester.pumpWidget(
+      MaterialApp.router(theme: AppTheme.light, routerConfig: router),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byKey(const Key('device-session-revoke-s-1')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const Key('device-sessions-confirm')));
+    await tester.pumpAndSettle();
+
+    expect(find.text('登录页'), findsOneWidget);
+    expect(controller.isAuthenticated, isFalse);
+    expect(controller.restoreFailure, isA<RevocationCleanupFailure>());
+  });
+
   testWidgets('retains content after refresh error and offers retry', (
     tester,
   ) async {
@@ -243,23 +331,59 @@ void main() {
   });
 
   testWidgets(
-    'buttons expose semantics, keyboard activation, and 48dp targets',
+    'revoked history stays visible but disables revoke and revoke others',
+    (tester) async {
+      final repository = _FakeAuthRepository(
+        sessions: [_currentSession, _revokedHistorySession],
+      );
+      await _pumpPage(tester, repository: repository);
+
+      expect(find.text('Retired scanner'), findsOneWidget);
+      expect(find.textContaining('撤销时间'), findsOneWidget);
+      final historicalRevoke = tester.widget<IconButton>(
+        find.byKey(const Key('device-session-revoke-revoked')),
+      );
+      final revokeOthers = tester.widget<OutlinedButton>(
+        find.byKey(const Key('device-sessions-revoke-others')),
+      );
+      expect(historicalRevoke.onPressed, isNull);
+      expect(revokeOthers.onPressed, isNull);
+    },
+  );
+
+  testWidgets(
+    'revoke buttons use one standard focus target with Enter and Space',
     (tester) async {
       final repository = _FakeAuthRepository(
         sessions: [_currentSession, _otherSession],
       );
       await _pumpPage(tester, repository: repository);
 
-      final revoke = find.byKey(const Key('device-session-revoke-s-2'));
-      expect(find.bySemanticsLabel('撤销 Warehouse tablet'), findsOneWidget);
+      final revoke = find.byKey(const Key('device-session-revoke-s-1'));
+      expect(find.bySemanticsLabel('撤销 Current tablet'), findsOneWidget);
       expect(tester.getSize(revoke).width, greaterThanOrEqualTo(48));
       expect(tester.getSize(revoke).height, greaterThanOrEqualTo(48));
       expect(tester.widget<IconButton>(revoke).onPressed, isNotNull);
+      final revokeSemantics = find.byWidgetPredicate(
+        (widget) =>
+            widget is Semantics &&
+            widget.properties.label == '撤销 Current tablet',
+      );
+      expect(
+        find.descendant(of: revokeSemantics, matching: find.byType(Focus)),
+        findsOneWidget,
+      );
 
-      Focus.of(tester.element(revoke)).requestFocus();
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
       await tester.pump();
-      expect(Focus.of(tester.element(revoke)).hasFocus, isTrue);
       await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pumpAndSettle();
+      expect(find.text('撤销此设备？'), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('device-sessions-cancel')));
+      await tester.pumpAndSettle();
+      await tester.sendKeyEvent(LogicalKeyboardKey.space);
       await tester.pumpAndSettle();
       expect(find.text('撤销此设备？'), findsOneWidget);
     },
@@ -372,6 +496,14 @@ Future<void> _pumpPage(
   await tester.pumpAndSettle();
 }
 
+String _pageLocalTimeLabel(DateTime value) {
+  final local = value.toLocal();
+  String twoDigits(int part) => part.toString().padLeft(2, '0');
+  return '${local.year.toString().padLeft(4, '0')}-'
+      '${twoDigits(local.month)}-${twoDigits(local.day)} '
+      '${twoDigits(local.hour)}:${twoDigits(local.minute)}';
+}
+
 const _user = AppUser(
   id: 7,
   username: 'operator',
@@ -460,12 +592,65 @@ final _ipv6PortLabelSession = DeviceSession(
   current: false,
 );
 
+final _bidiLabelSession = DeviceSession(
+  id: 'bidi',
+  deviceLabel: 'Scanner\u202ealert',
+  platform: 'windows',
+  userAgentFamily: 'Chrome',
+  createdAt: DateTime.utc(2026, 7, 3, 8),
+  lastUsedAt: DateTime.utc(2026, 7, 13, 8),
+  expiresAt: DateTime.utc(2026, 8, 3, 8),
+  current: false,
+);
+
+final _controlLabelSession = DeviceSession(
+  id: 'control',
+  deviceLabel: 'Scanner\u0085alert',
+  platform: 'windows',
+  userAgentFamily: 'Chrome',
+  createdAt: DateTime.utc(2026, 7, 3, 8),
+  lastUsedAt: DateTime.utc(2026, 7, 13, 8),
+  expiresAt: DateTime.utc(2026, 8, 3, 8),
+  current: false,
+);
+
+final _formatLabelSession = DeviceSession(
+  id: 'format',
+  deviceLabel: 'Scanner\u200dalert',
+  platform: 'windows',
+  userAgentFamily: 'Chrome',
+  createdAt: DateTime.utc(2026, 7, 3, 8),
+  lastUsedAt: DateTime.utc(2026, 7, 13, 8),
+  expiresAt: DateTime.utc(2026, 8, 3, 8),
+  current: false,
+);
+
+final _revokedHistorySession = DeviceSession(
+  id: 'revoked',
+  deviceLabel: 'Retired scanner',
+  platform: 'android',
+  userAgentFamily: 'RIMS Android',
+  createdAt: DateTime.utc(2026, 7, 3, 8),
+  lastUsedAt: DateTime.utc(2026, 7, 13, 8),
+  expiresAt: DateTime.utc(2026, 8, 3, 8),
+  revokedAt: DateTime.utc(2026, 7, 14, 11),
+  current: false,
+);
+
 final class _FakeAuthRepository
-    implements AuthRepository, AuthCredentialInvalidator {
-  _FakeAuthRepository({required this.sessions, this.holdRevokeOthers = false});
+    implements
+        AuthRepository,
+        AuthCredentialInvalidator,
+        OwnerBoundCredentialQuarantine {
+  _FakeAuthRepository({
+    required this.sessions,
+    this.holdRevokeOthers = false,
+    this.failCredentialCleanup = false,
+  });
 
   final List<DeviceSession> sessions;
   final bool holdRevokeOthers;
+  final bool failCredentialCleanup;
   Failure? listFailure;
   final List<String> revokeSessionCalls = [];
   int revokeOthersCalls = 0;
@@ -509,7 +694,21 @@ final class _FakeAuthRepository
   }
 
   @override
-  Future<void> expireCredentials() async => expireCredentialCalls += 1;
+  Future<void> expireCredentials() async {
+    expireCredentialCalls += 1;
+    if (failCredentialCleanup) throw StateError('secure clear failed');
+  }
+
+  @override
+  Future<DeviceCredential?> captureCredentialForQuarantine() async =>
+      _pageCredential;
+
+  @override
+  Future<bool> quarantineCredential(DeviceCredential expected) async {
+    expireCredentialCalls += 1;
+    if (failCredentialCleanup) throw StateError('secure clear failed');
+    return true;
+  }
 
   @override
   Future<Result<AuthSession?>> restoreSession() async => const Success(null);
@@ -527,6 +726,18 @@ final class _FakeAuthRepository
   @override
   Future<void> logout() async {}
 }
+
+final _pageCredential = DeviceCredential(
+  accessToken: 'access-token',
+  refreshToken: 'refresh-token',
+  accountId: '7',
+  sessionId: 's-1',
+  accessExpiresAt: DateTime.utc(2026, 7, 15, 3),
+  refreshExpiresAt: DateTime.utc(2026, 8, 15, 3),
+  tokenVersion: 5,
+  generation: 1,
+  biometricPolicy: BiometricCredentialPolicy.disabled,
+);
 
 final class _RecordingOwnershipCoordinator
     implements OfflineOwnershipCoordinator {

@@ -2,13 +2,22 @@ import 'package:flutter/foundation.dart';
 
 import '../../../../core/result/result.dart';
 import '../../domain/entities/device_session.dart';
+import '../../domain/entities/terminal_session_revocation.dart';
 import '../../domain/repositories/auth_repository.dart';
 import '../device_session_display_sanitizer.dart';
 
-enum DeviceSessionsCommandOutcome { completed, terminal, failed, ignored }
+enum DeviceSessionsCommandOutcome {
+  completed,
+  terminal,
+  terminalWithCleanupDebt,
+  failed,
+  ignored,
+}
 
 typedef TerminalSessionRevocationRunner =
-    Future<Result<void>> Function(Future<Result<void>> Function() command);
+    Future<TerminalSessionRevocationResult> Function(
+      Future<Result<void>> Function() command,
+    );
 
 final class DeviceSessionsViewModel extends ChangeNotifier {
   DeviceSessionsViewModel({
@@ -36,6 +45,10 @@ final class DeviceSessionsViewModel extends ChangeNotifier {
   bool get isTerminal => _isTerminal;
   String? get errorMessage => _errorMessage;
   String? get successMessage => _successMessage;
+  bool get canRevokeOthers =>
+      _sessions.any((session) => !session.current && session.revokedAt == null);
+
+  bool canRevokeSession(DeviceSession session) => session.revokedAt == null;
 
   String deviceLabelFor(DeviceSession session) =>
       DeviceSessionDisplaySanitizer.deviceLabel(session.deviceLabel);
@@ -96,14 +109,22 @@ final class DeviceSessionsViewModel extends ChangeNotifier {
   Future<DeviceSessionsCommandOutcome> revokeSession(
     DeviceSession session,
   ) async {
+    if (!canRevokeSession(session)) {
+      return DeviceSessionsCommandOutcome.ignored;
+    }
     final generation = _beginOperation();
     if (generation == null) return DeviceSessionsCommandOutcome.ignored;
     try {
-      final result = session.current
-          ? await runTerminalRevocation(
-              () => repository.revokeDeviceSession(session.id),
-            )
-          : await repository.revokeDeviceSession(session.id);
+      if (session.current) {
+        final result = await runTerminalRevocation(
+          () => repository.revokeDeviceSession(session.id),
+        );
+        if (!_isCurrent(generation)) {
+          return DeviceSessionsCommandOutcome.ignored;
+        }
+        return _terminalOutcome(result, revokeAll: false);
+      }
+      final result = await repository.revokeDeviceSession(session.id);
       if (!_isCurrent(generation)) return DeviceSessionsCommandOutcome.ignored;
       return result.when(
         success: (_) {
@@ -111,10 +132,6 @@ final class DeviceSessionsViewModel extends ChangeNotifier {
             _sessions.where((candidate) => candidate.id != session.id),
           );
           _errorMessage = null;
-          if (session.current) {
-            _isTerminal = true;
-            return DeviceSessionsCommandOutcome.terminal;
-          }
           _successMessage =
               '已撤销 ${DeviceSessionDisplaySanitizer.deviceLabel(session.deviceLabel)}';
           return DeviceSessionsCommandOutcome.completed;
@@ -138,7 +155,9 @@ final class DeviceSessionsViewModel extends ChangeNotifier {
       return result.when(
         success: (_) {
           _sessions = List.unmodifiable(
-            _sessions.where((session) => session.current),
+            _sessions.where(
+              (session) => session.current || session.revokedAt != null,
+            ),
           );
           _errorMessage = null;
           _successMessage = '已撤销其他登录设备';
@@ -168,15 +187,7 @@ final class DeviceSessionsViewModel extends ChangeNotifier {
         };
       });
       if (!_isCurrent(generation)) return DeviceSessionsCommandOutcome.ignored;
-      return result.when(
-        success: (_) {
-          _sessions = const [];
-          _errorMessage = null;
-          _isTerminal = true;
-          return DeviceSessionsCommandOutcome.terminal;
-        },
-        failure: (_) => _commandFailure('撤销全部设备失败，请重试'),
-      );
+      return _terminalOutcome(result, revokeAll: true);
     } on Object {
       if (!_isCurrent(generation)) return DeviceSessionsCommandOutcome.ignored;
       return _commandFailure('撤销全部设备失败，请重试');
@@ -200,6 +211,37 @@ final class DeviceSessionsViewModel extends ChangeNotifier {
     return DeviceSessionsCommandOutcome.failed;
   }
 
+  DeviceSessionsCommandOutcome _terminalOutcome(
+    TerminalSessionRevocationResult result, {
+    required bool revokeAll,
+  }) {
+    return switch (result.status) {
+      TerminalSessionRevocationStatus.remoteRejected => _commandFailure(
+        revokeAll ? '撤销全部设备失败，请重试' : '撤销设备失败，请重试',
+      ),
+      TerminalSessionRevocationStatus.completed => _markTerminal(
+        revokeAll: revokeAll,
+        cleanupDebt: false,
+      ),
+      TerminalSessionRevocationStatus.terminalWithCleanupDebt => _markTerminal(
+        revokeAll: revokeAll,
+        cleanupDebt: true,
+      ),
+    };
+  }
+
+  DeviceSessionsCommandOutcome _markTerminal({
+    required bool revokeAll,
+    required bool cleanupDebt,
+  }) {
+    if (revokeAll) _sessions = const [];
+    _isTerminal = true;
+    _errorMessage = cleanupDebt ? '登录已撤销，本机安全清理将在下次登录前继续' : null;
+    return cleanupDebt
+        ? DeviceSessionsCommandOutcome.terminalWithCleanupDebt
+        : DeviceSessionsCommandOutcome.terminal;
+  }
+
   bool _isCurrent(int generation) => !_disposed && generation == _generation;
 
   void _finishOperation(int? generation) {
@@ -209,10 +251,11 @@ final class DeviceSessionsViewModel extends ChangeNotifier {
   }
 
   String _formatDateTime(DateTime value) {
+    final local = value.toLocal();
     String twoDigits(int part) => part.toString().padLeft(2, '0');
-    return '${value.year.toString().padLeft(4, '0')}-'
-        '${twoDigits(value.month)}-${twoDigits(value.day)} '
-        '${twoDigits(value.hour)}:${twoDigits(value.minute)}';
+    return '${local.year.toString().padLeft(4, '0')}-'
+        '${twoDigits(local.month)}-${twoDigits(local.day)} '
+        '${twoDigits(local.hour)}:${twoDigits(local.minute)}';
   }
 
   @override

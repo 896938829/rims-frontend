@@ -745,6 +745,7 @@ final class _InterceptorFailureRecovery implements SessionFailureRecovery {
     required SessionRevocationLease markerLease,
     required AuthenticatedSessionCleanupLease cleanupLease,
     required bool credentialQuarantined,
+    bool ownershipCompleted = false,
   }) async => null;
 }
 

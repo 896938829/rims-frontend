@@ -757,6 +757,7 @@ final class _CoordinatorFailureRecovery implements SessionFailureRecovery {
     required SessionRevocationLease markerLease,
     required AuthenticatedSessionCleanupLease cleanupLease,
     required bool credentialQuarantined,
+    bool ownershipCompleted = false,
   }) async {
     order.add('ownership');
     this.credentialQuarantined = credentialQuarantined;

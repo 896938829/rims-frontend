@@ -5,6 +5,7 @@ import 'package:rims_frontend/core/result/failure.dart';
 import 'package:rims_frontend/core/result/result.dart';
 import 'package:rims_frontend/features/auth/domain/entities/auth_session.dart';
 import 'package:rims_frontend/features/auth/domain/entities/device_session.dart';
+import 'package:rims_frontend/features/auth/domain/entities/terminal_session_revocation.dart';
 import 'package:rims_frontend/features/auth/domain/entities/warehouse.dart';
 import 'package:rims_frontend/features/auth/domain/repositories/auth_repository.dart';
 import 'package:rims_frontend/features/auth/presentation/view_models/device_sessions_view_model.dart';
@@ -43,10 +44,22 @@ void main() {
 
       expect(viewModel.deviceLabelFor(untrusted), '未知设备');
       expect(viewModel.platformLabelFor(untrusted), '未知平台');
-      expect(viewModel.createdLabelFor(untrusted), '2026-07-01 08:00');
-      expect(viewModel.lastUsedLabelFor(untrusted), '2026-07-15 09:30');
-      expect(viewModel.expiresLabelFor(untrusted), '2026-08-01 08:00');
-      expect(viewModel.revokedLabelFor(untrusted), '2026-07-15 10:00');
+      expect(
+        viewModel.createdLabelFor(untrusted),
+        _localTimeLabel(untrusted.createdAt),
+      );
+      expect(
+        viewModel.lastUsedLabelFor(untrusted),
+        _localTimeLabel(untrusted.lastUsedAt),
+      );
+      expect(
+        viewModel.expiresLabelFor(untrusted),
+        _localTimeLabel(untrusted.expiresAt),
+      );
+      expect(
+        viewModel.revokedLabelFor(untrusted),
+        _localTimeLabel(untrusted.revokedAt!),
+      );
       expect(viewModel.userAgentLabelFor(untrusted), '未知客户端');
     });
 
@@ -75,6 +88,37 @@ void main() {
       }
     });
 
+    test('redacts control surrogate bidi and invisible format characters', () {
+      final viewModel = _viewModel(
+        _FakeAuthRepository(sessionsResult: const Success([])),
+      );
+      final unsafeLabels = [
+        'Scanner\u0007 alert',
+        'Scanner\u0085 alert',
+        'Scanner ${String.fromCharCode(0xd800)} alert',
+        'Scanner\u202e alert',
+        'Scanner\u2067 alert',
+        'Scanner\u200d alert',
+        'Scanner\u200c alert',
+        'Scanner\u200b alert',
+        'Scanner\ufeff alert',
+      ];
+
+      for (var index = 0; index < unsafeLabels.length; index += 1) {
+        final session = DeviceSession(
+          id: 'format-$index',
+          deviceLabel: unsafeLabels[index],
+          platform: 'android',
+          userAgentFamily: 'Chrome',
+          createdAt: DateTime.utc(2026, 7, 1),
+          lastUsedAt: DateTime.utc(2026, 7, 1),
+          expiresAt: DateTime.utc(2026, 8, 1),
+          current: false,
+        );
+        expect(viewModel.deviceLabelFor(session), '未知设备');
+      }
+    });
+
     test('maps platform and client family through fixed allowlists', () {
       final viewModel = _viewModel(
         _FakeAuthRepository(sessionsResult: const Success([])),
@@ -85,6 +129,55 @@ void main() {
       expect(viewModel.userAgentLabelFor(_otherSession), 'Chrome 浏览器');
       expect(viewModel.userAgentLabelFor(_unknownSessionForDisplay), '未知客户端');
     });
+
+    test('formats UTC timestamps with local timezone components', () {
+      final viewModel = _viewModel(
+        _FakeAuthRepository(sessionsResult: const Success([])),
+      );
+      final utc = DateTime.utc(2026, 1, 2, 3, 4);
+      final session = DeviceSession(
+        id: 'local-time',
+        deviceLabel: 'Scanner',
+        platform: 'android',
+        userAgentFamily: 'Chrome',
+        createdAt: utc,
+        lastUsedAt: utc,
+        expiresAt: utc,
+        current: false,
+      );
+
+      expect(viewModel.createdLabelFor(session), _localTimeLabel(utc));
+    });
+
+    test(
+      'revoked history is not actionable and survives revoke others',
+      () async {
+        final repository = _FakeAuthRepository(
+          sessionsResult: Success([
+            _currentSession,
+            _otherSession,
+            _revokedSession,
+          ]),
+        );
+        final viewModel = _viewModel(repository);
+        await viewModel.load();
+
+        expect(viewModel.canRevokeSession(_revokedSession), isFalse);
+        expect(
+          await viewModel.revokeSession(_revokedSession),
+          DeviceSessionsCommandOutcome.ignored,
+        );
+        expect(repository.revokeSessionCalls, isEmpty);
+        expect(viewModel.canRevokeOthers, isTrue);
+
+        expect(
+          await viewModel.revokeOthers(),
+          DeviceSessionsCommandOutcome.completed,
+        );
+        expect(viewModel.sessions, [_currentSession, _revokedSession]);
+        expect(viewModel.canRevokeOthers, isFalse);
+      },
+    );
 
     test('refresh failure retains previously loaded sessions', () async {
       final repository = _FakeAuthRepository(
@@ -200,8 +293,23 @@ void main() {
 DeviceSessionsViewModel _viewModel(AuthRepository repository) {
   return DeviceSessionsViewModel(
     repository: repository,
-    runTerminalRevocation: (command) => command(),
+    runTerminalRevocation: (command) async {
+      final result = await command();
+      return switch (result) {
+        Success<void>() => const TerminalSessionRevocationResult.completed(),
+        FailureResult<void>(failure: final failure) =>
+          TerminalSessionRevocationResult.remoteRejected(failure),
+      };
+    },
   );
+}
+
+String _localTimeLabel(DateTime value) {
+  final local = value.toLocal();
+  String twoDigits(int part) => part.toString().padLeft(2, '0');
+  return '${local.year.toString().padLeft(4, '0')}-'
+      '${twoDigits(local.month)}-${twoDigits(local.day)} '
+      '${twoDigits(local.hour)}:${twoDigits(local.minute)}';
 }
 
 final _currentSession = DeviceSession(
@@ -234,6 +342,18 @@ final _unknownSessionForDisplay = DeviceSession(
   createdAt: DateTime.utc(2026, 7, 2, 8),
   lastUsedAt: DateTime.utc(2026, 7, 14, 10, 45),
   expiresAt: DateTime.utc(2026, 8, 2, 8),
+  current: false,
+);
+
+final _revokedSession = DeviceSession(
+  id: 's-revoked',
+  deviceLabel: 'Retired scanner',
+  platform: 'android',
+  userAgentFamily: 'RIMS Android',
+  createdAt: DateTime.utc(2026, 7, 2, 8),
+  lastUsedAt: DateTime.utc(2026, 7, 14, 10, 45),
+  expiresAt: DateTime.utc(2026, 8, 2, 8),
+  revokedAt: DateTime.utc(2026, 7, 14, 11),
   current: false,
 );
 

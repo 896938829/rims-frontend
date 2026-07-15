@@ -15,6 +15,7 @@ final class AuthRepositoryImpl
     implements
         AuthRepository,
         AuthCredentialInvalidator,
+        OwnerBoundCredentialQuarantine,
         TransactionalAuthRepository,
         ProvisionalTransactionalAuthRepository,
         SessionCredentialRepository {
@@ -466,7 +467,52 @@ final class AuthRepositoryImpl
   }
 
   @override
-  Future<void> expireCredentials() => logout();
+  Future<DeviceCredential?> captureCredentialForQuarantine() async {
+    if (secureStorage case final DeviceCredentialStorage storage) {
+      return storage.readDeviceCredential();
+    }
+    return null;
+  }
+
+  @override
+  Future<bool> quarantineCredential(DeviceCredential expected) async {
+    if (secureStorage case final DeviceCredentialStorage storage) {
+      final active = await storage.readDeviceCredential();
+      if (!_sameFullCredential(active, expected)) return active == null;
+      if (secureStorage case final ConditionalTokenStorage conditional) {
+        return conditional.clearAccessTokenIfMatches(expected.accessToken);
+      }
+      return storage.clearDeviceCredentialIfMatches(
+        accountId: expected.accountId,
+        sessionId: expected.sessionId,
+        generation: expected.generation,
+      );
+    }
+    if (secureStorage case final ConditionalTokenStorage conditional) {
+      return conditional.clearAccessTokenIfMatches(expected.accessToken);
+    }
+    return false;
+  }
+
+  @override
+  Future<void> expireCredentials() async {
+    final expected = await captureCredentialForQuarantine();
+    if (expected != null) {
+      if (await quarantineCredential(expected)) return;
+      throw const RevocationCleanupFailure(
+        message: 'Unable to quarantine the owner-bound device credential.',
+      );
+    }
+
+    final accessToken = await secureStorage.readAccessToken();
+    if (accessToken == null || accessToken.isEmpty) return;
+    if (secureStorage case final ConditionalTokenStorage conditional) {
+      if (await conditional.clearAccessTokenIfMatches(accessToken)) return;
+    }
+    throw const RevocationCleanupFailure(
+      message: 'Unable to quarantine the captured access token.',
+    );
+  }
 
   bool _sameCredential(DeviceCredential? active, DeviceCredential expected) =>
       active?.accountId == expected.accountId &&
@@ -475,6 +521,15 @@ final class AuthRepositoryImpl
 
   bool _sameIdentity(DeviceCredential left, DeviceCredential right) =>
       left.accountId == right.accountId && left.sessionId == right.sessionId;
+
+  bool _sameFullCredential(
+    DeviceCredential? active,
+    DeviceCredential expected,
+  ) =>
+      active?.accountId == expected.accountId &&
+      active?.sessionId == expected.sessionId &&
+      active?.generation == expected.generation &&
+      active?.accessToken == expected.accessToken;
 
   Future<void> _clearLoginToken({
     required String token,

@@ -16,6 +16,7 @@ abstract final class DeviceSessionDisplaySanitizer {
     final label = value.trim();
     if (label.isEmpty ||
         label.toLowerCase() == 'unknown device' ||
+        _containsUnsafeTextControl(label) ||
         _containsNetworkAddress(label)) {
       return '未知设备';
     }
@@ -51,5 +52,35 @@ abstract final class DeviceSessionDisplaySanitizer {
     return _ipv4Address.hasMatch(value) ||
         _bracketedIpv6Address.hasMatch(value) ||
         _ipv6Address.hasMatch(value);
+  }
+
+  static bool _containsUnsafeTextControl(String value) {
+    final units = value.codeUnits;
+    for (var index = 0; index < units.length; index += 1) {
+      final unit = units[index];
+      if (unit <= 0x1f || (unit >= 0x7f && unit <= 0x9f)) return true;
+      if (unit >= 0xd800 && unit <= 0xdbff) {
+        if (index + 1 >= units.length ||
+            units[index + 1] < 0xdc00 ||
+            units[index + 1] > 0xdfff) {
+          return true;
+        }
+        index += 1;
+        continue;
+      }
+      if (unit >= 0xdc00 && unit <= 0xdfff) return true;
+      if (unit == 0x061c ||
+          unit == 0x200b ||
+          unit == 0x200c ||
+          unit == 0x200d ||
+          unit == 0x200e ||
+          unit == 0x200f ||
+          (unit >= 0x202a && unit <= 0x202e) ||
+          (unit >= 0x2066 && unit <= 0x2069) ||
+          unit == 0xfeff) {
+        return true;
+      }
+    }
+    return false;
   }
 }
