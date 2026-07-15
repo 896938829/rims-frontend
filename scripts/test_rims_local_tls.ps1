@@ -450,6 +450,17 @@ try {
   Assert-True `
     -Value $goProxySource.Contains('case <-ctx.Done():') `
     -Message 'WSL Go TLS proxy does not close active connections on shutdown.'
+  foreach ($safeGoFailureCategory in @(
+      'certificate load failed',
+      'listener start failed'
+    )) {
+    Assert-True `
+      -Value $goProxySource.Contains($safeGoFailureCategory) `
+      -Message "WSL Go TLS proxy omitted safe failure category: $safeGoFailureCategory"
+  }
+  Assert-False `
+    -Value $goProxySource.Contains('log.Fatal(err)') `
+    -Message 'WSL Go TLS proxy logs raw lower-level errors that can contain secret paths.'
   $tlsLibrarySource = [IO.File]::ReadAllText(
     (Join-Path $scriptDir 'lib\rims_local_tls.ps1')
   )
@@ -668,10 +679,21 @@ try {
     -Message 'Proxy process identity read throw was reported as a successful start.'
   Assert-True `
     -Value $script:startedProcessCompensated `
-    -Message 'Started proxy process was not killed after identity acquisition threw.'
-  Assert-False `
+    -Message 'Started proxy wrapper was not killed after identity acquisition threw.'
+  Assert-True `
     -Value $startThenIdentityThrow.cleanupPending `
-    -Message 'Successfully compensated process start left cleanup pending.'
+    -Message 'Killing only the WSL wrapper incorrectly proved the Linux proxy was clean.'
+  Assert-True `
+    -Value ($null -ne $startThenIdentityThrow.state) `
+    -Message 'Missing published identity did not return persistable partial proxy state.'
+  Assert-Equal `
+    -Actual $startThenIdentityThrow.state.windowsPid `
+    -Expected 4343 `
+    -Message 'Partial proxy state lost the Windows PID after identity recovery failed.'
+  Assert-Equal `
+    -Actual $startThenIdentityThrow.state.linuxIdentityPath `
+    -Expected $pathsA.proxyLinuxIdentity `
+    -Message 'Partial proxy state lost the deterministic published identity path.'
   Assert-Equal `
     -Actual $script:startedProcessWaitTimeout `
     -Expected 3000 `
@@ -680,6 +702,95 @@ try {
     -Actual ([IO.Path]::GetFileName($script:proxyRuntimeExecutable)) `
     -Expected 'wsl.exe' `
     -Message 'PS5.1 controller did not launch the TLS proxy through WSL.'
+
+  $publishedMarker = "rims-local-tls-proxy:$($pathsA.workspaceId)"
+  $publishedIdentity = [pscustomobject][ordered]@{
+    bootId = 'published-boot-id'
+    leaderPid = 4455
+    startTicks = '7654321'
+    processGroupId = 4455
+    commandMarker = $publishedMarker
+  }
+  $publishedProcess = [pscustomobject]@{
+    StartInfo = $null
+    Id = 4454
+    HasExited = $false
+    StartTime = [DateTime]::Parse('2026-07-15T01:02:04Z')
+  }
+  $publishedProcess | Add-Member -MemberType ScriptMethod -Name Start -Value {
+    return $true
+  }
+  $publishedProcess | Add-Member -MemberType ScriptMethod -Name Kill -Value {}
+  $publishedProcess | Add-Member -MemberType ScriptMethod -Name WaitForExit -Value {
+    param($timeoutMilliseconds)
+    return $true
+  }
+  $publishedProcess | Add-Member -MemberType ScriptMethod -Name Dispose -Value {}
+  $script:publishedIdentityCurrentReads = 0
+  $script:publishedIdentityCompensationState = $null
+  $publicationReaderThrow = Start-RimsLocalTlsProxyProcess `
+    -Spec ([pscustomobject]@{
+      proxySource = $pathsA.proxySource
+      proxyBinary = $pathsA.proxyBinary
+      linuxIdentityPath = $pathsA.proxyLinuxIdentity
+      serverCertificate = $pathsA.serverCertificate
+      serverPrivateKey = $pathsA.serverPrivateKey
+      tlsPort = 8443
+      backendPort = 8080
+      ownershipMarker = $publishedMarker
+      stderrLogPath = $pathsA.proxyStderrLog
+      stdoutLogPath = $pathsA.proxyStdoutLog
+    }) `
+    -BuildAction { param($spec) return [pscustomobject]@{ ok = $true } } `
+    -PathConversionAction { param($path) return "/mnt/c/fake/$([IO.Path]::GetFileName($path))" } `
+    -ProcessFactoryAction { return $publishedProcess } `
+    -LinuxIdentityAction {
+      param($spec, $process)
+      $identityTemporaryPath = ([string]$spec.linuxIdentityPath) + '.tmp.test'
+      [IO.File]::WriteAllText(
+        $identityTemporaryPath,
+        ($publishedIdentity | ConvertTo-Json -Compress),
+        (New-Object Text.UTF8Encoding($false))
+      )
+      [IO.File]::Move($identityTemporaryPath, [string]$spec.linuxIdentityPath)
+      throw 'fake reader failure after atomic identity publication'
+    } `
+    -CurrentLinuxIdentityAction {
+      param($storedIdentity)
+      $script:publishedIdentityCurrentReads += 1
+      return [pscustomobject]@{
+        ok = $true
+        exists = $true
+        identity = $publishedIdentity
+        detail = 'fake exact current identity'
+      }
+    } `
+    -CompensationAction {
+      param($state)
+      $script:publishedIdentityCompensationState = $state
+      return $true
+    }
+  Assert-False `
+    -Value $publicationReaderThrow.ok `
+    -Message 'Post-publication reader throw was reported as a successful start.'
+  Assert-Equal `
+    -Actual $script:publishedIdentityCurrentReads `
+    -Expected 1 `
+    -Message 'Published identity recovery did not verify the current Linux leader.'
+  Assert-True `
+    -Value ($null -ne $script:publishedIdentityCompensationState) `
+    -Message 'Verified published identity did not reach exact group compensation.'
+  Assert-Equal `
+    -Actual $script:publishedIdentityCompensationState.linuxProcessGroupId `
+    -Expected 4455 `
+    -Message 'Exact compensation received the wrong recovered Linux process group.'
+  Assert-Equal `
+    -Actual $script:publishedIdentityCompensationState.linuxIdentity.commandMarker `
+    -Expected $publishedMarker `
+    -Message 'Exact compensation lost the recovered workspace command marker.'
+  Assert-False `
+    -Value $publicationReaderThrow.cleanupPending `
+    -Message 'Successful exact recovered-identity compensation remained pending.'
 
   $script:linuxIdentityCompensated = $false
   $fakeIdentityProcess = [pscustomobject]@{
@@ -997,6 +1108,46 @@ func main() {
       -Before $privateKeySnapshotBefore `
       -After $privateKeySnapshotDuring `
       -Message 'TLS proxy created or updated a Windows user private-key container while running.'
+
+    $validCertificateWsl = ConvertTo-RimsWslPath `
+      -WindowsPath $concurrentTlsPaths.serverCertificate `
+      -WslExecutable $testWsl
+    $validPrivateKeyWsl = ConvertTo-RimsWslPath `
+      -WindowsPath $concurrentTlsPaths.serverPrivateKey `
+      -WslExecutable $testWsl
+    foreach ($missingMaterialCase in @(
+        [pscustomobject]@{
+          name = 'certificate'
+          certificate = '/mnt/e/SECRET-rims-missing-cert/server.pem'
+          privateKey = $validPrivateKeyWsl
+        },
+        [pscustomobject]@{
+          name = 'private key'
+          certificate = $validCertificateWsl
+          privateKey = '/mnt/e/SECRET-rims-missing-key/server.key'
+        }
+      )) {
+      $missingMaterial = Invoke-RimsExternalCommand `
+        -FilePath $testWsl `
+        -Arguments @(
+          '-e', [string]$realProxy.state.proxyBinaryWslPath,
+          '-cert', [string]$missingMaterialCase.certificate,
+          '-key', [string]$missingMaterialCase.privateKey,
+          '-listen-port', [string]$concurrentProxyPort,
+          '-backend-port', [string]$concurrentBackendPort,
+          '-command-marker', 'rims-local-missing-material-test'
+        ) `
+        -TimeoutSeconds 5
+      Assert-False `
+        -Value ($missingMaterial.ExitCode -eq 0) `
+        -Message "WSL Go TLS proxy accepted a missing $($missingMaterialCase.name)."
+      Assert-True `
+        -Value $missingMaterial.StandardError.Contains('certificate load failed') `
+        -Message "Missing $($missingMaterialCase.name) did not emit the fixed certificate category."
+      Assert-False `
+        -Value ($missingMaterial.StandardError -match '(?i)(?:[A-Z]:[\\/]|/mnt/|/home/|/tmp/|/var/|/usr/|SECRET)') `
+        -Message "Missing $($missingMaterialCase.name) leaked an absolute path in raw stderr."
+    }
   } catch {
     $proxyLog = if (Test-Path `
         -LiteralPath $concurrentTlsPaths.proxyStderrLog `

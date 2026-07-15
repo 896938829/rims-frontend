@@ -118,11 +118,11 @@ func main() {
 		*privateKeyPath,
 	)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("certificate load failed")
 	}
 	listener, err := net.Listen("tcp", "127.0.0.1:"+*listenPort)
 	if err != nil {
-		log.Fatal(err)
+		log.Fatal("listener start failed")
 	}
 	tlsListener := tls.NewListener(listener, &tls.Config{
 		Certificates: []tls.Certificate{certificate},
@@ -694,6 +694,132 @@ exec setsid --fork --wait bash -c '
 '@
 }
 
+function Read-RimsLocalTlsPublishedLinuxIdentity {
+  param(
+    [Parameter(Mandatory = $true)][string]$IdentityPath,
+    [Parameter(Mandatory = $true)][string]$CommandMarker,
+    [AllowNull()][scriptblock]$CurrentLinuxIdentityAction
+  )
+
+  if (-not (Test-Path -LiteralPath $IdentityPath -PathType Leaf)) {
+    return [pscustomobject][ordered]@{
+      ok = $false
+      identity = $null
+      leaderAbsenceProven = $false
+      detail = 'Published Linux identity is missing.'
+    }
+  }
+  try {
+    $identity = [IO.File]::ReadAllText($IdentityPath) |
+      ConvertFrom-Json -ErrorAction Stop
+  } catch {
+    return [pscustomobject][ordered]@{
+      ok = $false
+      identity = $null
+      leaderAbsenceProven = $false
+      detail = 'Published Linux identity is malformed.'
+    }
+  }
+  foreach ($requiredProperty in @(
+      'bootId',
+      'leaderPid',
+      'startTicks',
+      'processGroupId',
+      'commandMarker'
+    )) {
+    $requiredValue = [string](Get-RimsObjectPropertyValue `
+        -Value $identity `
+        -Name $requiredProperty `
+        -DefaultValue '')
+    if ([string]::IsNullOrWhiteSpace($requiredValue)) {
+      return [pscustomobject][ordered]@{
+        ok = $false
+        identity = $null
+        leaderAbsenceProven = $false
+        detail = "Published Linux identity is missing $requiredProperty."
+      }
+    }
+  }
+  $leaderPid = 0
+  $processGroupId = 0
+  if (-not [int]::TryParse([string]$identity.leaderPid, [ref]$leaderPid) -or
+      $leaderPid -le 0 -or
+      -not [int]::TryParse(
+        [string]$identity.processGroupId,
+        [ref]$processGroupId
+      ) -or
+      $processGroupId -le 0) {
+    return [pscustomobject][ordered]@{
+      ok = $false
+      identity = $null
+      leaderAbsenceProven = $false
+      detail = 'Published Linux identity has invalid process metadata.'
+    }
+  }
+  if (-not ([string]$identity.commandMarker).Equals(
+      $CommandMarker,
+      [StringComparison]::Ordinal
+    )) {
+    return [pscustomobject][ordered]@{
+      ok = $false
+      identity = $null
+      leaderAbsenceProven = $false
+      detail = 'Published Linux identity command marker does not match.'
+    }
+  }
+  try {
+    $current = if ($null -eq $CurrentLinuxIdentityAction) {
+      Get-RimsCurrentLinuxProcessIdentity -StoredIdentity $identity
+    } else { & $CurrentLinuxIdentityAction $identity }
+  } catch {
+    return [pscustomobject][ordered]@{
+      ok = $false
+      identity = $identity
+      leaderAbsenceProven = $false
+      detail = 'Current Linux identity verification threw.'
+    }
+  }
+  if (-not [bool](Get-RimsObjectPropertyValue `
+      -Value $current `
+      -Name 'ok' `
+      -DefaultValue $false)) {
+    return [pscustomobject][ordered]@{
+      ok = $false
+      identity = $identity
+      leaderAbsenceProven = $false
+      detail = 'Current Linux identity could not be verified.'
+    }
+  }
+  if (-not [bool](Get-RimsObjectPropertyValue `
+      -Value $current `
+      -Name 'exists' `
+      -DefaultValue $false)) {
+    return [pscustomobject][ordered]@{
+      ok = $false
+      identity = $identity
+      leaderAbsenceProven = $true
+      detail = 'Published Linux process group leader is absent.'
+    }
+  }
+  $match = Test-RimsLinuxProcessIdentity `
+    -Stored $identity `
+    -Current (Get-RimsObjectPropertyValue -Value $current -Name 'identity')
+  if (-not $match.ok) {
+    return [pscustomobject][ordered]@{
+      ok = $false
+      identity = $identity
+      leaderAbsenceProven = $false
+      detail = $match.detail
+    }
+  }
+  return [pscustomobject][ordered]@{
+    ok = $true
+    identity = $identity
+    leaderAbsenceProven = $false
+    detail = 'Recovered and verified the published Linux identity.'
+  }
+}
+
 function Start-RimsLocalTlsProxyProcess {
   param(
     [Parameter(Mandatory = $true)][psobject]$Spec,
@@ -701,6 +827,7 @@ function Start-RimsLocalTlsProxyProcess {
     [AllowNull()][scriptblock]$BuildAction,
     [AllowNull()][scriptblock]$PathConversionAction,
     [AllowNull()][scriptblock]$LinuxIdentityAction,
+    [AllowNull()][scriptblock]$CurrentLinuxIdentityAction,
     [AllowNull()][scriptblock]$CompensationAction
   )
 
@@ -848,11 +975,29 @@ chmod 700 "$binary"
       commandLine = $commandLine
       linuxIdentity = $linuxIdentity
       linuxProcessGroupId = $linuxProcessGroupId
+      linuxIdentityPath = $Spec.linuxIdentityPath
       proxyBinaryWslPath = $wslPaths.binary
     }
   } catch {
     $startFailure = $_.Exception.Message
     $cleanupFailure = $null
+    $linuxLeaderAbsenceProven = $false
+    $canStopExactLinuxIdentity = $null -ne $linuxIdentity
+    if ($started -and $null -eq $linuxIdentity) {
+      $recoveredIdentity = Read-RimsLocalTlsPublishedLinuxIdentity `
+        -IdentityPath ([string]$Spec.linuxIdentityPath) `
+        -CommandMarker ([string]$Spec.ownershipMarker) `
+        -CurrentLinuxIdentityAction $CurrentLinuxIdentityAction
+      $linuxLeaderAbsenceProven = [bool]$recoveredIdentity.leaderAbsenceProven
+      if ($null -ne $recoveredIdentity.identity) {
+        $linuxIdentity = $recoveredIdentity.identity
+        $linuxProcessGroupId = [int]$linuxIdentity.processGroupId
+      }
+      $canStopExactLinuxIdentity = [bool]$recoveredIdentity.ok
+      if (-not $recoveredIdentity.ok) {
+        $cleanupFailure = $recoveredIdentity.detail
+      }
+    }
     $compensationState = [pscustomobject][ordered]@{
       port = $Spec.tlsPort
       backendPort = $Spec.backendPort
@@ -865,6 +1010,7 @@ chmod 700 "$binary"
       proxyBinaryWslPath = $wslPaths.binary
       linuxIdentity = $linuxIdentity
       linuxProcessGroupId = $linuxProcessGroupId
+      linuxIdentityPath = $Spec.linuxIdentityPath
       cleanupPending = $true
     }
     if ($null -ne $linuxIdentity) {
@@ -877,7 +1023,7 @@ chmod 700 "$binary"
     }
     $compensated = -not $started
     if ($started) {
-      if ($null -ne $linuxIdentity) {
+      if ($canStopExactLinuxIdentity) {
         try {
           $compensated = if ($null -eq $CompensationAction) {
             [bool](Stop-RimsOwnedBackendProcess -State $compensationState)
@@ -890,16 +1036,19 @@ chmod 700 "$binary"
           $cleanupFailure = $_.Exception.Message
         }
       } else {
+        $wrapperStopped = $false
         try {
           $process.Kill()
           if (-not $process.WaitForExit(3000)) {
             throw 'TLS proxy process did not exit within the compensation timeout.'
           }
-          $compensated = $true
+          $wrapperStopped = $true
         } catch {
-          $compensated = $false
-          $cleanupFailure = $_.Exception.Message
+          $cleanupFailure = if ([string]::IsNullOrWhiteSpace($cleanupFailure)) {
+            $_.Exception.Message
+          } else { "$cleanupFailure; $($_.Exception.Message)" }
         }
+        $compensated = $wrapperStopped -and $linuxLeaderAbsenceProven
       }
     }
     $cleanupPending = $started -and -not $compensated
@@ -995,6 +1144,10 @@ function Start-RimsLocalTlsProxy {
     linuxProcessGroupId = Get-RimsObjectPropertyValue `
       -Value $start `
       -Name 'linuxProcessGroupId'
+    linuxIdentityPath = Get-RimsObjectPropertyValue `
+      -Value $start `
+      -Name 'linuxIdentityPath' `
+      -DefaultValue $TlsPaths.proxyLinuxIdentity
     cleanupPending = $true
   }
   $failureDetail = $null
