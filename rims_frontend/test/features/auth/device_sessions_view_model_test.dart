@@ -252,6 +252,93 @@ void main() {
       },
     );
 
+    test(
+      'revoke others revalidates activity after the clock advances',
+      () async {
+        final start = DateTime.utc(2026, 7, 15, 12);
+        var current = start;
+        final expiring = _sessionWithExpiry(
+          id: 'expiring-other',
+          expiresAt: start.add(const Duration(seconds: 1)),
+        );
+        final repository = _FakeAuthRepository(
+          sessionsResult: Success([expiring]),
+        );
+        final viewModel = _viewModel(repository, now: () => current);
+        await viewModel.load();
+        expect(viewModel.canRevokeOthers, isTrue);
+
+        current = expiring.expiresAt;
+        final outcome = await viewModel.revokeOthers();
+
+        expect(outcome, DeviceSessionsCommandOutcome.ignored);
+        expect(repository.revokeOthersCalls, 0);
+      },
+    );
+
+    test('revoke one revalidates activity after the clock advances', () async {
+      final start = DateTime.utc(2026, 7, 15, 12);
+      var current = start;
+      final expiring = _sessionWithExpiry(
+        id: 'expiring-one',
+        expiresAt: start.add(const Duration(seconds: 1)),
+      );
+      final repository = _FakeAuthRepository(
+        sessionsResult: Success([expiring]),
+      );
+      final viewModel = _viewModel(repository, now: () => current);
+      await viewModel.load();
+      expect(viewModel.canRevokeSession(expiring), isTrue);
+
+      current = expiring.expiresAt;
+      final outcome = await viewModel.revokeSession(expiring);
+
+      expect(outcome, DeviceSessionsCommandOutcome.ignored);
+      expect(repository.revokeSessionCalls, isEmpty);
+    });
+
+    testWidgets(
+      'expiry notification reschedules after refresh and stops on dispose',
+      (tester) async {
+        final start = DateTime.utc(2026, 7, 15, 12);
+        var current = start;
+        final oldSession = _sessionWithExpiry(
+          id: 'old-expiry',
+          expiresAt: start.add(const Duration(seconds: 1)),
+        );
+        final newSession = _sessionWithExpiry(
+          id: 'new-expiry',
+          expiresAt: start.add(const Duration(seconds: 2)),
+        );
+        final repository = _FakeAuthRepository(
+          sessionsResult: Success([oldSession]),
+        );
+        final viewModel = _viewModel(repository, now: () => current);
+        var notifications = 0;
+        viewModel.addListener(() => notifications += 1);
+        await viewModel.load();
+
+        repository.sessionsResult = Success([newSession]);
+        await viewModel.refresh();
+        final afterRefresh = notifications;
+
+        current = oldSession.expiresAt;
+        await tester.pump(const Duration(seconds: 1));
+        expect(notifications, afterRefresh);
+
+        current = newSession.expiresAt;
+        await tester.pump(const Duration(seconds: 1));
+        expect(notifications, afterRefresh + 1);
+        await tester.pump(Duration.zero);
+        expect(notifications, afterRefresh + 1);
+
+        viewModel.dispose();
+        current = current.add(const Duration(days: 30));
+        await tester.pump(const Duration(days: 30));
+        expect(notifications, afterRefresh + 1);
+      },
+    );
+
     test('refresh failure retains previously loaded sessions', () async {
       final repository = _FakeAuthRepository(
         sessionsResult: Success([_currentSession, _otherSession]),
@@ -457,6 +544,7 @@ final class _FakeAuthRepository implements AuthRepository {
   Result<List<DeviceSession>> sessionsResult;
   Completer<Result<List<DeviceSession>>>? pendingSessionsResult;
   final List<String> revokeSessionCalls = [];
+  int revokeOthersCalls = 0;
 
   @override
   Future<Result<List<DeviceSession>>> listDeviceSessions() {
@@ -472,7 +560,10 @@ final class _FakeAuthRepository implements AuthRepository {
   }
 
   @override
-  Future<Result<int>> revokeOtherDeviceSessions() async => const Success(1);
+  Future<Result<int>> revokeOtherDeviceSessions() async {
+    revokeOthersCalls += 1;
+    return const Success(1);
+  }
 
   @override
   Future<Result<int>> revokeAllDeviceSessions() async => const Success(2);

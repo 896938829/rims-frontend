@@ -189,6 +189,83 @@ void main() {
     expect(repository.revokeAllCalls, 0);
   });
 
+  testWidgets('session actions expire at the injected clock boundary', (
+    tester,
+  ) async {
+    final semantics = tester.ensureSemantics();
+    final start = DateTime.utc(2026, 7, 15, 12);
+    var current = start;
+    final currentSession = _pageSession(
+      id: 'timer-current',
+      label: 'Current timer tablet',
+      expiresAt: start.add(const Duration(seconds: 10)),
+      current: true,
+    );
+    final expiring = _pageSession(
+      id: 'timer-other',
+      label: 'Expiring tablet',
+      expiresAt: start.add(const Duration(seconds: 1)),
+    );
+    final repository = _FakeAuthRepository(
+      sessions: [currentSession, expiring],
+    );
+    await _pumpPage(tester, repository: repository, now: () => current);
+
+    final revoke = find.byKey(const Key('device-session-revoke-timer-other'));
+    expect(tester.widget<IconButton>(revoke).onPressed, isNotNull);
+    expect(
+      tester
+          .widget<OutlinedButton>(
+            find.byKey(const Key('device-sessions-revoke-others')),
+          )
+          .onPressed,
+      isNotNull,
+    );
+
+    current = expiring.expiresAt;
+    await tester.pump(const Duration(seconds: 1));
+
+    expect(tester.widget<IconButton>(revoke).onPressed, isNull);
+    final node = tester.getSemantics(revoke);
+    expect(node.flagsCollection.isButton, isFalse);
+    expect(node.flagsCollection.isEnabled, Tristate.isFalse);
+    expect(
+      tester
+          .widget<OutlinedButton>(
+            find.byKey(const Key('device-sessions-revoke-others')),
+          )
+          .onPressed,
+      isNull,
+    );
+    semantics.dispose();
+  });
+
+  testWidgets('dialog confirmation revalidates sessions after expiry', (
+    tester,
+  ) async {
+    final start = DateTime.utc(2026, 7, 15, 12);
+    var current = start;
+    final expiring = _pageSession(
+      id: 'dialog-expiry',
+      label: 'Dialog tablet',
+      expiresAt: start.add(const Duration(seconds: 1)),
+    );
+    final repository = _FakeAuthRepository(sessions: [expiring]);
+    await _pumpPage(tester, repository: repository, now: () => current);
+
+    await tester.tap(find.byKey(const Key('device-sessions-revoke-others')));
+    await tester.pumpAndSettle();
+    expect(find.text('撤销其他设备？'), findsOneWidget);
+
+    current = expiring.expiresAt;
+    await tester.pump(const Duration(seconds: 1));
+    await tester.tap(find.byKey(const Key('device-sessions-confirm')));
+    await tester.pumpAndSettle();
+
+    expect(repository.revokeOthersCalls, 0);
+    expect(repository.listCalls, 1);
+  });
+
   testWidgets('current revoke runs revocation cleanup and redirects to login', (
     tester,
   ) async {
@@ -212,6 +289,7 @@ void main() {
           builder: (context, state) => DeviceSessionsPage(
             authRepository: repository,
             sessionController: controller,
+            now: _fixedPageNow,
           ),
         ),
       ],
@@ -256,6 +334,7 @@ void main() {
           builder: (context, state) => DeviceSessionsPage(
             authRepository: repository,
             sessionController: controller,
+            now: _fixedPageNow,
           ),
         ),
       ],
@@ -300,6 +379,7 @@ void main() {
           builder: (context, state) => DeviceSessionsPage(
             authRepository: repository,
             sessionController: controller,
+            now: _fixedPageNow,
           ),
         ),
       ],
@@ -493,6 +573,7 @@ Future<void> _pumpPage(
   required _FakeAuthRepository repository,
   Brightness brightness = Brightness.light,
   TextScaler textScaler = TextScaler.noScaling,
+  DateTime Function()? now,
 }) async {
   final controller = AuthSessionController();
   await controller.startSession(_authSession);
@@ -505,12 +586,31 @@ Future<void> _pumpPage(
         child: DeviceSessionsPage(
           authRepository: repository,
           sessionController: controller,
+          now: now ?? _fixedPageNow,
         ),
       ),
     ),
   );
   await tester.pumpAndSettle();
 }
+
+DateTime _fixedPageNow() => DateTime.utc(2026, 7, 15, 12);
+
+DeviceSession _pageSession({
+  required String id,
+  required String label,
+  required DateTime expiresAt,
+  bool current = false,
+}) => DeviceSession(
+  id: id,
+  deviceLabel: label,
+  platform: 'android',
+  userAgentFamily: 'RIMS Android',
+  createdAt: expiresAt.subtract(const Duration(days: 1)),
+  lastUsedAt: expiresAt.subtract(const Duration(minutes: 1)),
+  expiresAt: expiresAt,
+  current: current,
+);
 
 String _pageLocalTimeLabel(DateTime value) {
   final local = value.toLocal();

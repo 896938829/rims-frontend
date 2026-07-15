@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 
 import '../../../../core/result/result.dart';
@@ -35,6 +37,8 @@ final class DeviceSessionsViewModel extends ChangeNotifier {
   bool _isTerminal = false;
   bool _disposed = false;
   int _generation = 0;
+  int _expiryScheduleGeneration = 0;
+  Timer? _expiryTimer;
   String? _errorMessage;
   String? _successMessage;
 
@@ -49,9 +53,7 @@ final class DeviceSessionsViewModel extends ChangeNotifier {
   String? get successMessage => _successMessage;
   bool get canRevokeOthers {
     final timestamp = now();
-    return _sessions.any(
-      (session) => !session.current && _isActiveAt(session, timestamp),
-    );
+    return _hasActiveNonCurrentAt(timestamp);
   }
 
   bool canRevokeSession(DeviceSession session) => _isActiveAt(session, now());
@@ -94,6 +96,7 @@ final class DeviceSessionsViewModel extends ChangeNotifier {
         success: (sessions) {
           _sessions = List.unmodifiable(sessions);
           _errorMessage = null;
+          _scheduleExpiryNotification();
         },
         failure: (_) {
           _errorMessage = isRefresh || _sessions.isNotEmpty
@@ -115,7 +118,8 @@ final class DeviceSessionsViewModel extends ChangeNotifier {
   Future<DeviceSessionsCommandOutcome> revokeSession(
     DeviceSession session,
   ) async {
-    if (!canRevokeSession(session)) {
+    final timestamp = now();
+    if (!_isActiveAt(session, timestamp)) {
       return DeviceSessionsCommandOutcome.ignored;
     }
     final generation = _beginOperation();
@@ -137,6 +141,7 @@ final class DeviceSessionsViewModel extends ChangeNotifier {
           _sessions = List.unmodifiable(
             _sessions.where((candidate) => candidate.id != session.id),
           );
+          _scheduleExpiryNotification();
           _errorMessage = null;
           _successMessage =
               '已撤销 ${DeviceSessionDisplaySanitizer.deviceLabel(session.deviceLabel)}';
@@ -153,6 +158,10 @@ final class DeviceSessionsViewModel extends ChangeNotifier {
   }
 
   Future<DeviceSessionsCommandOutcome> revokeOthers() async {
+    final timestamp = now();
+    if (!_hasActiveNonCurrentAt(timestamp)) {
+      return DeviceSessionsCommandOutcome.ignored;
+    }
     final generation = _beginOperation();
     if (generation == null) return DeviceSessionsCommandOutcome.ignored;
     try {
@@ -166,6 +175,7 @@ final class DeviceSessionsViewModel extends ChangeNotifier {
               (session) => session.current || !_isActiveAt(session, timestamp),
             ),
           );
+          _scheduleExpiryNotification();
           _errorMessage = null;
           _successMessage = '已撤销其他登录设备';
           return DeviceSessionsCommandOutcome.completed;
@@ -242,6 +252,7 @@ final class DeviceSessionsViewModel extends ChangeNotifier {
     required bool cleanupDebt,
   }) {
     if (revokeAll) _sessions = const [];
+    _cancelExpiryNotification();
     _isTerminal = true;
     _errorMessage = cleanupDebt ? '登录已撤销，本机安全清理将在下次登录前继续' : null;
     return cleanupDebt
@@ -253,6 +264,40 @@ final class DeviceSessionsViewModel extends ChangeNotifier {
 
   bool _isActiveAt(DeviceSession session, DateTime timestamp) =>
       session.revokedAt == null && session.expiresAt.isAfter(timestamp);
+
+  bool _hasActiveNonCurrentAt(DateTime timestamp) => _sessions.any(
+    (session) => !session.current && _isActiveAt(session, timestamp),
+  );
+
+  void _scheduleExpiryNotification() {
+    _expiryTimer?.cancel();
+    _expiryTimer = null;
+    final scheduleGeneration = ++_expiryScheduleGeneration;
+    if (_disposed || _isTerminal) return;
+
+    final timestamp = now();
+    DateTime? nextExpiry;
+    for (final session in _sessions) {
+      if (!_isActiveAt(session, timestamp)) continue;
+      if (nextExpiry == null || session.expiresAt.isBefore(nextExpiry)) {
+        nextExpiry = session.expiresAt;
+      }
+    }
+    if (nextExpiry == null) return;
+
+    _expiryTimer = Timer(nextExpiry.difference(timestamp), () {
+      if (_disposed || scheduleGeneration != _expiryScheduleGeneration) return;
+      _expiryTimer = null;
+      notifyListeners();
+      _scheduleExpiryNotification();
+    });
+  }
+
+  void _cancelExpiryNotification() {
+    _expiryScheduleGeneration += 1;
+    _expiryTimer?.cancel();
+    _expiryTimer = null;
+  }
 
   void _finishOperation(int? generation) {
     if (generation == null || !_isCurrent(generation)) return;
@@ -272,6 +317,7 @@ final class DeviceSessionsViewModel extends ChangeNotifier {
   void dispose() {
     _disposed = true;
     _generation += 1;
+    _cancelExpiryNotification();
     super.dispose();
   }
 }

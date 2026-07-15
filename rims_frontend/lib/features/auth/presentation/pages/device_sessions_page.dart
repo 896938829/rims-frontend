@@ -12,11 +12,13 @@ final class DeviceSessionsPage extends StatefulWidget {
   const DeviceSessionsPage({
     required this.authRepository,
     required this.sessionController,
+    this.now,
     super.key,
   });
 
   final AuthRepository authRepository;
   final AuthSessionController sessionController;
+  final DateTime Function()? now;
 
   @override
   State<DeviceSessionsPage> createState() => _DeviceSessionsPageState();
@@ -30,6 +32,7 @@ final class _DeviceSessionsPageState extends State<DeviceSessionsPage> {
     super.initState();
     _viewModel = DeviceSessionsViewModel(
       repository: widget.authRepository,
+      now: widget.now,
       runTerminalRevocation: (command) =>
           widget.sessionController.runSessionRevocation(
             authRepository: widget.authRepository,
