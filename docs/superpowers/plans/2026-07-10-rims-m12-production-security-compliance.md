@@ -134,19 +134,19 @@ Run middleware/app/file tests and full Go suite. Commit: `feat: enforce backend 
 - Modify: `scripts/test_rims_local.ps1`
 - Modify: `README.md`
 
-- [ ] **Step 1: Write RED wrapper tests**
+- [x] **Step 1: Write RED wrapper tests**
 
 Fake OpenSSL/ADB/process calls. Prove per-workspace CA/server cert, required SANs, ignored private-key paths, PID/start-time/port ownership, Android user-cert install/removal, pre-existing trust preservation, expired/wrong-host/untrusted rejection, first-failure cleanup, and unowned listener refusal.
 
-- [ ] **Step 2: Implement certificate/proxy lifecycle**
+- [x] **Step 2: Implement certificate/proxy lifecycle**
 
 Use WSL OpenSSL; store secrets only under ignored `.runtime/rims-local/tls/`; record fingerprints, never key content. Own an HTTPS proxy to the verified backend and install/remove only the owned CA on an owned emulator.
 
-- [ ] **Step 3: Extend local commands**
+- [x] **Step 3: Extend local commands**
 
 Add `-UseLocalTls` to doctor/up/status/logs/smoke/down with safe JSON evidence. M12 requires it; older smokes retain explicit local HTTP until regression migration is proven.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Run both TLS and local wrapper self-tests. Commit: `feat: manage local HTTPS runtime`.
 
