@@ -30,6 +30,7 @@ import 'features/auth/data/datasources/auth_remote_datasource.dart';
 import 'features/auth/data/repositories/auth_repository_impl.dart';
 import 'features/auth/domain/repositories/auth_repository.dart';
 import 'features/auth/domain/services/session_refresh_coordinator.dart';
+import 'features/auth/domain/services/auth_session_lifecycle_gate.dart';
 import 'features/auth/domain/services/authenticated_request_lease.dart';
 import 'features/auth/presentation/view_models/auth_session_controller.dart';
 import 'features/documents/data/datasources/documents_remote_datasource.dart';
@@ -180,9 +181,11 @@ final class _MainAppState extends State<MainApp> {
       databaseKeys: databaseKeyManager,
       mutationParticipants: [_offlineWriteBarrier],
     );
+    final authSessionLifecycleGate = AuthSessionLifecycleGate();
     _sessionController = AuthSessionController(
       eventBus: _eventBus,
       ownershipCoordinator: _offlineOwnershipService,
+      lifecycleGate: authSessionLifecycleGate,
     );
     _attachmentShareService = PlatformAttachmentShareService();
     unawaited(_attachmentPicker.recoverLostData());
@@ -249,17 +252,17 @@ final class _MainAppState extends State<MainApp> {
       pendingRevocationStorage: _secureStorage,
       repository: authRepository,
       authenticatedRequestLeaseReader: authenticatedRequestLeaseReader.read,
-      blockAuthentication: (lease) {
+      blockAuthentication: (lease) async {
         if (_sessionController.authEpoch != lease.authEpoch ||
             !_sessionController.canAuthenticateRequests ||
             _sessionController.currentUser?.id.toString() !=
                 lease.credential.accountId) {
           return null;
         }
-        _sessionController.invalidateExpiredSession();
-        return _sessionController.authEpoch;
+        return _sessionController.invalidateExpiredSession();
       },
       failureRecovery: cachedAuthRepository,
+      lifecycleGate: authSessionLifecycleGate,
     );
     final documentsRemoteDataSource = ApiDocumentsRemoteDataSource(_apiClient);
     final documentsRepository = DocumentsRepositoryImpl(

@@ -9,13 +9,19 @@ import '../../domain/entities/app_user.dart';
 import '../../domain/entities/auth_session.dart';
 import '../../domain/entities/warehouse.dart';
 import '../../domain/repositories/auth_repository.dart';
+import '../../domain/services/auth_session_lifecycle_gate.dart';
 import '../../../offline/domain/services/offline_ownership_service.dart';
 
 final class AuthSessionController extends ChangeNotifier {
-  AuthSessionController({this.eventBus, this.ownershipCoordinator});
+  AuthSessionController({
+    this.eventBus,
+    this.ownershipCoordinator,
+    AuthSessionLifecycleGate? lifecycleGate,
+  }) : lifecycleGate = lifecycleGate ?? AuthSessionLifecycleGate();
 
   final AppEventBus? eventBus;
   final OfflineOwnershipCoordinator? ownershipCoordinator;
+  final AuthSessionLifecycleGate lifecycleGate;
   AuthSession? _session;
   bool _isRestoring = false;
   bool _isSwitchingWarehouse = false;
@@ -55,6 +61,59 @@ final class AuthSessionController extends ChangeNotifier {
   int get authEpoch => _authEpoch;
 
   int beginAuthenticationAttempt() => ++_authEpoch;
+
+  Future<Result<void>> login({
+    required AuthRepository authRepository,
+    required String username,
+    required String password,
+  }) => lifecycleGate.run(() async {
+    final epoch = ++_authEpoch;
+    try {
+      if (authRepository case final TransactionalAuthRepository transactional) {
+        final prepared = await transactional.prepareLogin(
+          username: username,
+          password: password,
+        );
+        return switch (prepared) {
+          Success<AuthSessionTransaction>(data: final transaction) =>
+            await _startSession(
+                  transaction.session,
+                  expectedEpoch: epoch,
+                  transaction: transaction,
+                )
+                ? const Success<void>(null)
+                : FailureResult<void>(
+                    _ownershipFailure ??
+                        const StateFailure(message: 'Unable to start session.'),
+                  ),
+          FailureResult<AuthSessionTransaction>(failure: final failure) =>
+            FailureResult<void>(failure),
+        };
+      }
+      final result = await authRepository.login(
+        username: username,
+        password: password,
+      );
+      return switch (result) {
+        Success<AuthSession>(data: final session) =>
+          await _startSession(session, expectedEpoch: epoch)
+              ? const Success<void>(null)
+              : FailureResult<void>(
+                  _ownershipFailure ??
+                      const StateFailure(message: 'Unable to start session.'),
+                ),
+        FailureResult<AuthSession>(failure: final failure) =>
+          FailureResult<void>(failure),
+      };
+    } on Object catch (error) {
+      return FailureResult<void>(
+        UnknownFailure(
+          message: 'Unable to sign in.',
+          cause: sanitizeTransportCause(error),
+        ),
+      );
+    }
+  });
   bool get canAccessOfflineData {
     final accountId = currentUser?.id.toString();
     return !_isOwnershipTransitioning &&
@@ -69,16 +128,21 @@ final class AuthSessionController extends ChangeNotifier {
         (ownershipCoordinator?.canSync(accountId) ?? true);
   }
 
-  Future<void> restoreSession(AuthRepository authRepository) async {
-    await _restoreSession(
-      authRepository,
-      preserveActiveSessionOnFailure: false,
-    );
-  }
+  Future<void> restoreSession(AuthRepository authRepository) =>
+      lifecycleGate.run(
+        () => _restoreSession(
+          authRepository,
+          preserveActiveSessionOnFailure: false,
+        ),
+      );
 
-  Future<void> refreshSession(AuthRepository authRepository) async {
-    await _restoreSession(authRepository, preserveActiveSessionOnFailure: true);
-  }
+  Future<void> refreshSession(AuthRepository authRepository) =>
+      lifecycleGate.run(
+        () => _restoreSession(
+          authRepository,
+          preserveActiveSessionOnFailure: true,
+        ),
+      );
 
   Future<void> _restoreSession(
     AuthRepository authRepository, {
@@ -196,6 +260,18 @@ final class AuthSessionController extends ChangeNotifier {
     AuthSession session, {
     int? expectedEpoch,
     AuthSessionTransaction? transaction,
+  }) => lifecycleGate.run(
+    () => _startSession(
+      session,
+      expectedEpoch: expectedEpoch,
+      transaction: transaction,
+    ),
+  );
+
+  Future<bool> _startSession(
+    AuthSession session, {
+    int? expectedEpoch,
+    AuthSessionTransaction? transaction,
   }) async {
     if (_disposed || (expectedEpoch != null && expectedEpoch != _authEpoch)) {
       final rejectionEpoch = _authEpoch;
@@ -308,6 +384,7 @@ final class AuthSessionController extends ChangeNotifier {
     if (!_isCurrent(epoch)) return false;
     _session = session;
     _credentialsInvalidated = false;
+    _ownershipFailure = null;
     _restoreFailure = null;
     _switchWarehouseFailure = null;
     _sessionMessage = null;
@@ -370,6 +447,14 @@ final class AuthSessionController extends ChangeNotifier {
   }
 
   Future<bool> switchWarehouse({
+    required AuthRepository authRepository,
+    required Warehouse warehouse,
+  }) => lifecycleGate.run(
+    () =>
+        _switchWarehouse(authRepository: authRepository, warehouse: warehouse),
+  );
+
+  Future<bool> _switchWarehouse({
     required AuthRepository authRepository,
     required Warehouse warehouse,
   }) async {
@@ -443,6 +528,13 @@ final class AuthSessionController extends ChangeNotifier {
   Future<OfflineOwnershipReport?> expireSession({
     AuthRepository? authRepository,
     String message = '登录已过期，请重新登录',
+  }) => lifecycleGate.run(
+    () => _expireSession(authRepository: authRepository, message: message),
+  );
+
+  Future<OfflineOwnershipReport?> _expireSession({
+    required AuthRepository? authRepository,
+    required String message,
   }) async {
     ++_authEpoch;
     final previous = _session;
@@ -486,6 +578,14 @@ final class AuthSessionController extends ChangeNotifier {
   Future<OfflineOwnershipReport?> logout({
     required AuthRepository authRepository,
     DraftRetentionChoice draftRetention = DraftRetentionChoice.delete,
+  }) => lifecycleGate.run(
+    () =>
+        _logout(authRepository: authRepository, draftRetention: draftRetention),
+  );
+
+  Future<OfflineOwnershipReport?> _logout({
+    required AuthRepository authRepository,
+    required DraftRetentionChoice draftRetention,
   }) async {
     final operationEpoch = _authEpoch;
     final previous = _session;
@@ -521,7 +621,7 @@ final class AuthSessionController extends ChangeNotifier {
     return report;
   }
 
-  void invalidateRevokedSession() {
+  Future<int> invalidateRevokedSession() => lifecycleGate.run(() async {
     ++_authEpoch;
     final previous = _session;
     _session = null;
@@ -531,9 +631,10 @@ final class AuthSessionController extends ChangeNotifier {
     _clearSourceMetadata();
     _publishOwnershipChanges(previous, null);
     notifyListeners();
-  }
+    return _authEpoch;
+  });
 
-  void invalidateExpiredSession() {
+  Future<int> invalidateExpiredSession() => lifecycleGate.run(() async {
     ++_authEpoch;
     final previous = _session;
     _session = null;
@@ -543,7 +644,8 @@ final class AuthSessionController extends ChangeNotifier {
     _clearSourceMetadata();
     _publishOwnershipChanges(previous, null);
     notifyListeners();
-  }
+    return _authEpoch;
+  });
 
   Future<bool> _prepareOwnershipChange(
     AuthSession? previous,

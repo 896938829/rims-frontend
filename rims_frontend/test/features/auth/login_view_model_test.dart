@@ -228,7 +228,7 @@ void main() {
 
     for (final invalidation in ['revoked', 'expired']) {
       test(
-        'stale commit failure cannot overwrite $invalidation state',
+        '$invalidation invalidation waits for an active session commit',
         () async {
           final blocker = Completer<void>();
           final transaction = _FakeAuthSessionTransaction(
@@ -247,14 +247,15 @@ void main() {
             transaction: transaction,
           );
           await transaction.commitStarted.future;
-          if (invalidation == 'revoked') {
-            controller.invalidateRevokedSession();
-          } else {
-            controller.invalidateExpiredSession();
-          }
+          final invalidating = invalidation == 'revoked'
+              ? controller.invalidateRevokedSession()
+              : controller.invalidateExpiredSession();
+          await Future<void>.delayed(Duration.zero);
+          expect(controller.session, _session);
           blocker.complete();
 
           expect(await starting, isFalse);
+          await invalidating;
           expect(controller.session, isNull);
           expect(
             controller.restoreFailure,
@@ -270,7 +271,7 @@ void main() {
       );
     }
 
-    test('stale commit throw cannot overwrite a newer login', () async {
+    test('a newer session waits for an active commit to finish', () async {
       final blocker = Completer<void>();
       final transaction = _FakeAuthSessionTransaction(
         throwOnCommit: true,
@@ -286,10 +287,15 @@ void main() {
       );
       await transaction.commitStarted.future;
 
-      expect(await controller.startSession(_multiWarehouseSession), isTrue);
+      final newer = controller.startSession(_multiWarehouseSession);
+      var newerCompleted = false;
+      unawaited(newer.then((_) => newerCompleted = true));
+      await Future<void>.delayed(Duration.zero);
+      expect(newerCompleted, isFalse);
       blocker.complete();
 
       expect(await stale, isFalse);
+      expect(await newer, isTrue);
       expect(controller.session, _multiWarehouseSession);
       expect(
         controller.ownershipFailure?.message,
@@ -395,7 +401,7 @@ void main() {
       },
     );
 
-    test('an old logout completion cannot clear a newer session', () async {
+    test('a newer session waits for an old logout to complete', () async {
       final releaseLogout = Completer<void>();
       final repository = _FakeAuthRepository(
         logoutFuture: releaseLogout.future,
@@ -405,9 +411,14 @@ void main() {
 
       final logout = sessionController.logout(authRepository: repository);
       await Future<void>.delayed(Duration.zero);
-      expect(await sessionController.startSession(_newSession), isTrue);
+      final newer = sessionController.startSession(_newSession);
+      var newerCompleted = false;
+      unawaited(newer.then((_) => newerCompleted = true));
+      await Future<void>.delayed(Duration.zero);
+      expect(newerCompleted, isFalse);
       releaseLogout.complete();
       await logout;
+      expect(await newer, isTrue);
 
       expect(sessionController.session, _newSession);
       expect(sessionController.canAuthenticateRequests, isTrue);
@@ -464,6 +475,7 @@ void main() {
 
         final restore = sessionController.restoreSession(repository);
 
+        await Future<void>.delayed(Duration.zero);
         expect(sessionController.isRestoring, isTrue);
         completer.complete(const Success<AuthSession?>(_session));
         await restore;
@@ -646,7 +658,7 @@ void main() {
       },
     );
 
-    test('blocked restore cannot resurrect a session after logout', () async {
+    test('logout waits for a blocked restore then clears its result', () async {
       final controller = AuthSessionController();
       await controller.startSession(_session);
       final blocked = Completer<Result<AuthSession?>>();
@@ -654,10 +666,14 @@ void main() {
         _FakeAuthRepository(restoreFuture: blocked.future),
       );
       await Future<void>.delayed(Duration.zero);
-      await controller.logout(authRepository: _FakeAuthRepository());
-
+      final logout = controller.logout(authRepository: _FakeAuthRepository());
+      var logoutCompleted = false;
+      unawaited(logout.then((_) => logoutCompleted = true));
+      await Future<void>.delayed(Duration.zero);
+      expect(logoutCompleted, isFalse);
       blocked.complete(const Success<AuthSession?>(_session));
       await restore;
+      await logout;
 
       expect(controller.session, isNull);
       expect(controller.canAuthenticateRequests, isFalse);

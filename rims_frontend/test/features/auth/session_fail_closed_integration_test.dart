@@ -172,7 +172,14 @@ void main() {
 
       final oldRequest = fixture.dio.get<dynamic>('/old-refresh');
       await fixture.remote.refreshStarted.future;
-      expect(await controller.startSession(_newSession), isTrue);
+      final newSession = controller.startSession(_newSession);
+      var newSessionCompleted = false;
+      unawaited(newSession.then((_) => newSessionCompleted = true));
+      await Future<void>.delayed(Duration.zero);
+      expect(newSessionCompleted, isFalse);
+      releaseRefresh.complete();
+      await expectLater(oldRequest, throwsA(isA<DioException>()));
+      expect(await newSession, isTrue);
       storage
         ..credential = _credential(
           accessToken: 'access-new',
@@ -194,9 +201,6 @@ void main() {
         ),
       );
       final ownershipCount = ownership.intents.length;
-      releaseRefresh.complete();
-
-      await expectLater(oldRequest, throwsA(isA<DioException>()));
       expect(controller.session?.accessToken, 'access-new');
       expect(controller.canAuthenticateRequests, isTrue);
       expect(storage.credential?.sessionId, 'session-new');
@@ -243,7 +247,14 @@ void main() {
       final oldLogout = controller.logout(authRepository: fixture.repository);
       await fixture.remote.logoutStarted.future;
       expect(controller.canAuthenticateRequests, isFalse);
-      expect(await controller.startSession(_newSession), isTrue);
+      final newSession = controller.startSession(_newSession);
+      var newSessionCompleted = false;
+      unawaited(newSession.then((_) => newSessionCompleted = true));
+      await Future<void>.delayed(Duration.zero);
+      expect(newSessionCompleted, isFalse);
+      releaseLogout.complete();
+      await oldLogout;
+      expect(await newSession, isTrue);
       storage
         ..credential = _credential(
           accessToken: 'access-new',
@@ -268,9 +279,6 @@ void main() {
           expiresAt: DateTime.utc(2026, 7, 16),
         ),
       );
-      releaseLogout.complete();
-      await oldLogout;
-
       expect(fixture.remote.lastLogoutAccessToken, 'access-1');
       expect(controller.session, _newSession);
       expect(controller.canAuthenticateRequests, isTrue);
@@ -327,17 +335,17 @@ _ChainFixture _buildFixture({
     tokenStorage: storage,
     pendingRevocationStorage: storage,
     repository: rawRepository,
-    blockAuthentication: (lease) {
+    blockAuthentication: (lease) async {
       if (controller.authEpoch != lease.authEpoch ||
           !controller.canAuthenticateRequests ||
           controller.currentUser?.id.toString() != lease.credential.accountId) {
         return null;
       }
       events.add('block');
-      controller.invalidateExpiredSession();
-      return controller.authEpoch;
+      return controller.invalidateExpiredSession();
     },
     failureRecovery: cachedRepository,
+    lifecycleGate: controller.lifecycleGate,
   );
   final adapter = _AlwaysUnauthorizedAdapter();
   final dio = Dio()..httpClientAdapter = adapter;

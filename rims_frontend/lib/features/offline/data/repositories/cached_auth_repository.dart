@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import '../../../../core/network/sanitized_transport_cause.dart';
 import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
@@ -55,8 +57,8 @@ final class CachedAuthRepository
   final int Function()? authEpochReader;
   final PendingRevocationJournal? revocationJournal;
   final String Function() authTransactionOwnerFactory;
-  final void Function() onSessionRevoked;
-  final void Function()? onSessionExpired;
+  final FutureOr<void> Function() onSessionRevoked;
+  final FutureOr<void> Function()? onSessionExpired;
   final DateTime Function() now;
   final Set<String> _volatilePendingRevocationAccountIds = {};
   final Set<SessionRevocationLease> _volatilePendingRevocationLeases = {};
@@ -157,7 +159,7 @@ final class CachedAuthRepository
     required String? accountId,
   }) async {
     if (failure is AuthenticationFailure) {
-      onSessionExpired?.call();
+      await onSessionExpired?.call();
       Failure? cleanupFailure;
       if (accountId != null) {
         cleanupFailure = await _applyOwnership(
@@ -505,7 +507,7 @@ final class CachedAuthRepository
     try {
       await delegate.logout();
     } on RevocationCleanupFailure catch (failure) {
-      onSessionExpired?.call();
+      await onSessionExpired?.call();
       if (operationEpoch != null && operationCredential != null) {
         final cleanupLease = AuthenticatedSessionCleanupLease(
           request: AuthenticatedRequestLease(
@@ -984,7 +986,7 @@ final class CachedAuthRepository
     String accountId, {
     bool notifyRevocation = true,
   }) async {
-    if (notifyRevocation) onSessionRevoked();
+    if (notifyRevocation) await onSessionRevoked();
     Object? firstError = await _retainPendingRevocationAccount(accountId);
     // Quarantine every independently recoverable projection before cleanup.
     try {
@@ -1096,7 +1098,7 @@ final class CachedAuthRepository
         ),
         cleanupEpoch: marker.authEpoch,
       );
-      onSessionRevoked();
+      await onSessionRevoked();
       var quarantined = false;
       if (tokenStorage case final DeviceCredentialStorage credentialStorage) {
         quarantined = await credentialStorage.clearDeviceCredentialIfMatches(

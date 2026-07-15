@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:collection';
 
 import '../../../../core/result/failure.dart';
@@ -6,12 +7,13 @@ import '../../../../core/network/sanitized_transport_cause.dart';
 import '../../../../core/storage/app_secure_storage.dart';
 import '../repositories/auth_repository.dart';
 import 'authenticated_request_lease.dart';
+import 'auth_session_lifecycle_gate.dart';
 
 enum SessionRefreshOrigin { request, queuedWrite, syncCenter }
 
 typedef SessionFailClosedCallback = Future<void> Function(String accountId);
 typedef SessionAuthenticationBlocker =
-    int? Function(AuthenticatedRequestLease expected);
+    FutureOr<int?> Function(AuthenticatedRequestLease expected);
 
 abstract interface class SessionFailureRecovery {
   Future<Failure?> retainPendingRevocation(
@@ -36,7 +38,8 @@ final class SessionRefreshCoordinator {
     this.blockAuthentication,
     this.failureRecovery,
     this.onFailClosed,
-  });
+    AuthSessionLifecycleGate? lifecycleGate,
+  }) : lifecycleGate = lifecycleGate ?? AuthSessionLifecycleGate();
 
   final DeviceCredentialStorage credentialStorage;
   final TokenStorage tokenStorage;
@@ -46,6 +49,7 @@ final class SessionRefreshCoordinator {
   final SessionAuthenticationBlocker? blockAuthentication;
   final SessionFailureRecovery? failureRecovery;
   final SessionFailClosedCallback? onFailClosed;
+  final AuthSessionLifecycleGate lifecycleGate;
 
   final Map<String, Future<Result<DeviceCredential>>> _inFlight = {};
   final LinkedHashSet<String> _quarantinedCredentials = LinkedHashSet();
@@ -70,6 +74,27 @@ final class SessionRefreshCoordinator {
         ),
       );
     }
+    final key = _flightKey(failedCredential, failedAuthEpoch);
+    final active = _inFlight[key];
+    if (active != null) return active;
+    final operation = lifecycleGate.run(
+      () => _refreshAfterUnauthorizedLocked(
+        failedCredential: failedCredential,
+        failedAuthEpoch: failedAuthEpoch,
+      ),
+    );
+    _inFlight[key] = operation;
+    try {
+      return await operation;
+    } finally {
+      if (identical(_inFlight[key], operation)) _inFlight.remove(key);
+    }
+  }
+
+  Future<Result<DeviceCredential>> _refreshAfterUnauthorizedLocked({
+    required DeviceCredential failedCredential,
+    required int failedAuthEpoch,
+  }) async {
     final DeviceCredential? current;
     try {
       current = await credentialStorage.readDeviceCredential();
@@ -120,16 +145,7 @@ final class SessionRefreshCoordinator {
       );
     }
 
-    final key = _flightKey(current, failedAuthEpoch);
-    final active = _inFlight[key];
-    if (active != null) return active;
-    final operation = _refresh(current, failedAuthEpoch);
-    _inFlight[key] = operation;
-    try {
-      return await operation;
-    } finally {
-      if (identical(_inFlight[key], operation)) _inFlight.remove(key);
-    }
+    return _refresh(current, failedAuthEpoch);
   }
 
   Future<void> invalidateCurrent({
@@ -283,7 +299,7 @@ final class SessionRefreshCoordinator {
     final int cleanupEpoch;
     if (blockAuthentication case final blocker?) {
       try {
-        final blockedEpoch = blocker(requestLease);
+        final blockedEpoch = await blocker(requestLease);
         if (blockedEpoch == null) return null;
         cleanupEpoch = blockedEpoch;
       } on Object catch (error) {
