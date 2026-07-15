@@ -897,9 +897,17 @@ void main() {
   test(
     'logout marker failure falls back to the M11 revocation journal',
     () async {
+      var authEpoch = 4;
+      final credential = _deviceCredential(
+        accessToken: 'access-1',
+        refreshToken: 'refresh-1',
+        sessionId: 'session-7',
+      );
       final storage = _FakeSessionStorage(token: 'access-1')
         ..accountId = '7'
-        ..failNext(_RevocationStorageFailure.saveMarker);
+        ..credential = credential
+        ..authEpoch = authEpoch
+        ..failNext(_RevocationStorageFailure.saveMarker, times: 2);
       final journal = MemoryPendingRevocationJournal();
       var memoryBlocked = false;
       final repository = CachedAuthRepository(
@@ -908,6 +916,13 @@ void main() {
           logoutError: const RevocationCleanupFailure(
             message: 'primary marker failed',
           ),
+          beforeLogoutError: () async {
+            await storage.clearDeviceCredentialIfMatches(
+              accountId: credential.accountId,
+              sessionId: credential.sessionId,
+              generation: credential.generation,
+            );
+          },
         ),
         store: MemoryOfflineStore(),
         tokenStorage: storage,
@@ -915,15 +930,27 @@ void main() {
         revocationStorage: storage,
         revocationJournal: journal,
         ownershipCoordinator: _RecordingOwnershipCoordinator(),
+        authEpochReader: () => authEpoch,
         onSessionRevoked: () {},
-        onSessionExpired: () => memoryBlocked = true,
+        onSessionExpired: () {
+          memoryBlocked = true;
+          authEpoch += 1;
+        },
       );
 
       await repository.logout();
 
       expect(memoryBlocked, isTrue);
       expect(storage.accountId, isNull);
-      expect(await journal.readAccountIds(), {'7'});
+      expect(await journal.readAccountIds(), isEmpty);
+      expect(await journal.readLeases(), {
+        const SessionRevocationLease(
+          accountId: '7',
+          sessionId: 'session-7',
+          generation: 1,
+          authEpoch: 5,
+        ),
+      });
     },
   );
 
@@ -2880,12 +2907,14 @@ final class _FakeAuthRepository implements AuthRepository {
     this.loginResult = const FailureResult(UnknownFailure()),
     this.switchResult = const FailureResult(UnknownFailure()),
     this.logoutError,
+    this.beforeLogoutError,
   });
 
   Result<AuthSession?> restoreResult;
   Result<AuthSession> loginResult;
   Result<Warehouse> switchResult;
   Object? logoutError;
+  final Future<void> Function()? beforeLogoutError;
   int loginCalls = 0;
   int logoutCalls = 0;
 
@@ -2909,6 +2938,7 @@ final class _FakeAuthRepository implements AuthRepository {
   @override
   Future<void> logout() async {
     logoutCalls += 1;
+    await beforeLogoutError?.call();
     if (logoutError case final error?) throw error;
   }
 }

@@ -228,6 +228,7 @@ final class _MainAppState extends State<MainApp> {
     final authRepository = AuthRepositoryImpl(
       remoteDataSource: ApiAuthRemoteDataSource(_apiClient),
       secureStorage: _secureStorage,
+      authEpochReader: () => _sessionController.authEpoch,
     );
     final cachedAuthRepository = CachedAuthRepository(
       delegate: authRepository,
@@ -247,6 +248,7 @@ final class _MainAppState extends State<MainApp> {
       tokenStorage: _secureStorage,
       pendingRevocationStorage: _secureStorage,
       repository: authRepository,
+      authenticatedRequestLeaseReader: authenticatedRequestLeaseReader.read,
       blockAuthentication: (lease) {
         if (_sessionController.authEpoch != lease.authEpoch ||
             !_sessionController.canAuthenticateRequests ||

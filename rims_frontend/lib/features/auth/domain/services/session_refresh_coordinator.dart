@@ -32,6 +32,7 @@ final class SessionRefreshCoordinator {
     required this.tokenStorage,
     required this.pendingRevocationStorage,
     required this.repository,
+    this.authenticatedRequestLeaseReader,
     this.blockAuthentication,
     this.failureRecovery,
     this.onFailClosed,
@@ -41,6 +42,7 @@ final class SessionRefreshCoordinator {
   final TokenStorage tokenStorage;
   final PendingRevocationStorage pendingRevocationStorage;
   final SessionCredentialRepository repository;
+  final AuthenticatedRequestLeaseReader? authenticatedRequestLeaseReader;
   final SessionAuthenticationBlocker? blockAuthentication;
   final SessionFailureRecovery? failureRecovery;
   final SessionFailClosedCallback? onFailClosed;
@@ -198,6 +200,29 @@ final class SessionRefreshCoordinator {
       return FailureResult(
         _preferCleanupFailure(protocolFailure, cleanupFailure),
       );
+    }
+    final leaseReader = authenticatedRequestLeaseReader;
+    if (leaseReader != null) {
+      try {
+        final activeLease = await leaseReader();
+        if (activeLease == null ||
+            activeLease.authEpoch != authEpoch ||
+            activeLease.token != current.accessToken ||
+            !_sameCredential(activeLease.credential, current)) {
+          return const FailureResult(
+            AuthenticationFailure(
+              message: 'The authentication lease was superseded.',
+            ),
+          );
+        }
+      } on Object catch (error) {
+        return FailureResult(
+          LocalStorageFailure(
+            message: 'Unable to verify the authentication lease.',
+            cause: sanitizeTransportCause(error),
+          ),
+        );
+      }
     }
     try {
       final committed = await credentialStorage.rotateDeviceCredential(

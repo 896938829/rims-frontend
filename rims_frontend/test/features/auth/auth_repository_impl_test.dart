@@ -9,6 +9,7 @@ import 'package:rims_frontend/features/auth/data/models/auth_models.dart';
 import 'package:rims_frontend/features/auth/data/repositories/auth_repository_impl.dart';
 import 'package:rims_frontend/features/auth/domain/entities/auth_session.dart';
 import 'package:rims_frontend/features/auth/domain/repositories/auth_repository.dart';
+import 'package:rims_frontend/features/auth/domain/services/authenticated_request_lease.dart';
 import 'package:rims_frontend/features/auth/domain/services/session_refresh_coordinator.dart';
 
 void main() {
@@ -165,6 +166,156 @@ void main() {
         expect(storage.credential, isNull);
         expect(await storage.readAccessToken(), isNull);
         expect(remoteDataSource.logoutCalls, 1);
+      },
+    );
+
+    test(
+      'logout gate fences a remote refresh before its credential commit',
+      () async {
+        var canAuthenticate = true;
+        var authEpoch = 4;
+        final storage = _FakeDeviceCredentialStorage()
+          ..credential = _deviceCredential()
+          ..accessToken = 'access-1'
+          ..tokenCommitted = true;
+        final releaseRefresh = Completer<void>();
+        final releaseLogout = Completer<void>();
+        final remoteDataSource = _FakeRotatingAuthRemoteDataSource(
+          refreshResult: Success(
+            _rotatingLoginModel(
+              accessToken: 'access-2',
+              refreshToken: 'refresh-2',
+              tokenVersion: 6,
+            ),
+          ),
+          refreshBlocker: releaseRefresh,
+          logoutBlocker: releaseLogout,
+        );
+        final repository = AuthRepositoryImpl(
+          remoteDataSource: remoteDataSource,
+          secureStorage: storage,
+          authEpochReader: () => authEpoch,
+        );
+        Future<AuthenticatedRequestLease?> readLease() async {
+          final credential = await storage.readDeviceCredential();
+          if (!canAuthenticate || credential == null) return null;
+          return AuthenticatedRequestLease(
+            token: credential.accessToken,
+            credential: credential,
+            authEpoch: authEpoch,
+          );
+        }
+
+        final coordinator = SessionRefreshCoordinator(
+          credentialStorage: storage,
+          tokenStorage: storage,
+          pendingRevocationStorage: storage,
+          repository: repository,
+          authenticatedRequestLeaseReader: readLease,
+        );
+        final refreshing = coordinator.refreshAfterUnauthorized(
+          failedCredential: _deviceCredential(),
+          failedAuthEpoch: authEpoch,
+          origin: SessionRefreshOrigin.request,
+        );
+        await remoteDataSource.refreshStarted.future;
+
+        canAuthenticate = false;
+        final loggingOut = repository.logout();
+        await remoteDataSource.logoutStarted.future;
+        releaseRefresh.complete();
+        expect(await refreshing, isA<FailureResult<DeviceCredential>>());
+        releaseLogout.complete();
+        await loggingOut;
+
+        expect(storage.credential, isNull);
+        expect(await storage.readAccessToken(), isNull);
+        expect(authEpoch, 4);
+      },
+    );
+
+    test(
+      'logout clears a same-session higher generation when its epoch is unchanged',
+      () async {
+        var authEpoch = 4;
+        final storage = _FakeDeviceCredentialStorage()
+          ..credential = _deviceCredential()
+          ..accessToken = 'access-1'
+          ..tokenCommitted = true
+          ..credentialBeforeNextClear = _deviceCredential(
+            accessToken: 'access-2',
+            refreshToken: 'refresh-2',
+            generation: 2,
+          );
+        final repository = AuthRepositoryImpl(
+          remoteDataSource: _FakeRotatingAuthRemoteDataSource(
+            refreshResult: const FailureResult(AuthenticationFailure()),
+          ),
+          secureStorage: storage,
+          authEpochReader: () => authEpoch,
+        );
+
+        await repository.logout();
+
+        expect(storage.credential, isNull);
+        expect(await storage.readAccessToken(), isNull);
+        expect(authEpoch, 4);
+      },
+    );
+
+    test(
+      'logout started after refresh commit clears the latest generation',
+      () async {
+        var canAuthenticate = true;
+        const authEpoch = 4;
+        final storage = _FakeDeviceCredentialStorage()
+          ..credential = _deviceCredential()
+          ..accessToken = 'access-1'
+          ..tokenCommitted = true;
+        final remoteDataSource = _FakeRotatingAuthRemoteDataSource(
+          refreshResult: Success(
+            _rotatingLoginModel(
+              accessToken: 'access-2',
+              refreshToken: 'refresh-2',
+              tokenVersion: 6,
+            ),
+          ),
+        );
+        final repository = AuthRepositoryImpl(
+          remoteDataSource: remoteDataSource,
+          secureStorage: storage,
+          authEpochReader: () => authEpoch,
+        );
+        final coordinator = SessionRefreshCoordinator(
+          credentialStorage: storage,
+          tokenStorage: storage,
+          pendingRevocationStorage: storage,
+          repository: repository,
+          authenticatedRequestLeaseReader: () async {
+            final credential = await storage.readDeviceCredential();
+            if (!canAuthenticate || credential == null) return null;
+            return AuthenticatedRequestLease(
+              token: credential.accessToken,
+              credential: credential,
+              authEpoch: authEpoch,
+            );
+          },
+        );
+
+        final refreshed = await coordinator.refreshAfterUnauthorized(
+          failedCredential: _deviceCredential(),
+          failedAuthEpoch: authEpoch,
+          origin: SessionRefreshOrigin.request,
+        );
+        expect(refreshed, isA<Success<DeviceCredential>>());
+        expect(storage.credential?.generation, 2);
+
+        canAuthenticate = false;
+        await repository.logout();
+
+        expect(storage.credential, isNull);
+        expect(await storage.readAccessToken(), isNull);
+        expect(remoteDataSource.lastLogoutAccessToken, 'access-2');
       },
     );
 
@@ -977,6 +1128,7 @@ final class _FakeDeviceCredentialStorage extends _FakeTokenStorage
   DeviceCredential? credential;
   String? pendingAccountId;
   Object? pendingMarkerError;
+  DeviceCredential? credentialBeforeNextClear;
 
   @override
   Future<void> clearAccessToken() async {
@@ -1030,6 +1182,12 @@ final class _FakeDeviceCredentialStorage extends _FakeTokenStorage
     required String sessionId,
     required int generation,
   }) async {
+    if (credentialBeforeNextClear case final replacement?) {
+      credentialBeforeNextClear = null;
+      credential = replacement;
+      accessToken = replacement.accessToken;
+      return false;
+    }
     final current = credential;
     if (current?.accountId != accountId ||
         current?.sessionId != sessionId ||
@@ -1236,6 +1394,7 @@ DeviceCredential _deviceCredential({
   String accessToken = 'access-1',
   String refreshToken = 'refresh-1',
   String sessionId = 'session-7',
+  int generation = 1,
 }) => DeviceCredential(
   accessToken: accessToken,
   refreshToken: refreshToken,
@@ -1244,6 +1403,6 @@ DeviceCredential _deviceCredential({
   accessExpiresAt: DateTime.utc(2026, 7, 15, 3),
   refreshExpiresAt: DateTime.utc(2026, 8, 15, 3),
   tokenVersion: 5,
-  generation: 1,
+  generation: generation,
   biometricPolicy: BiometricCredentialPolicy.requireUnlock,
 );

@@ -21,11 +21,13 @@ final class AuthRepositoryImpl
     required this.remoteDataSource,
     required this.secureStorage,
     this.tokenOwnerFactory = _newTokenOwnerId,
+    this.authEpochReader,
   });
 
   final AuthRemoteDataSource remoteDataSource;
   final TokenStorage secureStorage;
   final String Function() tokenOwnerFactory;
+  final int Function()? authEpochReader;
 
   @override
   Object get tokenTransactionStorageIdentity => secureStorage;
@@ -296,6 +298,7 @@ final class AuthRepositoryImpl
 
   @override
   Future<void> logout() async {
+    final expectedAuthEpoch = authEpochReader?.call();
     final rotatingRemote = remoteDataSource is RotatingAuthRemoteDataSource
         ? remoteDataSource as RotatingAuthRemoteDataSource
         : null;
@@ -319,7 +322,20 @@ final class AuthRepositoryImpl
           try {
             final active = await deviceStorage?.readDeviceCredential();
             if (_sameCredential(active, current)) {
-              await pending.savePendingRevocationAccountId(current.accountId);
+              if (expectedAuthEpoch != null &&
+                  pending is SessionPendingRevocationStorage) {
+                await (pending as SessionPendingRevocationStorage)
+                    .savePendingRevocationLease(
+                      SessionRevocationLease(
+                        accountId: current.accountId,
+                        sessionId: current.sessionId,
+                        generation: current.generation,
+                        authEpoch: expectedAuthEpoch,
+                      ),
+                    );
+              } else {
+                await pending.savePendingRevocationAccountId(current.accountId);
+              }
             }
           } on Object catch (error) {
             markerError = error;
@@ -328,11 +344,37 @@ final class AuthRepositoryImpl
       }
     }
     if (deviceStorage != null && current != null) {
-      await deviceStorage.clearDeviceCredentialIfMatches(
+      var cleared = await deviceStorage.clearDeviceCredentialIfMatches(
         accountId: current.accountId,
         sessionId: current.sessionId,
         generation: current.generation,
       );
+      if (!cleared) {
+        final latest = await deviceStorage.readDeviceCredential();
+        final epochUnchanged =
+            expectedAuthEpoch == null ||
+            authEpochReader?.call() == expectedAuthEpoch;
+        if (epochUnchanged &&
+            latest != null &&
+            _sameIdentity(latest, current) &&
+            latest.generation > current.generation) {
+          cleared = await deviceStorage.clearDeviceCredentialIfMatches(
+            accountId: latest.accountId,
+            sessionId: latest.sessionId,
+            generation: latest.generation,
+          );
+        }
+        if (!cleared) {
+          final active = await deviceStorage.readDeviceCredential();
+          if (epochUnchanged &&
+              active != null &&
+              _sameIdentity(active, current)) {
+            throw const RevocationCleanupFailure(
+              message: 'Unable to clear the logged out device credential.',
+            );
+          }
+        }
+      }
     } else {
       await secureStorage.clearAccessToken();
     }
@@ -351,6 +393,9 @@ final class AuthRepositoryImpl
       active?.accountId == expected.accountId &&
       active?.sessionId == expected.sessionId &&
       active?.generation == expected.generation;
+
+  bool _sameIdentity(DeviceCredential left, DeviceCredential right) =>
+      left.accountId == right.accountId && left.sessionId == right.sessionId;
 
   Future<void> _clearLoginToken({
     required String token,

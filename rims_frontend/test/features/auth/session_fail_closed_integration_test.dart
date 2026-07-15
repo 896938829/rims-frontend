@@ -389,7 +389,8 @@ final class _ChainStorage
         TokenStorage,
         AuthenticatedAccountStorage,
         ConditionalAuthenticatedAccountStorage,
-        PendingRevocationStorage {
+        PendingRevocationStorage,
+        SessionPendingRevocationStorage {
   _ChainStorage(this.credential, {required this.events});
 
   final List<String> events;
@@ -397,6 +398,7 @@ final class _ChainStorage
   String? accountId;
   int? accountEpoch;
   String? pendingAccountId;
+  SessionRevocationLease? pendingLease;
   bool failPrimaryMarker = false;
   bool failConditionalClear = false;
   bool failFallbackClear = false;
@@ -500,14 +502,37 @@ final class _ChainStorage
   @override
   Future<void> clearPendingRevocationAccountId() async {
     pendingAccountId = null;
+    pendingLease = null;
+  }
+
+  @override
+  Future<void> savePendingRevocationLease(SessionRevocationLease lease) async {
+    events.add('primary-marker');
+    if (failPrimaryMarker) throw StateError('primary marker failed');
+    pendingLease = lease;
+  }
+
+  @override
+  Future<SessionRevocationLease?> readPendingRevocationLease() async =>
+      pendingLease;
+
+  @override
+  Future<bool> clearPendingRevocationLeaseIfMatches(
+    SessionRevocationLease expected,
+  ) async {
+    if (pendingLease != expected) return false;
+    pendingLease = null;
+    return true;
   }
 }
 
-final class _ChainJournal implements PendingRevocationJournal {
+final class _ChainJournal
+    implements PendingRevocationJournal, SessionPendingRevocationJournal {
   _ChainJournal(this.events);
 
   final List<String> events;
   final Set<String> accountIds = {};
+  final Set<SessionRevocationLease> leases = {};
   bool failAdd = false;
 
   @override
@@ -524,6 +549,23 @@ final class _ChainJournal implements PendingRevocationJournal {
   Future<void> removeAccountId(String accountId) async {
     events.add('journal-remove');
     accountIds.remove(accountId);
+  }
+
+  @override
+  Future<void> addLease(SessionRevocationLease lease) async {
+    events.add('journal-add');
+    if (failAdd) throw StateError('journal failed');
+    leases.add(lease);
+  }
+
+  @override
+  Future<Set<SessionRevocationLease>> readLeases() async =>
+      Set.unmodifiable(leases);
+
+  @override
+  Future<void> removeLease(SessionRevocationLease lease) async {
+    events.add('journal-remove');
+    leases.remove(lease);
   }
 }
 
