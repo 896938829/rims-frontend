@@ -12,6 +12,9 @@ final class ApiExceptionMapper {
     if (error is! DioException) {
       return UnknownFailure(cause: sanitizeTransportCause(error));
     }
+    if (error.error case final RevocationCleanupFailure cleanupFailure) {
+      return sanitizeFailureCause(cleanupFailure);
+    }
     final cause = sanitizeTransportCause(error)!;
 
     if (error.type == DioExceptionType.cancel) {

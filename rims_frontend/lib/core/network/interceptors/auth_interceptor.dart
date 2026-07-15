@@ -5,9 +5,11 @@ import 'package:dio/dio.dart';
 
 import '../../../features/auth/domain/services/session_refresh_coordinator.dart';
 import '../../../features/auth/domain/services/authenticated_request_lease.dart';
+import '../../result/failure.dart';
 import '../../result/result.dart';
 import '../../storage/app_secure_storage.dart';
 import '../auth_request_policy.dart';
+import '../sanitized_transport_cause.dart';
 
 export '../auth_request_policy.dart';
 
@@ -161,11 +163,23 @@ final class AuthInterceptor extends Interceptor {
         failedAuthEpoch: failedLease.authEpoch,
         origin: origin,
       );
-      if (refreshed is! Success<DeviceCredential>) {
+      if (refreshed case FailureResult<DeviceCredential>(
+        failure: final failure,
+      )) {
+        if (failure is RevocationCleanupFailure) {
+          handler.next(
+            DioException(
+              requestOptions: options,
+              type: DioExceptionType.unknown,
+              error: sanitizeFailureCause(failure),
+            ),
+          );
+          return;
+        }
         handler.next(error);
         return;
       }
-      final credential = refreshed.data;
+      final credential = (refreshed as Success<DeviceCredential>).data;
       if (queuedWrite || !_canReplay(options)) {
         handler.next(error);
         return;

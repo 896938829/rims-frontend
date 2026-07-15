@@ -3,7 +3,10 @@ import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:rims_frontend/core/network/api_client.dart';
+import 'package:rims_frontend/core/network/api_exception_mapper.dart';
 import 'package:rims_frontend/core/network/interceptors/auth_interceptor.dart';
+import 'package:rims_frontend/core/result/failure.dart';
 import 'package:rims_frontend/core/result/result.dart';
 import 'package:rims_frontend/core/storage/app_secure_storage.dart';
 import 'package:rims_frontend/features/auth/domain/repositories/auth_repository.dart';
@@ -546,6 +549,102 @@ void main() {
       expect(syncAdapter.fetchCount, 1);
     },
   );
+
+  test(
+    'cleanup failure crosses interceptor and API mapping as a redacted typed failure',
+    () async {
+      const accessToken = 'cleanup-access-secret';
+      const refreshToken = 'cleanup-refresh-secret';
+      final credential = _credential(
+        accessToken: accessToken,
+        refreshToken: refreshToken,
+      );
+      final storage = _InterceptorCredentialStorage(credential);
+      final repository = _InterceptorRefreshRepository(
+        result: const FailureResult(AuthenticationFailure()),
+      );
+      final transport = DioException(
+        requestOptions: RequestOptions(
+          path: '/auth/refresh',
+          headers: {'Authorization': 'Bearer $accessToken'},
+          data: {'refreshToken': refreshToken},
+        ),
+        error: StateError('nested $refreshToken'),
+      );
+      final dio = _dioWithCoordinator(
+        storage,
+        repository,
+        _RotatingAdapter(alwaysUnauthorized: true),
+        failureRecovery: _InterceptorFailureRecovery(
+          RevocationCleanupFailure(
+            message: 'Credential cleanup is incomplete.',
+            cause: transport,
+          ),
+        ),
+      );
+
+      late DioException intercepted;
+      try {
+        await dio.get<dynamic>('/cleanup-failure');
+        fail('expected cleanup failure');
+      } on DioException catch (error) {
+        intercepted = error;
+      }
+      final mapped = const ApiExceptionMapper().map(intercepted);
+
+      expect(intercepted.requestOptions.path, '/cleanup-failure');
+      expect(intercepted.error, isA<RevocationCleanupFailure>());
+      expect(mapped, isA<RevocationCleanupFailure>());
+      expect(mapped.cause.toString(), isNot(contains(accessToken)));
+      expect(mapped.cause.toString(), isNot(contains(refreshToken)));
+    },
+  );
+
+  test(
+    'ApiClient preserves cleanup failure returned by auth refresh',
+    () async {
+      final credential = _credential();
+      final storage = _InterceptorCredentialStorage(credential);
+      final repository = _InterceptorRefreshRepository(
+        result: const FailureResult(AuthenticationFailure()),
+      );
+      final coordinator = SessionRefreshCoordinator(
+        credentialStorage: storage,
+        tokenStorage: storage,
+        pendingRevocationStorage: storage,
+        repository: repository,
+        failureRecovery: const _InterceptorFailureRecovery(
+          RevocationCleanupFailure(
+            message: 'Credential cleanup is incomplete.',
+          ),
+        ),
+      );
+      final dio = Dio()
+        ..httpClientAdapter = _RotatingAdapter(alwaysUnauthorized: true);
+      final client = ApiClient.test(
+        dio: dio,
+        enableLogging: false,
+        authenticatedRequestLeaseReader: () async {
+          final current = await storage.readDeviceCredential();
+          if (current == null) return null;
+          return AuthenticatedRequestLease(
+            token: current.accessToken,
+            credential: current,
+            authEpoch: 1,
+          );
+        },
+        refreshCoordinatorReader: () => coordinator,
+      );
+
+      final result = await client.get<dynamic>('/cleanup-failure');
+
+      expect(result, isA<FailureResult<Response<dynamic>>>());
+      expect(
+        (result as FailureResult<Response<dynamic>>).failure,
+        isA<RevocationCleanupFailure>(),
+      );
+    },
+  );
 }
 
 Dio _dioWithAuthInterceptor({
@@ -564,6 +663,7 @@ Dio _dioWithCoordinator(
   TokenReader? tokenReader,
   int Function()? authEpochReader,
   void Function()? onReplayExecution,
+  SessionFailureRecovery? failureRecovery,
 }) {
   final dio = Dio()..httpClientAdapter = adapter;
   final epochReader = authEpochReader ?? () => 1;
@@ -573,6 +673,7 @@ Dio _dioWithCoordinator(
     tokenStorage: storage,
     pendingRevocationStorage: storage,
     repository: repository,
+    failureRecovery: failureRecovery,
   );
   dio.interceptors.add(
     AuthInterceptor(
@@ -602,9 +703,10 @@ Dio _dioWithCoordinator(
 
 final class _InterceptorRefreshRepository
     implements SessionCredentialRepository {
-  _InterceptorRefreshRepository({this.release});
+  _InterceptorRefreshRepository({this.release, this.result});
 
   final Completer<void>? release;
+  final Result<DeviceCredential>? result;
   final Completer<void> started = Completer<void>();
   int calls = 0;
 
@@ -616,6 +718,7 @@ final class _InterceptorRefreshRepository
     if (!started.isCompleted) started.complete();
     await release?.future;
     await Future<void>.delayed(const Duration(milliseconds: 10));
+    if (result case final configured?) return configured;
     return Success(
       _credential(
         accessToken: 'access-2',
@@ -624,6 +727,23 @@ final class _InterceptorRefreshRepository
       ),
     );
   }
+}
+
+final class _InterceptorFailureRecovery implements SessionFailureRecovery {
+  const _InterceptorFailureRecovery(this.failure);
+
+  final Failure failure;
+
+  @override
+  Future<Failure?> retainPendingRevocation(
+    AuthenticatedSessionCleanupLease expected,
+  ) async => failure;
+
+  @override
+  Future<Failure?> completeOwnershipCleanup({
+    required AuthenticatedSessionCleanupLease expected,
+    required bool credentialQuarantined,
+  }) async => null;
 }
 
 final class _InterceptorCredentialStorage
