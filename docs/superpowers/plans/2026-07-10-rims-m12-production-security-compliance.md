@@ -190,21 +190,23 @@ Completed in backend commits `7f68bd5`, `dae6e34`, `c5431b4`, and `8f86fab`. Ver
 - Create: backend `internal/modules/user/session_service_test.go`
 - Create: backend `internal/modules/user/session_routes_test.go`
 
-- [ ] **Step 1: Write RED API tests**
+- [x] **Step 1: Write RED API tests**
 
 Cover access/refresh/session login response, single-use refresh, concurrent refresh, reuse-family revocation, list/revoke one/others/all, idempotent logout, disabled/deleted account, token-version/password invalidation, expired/revoked middleware rejection, non-enumerating failures, and bounded device labels.
 
-- [ ] **Step 2: Implement routes**
+- [x] **Step 2: Implement routes**
 
 Public `POST /auth/login` and `POST /auth/refresh`. Authenticated `POST /auth/logout`, `GET /auth/sessions`, `DELETE /auth/sessions/:id`, `POST /auth/sessions/revoke-others`, and `POST /auth/sessions/revoke-all`.
 
-- [ ] **Step 3: Invalidate sessions on security mutations**
+- [x] **Step 3: Invalidate sessions on security mutations**
 
 Password change/reset, account disable/delete, and critical role mutation increment token version and revoke the required scope transactionally.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Run user/middleware/app tests and full Go suite. Commit: `feat: add rotating session APIs`.
+
+Completed in backend commits `41f789c`, `595b68d`, `8b4fd10`, and `0373b4b`. Verification includes focused and race tests, the full Go suite and vet, strict public-auth body-limit tests, and a real-PostgreSQL matrix covering concurrent refresh, session commands, authority invalidation, lock ordering, transactional rollback, registration, and signing failures.
 
 ## Task 8: Frontend Versioned Credentials And Serialized Refresh
 
