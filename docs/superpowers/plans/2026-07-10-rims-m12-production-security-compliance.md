@@ -221,21 +221,23 @@ Completed in backend commits `41f789c`, `595b68d`, `8b4fd10`, and `0373b4b`. Ver
 - Test: `rims_frontend/test/features/auth/session_refresh_coordinator_test.dart`
 - Test: `rims_frontend/test/core/storage/app_secure_storage_test.dart`
 
-- [ ] **Step 1: Write RED credential/refresh tests**
+- [x] **Step 1: Write RED credential/refresh tests**
 
 Cover v3 migration, owner/session identity, atomic access+refresh commit, ten concurrent 401s -> one refresh, one replay per safe request, failure clearing, storage failure after rotation, logout/revoke race, stale generation, queued-write non-replay, and no credential in Drift.
 
-- [ ] **Step 2: Implement secure record v3**
+- [x] **Step 2: Implement secure record v3**
 
 Store access/refresh, account/session IDs, expiries, token version, generation, and biometric policy in one strict owner-bound record. Malformed/unsupported records produce typed restore failure and clear safely.
 
-- [ ] **Step 3: Implement serialized coordinator**
+- [x] **Step 3: Implement serialized coordinator**
 
 Replay only idempotent reads or requests already carrying a stable idempotency key. Offline outbox refreshes only inside an explicit Sync Center command. Preserve pending revocation and M11 cleanup ordering.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Run storage/auth tests, full analyze, and diff check. Commit: `feat: rotate frontend device credentials`.
+
+Completed in frontend commits `dcf5e10`, `c7959ce`, `3f8e8a2`, `0edbf0b`, `ada7ad1`, `44e5caf`, `6a2fc50`, `54f26bf`, `413a273`, `da35fdc`, `c235953`, `de00f4f`, `12067f7`, and `3f5d91b`. The final design uses a shared reentrant auth lifecycle gate, stable token/credential/epoch leases, structured session cleanup markers with legacy migration, conditional credential cleanup, repeatable-body replay, and redacted typed transport failures. Independent verification passed 148 focused lifecycle/restart tests, `flutter analyze --no-pub`, all 1390 Flutter tests, and `git diff --check`; independent specification and quality reviews both approved the result with no remaining Critical or Important findings.
 
 ## Task 9: Device Session Management UI
 
