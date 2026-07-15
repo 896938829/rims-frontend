@@ -1,3 +1,4 @@
+import '../../../../core/network/sanitized_transport_cause.dart';
 import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
 import '../../../../core/storage/app_secure_storage.dart';
@@ -79,11 +80,11 @@ final class CachedAuthRepository
               _volatilePendingRevocationAccountIds.isNotEmpty
           ? RevocationCleanupFailure(
               message: 'Revoked credential cleanup could not be completed.',
-              cause: error,
+              cause: sanitizeTransportCause(error),
             )
           : LocalStorageFailure(
               message: 'Unable to restore the local authentication session.',
-              cause: error,
+              cause: sanitizeTransportCause(error),
             );
       return FailureResult(failure);
     }
@@ -166,7 +167,7 @@ final class CachedAuthRepository
       } on Object catch (error) {
         cleanupFailure ??= LocalStorageFailure(
           message: 'Expired credential cleanup could not be completed.',
-          cause: error,
+          cause: sanitizeTransportCause(error),
         );
       }
       if (cleanupFailure != null) {
@@ -176,7 +177,7 @@ final class CachedAuthRepository
             statusCode: failure.statusCode,
             businessCode: failure.businessCode,
             traceId: failure.traceId,
-            cause: cleanupFailure,
+            cause: sanitizeTransportCause(cleanupFailure),
           ),
         );
       }
@@ -245,7 +246,7 @@ final class CachedAuthRepository
       return FailureResult(
         LocalStorageFailure(
           message: 'Unable to complete the local authentication transaction.',
-          cause: error,
+          cause: sanitizeTransportCause(error),
         ),
       );
     }
@@ -414,7 +415,7 @@ final class CachedAuthRepository
         return FailureResult(
           LocalStorageFailure(
             message: 'Unable to finalize authentication ownership.',
-            cause: error,
+            cause: sanitizeTransportCause(error),
           ),
         );
       }
@@ -434,7 +435,7 @@ final class CachedAuthRepository
       return FailureResult(
         LocalStorageFailure(
           message: 'Unable to update the local warehouse session.',
-          cause: error,
+          cause: sanitizeTransportCause(error),
         ),
       );
     }
@@ -735,7 +736,7 @@ final class CachedAuthRepository
     if (journalRetained || primaryRetained) return null;
     return RevocationCleanupFailure(
       message: 'Unable to retain pending credential revocation.',
-      cause: List.unmodifiable(errors),
+      cause: sanitizeTransportCause(errors),
     );
   }
 
@@ -794,7 +795,7 @@ final class CachedAuthRepository
         message: firstError is Failure
             ? firstError.message
             : 'Refresh credential cleanup could not be completed.',
-        cause: firstError,
+        cause: sanitizeTransportCause(firstError),
       );
     }
     _volatilePendingRevocationAccountIds.remove(accountId);
@@ -845,7 +846,7 @@ final class CachedAuthRepository
         message: firstError is Failure
             ? firstError.message
             : 'Revoked credential cleanup could not be completed.',
-        cause: firstError,
+        cause: sanitizeTransportCause(firstError),
       );
     }
     _volatilePendingRevocationAccountIds.remove(accountId);
@@ -868,7 +869,7 @@ final class CachedAuthRepository
     } on Object catch (error) {
       return RevocationCleanupFailure(
         message: 'Pending credential revocation could not be verified.',
-        cause: error,
+        cause: sanitizeTransportCause(error),
       );
     }
     if (primaryReadError != null &&
@@ -876,7 +877,7 @@ final class CachedAuthRepository
         _volatilePendingRevocationAccountIds.isEmpty) {
       return RevocationCleanupFailure(
         message: 'Pending credential revocation could not be verified.',
-        cause: primaryReadError,
+        cause: sanitizeTransportCause(primaryReadError),
       );
     }
     final pendingRevocations = <String>{
@@ -958,14 +959,14 @@ final class CachedAuthRepository
     if (report.completed) return null;
     return LocalStorageFailure(
       message: report.failures.map((failure) => failure.message).join(' '),
-      cause: report,
+      cause: sanitizeTransportCause(report),
     );
   }
 
   LocalStorageFailure _ownershipFailureFrom(OfflineOwnershipReport report) {
     return LocalStorageFailure(
       message: report.failures.map((failure) => failure.message).join(' '),
-      cause: report,
+      cause: sanitizeTransportCause(report),
     );
   }
 
@@ -977,7 +978,7 @@ final class CachedAuthRepository
       return FailureResult(
         LocalStorageFailure(
           message: 'Unable to roll back reauthentication ownership.',
-          cause: error,
+          cause: sanitizeTransportCause(error),
         ),
       );
     }
@@ -1115,7 +1116,7 @@ final class _CachedAuthSessionTransaction
       return FailureResult(
         LocalStorageFailure(
           message: 'Unable to finalize reauthentication ownership.',
-          cause: error,
+          cause: sanitizeTransportCause(error),
         ),
       );
     }
@@ -1130,7 +1131,7 @@ final class _CachedAuthSessionTransaction
       result = FailureResult(
         LocalStorageFailure(
           message: 'Unable to commit the local authentication session.',
-          cause: error,
+          cause: sanitizeTransportCause(error),
         ),
       );
     }
@@ -1141,7 +1142,7 @@ final class _CachedAuthSessionTransaction
     } on Object catch (error) {
       projectionFailure = LocalStorageFailure(
         message: 'Unable to roll back the failed authentication session.',
-        cause: error,
+        cause: sanitizeTransportCause(error),
       );
     }
     final leaseFailure = _rollbackLease();
@@ -1157,7 +1158,11 @@ final class _CachedAuthSessionTransaction
           if (projectionFailure != null) projectionFailure.message,
           if (leaseFailure != null) leaseFailure.message,
         ].join(' '),
-        cause: [originalFailure, projectionFailure, leaseFailure],
+        cause: sanitizeTransportCause([
+          originalFailure,
+          projectionFailure,
+          leaseFailure,
+        ]),
       ),
     );
   }
@@ -1172,7 +1177,7 @@ final class _CachedAuthSessionTransaction
       upstreamResult = FailureResult(
         LocalStorageFailure(
           message: 'Unable to abort the local credential transaction.',
-          cause: error,
+          cause: sanitizeTransportCause(error),
         ),
       );
     }
@@ -1185,7 +1190,7 @@ final class _CachedAuthSessionTransaction
       failures.add(
         LocalStorageFailure(
           message: 'Unable to roll back the local session projection.',
-          cause: error,
+          cause: sanitizeTransportCause(error),
         ),
       );
     }
@@ -1195,7 +1200,7 @@ final class _CachedAuthSessionTransaction
     return FailureResult(
       LocalStorageFailure(
         message: failures.map((failure) => failure.message).join(' '),
-        cause: failures,
+        cause: sanitizeTransportCause(failures),
       ),
     );
   }
@@ -1211,7 +1216,7 @@ final class _CachedAuthSessionTransaction
     } on Object catch (error) {
       return LocalStorageFailure(
         message: 'Unable to roll back reauthentication ownership.',
-        cause: error,
+        cause: sanitizeTransportCause(error),
       );
     }
   }

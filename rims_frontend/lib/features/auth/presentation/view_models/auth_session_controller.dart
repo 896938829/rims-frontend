@@ -2,6 +2,7 @@ import 'package:flutter/foundation.dart';
 
 import '../../../../core/events/app_event.dart';
 import '../../../../core/events/app_event_bus.dart';
+import '../../../../core/network/sanitized_transport_cause.dart';
 import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
 import '../../domain/entities/app_user.dart';
@@ -178,7 +179,7 @@ final class AuthSessionController extends ChangeNotifier {
       _credentialsInvalidated = true;
       _restoreFailure = LocalStorageFailure(
         message: '会话恢复失败，请重试',
-        cause: error,
+        cause: sanitizeTransportCause(error),
       );
       _sessionMessage = _restoreFailure!.message;
       _clearSourceMetadata();
@@ -254,7 +255,7 @@ final class AuthSessionController extends ChangeNotifier {
           transaction: transaction,
           failure: LocalStorageFailure(
             message: 'credential commit failed',
-            cause: error,
+            cause: sanitizeTransportCause(error),
           ),
         );
       }
@@ -286,7 +287,7 @@ final class AuthSessionController extends ChangeNotifier {
             transaction: transaction,
             failure: LocalStorageFailure(
               message: 'ownership finalize failed',
-              cause: error,
+              cause: sanitizeTransportCause(error),
             ),
           );
         }
@@ -352,7 +353,10 @@ final class AuthSessionController extends ChangeNotifier {
         abortFailure = failure;
       }
     } on Object catch (error) {
-      abortFailure = LocalStorageFailure(message: '登录事务清理失败，请重试', cause: error);
+      abortFailure = LocalStorageFailure(
+        message: '登录事务清理失败，请重试',
+        cause: sanitizeTransportCause(error),
+      );
     }
     if (!reportFailure || _disposed) return abortFailure;
     if (expectedEpoch != null && !_isCurrent(expectedEpoch)) {
@@ -424,7 +428,7 @@ final class AuthSessionController extends ChangeNotifier {
       if (_isCurrent(epoch)) {
         _switchWarehouseFailure = LocalStorageFailure(
           message: '切换仓库失败，请重试',
-          cause: error,
+          cause: sanitizeTransportCause(error),
         );
       }
       return false;
@@ -469,7 +473,7 @@ final class AuthSessionController extends ChangeNotifier {
       } on Object catch (error) {
         _restoreFailure = LocalStorageFailure(
           message: '登录凭据清理失败，请重试',
-          cause: error,
+          cause: sanitizeTransportCause(error),
         );
         _sessionMessage = '$message；${_restoreFailure!.message}';
       }
@@ -615,7 +619,7 @@ final class AuthSessionController extends ChangeNotifier {
     } on Object catch (error) {
       _ownershipFailure = LocalStorageFailure(
         message: '离线数据归属处理失败',
-        cause: error,
+        cause: sanitizeTransportCause(error),
       );
       final report = OfflineOwnershipReport(
         reason: intent.reason,
@@ -625,7 +629,7 @@ final class AuthSessionController extends ChangeNotifier {
           OfflineOwnershipFailure(
             step: OfflineOwnershipStep.store,
             message: _ownershipFailure!.message,
-            cause: error,
+            cause: sanitizeTransportCause(error),
           ),
         ],
       );

@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rims_frontend/core/result/failure.dart';
 import 'package:rims_frontend/core/result/result.dart';
@@ -457,6 +458,89 @@ void main() {
       expect(repository.calls, 1);
     },
   );
+
+  test('invalid rotation preserves marker and clear cleanup failure', () async {
+    final storage = _CoordinatorStorage(_credential())
+      ..pendingError = StateError('marker failed')
+      ..conditionalClearError = StateError('clear failed')
+      ..fallbackClearError = StateError('fallback failed');
+    final repository = _RefreshRepository(
+      result: Success(_credential(sessionId: 'invalid-session', generation: 2)),
+    );
+    final coordinator = _coordinator(storage, repository);
+
+    final result = await coordinator.refreshAfterUnauthorized(
+      failedCredential: _credential(),
+      origin: SessionRefreshOrigin.request,
+    );
+
+    expect(result, isA<FailureResult<DeviceCredential>>());
+    expect(
+      (result as FailureResult<DeviceCredential>).failure,
+      isA<RevocationCleanupFailure>(),
+    );
+  });
+
+  test('rotation CAS superseded preserves cleanup failure', () async {
+    final storage = _CoordinatorStorage(_credential())
+      ..forceRotateFalse = true
+      ..pendingError = StateError('marker failed');
+    final repository = _RefreshRepository();
+    final coordinator = _coordinator(storage, repository);
+
+    final result = await coordinator.refreshAfterUnauthorized(
+      failedCredential: _credential(),
+      origin: SessionRefreshOrigin.request,
+    );
+
+    expect(result, isA<FailureResult<DeviceCredential>>());
+    expect(
+      (result as FailureResult<DeviceCredential>).failure,
+      isA<RevocationCleanupFailure>(),
+    );
+  });
+
+  test(
+    'authentication failure causes redact recursive credential transport',
+    () async {
+      const accessToken = 'access-secret-value';
+      const refreshToken = 'refresh-secret-value';
+      final credential = _credential(
+        accessToken: accessToken,
+        refreshToken: refreshToken,
+      );
+      final storage = _CoordinatorStorage(credential);
+      final transport = DioException(
+        requestOptions: RequestOptions(
+          path: '/auth/refresh',
+          headers: {'Authorization': 'Bearer $accessToken'},
+          data: {'refreshToken': refreshToken},
+        ),
+        response: Response<dynamic>(
+          requestOptions: RequestOptions(path: '/auth/refresh'),
+          statusCode: 500,
+          data: {'echo': accessToken},
+        ),
+        error: StateError('failed with $refreshToken'),
+      );
+      final coordinator = _coordinator(
+        storage,
+        _RefreshRepository(throwError: transport),
+      );
+
+      final result = await coordinator.refreshAfterUnauthorized(
+        failedCredential: credential,
+        origin: SessionRefreshOrigin.request,
+      );
+      final failure = (result as FailureResult<DeviceCredential>).failure;
+      final graph = _causeGraph(failure).toList(growable: false);
+      final rendered = graph.map((node) => node.toString()).join('\n');
+
+      expect(graph.whereType<DioException>(), isEmpty);
+      expect(rendered, isNot(contains(accessToken)));
+      expect(rendered, isNot(contains(refreshToken)));
+    },
+  );
 }
 
 SessionRefreshCoordinator _coordinator(
@@ -513,6 +597,8 @@ final class _CoordinatorStorage
   Object? conditionalClearError;
   Object? fallbackClearError;
   Object? nextReadError;
+  Object? pendingError;
+  bool forceRotateFalse = false;
   bool logClearAttempts = false;
   bool logReads = false;
   final List<String>? order;
@@ -575,6 +661,7 @@ final class _CoordinatorStorage
     required int expectedGeneration,
   }) async {
     if (rotateError case final error?) throw error;
+    if (forceRotateFalse) return false;
     final current = this.credential;
     if (current?.accountId != expectedAccountId ||
         current?.sessionId != expectedSessionId ||
@@ -592,6 +679,7 @@ final class _CoordinatorStorage
   @override
   Future<void> savePendingRevocationAccountId(String accountId) async {
     order?.add('pending');
+    if (pendingError case final error?) throw error;
     pendingAccountId = accountId;
   }
 
@@ -647,3 +735,25 @@ DeviceCredential _credential({
   generation: generation,
   biometricPolicy: BiometricCredentialPolicy.disabled,
 );
+
+Iterable<Object> _causeGraph(Object? root) sync* {
+  if (root == null) return;
+  yield root;
+  if (root is Failure) {
+    yield* _causeGraph(root.cause);
+  } else if (root is Iterable) {
+    for (final value in root) {
+      yield* _causeGraph(value);
+    }
+  } else if (root is Map) {
+    for (final entry in root.entries) {
+      yield* _causeGraph(entry.key);
+      yield* _causeGraph(entry.value);
+    }
+  } else if (root is DioException) {
+    yield* _causeGraph(root.requestOptions.headers);
+    yield* _causeGraph(root.requestOptions.data);
+    yield* _causeGraph(root.response?.data);
+    yield* _causeGraph(root.error);
+  }
+}

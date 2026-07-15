@@ -2,6 +2,7 @@ import 'dart:collection';
 
 import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
+import '../../../../core/network/sanitized_transport_cause.dart';
 import '../../../../core/storage/app_secure_storage.dart';
 import '../repositories/auth_repository.dart';
 import 'authenticated_request_lease.dart';
@@ -79,11 +80,14 @@ final class SessionRefreshCoordinator {
         cleanupFailure == null
             ? LocalStorageFailure(
                 message: 'Unable to read the current device credential.',
-                cause: error,
+                cause: sanitizeTransportCause(error),
               )
             : RevocationCleanupFailure(
                 message: cleanupFailure.message,
-                cause: [error, cleanupFailure],
+                cause: [
+                  sanitizeTransportCause(error),
+                  sanitizeTransportCause(cleanupFailure),
+                ],
               ),
       );
     }
@@ -109,7 +113,7 @@ final class SessionRefreshCoordinator {
             ? const StateFailure(message: 'The credential generation is stale.')
             : RevocationCleanupFailure(
                 message: 'Unable to quarantine an invalid credential state.',
-                cause: cleanupFailure,
+                cause: sanitizeTransportCause(cleanupFailure),
               ),
       );
     }
@@ -164,7 +168,7 @@ final class SessionRefreshCoordinator {
         cleanupFailure ??
             UnknownFailure(
               message: 'Unable to refresh the device credential.',
-              cause: error,
+              cause: sanitizeTransportCause(error),
             ),
       );
     }
@@ -174,19 +178,25 @@ final class SessionRefreshCoordinator {
       final cleanupFailure = await _failClosed(current, authEpoch);
       return FailureResult(
         cleanupFailure == null
-            ? failure
+            ? sanitizeFailureCause(failure)
             : RevocationCleanupFailure(
                 message: cleanupFailure.message,
-                cause: [failure, cleanupFailure],
+                cause: [
+                  sanitizeTransportCause(failure),
+                  sanitizeTransportCause(cleanupFailure),
+                ],
               ),
       );
     }
     final next = (refreshed as Success<DeviceCredential>).data;
     if (!_sameIdentity(current, next) ||
         next.generation != current.generation + 1) {
-      await _failClosed(current, authEpoch);
-      return const FailureResult(
-        AuthenticationFailure(message: 'Invalid rotated credential identity.'),
+      const protocolFailure = AuthenticationFailure(
+        message: 'Invalid rotated credential identity.',
+      );
+      final cleanupFailure = await _failClosed(current, authEpoch);
+      return FailureResult(
+        _preferCleanupFailure(protocolFailure, cleanupFailure),
       );
     }
     try {
@@ -203,14 +213,20 @@ final class SessionRefreshCoordinator {
           latest.generation > current.generation) {
         return Success(latest);
       }
-      await _failClosed(current, authEpoch);
+      final cleanupFailure = await _failClosed(current, authEpoch);
       if (latest == null) {
-        return const FailureResult(
-          AuthenticationFailure(message: 'The device session was invalidated.'),
+        const protocolFailure = AuthenticationFailure(
+          message: 'The device session was invalidated.',
+        );
+        return FailureResult(
+          _preferCleanupFailure(protocolFailure, cleanupFailure),
         );
       }
-      return const FailureResult(
-        StateFailure(message: 'Credential rotation was superseded.'),
+      const protocolFailure = StateFailure(
+        message: 'Credential rotation was superseded.',
+      );
+      return FailureResult(
+        _preferCleanupFailure(protocolFailure, cleanupFailure),
       );
     } on Object catch (error) {
       final cleanupFailure = await _failClosed(current, authEpoch);
@@ -218,7 +234,7 @@ final class SessionRefreshCoordinator {
         cleanupFailure ??
             LocalStorageFailure(
               message: 'Unable to commit rotated credentials.',
-              cause: error,
+              cause: sanitizeTransportCause(error),
             ),
       );
     }
@@ -248,7 +264,7 @@ final class SessionRefreshCoordinator {
       } on Object catch (error) {
         return RevocationCleanupFailure(
           message: 'Unable to block the failed authentication lease.',
-          cause: error,
+          cause: sanitizeTransportCause(error),
         );
       }
     } else {
@@ -331,8 +347,21 @@ final class SessionRefreshCoordinator {
         ? null
         : RevocationCleanupFailure(
             message: 'Unable to complete refresh credential cleanup.',
-            cause: List.unmodifiable(errors),
+            cause: List<Object?>.unmodifiable(
+              errors.map(sanitizeTransportCause),
+            ),
           );
+  }
+
+  Failure _preferCleanupFailure(Failure protocol, Failure? cleanup) {
+    if (cleanup == null) return protocol;
+    return RevocationCleanupFailure(
+      message: cleanup.message,
+      cause: [
+        sanitizeTransportCause(protocol),
+        sanitizeTransportCause(cleanup),
+      ],
+    );
   }
 
   bool _sameIdentity(DeviceCredential left, DeviceCredential right) =>

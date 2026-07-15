@@ -4,6 +4,7 @@ import '../../../../core/network/api_client.dart';
 import '../../../../core/network/api_endpoints.dart';
 import '../../../../core/network/auth_request_policy.dart';
 import '../../../../core/network/api_envelope.dart';
+import '../../../../core/network/sanitized_transport_cause.dart';
 import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
 import '../models/auth_models.dart';
@@ -158,7 +159,7 @@ final class ApiAuthRemoteDataSource
               statusCode: response.statusCode,
               businessCode: envelope.code,
               traceId: envelope.traceId,
-              cause: error,
+              cause: sanitizeTransportCause(error),
             ),
           );
         }

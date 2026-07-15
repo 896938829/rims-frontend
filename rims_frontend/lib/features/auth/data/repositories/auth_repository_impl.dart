@@ -1,3 +1,4 @@
+import '../../../../core/network/sanitized_transport_cause.dart';
 import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
 import '../../../../core/storage/app_secure_storage.dart';
@@ -236,7 +237,7 @@ final class AuthRepositoryImpl
           return FailureResult<AuthSession>(
             LocalStorageFailure(
               message: 'Unable to store the authenticated credential.',
-              cause: error,
+              cause: sanitizeTransportCause(error),
             ),
           );
         }
@@ -338,7 +339,7 @@ final class AuthRepositoryImpl
     if (markerError != null) {
       throw RevocationCleanupFailure(
         message: 'Unable to retain pending credential revocation.',
-        cause: markerError,
+        cause: sanitizeTransportCause(markerError),
       );
     }
   }
@@ -412,7 +413,10 @@ final class AuthRepositoryImpl
           return Success(next);
         } on Object catch (error) {
           return FailureResult<DeviceCredential>(
-            UnknownFailure(message: 'Invalid refresh response.', cause: error),
+            UnknownFailure(
+              message: 'Invalid refresh response.',
+              cause: sanitizeTransportCause(error),
+            ),
           );
         }
       },
@@ -421,7 +425,12 @@ final class AuthRepositoryImpl
   }
 
   FailureResult<T> _localStorageFailure<T>(String message, Object error) =>
-      FailureResult<T>(LocalStorageFailure(message: message, cause: error));
+      FailureResult<T>(
+        LocalStorageFailure(
+          message: message,
+          cause: sanitizeTransportCause(error),
+        ),
+      );
 
   Future<Result<AuthSession>> _commitRawLogin(
     AuthSessionTransaction transaction,
@@ -526,7 +535,7 @@ final class _StoredAuthSessionTransaction
       return FailureResult(
         LocalStorageFailure(
           message: 'Unable to commit the authenticated credential.',
-          cause: error,
+          cause: sanitizeTransportCause(error),
         ),
       );
     }
@@ -544,7 +553,7 @@ final class _StoredAuthSessionTransaction
       return FailureResult(
         LocalStorageFailure(
           message: 'Unable to abort the authenticated credential.',
-          cause: error,
+          cause: sanitizeTransportCause(error),
         ),
       );
     }

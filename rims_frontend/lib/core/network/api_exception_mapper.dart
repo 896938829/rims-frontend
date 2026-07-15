@@ -3,23 +3,25 @@ import 'package:dio/dio.dart';
 import '../result/failure.dart';
 import 'api_business_failure_mapper.dart';
 import 'api_envelope.dart';
+import 'sanitized_transport_cause.dart';
 
 final class ApiExceptionMapper {
   const ApiExceptionMapper();
 
   Failure map(Object error) {
     if (error is! DioException) {
-      return UnknownFailure(cause: error);
+      return UnknownFailure(cause: sanitizeTransportCause(error));
     }
+    final cause = sanitizeTransportCause(error)!;
 
     if (error.type == DioExceptionType.cancel) {
-      return CancellationFailure(cause: error);
+      return CancellationFailure(cause: cause);
     }
 
     if (error.type == DioExceptionType.unknown && error.response == null) {
       return TransportUnknownFailure(
         message: _messageFrom(error),
-        cause: error,
+        cause: cause,
       );
     }
 
@@ -28,7 +30,7 @@ final class ApiExceptionMapper {
         error.response == null) {
       return TransportUnknownFailure(
         message: _messageFrom(error),
-        cause: error,
+        cause: cause,
       );
     }
 
@@ -44,7 +46,7 @@ final class ApiExceptionMapper {
         statusCode: statusCode,
         businessCode: businessCode,
         traceId: traceId,
-        cause: error,
+        cause: cause,
       );
     }
 
@@ -54,7 +56,7 @@ final class ApiExceptionMapper {
         message: message,
         statusCode: statusCode,
         traceId: traceId,
-        cause: error,
+        cause: cause,
       );
     }
 
@@ -63,7 +65,7 @@ final class ApiExceptionMapper {
       message: message,
       businessCode: businessCode == 0 ? null : businessCode,
       traceId: traceId,
-      cause: error,
+      cause: cause,
     );
   }
 

@@ -140,5 +140,29 @@ void main() {
 
       expect(failure, isA<CancellationFailure>());
     });
+
+    test('transport cause excludes Dio credential graphs', () {
+      const accessToken = 'mapper-access-secret';
+      const refreshToken = 'mapper-refresh-secret';
+      final failure = const ApiExceptionMapper().map(
+        DioException(
+          requestOptions: RequestOptions(
+            path: '/auth/refresh',
+            headers: {'Authorization': 'Bearer $accessToken'},
+            data: {'refreshToken': refreshToken},
+          ),
+          response: Response<dynamic>(
+            requestOptions: RequestOptions(path: '/auth/refresh'),
+            statusCode: 500,
+            data: {'echo': accessToken},
+          ),
+          error: StateError('nested $refreshToken'),
+        ),
+      );
+
+      expect(failure.cause, isNot(isA<DioException>()));
+      expect(failure.cause.toString(), isNot(contains(accessToken)));
+      expect(failure.cause.toString(), isNot(contains(refreshToken)));
+    });
   });
 }
