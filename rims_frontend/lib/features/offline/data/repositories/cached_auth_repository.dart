@@ -517,13 +517,21 @@ final class CachedAuthRepository
           ),
           cleanupEpoch: authEpochReader?.call() ?? operationEpoch,
         );
+        final markerLease = SessionRevocationLease(
+          accountId: operationCredential.accountId,
+          sessionId: operationCredential.sessionId,
+          generation: operationCredential.generation,
+          authEpoch: operationEpoch,
+        );
         cleanupFailure = await _retainPendingRevocationLease(
+          markerLease,
           cleanupLease,
           allowCredentialMissing: true,
         );
         final active = await _readCurrentCredential();
         final ownershipFailure = await completeOwnershipCleanup(
-          expected: cleanupLease,
+          markerLease: markerLease,
+          cleanupLease: cleanupLease,
           credentialQuarantined:
               active == null ||
               !_sameFullCredential(active, operationCredential),
@@ -531,6 +539,7 @@ final class CachedAuthRepository
         cleanupFailure ??= ownershipFailure;
         if (ownershipFailure == null) {
           cleanupFailure ??= await _retainDetachedPendingRevocationLease(
+            markerLease,
             cleanupLease,
           );
         }
@@ -734,18 +743,19 @@ final class CachedAuthRepository
   }
 
   @override
-  Future<Failure?> retainPendingRevocation(
-    AuthenticatedSessionCleanupLease expected,
-  ) async {
-    if (!await _isCleanupCurrent(expected)) return null;
-    return _retainPendingRevocationLease(expected);
+  Future<Failure?> retainPendingRevocation({
+    required SessionRevocationLease markerLease,
+    required AuthenticatedSessionCleanupLease cleanupLease,
+  }) async {
+    if (!await _isCleanupCurrent(cleanupLease)) return null;
+    return _retainPendingRevocationLease(markerLease, cleanupLease);
   }
 
   Future<Failure?> _retainPendingRevocationLease(
+    SessionRevocationLease marker,
     AuthenticatedSessionCleanupLease expected, {
     bool allowCredentialMissing = false,
   }) async {
-    final marker = _markerFrom(expected);
     _volatilePendingRevocationLeases.add(marker);
     _revocationInvalidated = true;
     final errors = <Object>[];
@@ -820,12 +830,12 @@ final class CachedAuthRepository
   }
 
   Future<Failure?> _retainDetachedPendingRevocationLease(
+    SessionRevocationLease marker,
     AuthenticatedSessionCleanupLease expected,
   ) async {
     if (!_isCleanupEpochCurrent(expected)) return null;
     final active = await _readCurrentCredential();
     if (active != null) return null;
-    final marker = _markerFrom(expected);
     final errors = <Object>[];
     var retained = false;
     if (revocationJournal
@@ -895,14 +905,15 @@ final class CachedAuthRepository
 
   @override
   Future<Failure?> completeOwnershipCleanup({
-    required AuthenticatedSessionCleanupLease expected,
+    required SessionRevocationLease markerLease,
+    required AuthenticatedSessionCleanupLease cleanupLease,
     required bool credentialQuarantined,
   }) async {
+    final expected = cleanupLease;
     if (!await _isCleanupCurrent(expected, allowCredentialMissing: true)) {
-      return null;
+      return _handleSupersededCleanup(markerLease, expected);
     }
     final accountId = expected.request.credential.accountId;
-    final marker = _markerFrom(expected);
     Object? firstError;
     if (!credentialQuarantined) {
       firstError = const RevocationCleanupFailure(
@@ -911,10 +922,7 @@ final class CachedAuthRepository
     }
     try {
       if (await _isCleanupCurrent(expected, allowCredentialMissing: true)) {
-        await _deleteSessionProjectionIfEpoch(
-          accountId,
-          expected.request.authEpoch,
-        );
+        await _deleteSessionProjectionIfEpoch(accountId, markerLease.authEpoch);
       }
     } on OfflineWriteBlockedException {
       // The active fail-closed transition already blocks offline writes.
@@ -922,15 +930,14 @@ final class CachedAuthRepository
       firstError ??= error;
     }
     if (!await _isCleanupCurrent(expected, allowCredentialMissing: true)) {
-      await _releasePendingRevocationLease(marker);
-      return null;
+      return _handleSupersededCleanup(markerLease, expected);
     }
     try {
       if (accountStorage
           case final ConditionalAuthenticatedAccountStorage cas) {
         await cas.clearAuthenticatedAccountIfMatches(
           accountId: accountId,
-          authEpoch: expected.request.authEpoch,
+          authEpoch: markerLease.authEpoch,
         );
       } else if (await _isCleanupCurrent(
         expected,
@@ -946,8 +953,7 @@ final class CachedAuthRepository
       allowCredentialMissing: true,
       requireAccount: false,
     )) {
-      await _releasePendingRevocationLease(marker);
-      return null;
+      return _handleSupersededCleanup(markerLease, expected);
     }
     final ownershipFailure = await _applyOwnership(
       OfflineOwnershipIntent.tokenExpiry(accountId: accountId),
@@ -957,13 +963,12 @@ final class CachedAuthRepository
       allowCredentialMissing: true,
       requireAccount: false,
     )) {
-      await _releasePendingRevocationLease(marker);
-      return null;
+      return _handleSupersededCleanup(markerLease, expected);
     }
     firstError ??= ownershipFailure;
     if (firstError == null) {
       try {
-        await _releasePendingRevocationLease(marker);
+        await _releasePendingRevocationLease(markerLease);
       } on Object catch (error) {
         firstError = error;
       }
@@ -977,7 +982,7 @@ final class CachedAuthRepository
       );
     }
     _volatilePendingRevocationAccountIds.remove(accountId);
-    _volatilePendingRevocationLeases.remove(marker);
+    _volatilePendingRevocationLeases.remove(markerLease);
     _updateRevocationInvalidated();
     return null;
   }
@@ -1077,28 +1082,37 @@ final class CachedAuthRepository
       ?durablePendingLease,
     };
     for (final marker in pendingLeases) {
-      if (!await _isMarkerCurrent(marker)) {
-        await _releasePendingRevocationLease(marker);
-        continue;
-      }
       final credential = await _readCurrentCredential();
-      if (credential == null ||
-          credential.accountId != marker.accountId ||
+      if (credential == null) {
+        final accountId = await accountStorage.readAuthenticatedAccountId();
+        if (accountId != null && accountId != marker.accountId) {
+          await _releasePendingRevocationLease(marker);
+          continue;
+        }
+        await onSessionRevoked();
+        final failure = await _completeDetachedMarkerCleanup(
+          marker,
+          cleanupEpoch: authEpochReader?.call() ?? marker.authEpoch,
+        );
+        if (failure != null) return failure;
+        continue;
+      }
+      if (credential.accountId != marker.accountId ||
           credential.sessionId != marker.sessionId ||
-          credential.generation != marker.generation ||
-          authEpochReader?.call() != marker.authEpoch) {
+          credential.generation != marker.generation) {
         await _releasePendingRevocationLease(marker);
         continue;
       }
-      final expected = AuthenticatedSessionCleanupLease(
-        request: AuthenticatedRequestLease(
-          token: credential.accessToken,
-          credential: credential,
-          authEpoch: marker.authEpoch,
-        ),
-        cleanupEpoch: marker.authEpoch,
+      final requestLease = AuthenticatedRequestLease(
+        token: credential.accessToken,
+        credential: credential,
+        authEpoch: marker.authEpoch,
       );
       await onSessionRevoked();
+      final expected = AuthenticatedSessionCleanupLease(
+        request: requestLease,
+        cleanupEpoch: authEpochReader?.call() ?? marker.authEpoch,
+      );
       var quarantined = false;
       if (tokenStorage case final DeviceCredentialStorage credentialStorage) {
         quarantined = await credentialStorage.clearDeviceCredentialIfMatches(
@@ -1108,7 +1122,8 @@ final class CachedAuthRepository
         );
       }
       final failure = await completeOwnershipCleanup(
-        expected: expected,
+        markerLease: marker,
+        cleanupLease: expected,
         credentialQuarantined: quarantined,
       );
       if (failure != null) {
@@ -1143,7 +1158,7 @@ final class CachedAuthRepository
     for (final accountId in ordered) {
       final failure = await _completeRevocation(
         accountId,
-        notifyRevocation: false,
+        notifyRevocation: true,
       );
       if (failure != null) return failure;
     }
@@ -1234,12 +1249,82 @@ final class CachedAuthRepository
     return null;
   }
 
-  Future<bool> _isMarkerCurrent(SessionRevocationLease marker) async {
-    final credential = await _readCurrentCredential();
-    return authEpochReader?.call() == marker.authEpoch &&
-        credential?.accountId == marker.accountId &&
-        credential?.sessionId == marker.sessionId &&
-        credential?.generation == marker.generation;
+  Future<Failure?> _handleSupersededCleanup(
+    SessionRevocationLease marker,
+    AuthenticatedSessionCleanupLease cleanup,
+  ) async {
+    final active = await _readCurrentCredential();
+    if (active != null &&
+        !_sameFullCredential(active, cleanup.request.credential)) {
+      await _releasePendingRevocationLease(marker);
+      return null;
+    }
+    return const RevocationCleanupFailure(
+      message: 'The session cleanup lease was superseded before completion.',
+    );
+  }
+
+  Future<RevocationCleanupFailure?> _completeDetachedMarkerCleanup(
+    SessionRevocationLease marker, {
+    required int cleanupEpoch,
+  }) async {
+    bool isCurrent() =>
+        authEpochReader == null || authEpochReader?.call() == cleanupEpoch;
+    if (!isCurrent()) {
+      return const RevocationCleanupFailure(
+        message: 'The detached session cleanup lease is stale.',
+      );
+    }
+    Object? firstError;
+    try {
+      await _deleteSessionProjectionIfEpoch(marker.accountId, marker.authEpoch);
+    } on OfflineWriteBlockedException {
+      // The active recovery transition already blocks offline writes.
+    } on Object catch (error) {
+      firstError = error;
+    }
+    if (!isCurrent()) {
+      return const RevocationCleanupFailure(
+        message: 'The detached session cleanup lease is stale.',
+      );
+    }
+    try {
+      if (accountStorage
+          case final ConditionalAuthenticatedAccountStorage cas) {
+        await cas.clearAuthenticatedAccountIfMatches(
+          accountId: marker.accountId,
+          authEpoch: marker.authEpoch,
+        );
+      } else if (await accountStorage.readAuthenticatedAccountId() ==
+          marker.accountId) {
+        await accountStorage.clearAuthenticatedAccountId();
+      }
+    } on Object catch (error) {
+      firstError ??= error;
+    }
+    if (!isCurrent()) {
+      return const RevocationCleanupFailure(
+        message: 'The detached session cleanup lease is stale.',
+      );
+    }
+    firstError ??= await _applyOwnership(
+      OfflineOwnershipIntent.tokenExpiry(accountId: marker.accountId),
+    );
+    if (!isCurrent()) {
+      return const RevocationCleanupFailure(
+        message: 'The detached session cleanup lease is stale.',
+      );
+    }
+    if (firstError != null) {
+      return RevocationCleanupFailure(
+        message: firstError is Failure
+            ? firstError.message
+            : 'Detached session cleanup could not be completed.',
+        cause: sanitizeTransportCause(firstError),
+      );
+    }
+    await _releasePendingRevocationLease(marker);
+    return null;
   }
 
   bool _sameFullCredential(
@@ -1252,15 +1337,6 @@ final class CachedAuthRepository
       active?.accessToken == expected.accessToken &&
       active?.refreshToken == expected.refreshToken &&
       active?.tokenVersion == expected.tokenVersion;
-
-  SessionRevocationLease _markerFrom(
-    AuthenticatedSessionCleanupLease cleanup,
-  ) => SessionRevocationLease(
-    accountId: cleanup.request.credential.accountId,
-    sessionId: cleanup.request.credential.sessionId,
-    generation: cleanup.request.credential.generation,
-    authEpoch: cleanup.cleanupEpoch,
-  );
 
   void _updateRevocationInvalidated() {
     _revocationInvalidated =

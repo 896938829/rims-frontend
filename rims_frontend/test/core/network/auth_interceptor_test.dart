@@ -735,13 +735,15 @@ final class _InterceptorFailureRecovery implements SessionFailureRecovery {
   final Failure failure;
 
   @override
-  Future<Failure?> retainPendingRevocation(
-    AuthenticatedSessionCleanupLease expected,
-  ) async => failure;
+  Future<Failure?> retainPendingRevocation({
+    required SessionRevocationLease markerLease,
+    required AuthenticatedSessionCleanupLease cleanupLease,
+  }) async => failure;
 
   @override
   Future<Failure?> completeOwnershipCleanup({
-    required AuthenticatedSessionCleanupLease expected,
+    required SessionRevocationLease markerLease,
+    required AuthenticatedSessionCleanupLease cleanupLease,
     required bool credentialQuarantined,
   }) async => null;
 }

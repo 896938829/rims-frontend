@@ -743,17 +743,19 @@ final class _CoordinatorFailureRecovery implements SessionFailureRecovery {
   bool? credentialQuarantined;
 
   @override
-  Future<Failure?> retainPendingRevocation(
-    AuthenticatedSessionCleanupLease expected,
-  ) async {
+  Future<Failure?> retainPendingRevocation({
+    required SessionRevocationLease markerLease,
+    required AuthenticatedSessionCleanupLease cleanupLease,
+  }) async {
     order.add('pending');
-    storage.pendingAccountId = expected.request.credential.accountId;
+    storage.pendingAccountId = cleanupLease.request.credential.accountId;
     return null;
   }
 
   @override
   Future<Failure?> completeOwnershipCleanup({
-    required AuthenticatedSessionCleanupLease expected,
+    required SessionRevocationLease markerLease,
+    required AuthenticatedSessionCleanupLease cleanupLease,
     required bool credentialQuarantined,
   }) async {
     order.add('ownership');

@@ -53,6 +53,14 @@ AuthenticatedSessionCleanupLease _cleanupLease() {
   );
 }
 
+SessionRevocationLease _markerLease(AuthenticatedSessionCleanupLease cleanup) =>
+    SessionRevocationLease(
+      accountId: cleanup.request.credential.accountId,
+      sessionId: cleanup.request.credential.sessionId,
+      generation: cleanup.request.credential.generation,
+      authEpoch: cleanup.request.authEpoch,
+    );
+
 void main() {
   final now = DateTime.utc(2026, 7, 13, 12);
 
@@ -116,7 +124,8 @@ void main() {
 
       await controller.refreshSession(repository);
 
-      expect(controller.restoreFailure, isNull);
+      expect(controller.restoreFailure, isA<AuthorizationFailure>());
+      expect(controller.canAuthenticateRequests, isFalse);
       expect(storage.pendingRevocationAccountId, isNull);
       expect(keys.generation, 2);
     },
@@ -650,9 +659,13 @@ void main() {
       final recovery = repository as SessionFailureRecovery;
 
       final cleanupLease = _cleanupLease();
-      final retained = await recovery.retainPendingRevocation(cleanupLease);
+      final retained = await recovery.retainPendingRevocation(
+        markerLease: _markerLease(cleanupLease),
+        cleanupLease: cleanupLease,
+      );
       final completed = await recovery.completeOwnershipCleanup(
-        expected: cleanupLease,
+        markerLease: _markerLease(cleanupLease),
+        cleanupLease: cleanupLease,
         credentialQuarantined: true,
       );
 
@@ -697,7 +710,10 @@ void main() {
         cleanupEpoch: epoch,
       );
 
-      final retaining = repository.retainPendingRevocation(cleanup);
+      final retaining = repository.retainPendingRevocation(
+        markerLease: _markerLease(cleanup),
+        cleanupLease: cleanup,
+      );
       await storage.accountReadStarted.future;
       epoch = 12;
       storage
@@ -714,6 +730,60 @@ void main() {
       expect(storage.pendingRevocationLease, isNull);
       expect(storage.pendingRevocationAccountId, isNull);
       expect(storage.credential?.sessionId, 'session-new');
+    },
+  );
+
+  test(
+    'stale cleanup epoch returns typed failure and retains original marker',
+    () async {
+      var epoch = 12;
+      final credential = _cleanupLease().request.credential;
+      final cleanup = AuthenticatedSessionCleanupLease(
+        request: AuthenticatedRequestLease(
+          token: credential.accessToken,
+          credential: credential,
+          authEpoch: 11,
+        ),
+        cleanupEpoch: epoch,
+      );
+      final marker = _markerLease(cleanup);
+      final storage = _FakeSessionStorage(token: credential.accessToken)
+        ..accountId = credential.accountId
+        ..credential = credential;
+      final journal = MemoryPendingRevocationJournal();
+      final repository = CachedAuthRepository(
+        delegate: _FakeAuthRepository(
+          restoreResult: const Success<AuthSession?>(null),
+        ),
+        store: MemoryOfflineStore(),
+        tokenStorage: storage,
+        accountStorage: storage,
+        revocationStorage: storage,
+        revocationJournal: journal,
+        authEpochReader: () => epoch,
+        onSessionRevoked: () {},
+      );
+      expect(
+        await repository.retainPendingRevocation(
+          markerLease: marker,
+          cleanupLease: cleanup,
+        ),
+        isNull,
+      );
+      storage.blockNextAccountRead();
+
+      final completing = repository.completeOwnershipCleanup(
+        markerLease: marker,
+        cleanupLease: cleanup,
+        credentialQuarantined: true,
+      );
+      await storage.accountReadStarted.future;
+      epoch = 13;
+      storage.releaseAccountRead();
+
+      expect(await completing, isA<RevocationCleanupFailure>());
+      expect(storage.pendingRevocationLease, marker);
+      expect(await journal.readLeases(), {marker});
     },
   );
 
@@ -824,21 +894,131 @@ void main() {
   test(
     'restart completes cleanup for a matching session marker lease',
     () async {
+      final controller = AuthSessionController();
+      addTearDown(controller.dispose);
+      controller.beginAuthenticationAttempt();
       final credential = _cleanupLease().request.credential;
       final marker = SessionRevocationLease(
         accountId: credential.accountId,
         sessionId: credential.sessionId,
         generation: credential.generation,
-        authEpoch: 11,
+        authEpoch: 2,
       );
       final storage = _FakeSessionStorage(token: credential.accessToken)
         ..accountId = credential.accountId
         ..credential = credential
-        ..authEpoch = 11
+        ..authEpoch = 2
         ..pendingRevocationLease = marker;
       final journal = MemoryPendingRevocationJournal();
       await journal.addLease(marker);
       final ownership = _RecordingOwnershipCoordinator();
+      final store = MemoryOfflineStore();
+      await store.writeCache(
+        CacheRecord(
+          key: const CacheKey(
+            accountId: '7',
+            namespace: 'auth.session',
+            entityKey: 'projection',
+          ),
+          payload: const {'_local_auth_epoch': 2},
+          schemaVersion: 1,
+          fetchedAt: now,
+          expiresAt: now.add(const Duration(days: 1)),
+        ),
+      );
+      final repository = CachedAuthRepository(
+        delegate: _FakeAuthRepository(
+          restoreResult: const Success<AuthSession?>(null),
+        ),
+        store: store,
+        tokenStorage: storage,
+        accountStorage: storage,
+        revocationStorage: storage,
+        revocationJournal: journal,
+        ownershipCoordinator: ownership,
+        authEpochReader: () => controller.authEpoch,
+        onSessionRevoked: controller.invalidateRevokedSession,
+      );
+
+      await controller.restoreSession(repository);
+      expect(controller.session, isNull);
+      expect(controller.canAuthenticateRequests, isFalse);
+      expect(storage.credential, isNull);
+      expect(storage.accountId, isNull);
+      expect(storage.pendingRevocationLease, isNull);
+      expect(await journal.readLeases(), isEmpty);
+      expect(
+        await store.readCache(
+          const CacheKey(
+            accountId: '7',
+            namespace: 'auth.session',
+            entityKey: 'projection',
+          ),
+          schemaVersion: 1,
+        ),
+        isNull,
+      );
+      expect(
+        ownership.intents.single.reason,
+        OfflineOwnershipReason.tokenExpiry,
+      );
+    },
+  );
+
+  test('detached structured marker retries ownership before release', () async {
+    var epoch = 11;
+    final credential = _cleanupLease().request.credential;
+    final marker = SessionRevocationLease(
+      accountId: credential.accountId,
+      sessionId: credential.sessionId,
+      generation: credential.generation,
+      authEpoch: epoch,
+    );
+    final storage = _FakeSessionStorage(token: credential.accessToken)
+      ..accountId = credential.accountId
+      ..credential = credential
+      ..authEpoch = epoch
+      ..pendingRevocationLease = marker;
+    final journal = MemoryPendingRevocationJournal();
+    await journal.addLease(marker);
+    final ownership = _RecordingOwnershipCoordinator()..failNext = true;
+    final repository = CachedAuthRepository(
+      delegate: _FakeAuthRepository(
+        restoreResult: const Success<AuthSession?>(null),
+      ),
+      store: MemoryOfflineStore(),
+      tokenStorage: storage,
+      accountStorage: storage,
+      revocationStorage: storage,
+      revocationJournal: journal,
+      ownershipCoordinator: ownership,
+      authEpochReader: () => epoch,
+      onSessionRevoked: () => epoch += 1,
+    );
+
+    expect(
+      await repository.restoreSession(),
+      isA<FailureResult<AuthSession?>>(),
+    );
+    expect(storage.credential, isNull);
+    expect(storage.pendingRevocationLease, marker);
+    expect(await journal.readLeases(), {marker});
+
+    expect(await repository.restoreSession(), isA<Success<AuthSession?>>());
+    expect(storage.pendingRevocationLease, isNull);
+    expect(await journal.readLeases(), isEmpty);
+    expect(ownership.intents, hasLength(2));
+  });
+
+  test(
+    'legacy marker retry advances the production invalidation callback',
+    () async {
+      final controller = AuthSessionController();
+      addTearDown(controller.dispose);
+      await controller.startSession(_session);
+      final storage = _FakeSessionStorage()
+        ..accountId = '7'
+        ..pendingRevocationAccountId = '7';
       final repository = CachedAuthRepository(
         delegate: _FakeAuthRepository(
           restoreResult: const Success<AuthSession?>(null),
@@ -847,21 +1027,20 @@ void main() {
         tokenStorage: storage,
         accountStorage: storage,
         revocationStorage: storage,
-        revocationJournal: journal,
-        ownershipCoordinator: ownership,
-        authEpochReader: () => 11,
-        onSessionRevoked: () {},
+        revocationJournal: MemoryPendingRevocationJournal(),
+        ownershipCoordinator: _RecordingOwnershipCoordinator(),
+        authEpochReader: () => controller.authEpoch,
+        onSessionRevoked: controller.invalidateRevokedSession,
       );
 
-      expect(await repository.restoreSession(), isA<Success<AuthSession?>>());
-      expect(storage.credential, isNull);
+      await controller.restoreSession(repository);
+
+      expect(controller.session, isNull);
+      expect(controller.canAuthenticateRequests, isFalse);
+      expect(controller.authEpoch, 3);
+      expect(controller.restoreFailure, isA<AuthorizationFailure>());
       expect(storage.accountId, isNull);
-      expect(storage.pendingRevocationLease, isNull);
-      expect(await journal.readLeases(), isEmpty);
-      expect(
-        ownership.intents.single.reason,
-        OfflineOwnershipReason.tokenExpiry,
-      );
+      expect(storage.pendingRevocationAccountId, isNull);
     },
   );
 
@@ -887,7 +1066,11 @@ void main() {
       );
       final recovery = repository as SessionFailureRecovery;
 
-      final failure = await recovery.retainPendingRevocation(_cleanupLease());
+      final cleanup = _cleanupLease();
+      final failure = await recovery.retainPendingRevocation(
+        markerLease: _markerLease(cleanup),
+        cleanupLease: cleanup,
+      );
 
       expect(failure, isA<RevocationCleanupFailure>());
       expect(storage.pendingRevocationAccountId, isNull);
@@ -948,7 +1131,7 @@ void main() {
           accountId: '7',
           sessionId: 'session-7',
           generation: 1,
-          authEpoch: 5,
+          authEpoch: 4,
         ),
       });
     },
@@ -2012,7 +2195,8 @@ void main() {
         await controller.refreshSession(repository);
 
         expect(controller.isRestoring, isFalse);
-        expect(controller.restoreFailure, isNull);
+        expect(controller.restoreFailure, isA<AuthorizationFailure>());
+        expect(controller.canAuthenticateRequests, isFalse);
         expect(storage.token, isNull);
         expect(storage.pendingRevocationAccountId, isNull);
         expect(

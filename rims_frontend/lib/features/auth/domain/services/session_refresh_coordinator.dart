@@ -16,12 +16,14 @@ typedef SessionAuthenticationBlocker =
     FutureOr<int?> Function(AuthenticatedRequestLease expected);
 
 abstract interface class SessionFailureRecovery {
-  Future<Failure?> retainPendingRevocation(
-    AuthenticatedSessionCleanupLease expected,
-  );
+  Future<Failure?> retainPendingRevocation({
+    required SessionRevocationLease markerLease,
+    required AuthenticatedSessionCleanupLease cleanupLease,
+  });
 
   Future<Failure?> completeOwnershipCleanup({
-    required AuthenticatedSessionCleanupLease expected,
+    required SessionRevocationLease markerLease,
+    required AuthenticatedSessionCleanupLease cleanupLease,
     required bool credentialQuarantined,
   });
 }
@@ -290,6 +292,12 @@ final class SessionRefreshCoordinator {
       credential: expected,
       authEpoch: authEpoch,
     );
+    final markerLease = SessionRevocationLease(
+      accountId: expected.accountId,
+      sessionId: expected.sessionId,
+      generation: expected.generation,
+      authEpoch: authEpoch,
+    );
     try {
       final active = await credentialStorage.readDeviceCredential();
       if (active != null && !_sameCredential(active, expected)) return null;
@@ -319,7 +327,10 @@ final class SessionRefreshCoordinator {
 
     if (recovery != null) {
       try {
-        final failure = await recovery.retainPendingRevocation(cleanupLease);
+        final failure = await recovery.retainPendingRevocation(
+          markerLease: markerLease,
+          cleanupLease: cleanupLease,
+        );
         if (failure != null) errors.add(failure);
       } on Object catch (error) {
         errors.add(error);
@@ -385,7 +396,8 @@ final class SessionRefreshCoordinator {
     if (recovery != null) {
       try {
         final failure = await recovery.completeOwnershipCleanup(
-          expected: cleanupLease,
+          markerLease: markerLease,
+          cleanupLease: cleanupLease,
           credentialQuarantined: credentialQuarantined,
         );
         if (failure != null) errors.add(failure);
