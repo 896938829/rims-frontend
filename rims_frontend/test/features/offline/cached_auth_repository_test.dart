@@ -2564,8 +2564,9 @@ final class _FakeSessionStorage
     required String accountId,
     required int authEpoch,
   }) async {
-    if (this.accountId != accountId || this.authEpoch != authEpoch)
+    if (this.accountId != accountId || this.authEpoch != authEpoch) {
       return false;
+    }
     await clearAuthenticatedAccountId();
     return true;
   }
