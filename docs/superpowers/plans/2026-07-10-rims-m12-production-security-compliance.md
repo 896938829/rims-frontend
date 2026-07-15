@@ -161,21 +161,23 @@ Run both TLS and local wrapper self-tests. Commit: `feat: manage local HTTPS run
 - Modify: backend `internal/auth/jwt.go`
 - Modify: backend `internal/auth/jwt_test.go`
 
-- [ ] **Step 1: Write RED migration/crypto tests**
+- [x] **Step 1: Write RED migration/crypto tests**
 
 Require token-family uniqueness, hashed refresh only, rotation parent, bounded device metadata, expiry/revocation/reuse, history indexes/retention, encrypted TOTP columns, hashed recovery codes, user token version, FKs, repeatable migration, and no plaintext token fixture.
 
-- [ ] **Step 2: Harden claims and refresh token**
+- [x] **Step 2: Harden claims and refresh token**
 
 JWT requires issuer, audience, subject, issued-at, not-before, expiry, JWT ID, session ID, token version, and exact HS256. Refresh uses 32 random bytes/base64url and stores only `HMAC-SHA256(AUTH_PEPPER, token)`.
 
-- [ ] **Step 3: Implement transactional repository**
+- [x] **Step 3: Implement transactional repository**
 
 Create/list/revoke sessions, consume-and-rotate once, detect reuse and revoke family, revoke account, update bounded safe last-use metadata, and prune. Concurrent rotation yields one successor.
 
-- [ ] **Step 4: Verify and commit**
+- [x] **Step 4: Verify and commit**
 
 Run focused tests, race rotation tests, migration checks, full suite, and diff check. Commit: `feat: persist rotating device sessions`.
+
+Completed in backend commits `7f68bd5`, `dae6e34`, `c5431b4`, and `8f86fab`. Verification includes focused and race tests, repeatable real-PostgreSQL migration checks, real concurrent rotation/revocation coverage, the full Go suite, `go vet`, and diff checks.
 
 ## Task 7: Backend Login, Refresh, Logout, And Revocation APIs
 
