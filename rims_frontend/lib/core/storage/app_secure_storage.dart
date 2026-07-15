@@ -157,6 +157,41 @@ abstract interface class ConditionalPendingRevocationStorage {
   );
 }
 
+final class SessionRevocationLease {
+  const SessionRevocationLease({
+    required this.accountId,
+    required this.sessionId,
+    required this.generation,
+    required this.authEpoch,
+  });
+
+  final String accountId;
+  final String sessionId;
+  final int generation;
+  final int authEpoch;
+
+  @override
+  bool operator ==(Object other) =>
+      other is SessionRevocationLease &&
+      other.accountId == accountId &&
+      other.sessionId == sessionId &&
+      other.generation == generation &&
+      other.authEpoch == authEpoch;
+
+  @override
+  int get hashCode => Object.hash(accountId, sessionId, generation, authEpoch);
+}
+
+abstract interface class SessionPendingRevocationStorage {
+  Future<void> savePendingRevocationLease(SessionRevocationLease lease);
+
+  Future<SessionRevocationLease?> readPendingRevocationLease();
+
+  Future<bool> clearPendingRevocationLeaseIfMatches(
+    SessionRevocationLease expected,
+  );
+}
+
 final class AppSecureStorage
     implements
         TokenStorage,
@@ -168,6 +203,7 @@ final class AppSecureStorage
         ConditionalAuthenticatedAccountStorage,
         PendingRevocationStorage,
         ConditionalPendingRevocationStorage,
+        SessionPendingRevocationStorage,
         DeviceCredentialStorage {
   const AppSecureStorage({FlutterSecureStorage? storage})
     : _storage = storage ?? const FlutterSecureStorage();
@@ -646,8 +682,27 @@ final class AppSecureStorage
       );
 
   @override
+  Future<void> savePendingRevocationLease(SessionRevocationLease lease) =>
+      _SecureStorageKeyMutex.run(
+        kPendingRevocationAccountIdKey,
+        () => _storage.write(
+          key: kPendingRevocationAccountIdKey,
+          value: _encodeSessionRevocationLease(lease),
+        ),
+      );
+
+  @override
   Future<String?> readPendingRevocationAccountId() {
-    return _storage.read(key: kPendingRevocationAccountIdKey);
+    return _storage.read(key: kPendingRevocationAccountIdKey).then((raw) {
+      if (raw == null || !raw.trimLeft().startsWith('{')) return raw;
+      return _tryDecodeSessionRevocationLease(raw)?.accountId;
+    });
+  }
+
+  @override
+  Future<SessionRevocationLease?> readPendingRevocationLease() async {
+    final raw = await _storage.read(key: kPendingRevocationAccountIdKey);
+    return raw == null ? null : _tryDecodeSessionRevocationLease(raw);
   }
 
   @override
@@ -660,13 +715,57 @@ final class AppSecureStorage
   Future<bool> clearPendingRevocationAccountIdIfMatches(
     String expectedAccountId,
   ) => _SecureStorageKeyMutex.run(kPendingRevocationAccountIdKey, () async {
-    if (await _storage.read(key: kPendingRevocationAccountIdKey) !=
-        expectedAccountId) {
+    final raw = await _storage.read(key: kPendingRevocationAccountIdKey);
+    if (raw != expectedAccountId) {
       return false;
     }
     await _storage.delete(key: kPendingRevocationAccountIdKey);
     return true;
   });
+
+  @override
+  Future<bool> clearPendingRevocationLeaseIfMatches(
+    SessionRevocationLease expected,
+  ) => _SecureStorageKeyMutex.run(kPendingRevocationAccountIdKey, () async {
+    final raw = await _storage.read(key: kPendingRevocationAccountIdKey);
+    if (raw == null || _tryDecodeSessionRevocationLease(raw) != expected) {
+      return false;
+    }
+    await _storage.delete(key: kPendingRevocationAccountIdKey);
+    return true;
+  });
+}
+
+String _encodeSessionRevocationLease(SessionRevocationLease lease) =>
+    jsonEncode({
+      'version': 2,
+      'account_id': lease.accountId,
+      'session_id': lease.sessionId,
+      'generation': lease.generation,
+      'auth_epoch': lease.authEpoch,
+    });
+
+SessionRevocationLease? _tryDecodeSessionRevocationLease(String raw) {
+  if (!raw.trimLeft().startsWith('{')) return null;
+  try {
+    final decoded = jsonDecode(raw);
+    if (decoded is! Map ||
+        decoded['version'] != 2 ||
+        decoded['account_id'] is! String ||
+        decoded['session_id'] is! String ||
+        decoded['generation'] is! int ||
+        decoded['auth_epoch'] is! int) {
+      return null;
+    }
+    return SessionRevocationLease(
+      accountId: decoded['account_id'] as String,
+      sessionId: decoded['session_id'] as String,
+      generation: decoded['generation'] as int,
+      authEpoch: decoded['auth_epoch'] as int,
+    );
+  } on FormatException {
+    return null;
+  }
 }
 
 final class _AccessTokenStoreRecord {

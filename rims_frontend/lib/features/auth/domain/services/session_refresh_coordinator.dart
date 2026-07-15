@@ -318,8 +318,24 @@ final class SessionRefreshCoordinator {
     } on Object catch (error) {
       errors.add(error);
       try {
-        await tokenStorage.clearAccessToken();
-        credentialQuarantined = true;
+        if (tokenStorage case final ConditionalTokenStorage conditional) {
+          credentialQuarantined = await conditional.clearAccessTokenIfMatches(
+            expected.accessToken,
+          );
+          if (!credentialQuarantined) {
+            final active = await credentialStorage.readDeviceCredential();
+            credentialQuarantined =
+                active == null || !_sameCredential(active, expected);
+          }
+        } else {
+          final active = await credentialStorage.readDeviceCredential();
+          if (active != null && _sameCredential(active, expected)) {
+            await tokenStorage.clearAccessToken();
+            credentialQuarantined = true;
+          } else {
+            credentialQuarantined = true;
+          }
+        }
       } on Object catch (fallbackError) {
         errors.add(fallbackError);
       }

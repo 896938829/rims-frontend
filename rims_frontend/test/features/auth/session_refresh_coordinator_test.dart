@@ -501,6 +501,33 @@ void main() {
   });
 
   test(
+    'conditional clear failure cannot clear a credential installed in its fallback window',
+    () async {
+      final replacement = _credential(
+        accessToken: 'access-new-login',
+        refreshToken: 'refresh-new-login',
+        sessionId: 'session-new-login',
+      );
+      final storage = _CoordinatorStorage(_credential())
+        ..conditionalClearError = StateError('secure clear failed')
+        ..credentialAfterConditionalClearError = replacement;
+      final coordinator = _coordinator(
+        storage,
+        _RefreshRepository(throwError: StateError('refresh failed')),
+      );
+
+      final result = await coordinator.refreshAfterUnauthorized(
+        failedCredential: _credential(),
+        origin: SessionRefreshOrigin.request,
+      );
+
+      expect(result, isA<FailureResult<DeviceCredential>>());
+      expect(storage.credential, same(replacement));
+      expect(storage.conditionalTokenClearAttempts, ['access-1']);
+    },
+  );
+
+  test(
     'authentication failure causes redact recursive credential transport',
     () async {
       const accessToken = 'access-secret-value';
@@ -588,7 +615,11 @@ final class _RefreshRepository implements SessionCredentialRepository {
 }
 
 final class _CoordinatorStorage
-    implements DeviceCredentialStorage, TokenStorage, PendingRevocationStorage {
+    implements
+        DeviceCredentialStorage,
+        TokenStorage,
+        ConditionalTokenStorage,
+        PendingRevocationStorage {
   _CoordinatorStorage(this.credential, {this.order});
 
   DeviceCredential? credential;
@@ -598,10 +629,12 @@ final class _CoordinatorStorage
   Object? fallbackClearError;
   Object? nextReadError;
   Object? pendingError;
+  DeviceCredential? credentialAfterConditionalClearError;
   bool forceRotateFalse = false;
   bool logClearAttempts = false;
   bool logReads = false;
   final List<String>? order;
+  final List<String> conditionalTokenClearAttempts = [];
 
   @override
   Future<bool> clearDeviceCredentialIfMatches({
@@ -610,7 +643,10 @@ final class _CoordinatorStorage
     required int generation,
   }) async {
     if (logClearAttempts) order?.add('conditional-clear');
-    if (conditionalClearError case final error?) throw error;
+    if (conditionalClearError case final error?) {
+      credential = credentialAfterConditionalClearError ?? credential;
+      throw error;
+    }
     final current = credential;
     if (current?.accountId != accountId ||
         current?.sessionId != sessionId ||
@@ -630,6 +666,14 @@ final class _CoordinatorStorage
     }
     order?.add('clear');
     credential = null;
+  }
+
+  @override
+  Future<bool> clearAccessTokenIfMatches(String expectedToken) async {
+    conditionalTokenClearAttempts.add(expectedToken);
+    if (credential?.accessToken != expectedToken) return false;
+    await clearAccessToken();
+    return true;
   }
 
   @override

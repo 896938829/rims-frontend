@@ -5,13 +5,88 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:rims_frontend/core/result/failure.dart';
 import 'package:rims_frontend/core/result/result.dart';
 import 'package:rims_frontend/core/storage/app_secure_storage.dart';
+import 'package:rims_frontend/core/storage/pending_revocation_journal.dart';
 import 'package:rims_frontend/features/auth/domain/entities/auth_session.dart';
 import 'package:rims_frontend/features/auth/domain/entities/warehouse.dart';
 import 'package:rims_frontend/features/auth/domain/repositories/auth_repository.dart';
 import 'package:rims_frontend/features/offline/data/repositories/cached_auth_repository.dart';
 import 'package:rims_frontend/features/offline/data/repositories/memory_offline_store.dart';
+import 'package:shared_preferences_platform_interface/in_memory_shared_preferences_async.dart';
+import 'package:shared_preferences_platform_interface/shared_preferences_async_platform_interface.dart';
 
 void main() {
+  group('session revocation cleanup leases', () {
+    const oldLease = SessionRevocationLease(
+      accountId: '7',
+      sessionId: 'session-old',
+      generation: 3,
+      authEpoch: 11,
+    );
+    const newLease = SessionRevocationLease(
+      accountId: '7',
+      sessionId: 'session-new',
+      generation: 1,
+      authEpoch: 12,
+    );
+
+    test('primary marker persists and clears by complete lease CAS', () async {
+      final raw = _MemoryFlutterSecureStorage();
+      final storage = AppSecureStorage(storage: raw);
+
+      await storage.savePendingRevocationLease(oldLease);
+
+      expect(await storage.readPendingRevocationLease(), oldLease);
+      expect(
+        await storage.clearPendingRevocationLeaseIfMatches(newLease),
+        isFalse,
+      );
+      expect(await storage.readPendingRevocationLease(), oldLease);
+      expect(
+        await storage.clearPendingRevocationLeaseIfMatches(oldLease),
+        isTrue,
+      );
+      expect(await storage.readPendingRevocationLease(), isNull);
+    });
+
+    test(
+      'legacy account marker is migration input, not a session lease',
+      () async {
+        final raw = _MemoryFlutterSecureStorage()
+          ..values[AppSecureStorage.kPendingRevocationAccountIdKey] = '7';
+        final storage = AppSecureStorage(storage: raw);
+
+        expect(await storage.readPendingRevocationLease(), isNull);
+        expect(await storage.readPendingRevocationAccountId(), '7');
+        expect(
+          await storage.clearPendingRevocationLeaseIfMatches(oldLease),
+          isFalse,
+        );
+        expect(await storage.readPendingRevocationAccountId(), '7');
+      },
+    );
+
+    test(
+      'fallback journal persists and removes complete leases by CAS',
+      () async {
+        final previousPlatform = SharedPreferencesAsyncPlatform.instance;
+        SharedPreferencesAsyncPlatform.instance =
+            InMemorySharedPreferencesAsync.empty();
+        addTearDown(
+          () => SharedPreferencesAsyncPlatform.instance = previousPlatform,
+        );
+        final journal = SharedPreferencesPendingRevocationJournal();
+
+        await journal.addLease(oldLease);
+        await journal.addLease(newLease);
+        await journal.removeLease(oldLease);
+
+        final restarted = SharedPreferencesPendingRevocationJournal();
+        expect(await restarted.readLeases(), {newLease});
+        expect(await restarted.readAccountIds(), isEmpty);
+      },
+    );
+  });
+
   group('device credential record v3', () {
     test('migrates a complete v2 owner-bound record to strict v3', () async {
       final raw = _MemoryFlutterSecureStorage()

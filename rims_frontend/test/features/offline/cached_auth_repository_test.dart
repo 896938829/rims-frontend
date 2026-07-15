@@ -628,8 +628,10 @@ void main() {
   test(
     'refresh failure recovery uses journal fallback then M11 token-expiry ownership',
     () async {
-      final storage = _FakeSessionStorage(token: 'expired-token')
+      final expectedCredential = _cleanupLease().request.credential;
+      final storage = _FakeSessionStorage(token: expectedCredential.accessToken)
         ..accountId = '7'
+        ..credential = expectedCredential
         ..failNext(_RevocationStorageFailure.saveMarker);
       final journal = MemoryPendingRevocationJournal();
       final ownership = _RecordingOwnershipCoordinator();
@@ -666,10 +668,210 @@ void main() {
   );
 
   test(
+    'cleanup rechecks the full lease after a blocked account read',
+    () async {
+      var epoch = 11;
+      final oldCredential = _cleanupLease().request.credential;
+      final storage = _FakeSessionStorage(token: oldCredential.accessToken)
+        ..accountId = oldCredential.accountId
+        ..credential = oldCredential
+        ..blockNextAccountRead();
+      final repository = CachedAuthRepository(
+        delegate: _FakeAuthRepository(
+          restoreResult: const Success<AuthSession?>(null),
+        ),
+        store: MemoryOfflineStore(),
+        tokenStorage: storage,
+        accountStorage: storage,
+        revocationStorage: storage,
+        revocationJournal: MemoryPendingRevocationJournal(),
+        authEpochReader: () => epoch,
+        onSessionRevoked: () {},
+      );
+      final cleanup = AuthenticatedSessionCleanupLease(
+        request: AuthenticatedRequestLease(
+          token: oldCredential.accessToken,
+          credential: oldCredential,
+          authEpoch: epoch,
+        ),
+        cleanupEpoch: epoch,
+      );
+
+      final retaining = repository.retainPendingRevocation(cleanup);
+      await storage.accountReadStarted.future;
+      epoch = 12;
+      storage
+        ..credential = _deviceCredential(
+          accessToken: 'access-new',
+          refreshToken: 'refresh-new',
+          sessionId: 'session-new',
+        )
+        ..token = 'access-new'
+        ..tokenCommitted = true;
+      storage.releaseAccountRead();
+
+      expect(await retaining, isNull);
+      expect(storage.pendingRevocationLease, isNull);
+      expect(storage.pendingRevocationAccountId, isNull);
+      expect(storage.credential?.sessionId, 'session-new');
+    },
+  );
+
+  test(
+    'restart removes a stale session marker without clearing a new same-account session',
+    () async {
+      var epoch = 12;
+      final oldCredential = _cleanupLease().request.credential;
+      final newCredential = _deviceCredential(
+        accessToken: 'access-new',
+        refreshToken: 'refresh-new',
+        sessionId: 'session-new',
+      );
+      final storage = _FakeSessionStorage(token: newCredential.accessToken)
+        ..accountId = newCredential.accountId
+        ..credential = newCredential
+        ..authEpoch = epoch
+        ..pendingRevocationLease = SessionRevocationLease(
+          accountId: oldCredential.accountId,
+          sessionId: oldCredential.sessionId,
+          generation: oldCredential.generation,
+          authEpoch: 11,
+        );
+      final store = MemoryOfflineStore();
+      final projectionKey = const CacheKey(
+        accountId: '7',
+        namespace: 'auth.session',
+        entityKey: 'projection',
+      );
+      await store.writeCache(
+        CacheRecord(
+          key: projectionKey,
+          payload: const {'_local_auth_epoch': 12},
+          schemaVersion: 1,
+          fetchedAt: now,
+          expiresAt: now.add(const Duration(days: 1)),
+        ),
+      );
+      final session = AuthSession(
+        accessToken: newCredential.accessToken,
+        user: _session.user,
+        currentWarehouse: _session.currentWarehouse,
+        warehouses: _session.warehouses,
+      );
+      final repository = CachedAuthRepository(
+        delegate: _FakeAuthRepository(restoreResult: Success(session)),
+        store: store,
+        tokenStorage: storage,
+        accountStorage: storage,
+        revocationStorage: storage,
+        revocationJournal: MemoryPendingRevocationJournal()
+          ..addLease(
+            SessionRevocationLease(
+              accountId: oldCredential.accountId,
+              sessionId: oldCredential.sessionId,
+              generation: oldCredential.generation,
+              authEpoch: 11,
+            ),
+          ),
+        authEpochReader: () => epoch,
+        onSessionRevoked: () {},
+      );
+
+      expect(await repository.restoreSession(), isA<Success<AuthSession?>>());
+      expect(storage.credential, same(newCredential));
+      expect(storage.accountId, '7');
+      expect(storage.pendingRevocationLease, isNull);
+      expect(await store.readCache(projectionKey, schemaVersion: 1), isNotNull);
+      expect(epoch, 12);
+    },
+  );
+
+  test('legacy account marker migration preserves an active session', () async {
+    final credential = _deviceCredential(
+      accessToken: 'access-new',
+      refreshToken: 'refresh-new',
+      sessionId: 'session-new',
+    );
+    final storage = _FakeSessionStorage(token: credential.accessToken)
+      ..accountId = credential.accountId
+      ..credential = credential
+      ..authEpoch = 12
+      ..pendingRevocationAccountId = credential.accountId;
+    final session = AuthSession(
+      accessToken: credential.accessToken,
+      user: _session.user,
+      currentWarehouse: _session.currentWarehouse,
+      warehouses: _session.warehouses,
+    );
+    final repository = CachedAuthRepository(
+      delegate: _FakeAuthRepository(restoreResult: Success(session)),
+      store: MemoryOfflineStore(),
+      tokenStorage: storage,
+      accountStorage: storage,
+      revocationStorage: storage,
+      revocationJournal: MemoryPendingRevocationJournal(),
+      ownershipCoordinator: _RecordingOwnershipCoordinator(),
+      authEpochReader: () => 12,
+      onSessionRevoked: () {},
+    );
+
+    expect(await repository.restoreSession(), isA<Success<AuthSession?>>());
+    expect(storage.credential, same(credential));
+    expect(storage.accountId, '7');
+    expect(storage.pendingRevocationAccountId, isNull);
+  });
+
+  test(
+    'restart completes cleanup for a matching session marker lease',
+    () async {
+      final credential = _cleanupLease().request.credential;
+      final marker = SessionRevocationLease(
+        accountId: credential.accountId,
+        sessionId: credential.sessionId,
+        generation: credential.generation,
+        authEpoch: 11,
+      );
+      final storage = _FakeSessionStorage(token: credential.accessToken)
+        ..accountId = credential.accountId
+        ..credential = credential
+        ..authEpoch = 11
+        ..pendingRevocationLease = marker;
+      final journal = MemoryPendingRevocationJournal();
+      await journal.addLease(marker);
+      final ownership = _RecordingOwnershipCoordinator();
+      final repository = CachedAuthRepository(
+        delegate: _FakeAuthRepository(
+          restoreResult: const Success<AuthSession?>(null),
+        ),
+        store: MemoryOfflineStore(),
+        tokenStorage: storage,
+        accountStorage: storage,
+        revocationStorage: storage,
+        revocationJournal: journal,
+        ownershipCoordinator: ownership,
+        authEpochReader: () => 11,
+        onSessionRevoked: () {},
+      );
+
+      expect(await repository.restoreSession(), isA<Success<AuthSession?>>());
+      expect(storage.credential, isNull);
+      expect(storage.accountId, isNull);
+      expect(storage.pendingRevocationLease, isNull);
+      expect(await journal.readLeases(), isEmpty);
+      expect(
+        ownership.intents.single.reason,
+        OfflineOwnershipReason.tokenExpiry,
+      );
+    },
+  );
+
+  test(
     'refresh recovery exposes failure when no durable marker survives',
     () async {
-      final storage = _FakeSessionStorage(token: 'expired-token')
+      final expectedCredential = _cleanupLease().request.credential;
+      final storage = _FakeSessionStorage(token: expectedCredential.accessToken)
         ..accountId = '7'
+        ..credential = expectedCredential
         ..failNext(_RevocationStorageFailure.saveMarker);
       final repository = CachedAuthRepository(
         delegate: _FakeAuthRepository(
@@ -2163,8 +2365,11 @@ final class _FakeSessionStorage
         AuthTokenTransactionStorage,
         AuthenticatedAccountStorage,
         AuthenticatedAccountTransactionStorage,
+        ConditionalAuthenticatedAccountStorage,
         PendingRevocationStorage,
-        ConditionalPendingRevocationStorage {
+        ConditionalPendingRevocationStorage,
+        SessionPendingRevocationStorage,
+        DeviceCredentialStorage {
   _FakeSessionStorage({this.token}) : tokenCommitted = token != null;
 
   String? token;
@@ -2178,9 +2383,14 @@ final class _FakeSessionStorage
   Object? tokenReadError;
   final List<String> committedOwnerIds = [];
   String? accountId;
+  int authEpoch = 0;
+  DeviceCredential? credential;
   String? accountProjectionId;
   int? accountProjectionAttemptVersion;
   String? pendingRevocationAccountId;
+  SessionRevocationLease? pendingRevocationLease;
+  Completer<void> accountReadStarted = Completer<void>();
+  Completer<void>? _accountReadRelease;
   final Map<_RevocationStorageFailure, int> _remainingFailures = {};
   final List<String> conditionalClearAttempts = [];
   final List<String> ownerClearAttempts = [];
@@ -2188,6 +2398,13 @@ final class _FakeSessionStorage
   void failNext(_RevocationStorageFailure failure, {int times = 1}) {
     _remainingFailures[failure] = times;
   }
+
+  void blockNextAccountRead() {
+    accountReadStarted = Completer<void>();
+    _accountReadRelease = Completer<void>();
+  }
+
+  void releaseAccountRead() => _accountReadRelease?.complete();
 
   void _throwIf(_RevocationStorageFailure failure) {
     final remaining = _remainingFailures[failure] ?? 0;
@@ -2207,6 +2424,7 @@ final class _FakeSessionStorage
     tokenOwnerId = null;
     tokenAttemptVersion = null;
     tokenCommitted = false;
+    credential = null;
   }
 
   @override
@@ -2297,13 +2515,32 @@ final class _FakeSessionStorage
   }
 
   @override
-  Future<String?> readAuthenticatedAccountId() async => accountId;
+  Future<String?> readAuthenticatedAccountId() async {
+    final release = _accountReadRelease;
+    if (release != null) {
+      if (!accountReadStarted.isCompleted) accountReadStarted.complete();
+      await release.future;
+      _accountReadRelease = null;
+    }
+    return accountId;
+  }
 
   @override
   Future<void> saveAuthenticatedAccountId(String accountId) async {
     this.accountId = accountId;
     accountProjectionId = null;
     accountProjectionAttemptVersion = null;
+  }
+
+  @override
+  Future<bool> clearAuthenticatedAccountIfMatches({
+    required String accountId,
+    required int authEpoch,
+  }) async {
+    if (this.accountId != accountId || this.authEpoch != authEpoch)
+      return false;
+    await clearAuthenticatedAccountId();
+    return true;
   }
 
   @override
@@ -2345,6 +2582,7 @@ final class _FakeSessionStorage
   Future<void> clearPendingRevocationAccountId() async {
     _throwIf(_RevocationStorageFailure.clearMarker);
     pendingRevocationAccountId = null;
+    pendingRevocationLease = null;
   }
 
   @override
@@ -2366,7 +2604,92 @@ final class _FakeSessionStorage
     _throwIf(_RevocationStorageFailure.saveMarker);
     pendingRevocationAccountId = accountId;
   }
+
+  @override
+  Future<void> savePendingRevocationLease(SessionRevocationLease lease) async {
+    _throwIf(_RevocationStorageFailure.saveMarker);
+    pendingRevocationLease = lease;
+    pendingRevocationAccountId = null;
+  }
+
+  @override
+  Future<SessionRevocationLease?> readPendingRevocationLease() async =>
+      pendingRevocationLease;
+
+  @override
+  Future<bool> clearPendingRevocationLeaseIfMatches(
+    SessionRevocationLease expected,
+  ) async {
+    if (pendingRevocationLease != expected) return false;
+    await clearPendingRevocationAccountId();
+    return true;
+  }
+
+  @override
+  Future<DeviceCredential?> readDeviceCredential() async => credential;
+
+  @override
+  Future<bool> clearDeviceCredentialIfMatches({
+    required String accountId,
+    required String sessionId,
+    required int generation,
+  }) async {
+    final current = credential;
+    if (current?.accountId != accountId ||
+        current?.sessionId != sessionId ||
+        current?.generation != generation) {
+      return false;
+    }
+    credential = null;
+    token = null;
+    return true;
+  }
+
+  @override
+  Future<bool> rotateDeviceCredential({
+    required DeviceCredential credential,
+    required String expectedAccountId,
+    required String expectedSessionId,
+    required int expectedGeneration,
+  }) async {
+    final current = this.credential;
+    if (current?.accountId != expectedAccountId ||
+        current?.sessionId != expectedSessionId ||
+        current?.generation != expectedGeneration) {
+      return false;
+    }
+    this.credential = credential;
+    token = credential.accessToken;
+    return true;
+  }
+
+  @override
+  Future<bool> savePendingDeviceCredentialForOwner({
+    required DeviceCredential credential,
+    required String ownerId,
+    required int attemptVersion,
+  }) async {
+    this.credential = credential;
+    return true;
+  }
 }
+
+DeviceCredential _deviceCredential({
+  required String accessToken,
+  required String refreshToken,
+  required String sessionId,
+  int generation = 1,
+}) => DeviceCredential(
+  accessToken: accessToken,
+  refreshToken: refreshToken,
+  accountId: '7',
+  sessionId: sessionId,
+  accessExpiresAt: DateTime.utc(2026, 7, 15, 3),
+  refreshExpiresAt: DateTime.utc(2026, 8, 15, 3),
+  tokenVersion: 5,
+  generation: generation,
+  biometricPolicy: BiometricCredentialPolicy.disabled,
+);
 
 final class _BasicTokenStorage implements TokenStorage {
   String? token;
