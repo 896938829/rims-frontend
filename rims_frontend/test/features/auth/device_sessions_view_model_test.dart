@@ -95,6 +95,7 @@ void main() {
       final unsafeLabels = [
         'Scanner\u0007 alert',
         'Scanner\u0085 alert',
+        'Scanner alert\n',
         'Scanner ${String.fromCharCode(0xd800)} alert',
         'Scanner\u202e alert',
         'Scanner\u2067 alert',
@@ -102,6 +103,13 @@ void main() {
         'Scanner\u200c alert',
         'Scanner\u200b alert',
         'Scanner\ufeff alert',
+        'Scanner\u00ad alert',
+        'Scanner\u180e alert',
+        'Scanner\u2060 alert',
+        'Scanner\u2061 alert',
+        'Scanner\u206a alert',
+        'Scanner ${String.fromCharCode(0xe0001)} alert',
+        'Scanner ${String.fromCharCode(0xe0020)} alert',
       ];
 
       for (var index = 0; index < unsafeLabels.length; index += 1) {
@@ -115,8 +123,27 @@ void main() {
           expiresAt: DateTime.utc(2026, 8, 1),
           current: false,
         );
-        expect(viewModel.deviceLabelFor(session), '未知设备');
+        expect(
+          viewModel.deviceLabelFor(session),
+          '未知设备',
+          reason: 'unsafe label index $index must be rejected',
+        );
       }
+
+      final visibleSupplementary = DeviceSession(
+        id: 'visible-supplementary',
+        deviceLabel: 'Scanner ${String.fromCharCode(0x1f600)}',
+        platform: 'android',
+        userAgentFamily: 'Chrome',
+        createdAt: DateTime.utc(2026, 7, 1),
+        lastUsedAt: DateTime.utc(2026, 7, 1),
+        expiresAt: DateTime.utc(2026, 8, 1),
+        current: false,
+      );
+      expect(
+        viewModel.deviceLabelFor(visibleSupplementary),
+        visibleSupplementary.deviceLabel,
+      );
     });
 
     test('maps platform and client family through fixed allowlists', () {
@@ -175,6 +202,52 @@ void main() {
           DeviceSessionsCommandOutcome.completed,
         );
         expect(viewModel.sessions, [_currentSession, _revokedSession]);
+        expect(viewModel.canRevokeOthers, isFalse);
+      },
+    );
+
+    test(
+      'expiry boundary disables history and excludes it from revoke others',
+      () async {
+        final now = DateTime.utc(2026, 7, 15, 12);
+        final active = _sessionWithExpiry(
+          id: 'active',
+          expiresAt: now.add(const Duration(seconds: 1)),
+        );
+        final expired = _sessionWithExpiry(
+          id: 'expired',
+          expiresAt: now.subtract(const Duration(seconds: 1)),
+        );
+        final expiresNow = _sessionWithExpiry(
+          id: 'expires-now',
+          expiresAt: now,
+        );
+        final repository = _FakeAuthRepository(
+          sessionsResult: Success([
+            _currentSession,
+            active,
+            expired,
+            expiresNow,
+          ]),
+        );
+        final viewModel = _viewModel(repository, now: () => now);
+        await viewModel.load();
+
+        expect(viewModel.canRevokeSession(active), isTrue);
+        expect(viewModel.canRevokeSession(expired), isFalse);
+        expect(viewModel.canRevokeSession(expiresNow), isFalse);
+        expect(viewModel.canRevokeOthers, isTrue);
+        expect(
+          await viewModel.revokeSession(expired),
+          DeviceSessionsCommandOutcome.ignored,
+        );
+        expect(repository.revokeSessionCalls, isEmpty);
+
+        expect(
+          await viewModel.revokeOthers(),
+          DeviceSessionsCommandOutcome.completed,
+        );
+        expect(viewModel.sessions, [_currentSession, expired, expiresNow]);
         expect(viewModel.canRevokeOthers, isFalse);
       },
     );
@@ -290,9 +363,13 @@ void main() {
   });
 }
 
-DeviceSessionsViewModel _viewModel(AuthRepository repository) {
+DeviceSessionsViewModel _viewModel(
+  AuthRepository repository, {
+  DateTime Function()? now,
+}) {
   return DeviceSessionsViewModel(
     repository: repository,
+    now: now ?? () => DateTime.utc(2026, 7, 15, 12),
     runTerminalRevocation: (command) async {
       final result = await command();
       return switch (result) {
@@ -311,6 +388,20 @@ String _localTimeLabel(DateTime value) {
       '${twoDigits(local.month)}-${twoDigits(local.day)} '
       '${twoDigits(local.hour)}:${twoDigits(local.minute)}';
 }
+
+DeviceSession _sessionWithExpiry({
+  required String id,
+  required DateTime expiresAt,
+}) => DeviceSession(
+  id: id,
+  deviceLabel: _otherSession.deviceLabel,
+  platform: _otherSession.platform,
+  userAgentFamily: _otherSession.userAgentFamily,
+  createdAt: _otherSession.createdAt,
+  lastUsedAt: _otherSession.lastUsedAt,
+  expiresAt: expiresAt,
+  current: false,
+);
 
 final _currentSession = DeviceSession(
   id: 's-1',

@@ -1,3 +1,5 @@
+import 'dart:ui' show Tristate;
+
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -93,23 +95,25 @@ void main() {
   ) async {
     final semantics = tester.ensureSemantics();
     final repository = _FakeAuthRepository(
-      sessions: [_bidiLabelSession, _controlLabelSession, _formatLabelSession],
+      sessions: [_wordJoinerLabelSession, _supplementaryFormatLabelSession],
     );
     await _pumpPage(tester, repository: repository);
 
-    expect(find.text('未知设备'), findsNWidgets(3));
-    expect(find.byTooltip('撤销 未知设备'), findsNWidgets(3));
+    expect(find.text('未知设备'), findsNWidgets(2));
+    expect(find.byTooltip('撤销 未知设备'), findsNWidgets(2));
     final unsafeLabels = repository.sessions
         .map((session) => session.deviceLabel)
         .toList(growable: false);
     final visibleAndSemanticText =
         '${tester.widgetList<Text>(find.byType(Text)).map((widget) => widget.data ?? '').join(' ')} '
-        '${['bidi', 'control', 'format'].map((id) => tester.getSemantics(find.byKey(Key('device-session-card-$id'))).toStringDeep()).join(' ')}';
+        '${['word-joiner', 'supplementary-format'].map((id) => tester.getSemantics(find.byKey(Key('device-session-card-$id'))).toStringDeep()).join(' ')}';
     for (final label in unsafeLabels) {
       expect(visibleAndSemanticText, isNot(contains(label)));
     }
 
-    await tester.tap(find.byKey(const Key('device-session-revoke-bidi')));
+    await tester.tap(
+      find.byKey(const Key('device-session-revoke-word-joiner')),
+    );
     await tester.pumpAndSettle();
     for (final label in unsafeLabels) {
       expect(
@@ -333,21 +337,33 @@ void main() {
   testWidgets(
     'revoked history stays visible but disables revoke and revoke others',
     (tester) async {
+      final semantics = tester.ensureSemantics();
       final repository = _FakeAuthRepository(
-        sessions: [_currentSession, _revokedHistorySession],
+        sessions: [_revokedHistorySession, _expiredHistorySession],
       );
       await _pumpPage(tester, repository: repository);
 
       expect(find.text('Retired scanner'), findsOneWidget);
+      expect(find.text('Expired tablet'), findsOneWidget);
       expect(find.textContaining('撤销时间'), findsOneWidget);
-      final historicalRevoke = tester.widget<IconButton>(
-        find.byKey(const Key('device-session-revoke-revoked')),
-      );
       final revokeOthers = tester.widget<OutlinedButton>(
         find.byKey(const Key('device-sessions-revoke-others')),
       );
-      expect(historicalRevoke.onPressed, isNull);
       expect(revokeOthers.onPressed, isNull);
+      for (final entry in const {
+        'revoked': 'Retired scanner，不可撤销',
+        'expired': 'Expired tablet，不可撤销',
+      }.entries) {
+        final revoke = find.byKey(Key('device-session-revoke-${entry.key}'));
+        expect(tester.widget<IconButton>(revoke).onPressed, isNull);
+        final node = tester.getSemantics(revoke);
+        expect(node.flagsCollection.isButton, isFalse);
+        expect(node.flagsCollection.isEnabled, Tristate.isFalse);
+        expect(node.flagsCollection.isFocused, Tristate.none);
+        expect(node.label, entry.value);
+        expect(find.byTooltip(entry.value), findsOneWidget);
+      }
+      semantics.dispose();
     },
   );
 
@@ -592,9 +608,9 @@ final _ipv6PortLabelSession = DeviceSession(
   current: false,
 );
 
-final _bidiLabelSession = DeviceSession(
-  id: 'bidi',
-  deviceLabel: 'Scanner\u202ealert',
+final _wordJoinerLabelSession = DeviceSession(
+  id: 'word-joiner',
+  deviceLabel: 'Scanner\u2060alert',
   platform: 'windows',
   userAgentFamily: 'Chrome',
   createdAt: DateTime.utc(2026, 7, 3, 8),
@@ -603,20 +619,9 @@ final _bidiLabelSession = DeviceSession(
   current: false,
 );
 
-final _controlLabelSession = DeviceSession(
-  id: 'control',
-  deviceLabel: 'Scanner\u0085alert',
-  platform: 'windows',
-  userAgentFamily: 'Chrome',
-  createdAt: DateTime.utc(2026, 7, 3, 8),
-  lastUsedAt: DateTime.utc(2026, 7, 13, 8),
-  expiresAt: DateTime.utc(2026, 8, 3, 8),
-  current: false,
-);
-
-final _formatLabelSession = DeviceSession(
-  id: 'format',
-  deviceLabel: 'Scanner\u200dalert',
+final _supplementaryFormatLabelSession = DeviceSession(
+  id: 'supplementary-format',
+  deviceLabel: 'Scanner ${String.fromCharCode(0xe0001)}alert',
   platform: 'windows',
   userAgentFamily: 'Chrome',
   createdAt: DateTime.utc(2026, 7, 3, 8),
@@ -634,6 +639,17 @@ final _revokedHistorySession = DeviceSession(
   lastUsedAt: DateTime.utc(2026, 7, 13, 8),
   expiresAt: DateTime.utc(2026, 8, 3, 8),
   revokedAt: DateTime.utc(2026, 7, 14, 11),
+  current: false,
+);
+
+final _expiredHistorySession = DeviceSession(
+  id: 'expired',
+  deviceLabel: 'Expired tablet',
+  platform: 'windows',
+  userAgentFamily: 'Chrome',
+  createdAt: DateTime.utc(2019, 12, 1),
+  lastUsedAt: DateTime.utc(2019, 12, 31),
+  expiresAt: DateTime.utc(2020, 1, 1),
   current: false,
 );
 

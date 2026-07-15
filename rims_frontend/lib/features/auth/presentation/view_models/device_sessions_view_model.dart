@@ -23,10 +23,12 @@ final class DeviceSessionsViewModel extends ChangeNotifier {
   DeviceSessionsViewModel({
     required this.repository,
     required this.runTerminalRevocation,
-  });
+    DateTime Function()? now,
+  }) : now = now ?? DateTime.now;
 
   final AuthRepository repository;
   final TerminalSessionRevocationRunner runTerminalRevocation;
+  final DateTime Function() now;
   List<DeviceSession> _sessions = const [];
   bool _isBusy = false;
   bool _hasLoaded = false;
@@ -45,10 +47,14 @@ final class DeviceSessionsViewModel extends ChangeNotifier {
   bool get isTerminal => _isTerminal;
   String? get errorMessage => _errorMessage;
   String? get successMessage => _successMessage;
-  bool get canRevokeOthers =>
-      _sessions.any((session) => !session.current && session.revokedAt == null);
+  bool get canRevokeOthers {
+    final timestamp = now();
+    return _sessions.any(
+      (session) => !session.current && _isActiveAt(session, timestamp),
+    );
+  }
 
-  bool canRevokeSession(DeviceSession session) => session.revokedAt == null;
+  bool canRevokeSession(DeviceSession session) => _isActiveAt(session, now());
 
   String deviceLabelFor(DeviceSession session) =>
       DeviceSessionDisplaySanitizer.deviceLabel(session.deviceLabel);
@@ -154,9 +160,10 @@ final class DeviceSessionsViewModel extends ChangeNotifier {
       if (!_isCurrent(generation)) return DeviceSessionsCommandOutcome.ignored;
       return result.when(
         success: (_) {
+          final timestamp = now();
           _sessions = List.unmodifiable(
             _sessions.where(
-              (session) => session.current || session.revokedAt != null,
+              (session) => session.current || !_isActiveAt(session, timestamp),
             ),
           );
           _errorMessage = null;
@@ -243,6 +250,9 @@ final class DeviceSessionsViewModel extends ChangeNotifier {
   }
 
   bool _isCurrent(int generation) => !_disposed && generation == _generation;
+
+  bool _isActiveAt(DeviceSession session, DateTime timestamp) =>
+      session.revokedAt == null && session.expiresAt.isAfter(timestamp);
 
   void _finishOperation(int? generation) {
     if (generation == null || !_isCurrent(generation)) return;

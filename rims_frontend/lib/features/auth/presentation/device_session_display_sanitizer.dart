@@ -14,9 +14,9 @@ abstract final class DeviceSessionDisplaySanitizer {
 
   static String deviceLabel(String value) {
     final label = value.trim();
-    if (label.isEmpty ||
+    if (_containsUnsafeTextControl(value) ||
+        label.isEmpty ||
         label.toLowerCase() == 'unknown device' ||
-        _containsUnsafeTextControl(label) ||
         _containsNetworkAddress(label)) {
       return '未知设备';
     }
@@ -58,29 +58,52 @@ abstract final class DeviceSessionDisplaySanitizer {
     final units = value.codeUnits;
     for (var index = 0; index < units.length; index += 1) {
       final unit = units[index];
-      if (unit <= 0x1f || (unit >= 0x7f && unit <= 0x9f)) return true;
+      final int codePoint;
       if (unit >= 0xd800 && unit <= 0xdbff) {
         if (index + 1 >= units.length ||
             units[index + 1] < 0xdc00 ||
             units[index + 1] > 0xdfff) {
           return true;
         }
+        final low = units[index + 1];
+        codePoint = 0x10000 + ((unit - 0xd800) << 10) + (low - 0xdc00);
         index += 1;
-        continue;
+      } else {
+        if (unit >= 0xdc00 && unit <= 0xdfff) return true;
+        codePoint = unit;
       }
-      if (unit >= 0xdc00 && unit <= 0xdfff) return true;
-      if (unit == 0x061c ||
-          unit == 0x200b ||
-          unit == 0x200c ||
-          unit == 0x200d ||
-          unit == 0x200e ||
-          unit == 0x200f ||
-          (unit >= 0x202a && unit <= 0x202e) ||
-          (unit >= 0x2066 && unit <= 0x2069) ||
-          unit == 0xfeff) {
-        return true;
-      }
+      if (_isControlOrFormatCodePoint(codePoint)) return true;
     }
     return false;
   }
+
+  static bool _isControlOrFormatCodePoint(int codePoint) {
+    if (codePoint <= 0x1f || _inRange(codePoint, 0x7f, 0x9f)) return true;
+
+    // Complete Unicode 16.0 General_Category=Cf ranges.
+    return codePoint == 0x00ad ||
+        _inRange(codePoint, 0x0600, 0x0605) ||
+        codePoint == 0x061c ||
+        codePoint == 0x06dd ||
+        codePoint == 0x070f ||
+        _inRange(codePoint, 0x0890, 0x0891) ||
+        codePoint == 0x08e2 ||
+        codePoint == 0x180e ||
+        _inRange(codePoint, 0x200b, 0x200f) ||
+        _inRange(codePoint, 0x202a, 0x202e) ||
+        _inRange(codePoint, 0x2060, 0x2064) ||
+        _inRange(codePoint, 0x2066, 0x206f) ||
+        codePoint == 0xfeff ||
+        _inRange(codePoint, 0xfff9, 0xfffb) ||
+        codePoint == 0x110bd ||
+        codePoint == 0x110cd ||
+        _inRange(codePoint, 0x13430, 0x1343f) ||
+        _inRange(codePoint, 0x1bca0, 0x1bca3) ||
+        _inRange(codePoint, 0x1d173, 0x1d17a) ||
+        codePoint == 0xe0001 ||
+        _inRange(codePoint, 0xe0020, 0xe007f);
+  }
+
+  static bool _inRange(int value, int start, int end) =>
+      value >= start && value <= end;
 }

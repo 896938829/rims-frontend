@@ -251,6 +251,9 @@ final class _DeviceSessionCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
+    final deviceLabel = viewModel.deviceLabelFor(session);
+    final canRevoke = onRevoke != null;
+    final revokeLabel = canRevoke ? '撤销 $deviceLabel' : '$deviceLabel，不可撤销';
     return Material(
       key: Key('device-session-card-${session.id}'),
       color: colors.surface,
@@ -273,7 +276,7 @@ final class _DeviceSessionCard extends StatelessWidget {
                     crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
                       Text(
-                        viewModel.deviceLabelFor(session),
+                        deviceLabel,
                         style: AppTextStyles.titleMedium.copyWith(
                           color: colors.onSurface,
                         ),
@@ -291,12 +294,13 @@ final class _DeviceSessionCard extends StatelessWidget {
                 ),
                 Semantics(
                   container: true,
-                  button: true,
-                  label: '撤销 ${viewModel.deviceLabelFor(session)}',
+                  button: canRevoke,
+                  enabled: canRevoke,
+                  label: revokeLabel,
                   excludeSemantics: true,
                   child: IconButton(
                     key: Key('device-session-revoke-${session.id}'),
-                    tooltip: '撤销 ${viewModel.deviceLabelFor(session)}',
+                    tooltip: revokeLabel,
                     constraints: const BoxConstraints(
                       minWidth: 48,
                       minHeight: 48,
