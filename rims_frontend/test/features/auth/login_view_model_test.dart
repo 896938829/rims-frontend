@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rims_frontend/core/result/failure.dart';
 import 'package:rims_frontend/core/result/result.dart';
@@ -7,6 +8,7 @@ import 'package:rims_frontend/features/auth/domain/entities/app_user.dart';
 import 'package:rims_frontend/features/auth/domain/entities/auth_session.dart';
 import 'package:rims_frontend/features/auth/domain/entities/warehouse.dart';
 import 'package:rims_frontend/features/auth/domain/repositories/auth_repository.dart';
+import 'package:rims_frontend/features/auth/presentation/pages/login_page.dart';
 import 'package:rims_frontend/features/auth/presentation/view_models/auth_session_controller.dart';
 import 'package:rims_frontend/features/auth/presentation/view_models/login_view_model.dart';
 import 'package:rims_frontend/features/offline/domain/services/offline_ownership_service.dart';
@@ -349,6 +351,137 @@ void main() {
       expect(success, isFalse);
       expect(viewModel.errorMessage, '用户名或密码错误');
       expect(sessionController.isAuthenticated, isFalse);
+    });
+
+    test(
+      'allows short legacy login passwords but rejects more than 128 characters',
+      () async {
+        final repository = _FakeAuthRepository(
+          result: const FailureResult<AuthSession>(
+            AuthenticationFailure(message: 'backend decided'),
+          ),
+        );
+        final viewModel =
+            LoginViewModel(
+                authRepository: repository,
+                sessionController: AuthSessionController(),
+              )
+              ..updateUsername('legacy-user')
+              ..updatePassword('short');
+
+        expect(await viewModel.login(), isFalse);
+        expect(repository.loginCallCount, 1);
+        viewModel.updatePassword(List.filled(129, 'x').join());
+        expect(await viewModel.login(), isFalse);
+        expect(repository.loginCallCount, 1);
+        expect(viewModel.errorMessage, '密码最多允许128个字符');
+      },
+    );
+
+    for (final terminal in ['success', 'failure', 'exception']) {
+      test('clears the VM password after terminal $terminal', () async {
+        final repository = _FakeAuthRepository(
+          result: terminal == 'success'
+              ? Success<AuthSession>(_session)
+              : const FailureResult<AuthSession>(
+                  AuthenticationFailure(message: 'denied'),
+                ),
+          throwOnLogin: terminal == 'exception',
+        );
+        final viewModel =
+            LoginViewModel(
+                authRepository: repository,
+                sessionController: AuthSessionController(),
+              )
+              ..updateUsername('admin')
+              ..updatePassword('one-time-secret');
+
+        await viewModel.login();
+        expect(await viewModel.login(), isFalse);
+        expect(repository.loginCallCount, 1);
+        expect(viewModel.errorMessage, '请输入账号和密码');
+      });
+    }
+
+    test(
+      'dispose invalidates a delayed login without retaining or notifying',
+      () async {
+        final pending = Completer<Result<AuthSession>>();
+        final repository = _FakeAuthRepository(loginFuture: pending.future);
+        final viewModel =
+            LoginViewModel(
+                authRepository: repository,
+                sessionController: AuthSessionController(),
+              )
+              ..updateUsername('admin')
+              ..updatePassword('one-time-secret');
+        var notifications = 0;
+        viewModel.addListener(() => notifications += 1);
+        final login = viewModel.login();
+        final notificationsBeforeDispose = notifications;
+        viewModel.dispose();
+        pending.complete(Success<AuthSession>(_session));
+
+        expect(await login, isFalse);
+        expect(notifications, notificationsBeforeDispose);
+      },
+    );
+
+    testWidgets('login page clears password after a terminal failure', (
+      tester,
+    ) async {
+      final repository = _FakeAuthRepository(
+        result: const FailureResult<AuthSession>(
+          AuthenticationFailure(message: 'denied'),
+        ),
+      );
+      await tester.pumpWidget(
+        MaterialApp(
+          home: LoginPage(
+            authRepository: repository,
+            sessionController: AuthSessionController(),
+          ),
+        ),
+      );
+
+      await tester.enterText(
+        find.byKey(const Key('login-username-field')),
+        'admin',
+      );
+      await tester.enterText(
+        find.byKey(const Key('login-password-field')),
+        'one-time-secret',
+      );
+      final passwordController = tester
+          .widget<TextField>(find.byKey(const Key('login-password-field')))
+          .controller!;
+      await tester.ensureVisible(find.widgetWithText(FilledButton, '登录'));
+      await tester.tap(find.widgetWithText(FilledButton, '登录'));
+      await tester.pumpAndSettle();
+
+      expect(passwordController.text, isEmpty);
+    });
+
+    testWidgets('login page clears password when disposed', (tester) async {
+      await tester.pumpWidget(
+        MaterialApp(
+          home: LoginPage(
+            authRepository: _FakeAuthRepository(),
+            sessionController: AuthSessionController(),
+          ),
+        ),
+      );
+      await tester.enterText(
+        find.byKey(const Key('login-password-field')),
+        'one-time-secret',
+      );
+      final passwordController = tester
+          .widget<TextField>(find.byKey(const Key('login-password-field')))
+          .controller!;
+
+      await tester.pumpWidget(const MaterialApp(home: SizedBox.shrink()));
+
+      expect(passwordController.text, isEmpty);
     });
 
     test('logout clears active session', () async {
@@ -770,6 +903,8 @@ final class _FakeAuthRepository
     this.restoreFuture,
     this.switchFuture,
     this.logoutFuture,
+    this.loginFuture,
+    this.throwOnLogin = false,
   }) : _result = result ?? const FailureResult<AuthSession>(UnknownFailure()),
        _restoreResult =
            restoreResult ?? const FailureResult<AuthSession?>(UnknownFailure());
@@ -780,6 +915,8 @@ final class _FakeAuthRepository
   final Future<Result<AuthSession?>>? restoreFuture;
   final Future<Result<Warehouse>>? switchFuture;
   final Future<void>? logoutFuture;
+  final Future<Result<AuthSession>>? loginFuture;
+  final bool throwOnLogin;
   int loginCallCount = 0;
   int restoreCallCount = 0;
   int logoutCallCount = 0;
@@ -795,6 +932,8 @@ final class _FakeAuthRepository
     loginCallCount += 1;
     lastUsername = username;
     lastPassword = password;
+    if (throwOnLogin) throw StateError('injected login failure');
+    if (loginFuture != null) return loginFuture!;
     return _result;
   }
 

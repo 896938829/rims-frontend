@@ -35,8 +35,8 @@ void main() {
 
     final changed = await viewModel.changePassword(
       oldPassword: 'old-secret',
-      newPassword: 'new-secret',
-      confirmPassword: 'different',
+      newPassword: 'Secure-pass-2026',
+      confirmPassword: 'Different-pass-2026',
     );
 
     expect(changed, isFalse);
@@ -53,8 +53,8 @@ void main() {
 
     final changeFuture = viewModel.changePassword(
       oldPassword: 'old-secret',
-      newPassword: 'new-secret',
-      confirmPassword: 'new-secret',
+      newPassword: 'Secure-pass-2026',
+      confirmPassword: 'Secure-pass-2026',
     );
 
     expect(viewModel.isChangingPassword, isTrue);
@@ -63,7 +63,7 @@ void main() {
 
     expect(changed, isTrue);
     expect(repository.changePasswordRequest?.oldPassword, 'old-secret');
-    expect(repository.changePasswordRequest?.newPassword, 'new-secret');
+    expect(repository.changePasswordRequest?.newPassword, 'Secure-pass-2026');
     expect(viewModel.isChangingPassword, isFalse);
     expect(viewModel.passwordError, isNull);
     expect(viewModel.passwordMessage, '密码已更新');
@@ -78,15 +78,15 @@ void main() {
 
     final changeFuture = viewModel.changePassword(
       oldPassword: 'old-secret',
-      newPassword: 'new-secret',
-      confirmPassword: 'new-secret',
+      newPassword: 'Secure-pass-2026',
+      confirmPassword: 'Secure-pass-2026',
     );
 
     expect(viewModel.isChangingPassword, isTrue);
     final duplicateFuture = viewModel.changePassword(
       oldPassword: 'old-secret',
-      newPassword: 'new-secret',
-      confirmPassword: 'new-secret',
+      newPassword: 'Secure-pass-2026',
+      confirmPassword: 'Secure-pass-2026',
     );
     await Future<void>.delayed(Duration.zero);
     final callCountDuringPending = repository.changePasswordCallCount;
@@ -107,19 +107,99 @@ void main() {
 
     final changed = await viewModel.changePassword(
       oldPassword: 'wrong',
-      newPassword: 'new-secret',
-      confirmPassword: 'new-secret',
+      newPassword: 'Secure-pass-2026',
+      confirmPassword: 'Secure-pass-2026',
     );
 
     expect(changed, isFalse);
     expect(viewModel.passwordError, '原密码不正确');
   });
+
+  test('changePassword preserves password whitespace exactly', () async {
+    final repository = _FakeAdminRepository();
+    final viewModel = ProfileSecurityViewModel(repository: repository);
+
+    expect(
+      await viewModel.changePassword(
+        oldPassword: ' old-secret ',
+        newPassword: ' 123456789012 ',
+        confirmPassword: ' 123456789012 ',
+      ),
+      isTrue,
+    );
+    expect(repository.changePasswordRequest?.oldPassword, ' old-secret ');
+    expect(repository.changePasswordRequest?.newPassword, ' 123456789012 ');
+  });
+
+  test('changePassword enforces only new password 12 to 128 bounds', () async {
+    final repository = _FakeAdminRepository();
+    final viewModel = ProfileSecurityViewModel(repository: repository);
+
+    expect(
+      await viewModel.changePassword(
+        oldPassword: ' ',
+        newPassword: '12345678901',
+        confirmPassword: '12345678901',
+      ),
+      isFalse,
+    );
+    expect(viewModel.passwordError, '新密码至少需要12个字符');
+    expect(
+      await viewModel.changePassword(
+        oldPassword: ' ',
+        newPassword: List.filled(129, 'x').join(),
+        confirmPassword: List.filled(129, 'x').join(),
+      ),
+      isFalse,
+    );
+    expect(viewModel.passwordError, '新密码最多允许128个字符');
+    expect(repository.changePasswordCallCount, 0);
+  });
+
+  test(
+    'changePassword contains repository exceptions and restores terminal state',
+    () async {
+      final repository = _FakeAdminRepository(throwOnChangePassword: true);
+      final viewModel = ProfileSecurityViewModel(repository: repository);
+
+      expect(
+        await viewModel.changePassword(
+          oldPassword: 'old-secret',
+          newPassword: 'Secure-pass-2026',
+          confirmPassword: 'Secure-pass-2026',
+        ),
+        isFalse,
+      );
+      expect(viewModel.isChangingPassword, isFalse);
+      expect(viewModel.passwordError, '密码更新失败，请重试');
+    },
+  );
+
+  test('dispose ignores a delayed password change completion', () async {
+    final pending = Completer<Result<void>>();
+    final repository = _FakeAdminRepository(
+      changePasswordResult: pending.future,
+    );
+    final viewModel = ProfileSecurityViewModel(repository: repository);
+    final changing = viewModel.changePassword(
+      oldPassword: 'old-secret',
+      newPassword: 'Secure-pass-2026',
+      confirmPassword: 'Secure-pass-2026',
+    );
+    viewModel.dispose();
+    pending.complete(const Success<void>(null));
+    expect(await changing, isFalse);
+  });
 }
 
 final class _FakeAdminRepository implements AdminRepository {
-  _FakeAdminRepository({this.changePasswordResult});
+  _FakeAdminRepository({
+    this.changePasswordResult,
+    this.throwOnChangePassword = false,
+  });
 
   final Future<Result<void>>? changePasswordResult;
+  final bool throwOnChangePassword;
   ChangeOwnPasswordRequest? changePasswordRequest;
   int changePasswordCallCount = 0;
 
@@ -242,6 +322,9 @@ final class _FakeAdminRepository implements AdminRepository {
   Future<Result<void>> changeOwnPassword(ChangeOwnPasswordRequest request) {
     changePasswordCallCount += 1;
     changePasswordRequest = request;
+    if (throwOnChangePassword) {
+      throw StateError('injected password change failure');
+    }
     return changePasswordResult ?? Future.value(const Success<void>(null));
   }
 

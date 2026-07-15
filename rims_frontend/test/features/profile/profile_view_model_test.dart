@@ -297,11 +297,11 @@ void main() {
     );
     await tester.enterText(
       find.byKey(const Key('profile-new-password-field')),
-      'new-secret',
+      'new-password-123',
     );
     await tester.enterText(
       find.byKey(const Key('profile-confirm-password-field')),
-      'new-secret',
+      'new-password-123',
     );
     await tester.tap(
       find.byKey(const Key('profile-submit-change-password-button')),
@@ -309,7 +309,7 @@ void main() {
     await tester.pumpAndSettle();
 
     expect(repository.changePasswordRequest?.oldPassword, 'old-secret');
-    expect(repository.changePasswordRequest?.newPassword, 'new-secret');
+    expect(repository.changePasswordRequest?.newPassword, 'new-password-123');
   });
 
   testWidgets(
@@ -606,6 +606,96 @@ void main() {
       expect(calls, 1);
     },
   );
+
+  testWidgets('password dialog clears controllers after terminal submit', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ProfilePage(
+            user: _ordinaryUser,
+            warehouse: _warehouse,
+            adminRepository: _FakeAdminRepository(),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('profile-change-password-button')),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.byKey(const Key('profile-change-password-button')));
+    await tester.pumpAndSettle();
+
+    final fields = [
+      find.byKey(const Key('profile-old-password-field')),
+      find.byKey(const Key('profile-new-password-field')),
+      find.byKey(const Key('profile-confirm-password-field')),
+    ];
+    await tester.enterText(fields[0], 'old-secret');
+    await tester.enterText(fields[1], 'new-password-123');
+    await tester.enterText(fields[2], 'new-password-123');
+    final controllers = fields
+        .map((field) => tester.widget<TextField>(field).controller!)
+        .toList();
+
+    await tester.tap(
+      find.byKey(const Key('profile-submit-change-password-button')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      controllers.map((controller) => controller.text),
+      everyElement(isEmpty),
+    );
+  });
+
+  testWidgets('password dialog clears controllers when cancelled', (
+    tester,
+  ) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ProfilePage(
+            user: _ordinaryUser,
+            warehouse: _warehouse,
+            adminRepository: _FakeAdminRepository(),
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+    await tester.scrollUntilVisible(
+      find.byKey(const Key('profile-change-password-button')),
+      300,
+      scrollable: find.byType(Scrollable).first,
+    );
+    await tester.tap(find.byKey(const Key('profile-change-password-button')));
+    await tester.pumpAndSettle();
+
+    final fields = [
+      find.byKey(const Key('profile-old-password-field')),
+      find.byKey(const Key('profile-new-password-field')),
+      find.byKey(const Key('profile-confirm-password-field')),
+    ];
+    for (final field in fields) {
+      await tester.enterText(field, 'one-time-secret');
+    }
+    final controllers = fields
+        .map((field) => tester.widget<TextField>(field).controller!)
+        .toList();
+
+    await tester.tap(find.widgetWithText(TextButton, '取消'));
+    await tester.pumpAndSettle();
+
+    expect(
+      controllers.map((controller) => controller.text),
+      everyElement(isEmpty),
+    );
+  });
 }
 
 const _adminUser = AppUser(

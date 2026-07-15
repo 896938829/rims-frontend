@@ -43,6 +43,7 @@ final class _LoginPageState extends State<LoginPage> {
 
   @override
   void dispose() {
+    _passwordController.clear();
     _usernameController.dispose();
     _passwordController.dispose();
     _viewModel.dispose();
@@ -120,7 +121,14 @@ final class _LoginPageState extends State<LoginPage> {
   }
 
   Future<void> _submitLogin(BuildContext context) async {
-    final success = await _viewModel.login();
+    var success = false;
+    try {
+      success = await _viewModel.login();
+    } finally {
+      if (mounted) {
+        _passwordController.clear();
+      }
+    }
 
     if (success && context.mounted) {
       context.go(RoutePaths.shell);

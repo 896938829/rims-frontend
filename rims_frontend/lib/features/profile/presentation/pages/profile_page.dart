@@ -796,6 +796,7 @@ final class _ChangePasswordDialogState extends State<_ChangePasswordDialog> {
 
   @override
   void dispose() {
+    _clearPasswordControllers();
     _oldPasswordController.dispose();
     _newPasswordController.dispose();
     _confirmPasswordController.dispose();
@@ -869,15 +870,28 @@ final class _ChangePasswordDialogState extends State<_ChangePasswordDialog> {
   }
 
   Future<void> _submit(BuildContext context) async {
-    final changed = await widget.viewModel.changePassword(
-      oldPassword: _oldPasswordController.text,
-      newPassword: _newPasswordController.text,
-      confirmPassword: _confirmPasswordController.text,
-    );
+    var changed = false;
+    try {
+      changed = await widget.viewModel.changePassword(
+        oldPassword: _oldPasswordController.text,
+        newPassword: _newPasswordController.text,
+        confirmPassword: _confirmPasswordController.text,
+      );
+    } finally {
+      if (mounted) {
+        _clearPasswordControllers();
+      }
+    }
 
     if (changed && context.mounted) {
       Navigator.of(context).pop();
     }
+  }
+
+  void _clearPasswordControllers() {
+    _oldPasswordController.clear();
+    _newPasswordController.clear();
+    _confirmPasswordController.clear();
   }
 }
 
