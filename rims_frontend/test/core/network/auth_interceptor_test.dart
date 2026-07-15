@@ -135,6 +135,87 @@ void main() {
     },
   );
 
+  test('null token discards caller-provided refresh metadata', () async {
+    final storage = _InterceptorCredentialStorage(_credential());
+    final repository = _InterceptorRefreshRepository();
+    final adapter = _RotatingAdapter(alwaysUnauthorized: true);
+    final dio = _dioWithCoordinator(
+      storage,
+      repository,
+      adapter,
+      tokenReader: () async => null,
+    );
+
+    await expectLater(
+      dio.get<dynamic>(
+        '/poisoned-null',
+        options: Options(
+          extra: {
+            AuthRequestPolicy.credentialSnapshot: _credential(),
+            AuthRequestPolicy.authenticationEpoch: 41,
+          },
+        ),
+      ),
+      throwsA(isA<DioException>()),
+    );
+
+    expect(repository.calls, 0);
+  });
+
+  test('empty token discards caller-provided refresh metadata', () async {
+    final storage = _InterceptorCredentialStorage(_credential());
+    final repository = _InterceptorRefreshRepository();
+    final adapter = _RotatingAdapter(alwaysUnauthorized: true);
+    final dio = _dioWithCoordinator(
+      storage,
+      repository,
+      adapter,
+      tokenReader: () async => '',
+    );
+
+    await expectLater(
+      dio.get<dynamic>(
+        '/poisoned-empty',
+        options: Options(
+          extra: {
+            AuthRequestPolicy.credentialSnapshot: _credential(),
+            AuthRequestPolicy.authenticationEpoch: 41,
+          },
+        ),
+      ),
+      throwsA(isA<DioException>()),
+    );
+
+    expect(repository.calls, 0);
+  });
+
+  test('mismatched token discards caller-provided refresh metadata', () async {
+    final storage = _InterceptorCredentialStorage(_credential());
+    final repository = _InterceptorRefreshRepository();
+    final adapter = _RotatingAdapter(alwaysUnauthorized: true);
+    final dio = _dioWithCoordinator(
+      storage,
+      repository,
+      adapter,
+      tokenReader: () async => 'account-8-access',
+    );
+
+    await expectLater(
+      dio.get<dynamic>(
+        '/poisoned-mismatch',
+        options: Options(
+          extra: {
+            AuthRequestPolicy.credentialSnapshot: _credential(),
+            AuthRequestPolicy.authenticationEpoch: 41,
+          },
+        ),
+      ),
+      throwsA(isA<DioException>()),
+    );
+
+    expect(repository.calls, 0);
+  });
+
   test('closed authentication gate prevents replay after refresh', () async {
     final storage = _InterceptorCredentialStorage(_credential());
     final releaseRefresh = Completer<void>();

@@ -62,6 +62,9 @@ final class AuthInterceptor extends Interceptor {
     RequestInterceptorHandler handler,
   ) async {
     try {
+      options.extra
+        ..remove(AuthRequestPolicy.credentialSnapshot)
+        ..remove(AuthRequestPolicy.authenticationEpoch);
       if (AuthRequestPolicy.isQueuedWrite) {
         options.extra.putIfAbsent(AuthRequestPolicy.queuedWrite, () => true);
       }
@@ -72,7 +75,6 @@ final class AuthInterceptor extends Interceptor {
         );
       }
       if (_hasAuthorizationHeader(options)) {
-        options.extra.remove(AuthRequestPolicy.credentialSnapshot);
         handler.next(options);
         return;
       }
@@ -81,8 +83,7 @@ final class AuthInterceptor extends Interceptor {
       if (token != null && token.isNotEmpty) {
         options.headers['Authorization'] = 'Bearer $token';
         final coordinator = _coordinator;
-        if (coordinator != null &&
-            options.extra[AuthRequestPolicy.credentialSnapshot] == null) {
+        if (coordinator != null) {
           final credential = await coordinator.readCurrentCredential();
           if (credential?.accessToken == token) {
             options.extra[AuthRequestPolicy.credentialSnapshot] = credential;
