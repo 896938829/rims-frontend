@@ -250,17 +250,19 @@ Completed in frontend commits `dcf5e10`, `c7959ce`, `3f8e8a2`, `0edbf0b`, `ada7a
 - Test: `rims_frontend/test/features/auth/device_sessions_view_model_test.dart`
 - Test: `rims_frontend/test/features/auth/device_sessions_page_test.dart`
 
-- [ ] **Step 1: Write RED state/widget tests**
+- [x] **Step 1: Write RED state/widget tests**
 
 Require current marker, safe device/platform/time display, confirm revoke, revoke others/all, current revoke -> login, retained data on refresh failure, one busy gate, no precise IP, touch/semantics/keyboard/narrow/large-text/light/dark coverage.
 
-- [ ] **Step 2: Implement repository-driven page**
+- [x] **Step 2: Implement repository-driven page**
 
 ViewModel uses auth repository only and generation guards all commands. Current/all revocation routes through session controller and M11 ownership cleanup. Add compact profile security entry.
 
-- [ ] **Step 3: Verify and commit**
+- [x] **Step 3: Verify and commit**
 
 Run auth/profile widgets and analyze. Commit: `feat: manage authenticated devices`.
+
+Completed in frontend commits `e8242c9`, `c578f26`, `02b75f6`, `de342bd`, and `9453e4b`. The final implementation uses repository-only state coordination, serialized terminal revocation cleanup, structured restart cleanup debt, owner/generation fencing, complete Unicode control and network-address redaction, injected-clock active-session boundaries, and one-shot expiry refreshes that prevent stale revoke actions. Independent verification passed 104 focused auth/offline tests, `flutter analyze --no-pub`, all 1440 Flutter tests, and the complete Task 9 `git diff --check`; specification review approved the behavior, and the final quality review approved it with no remaining Critical, Important, or Moderate findings.
 
 ## Task 10: Password Policy, Login Throttling, Lockout, And History
 
