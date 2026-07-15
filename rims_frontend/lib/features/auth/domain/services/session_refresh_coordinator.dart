@@ -6,6 +6,16 @@ import '../repositories/auth_repository.dart';
 enum SessionRefreshOrigin { request, queuedWrite, syncCenter }
 
 typedef SessionFailClosedCallback = Future<void> Function(String accountId);
+typedef SessionAuthenticationBlocker = void Function(String accountId);
+
+abstract interface class SessionFailureRecovery {
+  Future<Failure?> retainPendingRevocation(String accountId);
+
+  Future<Failure?> completeOwnershipCleanup({
+    required String accountId,
+    required bool credentialQuarantined,
+  });
+}
 
 final class SessionRefreshCoordinator {
   SessionRefreshCoordinator({
@@ -13,6 +23,8 @@ final class SessionRefreshCoordinator {
     required this.tokenStorage,
     required this.pendingRevocationStorage,
     required this.repository,
+    this.blockAuthentication,
+    this.failureRecovery,
     this.onFailClosed,
   });
 
@@ -20,6 +32,8 @@ final class SessionRefreshCoordinator {
   final TokenStorage tokenStorage;
   final PendingRevocationStorage pendingRevocationStorage;
   final SessionCredentialRepository repository;
+  final SessionAuthenticationBlocker? blockAuthentication;
+  final SessionFailureRecovery? failureRecovery;
   final SessionFailClosedCallback? onFailClosed;
 
   final Map<String, Future<Result<DeviceCredential>>> _inFlight = {};
@@ -47,9 +61,15 @@ final class SessionRefreshCoordinator {
     if (current.generation > failedCredential.generation) {
       return Success(current);
     }
-    if (current.generation != failedCredential.generation) {
-      return const FailureResult(
-        StateFailure(message: 'The credential generation is stale.'),
+    if (current.generation < failedCredential.generation) {
+      final cleanupFailure = await _failClosed(current);
+      return FailureResult(
+        cleanupFailure == null
+            ? const StateFailure(message: 'The credential generation is stale.')
+            : RevocationCleanupFailure(
+                message: 'Unable to quarantine an invalid credential state.',
+                cause: cleanupFailure,
+              ),
       );
     }
 
@@ -91,7 +111,19 @@ final class SessionRefreshCoordinator {
   }
 
   Future<Result<DeviceCredential>> _refresh(DeviceCredential current) async {
-    final refreshed = await repository.refreshCredential(current);
+    final Result<DeviceCredential> refreshed;
+    try {
+      refreshed = await repository.refreshCredential(current);
+    } on Object catch (error) {
+      final cleanupFailure = await _failClosed(current);
+      return FailureResult(
+        cleanupFailure ??
+            UnknownFailure(
+              message: 'Unable to refresh the device credential.',
+              cause: error,
+            ),
+      );
+    }
     if (refreshed case FailureResult<DeviceCredential>(
       failure: final failure,
     )) {
@@ -99,8 +131,8 @@ final class SessionRefreshCoordinator {
       return FailureResult(
         cleanupFailure == null
             ? failure
-            : LocalStorageFailure(
-                message: failure.message,
+            : RevocationCleanupFailure(
+                message: cleanupFailure.message,
                 cause: [failure, cleanupFailure],
               ),
       );
@@ -139,48 +171,100 @@ final class SessionRefreshCoordinator {
     } on Object catch (error) {
       final cleanupFailure = await _failClosed(current);
       return FailureResult(
-        LocalStorageFailure(
-          message: 'Unable to commit rotated credentials.',
-          cause: [error, cleanupFailure],
-        ),
+        cleanupFailure ??
+            LocalStorageFailure(
+              message: 'Unable to commit rotated credentials.',
+              cause: error,
+            ),
       );
     }
   }
 
-  Future<Object?> _failClosed(DeviceCredential expected) async {
-    Object? firstError;
+  Future<Failure?> _failClosed(DeviceCredential expected) async {
+    final errors = <Object>[];
+    final recovery = failureRecovery;
+    var shouldBlockAuthentication = true;
     try {
-      await pendingRevocationStorage.savePendingRevocationAccountId(
-        expected.accountId,
-      );
+      blockAuthentication?.call(expected.accountId);
     } on Object catch (error) {
-      firstError = error;
+      errors.add(error);
     }
-    var invalidatedCurrent = false;
+
+    if (recovery != null) {
+      try {
+        final failure = await recovery.retainPendingRevocation(
+          expected.accountId,
+        );
+        if (failure != null) errors.add(failure);
+      } on Object catch (error) {
+        errors.add(error);
+      }
+    } else {
+      try {
+        await pendingRevocationStorage.savePendingRevocationAccountId(
+          expected.accountId,
+        );
+      } on Object catch (error) {
+        errors.add(error);
+      }
+    }
+
+    var credentialQuarantined = false;
     try {
-      invalidatedCurrent = await credentialStorage
+      credentialQuarantined = await credentialStorage
           .clearDeviceCredentialIfMatches(
             accountId: expected.accountId,
             sessionId: expected.sessionId,
             generation: expected.generation,
           );
+      if (!credentialQuarantined) {
+        final active = await credentialStorage.readDeviceCredential();
+        final sameIdentity = active != null && _sameIdentity(active, expected);
+        shouldBlockAuthentication = active == null || sameIdentity;
+        credentialQuarantined = !sameIdentity;
+        if (!credentialQuarantined) {
+          credentialQuarantined = await credentialStorage
+              .clearDeviceCredentialIfMatches(
+                accountId: active.accountId,
+                sessionId: active.sessionId,
+                generation: active.generation,
+              );
+        }
+      }
     } on Object catch (error) {
-      firstError ??= error;
+      errors.add(error);
       try {
         await tokenStorage.clearAccessToken();
-        invalidatedCurrent = true;
-      } on Object {
-        // The conditional-clear error remains the primary cleanup failure.
+        credentialQuarantined = true;
+      } on Object catch (fallbackError) {
+        errors.add(fallbackError);
       }
     }
-    if (invalidatedCurrent) {
+
+    if (recovery != null) {
+      try {
+        final failure = await recovery.completeOwnershipCleanup(
+          accountId: expected.accountId,
+          credentialQuarantined: credentialQuarantined,
+        );
+        if (failure != null) errors.add(failure);
+      } on Object catch (error) {
+        errors.add(error);
+      }
+    } else if (credentialQuarantined && shouldBlockAuthentication) {
       try {
         await onFailClosed?.call(expected.accountId);
       } on Object catch (error) {
-        firstError ??= error;
+        errors.add(error);
       }
     }
-    return firstError;
+
+    return errors.isEmpty
+        ? null
+        : RevocationCleanupFailure(
+            message: 'Unable to complete refresh credential cleanup.',
+            cause: List.unmodifiable(errors),
+          );
   }
 
   bool _sameIdentity(DeviceCredential left, DeviceCredential right) =>

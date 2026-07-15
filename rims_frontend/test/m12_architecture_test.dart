@@ -12,6 +12,7 @@ const _externalChecklistPath = '../docs/security/external-launch-checklist.md';
 const _pubspecLockPath = 'pubspec.lock';
 const _mainAndroidManifestPath = 'android/app/src/main/AndroidManifest.xml';
 const _androidBuildPath = 'build/app/intermediates';
+const _appCompositionPath = 'lib/app.dart';
 
 const _dataClassIds = <String>{
   'credential.access',
@@ -80,6 +81,18 @@ const _externalApprovalIds = <String>{
 };
 
 void main() {
+  test('production refresh fail closed enters cached M11 cleanup', () {
+    final source = _readRequiredFile(_appCompositionPath);
+
+    expect(source, contains('failureRecovery: cachedAuthRepository'));
+    expect(source, contains('blockAuthentication: (accountId)'));
+    expect(source, contains('_sessionController.invalidateExpiredSession()'));
+    expect(
+      source.indexOf('final cachedAuthRepository = CachedAuthRepository('),
+      lessThan(source.indexOf('_sessionRefreshCoordinator =')),
+    );
+  });
+
   test(
     'checked subprocess timeout terminates a spawned descendant within a bound',
     () async {

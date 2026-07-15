@@ -9,6 +9,7 @@ import 'package:rims_frontend/features/auth/data/models/auth_models.dart';
 import 'package:rims_frontend/features/auth/data/repositories/auth_repository_impl.dart';
 import 'package:rims_frontend/features/auth/domain/entities/auth_session.dart';
 import 'package:rims_frontend/features/auth/domain/repositories/auth_repository.dart';
+import 'package:rims_frontend/features/auth/domain/services/session_refresh_coordinator.dart';
 
 void main() {
   group('AuthRepositoryImpl', () {
@@ -93,6 +94,77 @@ void main() {
         expect(storage.credential, isNull);
         expect(storage.readAccessToken(), completion(isNull));
         expect(storage.pendingAccountId, '7');
+      },
+    );
+
+    test(
+      'failed remote logout exposes marker failure after quarantine',
+      () async {
+        final storage = _FakeDeviceCredentialStorage()
+          ..credential = _deviceCredential()
+          ..accessToken = 'access-1'
+          ..tokenCommitted = true
+          ..pendingMarkerError = StateError('marker unavailable');
+        final repository = AuthRepositoryImpl(
+          remoteDataSource: _FakeRotatingAuthRemoteDataSource(
+            refreshResult: const FailureResult(AuthenticationFailure()),
+            logoutResult: const FailureResult(NetworkFailure()),
+          ),
+          secureStorage: storage,
+        );
+
+        await expectLater(
+          repository.logout(),
+          throwsA(isA<RevocationCleanupFailure>()),
+        );
+
+        expect(storage.credential, isNull);
+        expect(await storage.readAccessToken(), isNull);
+        expect(storage.pendingAccountId, isNull);
+      },
+    );
+
+    test(
+      'real repository logout cannot be undone by an in-flight refresh',
+      () async {
+        final storage = _FakeDeviceCredentialStorage()
+          ..credential = _deviceCredential()
+          ..accessToken = 'access-1'
+          ..tokenCommitted = true;
+        final releaseRefresh = Completer<void>();
+        final remoteDataSource = _FakeRotatingAuthRemoteDataSource(
+          refreshResult: Success(
+            _rotatingLoginModel(
+              accessToken: 'access-2',
+              refreshToken: 'refresh-2',
+              tokenVersion: 6,
+            ),
+          ),
+          refreshBlocker: releaseRefresh,
+        );
+        final repository = AuthRepositoryImpl(
+          remoteDataSource: remoteDataSource,
+          secureStorage: storage,
+        );
+        final coordinator = SessionRefreshCoordinator(
+          credentialStorage: storage,
+          tokenStorage: storage,
+          pendingRevocationStorage: storage,
+          repository: repository,
+        );
+
+        final refreshing = coordinator.refreshAfterUnauthorized(
+          failedCredential: _deviceCredential(),
+          origin: SessionRefreshOrigin.request,
+        );
+        await remoteDataSource.refreshStarted.future;
+        await repository.logout();
+        releaseRefresh.complete();
+
+        expect(await refreshing, isA<FailureResult<DeviceCredential>>());
+        expect(storage.credential, isNull);
+        expect(await storage.readAccessToken(), isNull);
+        expect(remoteDataSource.logoutCalls, 1);
       },
     );
 
@@ -868,6 +940,7 @@ final class _FakeDeviceCredentialStorage extends _FakeTokenStorage
     implements DeviceCredentialStorage, PendingRevocationStorage {
   DeviceCredential? credential;
   String? pendingAccountId;
+  Object? pendingMarkerError;
 
   @override
   Future<void> clearAccessToken() async {
@@ -942,6 +1015,7 @@ final class _FakeDeviceCredentialStorage extends _FakeTokenStorage
 
   @override
   Future<void> savePendingRevocationAccountId(String accountId) async {
+    if (pendingMarkerError case final error?) throw error;
     pendingAccountId = accountId;
   }
 }
@@ -1014,22 +1088,31 @@ final class _FakeRotatingAuthRemoteDataSource extends _FakeAuthRemoteDataSource
   _FakeRotatingAuthRemoteDataSource({
     required this.refreshResult,
     this.logoutResult = const Success(null),
+    this.refreshBlocker,
   });
 
   final Result<LoginResponseModel> refreshResult;
   final Result<void> logoutResult;
+  final Completer<void>? refreshBlocker;
+  final Completer<void> refreshStarted = Completer<void>();
   String? lastRefreshToken;
+  int logoutCalls = 0;
 
   @override
   Future<Result<LoginResponseModel>> refresh({
     required String refreshToken,
   }) async {
     lastRefreshToken = refreshToken;
+    if (!refreshStarted.isCompleted) refreshStarted.complete();
+    await refreshBlocker?.future;
     return refreshResult;
   }
 
   @override
-  Future<Result<void>> logout() async => logoutResult;
+  Future<Result<void>> logout() async {
+    logoutCalls += 1;
+    return logoutResult;
+  }
 }
 
 final class _DelayedLoginRemoteDataSource implements AuthRemoteDataSource {

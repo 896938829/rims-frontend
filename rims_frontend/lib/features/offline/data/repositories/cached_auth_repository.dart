@@ -7,6 +7,7 @@ import '../../../auth/domain/entities/app_user.dart';
 import '../../../auth/domain/entities/auth_session.dart';
 import '../../../auth/domain/entities/warehouse.dart';
 import '../../../auth/domain/repositories/auth_repository.dart';
+import '../../../auth/domain/services/session_refresh_coordinator.dart';
 import '../../domain/entities/cache_snapshot.dart';
 import '../../domain/services/offline_store.dart';
 import '../../domain/services/offline_ownership_service.dart';
@@ -19,7 +20,8 @@ final class CachedAuthRepository
         AuthRepository,
         AuthSessionRestoreMetadata,
         AuthCredentialInvalidator,
-        TransactionalAuthRepository {
+        TransactionalAuthRepository,
+        SessionFailureRecovery {
   CachedAuthRepository({
     required this.delegate,
     required this.store,
@@ -492,9 +494,18 @@ final class CachedAuthRepository
   @override
   Future<void> logout() async {
     final accountId = await accountStorage.readAuthenticatedAccountId();
-    await delegate.logout();
+    Failure? cleanupFailure;
+    try {
+      await delegate.logout();
+    } on RevocationCleanupFailure catch (failure) {
+      onSessionExpired?.call();
+      cleanupFailure = accountId == null
+          ? failure
+          : await retainPendingRevocation(accountId);
+    }
     if (accountId != null) await accountStorage.clearAuthenticatedAccountId();
     _clearMetadata();
+    if (cleanupFailure != null) throw cleanupFailure;
   }
 
   @override
@@ -667,27 +678,91 @@ final class CachedAuthRepository
     if (firstError != null) throw firstError;
   }
 
-  Future<RevocationCleanupFailure?> _completeRevocation(
-    String accountId, {
-    bool notifyRevocation = true,
-  }) async {
+  @override
+  Future<Failure?> retainPendingRevocation(String accountId) async {
     _volatilePendingRevocationAccountIds.add(accountId);
     _revocationInvalidated = true;
-    if (notifyRevocation) onSessionRevoked();
-    Object? firstError;
-    try {
-      await revocationJournal?.addAccountId(accountId);
-    } on Object catch (error) {
-      firstError = error;
+    final errors = <Object>[];
+    var journalRetained = false;
+    var primaryRetained = false;
+    final journal = revocationJournal;
+    if (journal != null) {
+      try {
+        await journal.addAccountId(accountId);
+        journalRetained = true;
+      } on Object catch (error) {
+        errors.add(error);
+      }
     }
     try {
       final primary = await revocationStorage.readPendingRevocationAccountId();
       if (primary == null || primary == accountId) {
         await revocationStorage.savePendingRevocationAccountId(accountId);
+        primaryRetained = true;
       }
+    } on Object catch (error) {
+      errors.add(error);
+    }
+    if (journalRetained || primaryRetained) return null;
+    return RevocationCleanupFailure(
+      message: 'Unable to retain pending credential revocation.',
+      cause: List.unmodifiable(errors),
+    );
+  }
+
+  @override
+  Future<Failure?> completeOwnershipCleanup({
+    required String accountId,
+    required bool credentialQuarantined,
+  }) async {
+    Object? firstError;
+    if (!credentialQuarantined) {
+      firstError = const RevocationCleanupFailure(
+        message: 'The failed credential could not be quarantined.',
+      );
+    }
+    try {
+      await accountStorage.clearAuthenticatedAccountId();
     } on Object catch (error) {
       firstError ??= error;
     }
+    try {
+      await _deleteSessionProjection(accountId);
+    } on OfflineWriteBlockedException {
+      // The active fail-closed transition already blocks offline writes.
+    } on Object catch (error) {
+      firstError ??= error;
+    }
+    final ownershipFailure = await _applyOwnership(
+      OfflineOwnershipIntent.tokenExpiry(accountId: accountId),
+    );
+    firstError ??= ownershipFailure;
+    if (firstError == null) {
+      try {
+        await _releasePendingRevocation(accountId);
+      } on Object catch (error) {
+        firstError = error;
+      }
+    }
+    if (firstError != null) {
+      return RevocationCleanupFailure(
+        message: firstError is Failure
+            ? firstError.message
+            : 'Refresh credential cleanup could not be completed.',
+        cause: firstError,
+      );
+    }
+    _volatilePendingRevocationAccountIds.remove(accountId);
+    _revocationInvalidated = _volatilePendingRevocationAccountIds.isNotEmpty;
+    return null;
+  }
+
+  Future<RevocationCleanupFailure?> _completeRevocation(
+    String accountId, {
+    bool notifyRevocation = true,
+  }) async {
+    if (notifyRevocation) onSessionRevoked();
+    Object? firstError = await retainPendingRevocation(accountId);
     // Quarantine every independently recoverable projection before cleanup.
     try {
       await _expireDelegateCredentials();
@@ -715,8 +790,7 @@ final class CachedAuthRepository
     }
     if (firstError == null) {
       try {
-        await revocationJournal?.removeAccountId(accountId);
-        await _clearPendingRevocationIfMatches(accountId);
+        await _releasePendingRevocation(accountId);
       } on Object catch (error) {
         firstError = error;
       }
@@ -799,6 +873,11 @@ final class CachedAuthRepository
     if (await revocationStorage.readPendingRevocationAccountId() == accountId) {
       await revocationStorage.clearPendingRevocationAccountId();
     }
+  }
+
+  Future<void> _releasePendingRevocation(String accountId) async {
+    await revocationJournal?.removeAccountId(accountId);
+    await _clearPendingRevocationIfMatches(accountId);
   }
 
   Future<Failure?> _applyOwnership(OfflineOwnershipIntent intent) async {

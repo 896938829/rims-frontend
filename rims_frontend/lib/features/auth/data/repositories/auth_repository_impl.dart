@@ -303,6 +303,7 @@ final class AuthRepositoryImpl
         : null;
     final current = await deviceStorage?.readDeviceCredential();
     var remoteRevocationFailed = false;
+    Object? markerError;
     if (rotatingRemote != null && current != null) {
       try {
         final result = await rotatingRemote.logout();
@@ -314,13 +315,19 @@ final class AuthRepositoryImpl
         if (secureStorage case final PendingRevocationStorage pending) {
           try {
             await pending.savePendingRevocationAccountId(current.accountId);
-          } on Object {
-            // Local credential quarantine below remains fail closed.
+          } on Object catch (error) {
+            markerError = error;
           }
         }
       }
     }
     await secureStorage.clearAccessToken();
+    if (markerError != null) {
+      throw RevocationCleanupFailure(
+        message: 'Unable to retain pending credential revocation.',
+        cause: markerError,
+      );
+    }
   }
 
   @override

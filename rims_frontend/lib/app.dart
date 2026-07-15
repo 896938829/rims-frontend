@@ -222,14 +222,7 @@ final class _MainAppState extends State<MainApp> {
       remoteDataSource: ApiAuthRemoteDataSource(_apiClient),
       secureStorage: _secureStorage,
     );
-    _sessionRefreshCoordinator = SessionRefreshCoordinator(
-      credentialStorage: _secureStorage,
-      tokenStorage: _secureStorage,
-      pendingRevocationStorage: _secureStorage,
-      repository: authRepository,
-      onFailClosed: (_) async => _sessionController.invalidateExpiredSession(),
-    );
-    _authRepository = CachedAuthRepository(
+    final cachedAuthRepository = CachedAuthRepository(
       delegate: authRepository,
       store: _offlineStore,
       tokenStorage: _secureStorage,
@@ -240,6 +233,19 @@ final class _MainAppState extends State<MainApp> {
       authEpochReader: () => _sessionController.authEpoch,
       onSessionRevoked: _sessionController.invalidateRevokedSession,
       onSessionExpired: _sessionController.invalidateExpiredSession,
+    );
+    _authRepository = cachedAuthRepository;
+    _sessionRefreshCoordinator = SessionRefreshCoordinator(
+      credentialStorage: _secureStorage,
+      tokenStorage: _secureStorage,
+      pendingRevocationStorage: _secureStorage,
+      repository: authRepository,
+      blockAuthentication: (accountId) {
+        if (_sessionController.currentUser?.id.toString() == accountId) {
+          _sessionController.invalidateExpiredSession();
+        }
+      },
+      failureRecovery: cachedAuthRepository,
     );
     final documentsRemoteDataSource = ApiDocumentsRemoteDataSource(_apiClient);
     final documentsRepository = DocumentsRepositoryImpl(

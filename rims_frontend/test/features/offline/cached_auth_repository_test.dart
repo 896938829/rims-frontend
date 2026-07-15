@@ -16,6 +16,7 @@ import 'package:rims_frontend/features/auth/domain/entities/app_user.dart';
 import 'package:rims_frontend/features/auth/domain/entities/auth_session.dart';
 import 'package:rims_frontend/features/auth/domain/entities/warehouse.dart';
 import 'package:rims_frontend/features/auth/domain/repositories/auth_repository.dart';
+import 'package:rims_frontend/features/auth/domain/services/session_refresh_coordinator.dart';
 import 'package:rims_frontend/features/auth/presentation/view_models/auth_session_controller.dart';
 import 'package:rims_frontend/features/offline/data/repositories/cached_auth_repository.dart';
 import 'package:rims_frontend/features/offline/data/database/offline_database.dart';
@@ -600,6 +601,139 @@ void main() {
     expect(loginDelegate.loginCalls, 1);
     expect(await journal.readAccountIds(), isEmpty);
   });
+
+  test(
+    'refresh failure recovery uses journal fallback then M11 token-expiry ownership',
+    () async {
+      final storage = _FakeSessionStorage(token: 'expired-token')
+        ..accountId = '7'
+        ..failNext(_RevocationStorageFailure.saveMarker);
+      final journal = MemoryPendingRevocationJournal();
+      final ownership = _RecordingOwnershipCoordinator();
+      final repository = CachedAuthRepository(
+        delegate: _FakeAuthRepository(
+          restoreResult: const Success<AuthSession?>(null),
+        ),
+        store: MemoryOfflineStore(),
+        tokenStorage: storage,
+        accountStorage: storage,
+        revocationStorage: storage,
+        revocationJournal: journal,
+        ownershipCoordinator: ownership,
+        onSessionRevoked: () {},
+      );
+      final recovery = repository as SessionFailureRecovery;
+
+      final retained = await recovery.retainPendingRevocation('7');
+      final completed = await recovery.completeOwnershipCleanup(
+        accountId: '7',
+        credentialQuarantined: true,
+      );
+
+      expect(retained, isNull);
+      expect(completed, isNull);
+      expect(storage.accountId, isNull);
+      expect(
+        ownership.intents.single.reason,
+        OfflineOwnershipReason.tokenExpiry,
+      );
+      expect(await journal.readAccountIds(), isEmpty);
+    },
+  );
+
+  test(
+    'refresh recovery exposes failure when no durable marker survives',
+    () async {
+      final storage = _FakeSessionStorage(token: 'expired-token')
+        ..accountId = '7'
+        ..failNext(_RevocationStorageFailure.saveMarker);
+      final repository = CachedAuthRepository(
+        delegate: _FakeAuthRepository(
+          restoreResult: const Success<AuthSession?>(null),
+        ),
+        store: MemoryOfflineStore(),
+        tokenStorage: storage,
+        accountStorage: storage,
+        revocationStorage: storage,
+        revocationJournal: _FailingPendingRevocationJournal(),
+        ownershipCoordinator: _RecordingOwnershipCoordinator(),
+        onSessionRevoked: () {},
+      );
+      final recovery = repository as SessionFailureRecovery;
+
+      final failure = await recovery.retainPendingRevocation('7');
+
+      expect(failure, isA<RevocationCleanupFailure>());
+      expect(storage.pendingRevocationAccountId, isNull);
+    },
+  );
+
+  test(
+    'logout marker failure falls back to the M11 revocation journal',
+    () async {
+      final storage = _FakeSessionStorage(token: 'access-1')
+        ..accountId = '7'
+        ..failNext(_RevocationStorageFailure.saveMarker);
+      final journal = MemoryPendingRevocationJournal();
+      var memoryBlocked = false;
+      final repository = CachedAuthRepository(
+        delegate: _FakeAuthRepository(
+          restoreResult: const Success<AuthSession?>(null),
+          logoutError: const RevocationCleanupFailure(
+            message: 'primary marker failed',
+          ),
+        ),
+        store: MemoryOfflineStore(),
+        tokenStorage: storage,
+        accountStorage: storage,
+        revocationStorage: storage,
+        revocationJournal: journal,
+        ownershipCoordinator: _RecordingOwnershipCoordinator(),
+        onSessionRevoked: () {},
+        onSessionExpired: () => memoryBlocked = true,
+      );
+
+      await repository.logout();
+
+      expect(memoryBlocked, isTrue);
+      expect(storage.accountId, isNull);
+      expect(await journal.readAccountIds(), {'7'});
+    },
+  );
+
+  test(
+    'logout reports cleanup failure when no durable marker survives',
+    () async {
+      final storage = _FakeSessionStorage(token: 'access-1')
+        ..accountId = '7'
+        ..failNext(_RevocationStorageFailure.saveMarker);
+      var memoryBlocked = false;
+      final repository = CachedAuthRepository(
+        delegate: _FakeAuthRepository(
+          restoreResult: const Success<AuthSession?>(null),
+          logoutError: const RevocationCleanupFailure(
+            message: 'primary marker failed',
+          ),
+        ),
+        store: MemoryOfflineStore(),
+        tokenStorage: storage,
+        accountStorage: storage,
+        revocationStorage: storage,
+        revocationJournal: _FailingPendingRevocationJournal(),
+        ownershipCoordinator: _RecordingOwnershipCoordinator(),
+        onSessionRevoked: () {},
+        onSessionExpired: () => memoryBlocked = true,
+      );
+
+      await expectLater(
+        repository.logout(),
+        throwsA(isA<RevocationCleanupFailure>()),
+      );
+
+      expect(memoryBlocked, isTrue);
+      expect(storage.accountId, isNull);
+    },
+  );
 
   test(
     'pending revocations are retried per account without clearing later failures',
@@ -1900,6 +2034,19 @@ final class _RecordingOwnershipCoordinator
   }
 }
 
+final class _FailingPendingRevocationJournal
+    implements PendingRevocationJournal {
+  @override
+  Future<void> addAccountId(String accountId) async =>
+      throw StateError('journal write failed');
+
+  @override
+  Future<Set<String>> readAccountIds() async => const {};
+
+  @override
+  Future<void> removeAccountId(String accountId) async {}
+}
+
 final class _ApplyOnlyOwnershipCoordinator
     implements OfflineOwnershipCoordinator {
   @override
@@ -2384,11 +2531,13 @@ final class _FakeAuthRepository implements AuthRepository {
     required this.restoreResult,
     this.loginResult = const FailureResult(UnknownFailure()),
     this.switchResult = const FailureResult(UnknownFailure()),
+    this.logoutError,
   });
 
   Result<AuthSession?> restoreResult;
   Result<AuthSession> loginResult;
   Result<Warehouse> switchResult;
+  Object? logoutError;
   int loginCalls = 0;
   int logoutCalls = 0;
 
@@ -2412,6 +2561,7 @@ final class _FakeAuthRepository implements AuthRepository {
   @override
   Future<void> logout() async {
     logoutCalls += 1;
+    if (logoutError case final error?) throw error;
   }
 }
 
