@@ -32,6 +32,7 @@ final class ApiClient {
     Dio? dio,
     ApiExceptionMapper exceptionMapper = const ApiExceptionMapper(),
     TokenReader? tokenReader,
+    SessionRefreshCoordinatorReader? refreshCoordinatorReader,
     WarehouseIdReader? warehouseIdReader,
     AppEventBus? eventBus,
     ApiRequestObserver? requestObserver,
@@ -40,6 +41,7 @@ final class ApiClient {
          dio: dio ?? Dio(),
          exceptionMapper: exceptionMapper,
          tokenReader: tokenReader,
+         refreshCoordinatorReader: refreshCoordinatorReader,
          warehouseIdReader: warehouseIdReader,
          eventBus: eventBus,
          requestObserver: requestObserver,
@@ -52,6 +54,7 @@ final class ApiClient {
     Dio? dio,
     ApiExceptionMapper exceptionMapper = const ApiExceptionMapper(),
     TokenReader? tokenReader,
+    SessionRefreshCoordinatorReader? refreshCoordinatorReader,
     WarehouseIdReader? warehouseIdReader,
     AppEventBus? eventBus,
     ApiRequestObserver? requestObserver,
@@ -60,6 +63,7 @@ final class ApiClient {
          dio: dio ?? Dio(),
          exceptionMapper: exceptionMapper,
          tokenReader: tokenReader,
+         refreshCoordinatorReader: refreshCoordinatorReader,
          warehouseIdReader: warehouseIdReader,
          eventBus: eventBus,
          requestObserver: requestObserver,
@@ -71,6 +75,7 @@ final class ApiClient {
     required this._dio,
     required this._exceptionMapper,
     required TokenReader? tokenReader,
+    required SessionRefreshCoordinatorReader? refreshCoordinatorReader,
     required WarehouseIdReader? warehouseIdReader,
     required this.eventBus,
     required this.requestObserver,
@@ -93,7 +98,13 @@ final class ApiClient {
     }
 
     if (tokenReader != null) {
-      _dio.interceptors.add(AuthInterceptor(tokenReader: tokenReader));
+      _dio.interceptors.add(
+        AuthInterceptor(
+          tokenReader: tokenReader,
+          refreshCoordinatorReader: refreshCoordinatorReader,
+          requestExecutor: _dio.fetch,
+        ),
+      );
     }
 
     if (warehouseIdReader != null) {

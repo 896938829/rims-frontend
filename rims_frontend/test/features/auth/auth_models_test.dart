@@ -1,8 +1,55 @@
+import 'dart:convert';
+
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rims_frontend/features/auth/data/models/auth_models.dart';
 
 void main() {
   group('LoginResponseModel', () {
+    test('parses rotating backend credentials and device session', () {
+      final payload = base64Url
+          .encode(utf8.encode(jsonEncode({'ver': 5})))
+          .replaceAll('=', '');
+      final model = LoginResponseModel.fromJson({
+        'token': 'legacy-token-alias',
+        'accessToken': 'header.$payload.signature',
+        'refreshToken': 'refresh-token',
+        'accessExpiresAt': 1784082600,
+        'refreshExpiresAt': 1786674600,
+        'session': {
+          'id': 'session-7',
+          'deviceLabel': 'Warehouse tablet',
+          'platform': 'android',
+          'userAgentFamily': 'RIMS Android',
+          'createdAt': '2026-07-15T02:00:00Z',
+          'lastUsedAt': '2026-07-15T02:01:00Z',
+          'expiresAt': '2026-08-14T02:00:00Z',
+          'current': true,
+        },
+        'user': {
+          'id': 7,
+          'username': 'alice',
+          'roleCode': 'operator',
+          'roleName': 'Operator',
+        },
+      });
+
+      expect(model.accessToken, 'header.$payload.signature');
+      expect(model.token, 'header.$payload.signature');
+      expect(model.refreshToken, 'refresh-token');
+      expect(
+        model.accessExpiresAt,
+        DateTime.fromMillisecondsSinceEpoch(1784082600000, isUtc: true),
+      );
+      expect(
+        model.refreshExpiresAt,
+        DateTime.fromMillisecondsSinceEpoch(1786674600000, isUtc: true),
+      );
+      expect(model.tokenVersion, 5);
+      expect(model.session?.id, 'session-7');
+      expect(model.session?.deviceLabel, 'Warehouse tablet');
+      expect(model.session?.current, isTrue);
+    });
+
     test('parses accessToken and alternate user payload fields', () {
       final model = LoginResponseModel.fromJson({
         'accessToken': 'token-from-backend',
@@ -15,6 +62,9 @@ void main() {
       });
 
       expect(model.token, 'token-from-backend');
+      expect(model.accessToken, 'token-from-backend');
+      expect(model.refreshToken, isNull);
+      expect(model.session, isNull);
       expect(model.user.id, 7);
       expect(model.user.username, 'alice');
       expect(model.user.realName, 'Alice Chen');

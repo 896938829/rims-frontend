@@ -29,6 +29,7 @@ import 'features/attachments/domain/services/attachment_picker.dart';
 import 'features/auth/data/datasources/auth_remote_datasource.dart';
 import 'features/auth/data/repositories/auth_repository_impl.dart';
 import 'features/auth/domain/repositories/auth_repository.dart';
+import 'features/auth/domain/services/session_refresh_coordinator.dart';
 import 'features/auth/presentation/view_models/auth_session_controller.dart';
 import 'features/documents/data/datasources/documents_remote_datasource.dart';
 import 'features/documents/data/repositories/documents_repository_impl.dart';
@@ -106,6 +107,7 @@ final class _MainAppState extends State<MainApp> {
   StreamSubscription<TokenExpiredEvent>? _tokenExpiredSubscription;
   late final ApiClient _apiClient;
   late final AuthRepository _authRepository;
+  late final SessionRefreshCoordinator _sessionRefreshCoordinator;
   late final DocumentsRepository _documentsRepository;
   late final InventoryRepository _inventoryRepository;
   late final ReportsRepository _reportsRepository;
@@ -185,9 +187,10 @@ final class _MainAppState extends State<MainApp> {
     unawaited(_attachmentPicker.recoverLostData());
     _apiClient = ApiClient(
       tokenReader: () async => _sessionController.canAuthenticateRequests
-          ? _sessionController.accessToken ??
-                await _secureStorage.readAccessToken()
+          ? await _secureStorage.readAccessToken() ??
+                _sessionController.accessToken
           : null,
+      refreshCoordinatorReader: () => _sessionRefreshCoordinator,
       warehouseIdReader: () async => _sessionController.currentWarehouse?.id,
       eventBus: _eventBus,
       requestObserver: ApiReachabilityObserver(_networkStatusService).call,
@@ -218,6 +221,13 @@ final class _MainAppState extends State<MainApp> {
     final authRepository = AuthRepositoryImpl(
       remoteDataSource: ApiAuthRemoteDataSource(_apiClient),
       secureStorage: _secureStorage,
+    );
+    _sessionRefreshCoordinator = SessionRefreshCoordinator(
+      credentialStorage: _secureStorage,
+      tokenStorage: _secureStorage,
+      pendingRevocationStorage: _secureStorage,
+      repository: authRepository,
+      onFailClosed: (_) async => _sessionController.invalidateExpiredSession(),
     );
     _authRepository = CachedAuthRepository(
       delegate: authRepository,

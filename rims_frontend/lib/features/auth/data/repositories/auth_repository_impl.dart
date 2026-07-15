@@ -14,7 +14,8 @@ final class AuthRepositoryImpl
         AuthRepository,
         AuthCredentialInvalidator,
         TransactionalAuthRepository,
-        ProvisionalTransactionalAuthRepository {
+        ProvisionalTransactionalAuthRepository,
+        SessionCredentialRepository {
   const AuthRepositoryImpl({
     required this.remoteDataSource,
     required this.secureStorage,
@@ -180,7 +181,7 @@ final class AuthRepositoryImpl
   }) async {
     return loginResult.when(
       success: (login) async {
-        final token = login.token.trim();
+        final token = login.accessToken.trim();
         if (token.isEmpty) {
           return const FailureResult<AuthSession>(
             UnknownFailure(message: '登录响应缺少 token'),
@@ -194,7 +195,28 @@ final class AuthRepositoryImpl
         }
 
         try {
-          if (secureStorage case final AuthTokenTransactionStorage owned) {
+          if (secureStorage case final DeviceCredentialStorage deviceStorage
+              when login.hasRotatingCredential) {
+            final credential = _credentialFromLogin(
+              login,
+              generation: 1,
+              biometricPolicy: BiometricCredentialPolicy.disabled,
+            );
+            final published = await deviceStorage
+                .savePendingDeviceCredentialForOwner(
+                  credential: credential,
+                  ownerId: ownerId,
+                  attemptVersion: attemptVersion!,
+                );
+            if (!published) {
+              return const FailureResult<AuthSession>(
+                LocalStorageFailure(
+                  message: 'The authenticated credential was superseded.',
+                ),
+              );
+            }
+          } else if (secureStorage
+              case final AuthTokenTransactionStorage owned) {
             final published = await owned.savePendingAccessTokenForOwner(
               token: token,
               ownerId: ownerId,
@@ -272,8 +294,33 @@ final class AuthRepositoryImpl
   }
 
   @override
-  Future<void> logout() {
-    return secureStorage.clearAccessToken();
+  Future<void> logout() async {
+    final rotatingRemote = remoteDataSource is RotatingAuthRemoteDataSource
+        ? remoteDataSource as RotatingAuthRemoteDataSource
+        : null;
+    final deviceStorage = secureStorage is DeviceCredentialStorage
+        ? secureStorage as DeviceCredentialStorage
+        : null;
+    final current = await deviceStorage?.readDeviceCredential();
+    var remoteRevocationFailed = false;
+    if (rotatingRemote != null && current != null) {
+      try {
+        final result = await rotatingRemote.logout();
+        remoteRevocationFailed = result is FailureResult<void>;
+      } on Object {
+        remoteRevocationFailed = true;
+      }
+      if (remoteRevocationFailed) {
+        if (secureStorage case final PendingRevocationStorage pending) {
+          try {
+            await pending.savePendingRevocationAccountId(current.accountId);
+          } on Object {
+            // Local credential quarantine below remains fail closed.
+          }
+        }
+      }
+    }
+    await secureStorage.clearAccessToken();
   }
 
   @override
@@ -306,6 +353,46 @@ final class AuthRepositoryImpl
     if (secureStorage case final AuthTokenTransactionStorage transaction) {
       await transaction.clearPendingAccessToken();
     }
+  }
+
+  @override
+  Future<Result<DeviceCredential>> refreshCredential(
+    DeviceCredential current,
+  ) async {
+    final remote = remoteDataSource is RotatingAuthRemoteDataSource
+        ? remoteDataSource as RotatingAuthRemoteDataSource
+        : null;
+    if (remote == null) {
+      return const FailureResult(
+        AuthenticationFailure(message: 'Session refresh is unavailable.'),
+      );
+    }
+    final result = await remote.refresh(refreshToken: current.refreshToken);
+    return result.when(
+      success: (login) {
+        try {
+          final next = _credentialFromLogin(
+            login,
+            generation: current.generation + 1,
+            biometricPolicy: current.biometricPolicy,
+          );
+          if (next.accountId != current.accountId ||
+              next.sessionId != current.sessionId) {
+            return const FailureResult<DeviceCredential>(
+              AuthenticationFailure(
+                message: 'Rotated credential identity changed.',
+              ),
+            );
+          }
+          return Success(next);
+        } on Object catch (error) {
+          return FailureResult<DeviceCredential>(
+            UnknownFailure(message: 'Invalid refresh response.', cause: error),
+          );
+        }
+      },
+      failure: FailureResult<DeviceCredential>.new,
+    );
   }
 
   FailureResult<T> _localStorageFailure<T>(String message, Object error) =>
@@ -346,6 +433,31 @@ final class AuthRepositoryImpl
 
     return null;
   }
+}
+
+DeviceCredential _credentialFromLogin(
+  LoginResponseModel login, {
+  required int generation,
+  required BiometricCredentialPolicy biometricPolicy,
+}) {
+  if (!login.hasRotatingCredential) {
+    throw const FormatException('Incomplete rotating credential response.');
+  }
+  final accountId = login.user.id.toString();
+  if (login.user.id < 1 || accountId.isEmpty) {
+    throw const FormatException('Invalid credential account identity.');
+  }
+  return DeviceCredential(
+    accessToken: login.accessToken,
+    refreshToken: login.refreshToken!,
+    accountId: accountId,
+    sessionId: login.session!.id,
+    accessExpiresAt: login.accessExpiresAt!,
+    refreshExpiresAt: login.refreshExpiresAt!,
+    tokenVersion: login.tokenVersion!,
+    generation: generation,
+    biometricPolicy: biometricPolicy,
+  );
 }
 
 String _newTokenOwnerId() => const Uuid().v4();

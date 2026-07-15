@@ -1,29 +1,141 @@
+import 'dart:convert';
+
 import '../../domain/entities/app_user.dart';
+import '../../domain/entities/device_session.dart';
 import '../../domain/entities/warehouse.dart';
 
 final class LoginResponseModel {
-  const LoginResponseModel({required this.token, required this.user});
+  const LoginResponseModel({
+    required String token,
+    required this.user,
+    String? accessToken,
+    this.refreshToken,
+    this.accessExpiresAt,
+    this.refreshExpiresAt,
+    this.tokenVersion,
+    this.session,
+  }) : accessToken = accessToken ?? token,
+       token = accessToken ?? token;
 
   factory LoginResponseModel.fromJson(Map<dynamic, dynamic> json) {
     final userJson =
         _readMap(json, const ['user', 'userInfo', 'currentUser', 'profile']) ??
         json;
 
+    final accessToken =
+        _readString(json, const [
+          'accessToken',
+          'access_token',
+          'token',
+          'jwt',
+        ]) ??
+        '';
+    final sessionJson = _readMap(json, const ['session']);
     return LoginResponseModel(
-      token:
-          _readString(json, const [
-            'token',
-            'accessToken',
-            'access_token',
-            'jwt',
-          ]) ??
-          '',
+      token: accessToken,
+      accessToken: accessToken,
+      refreshToken: _readString(json, const ['refreshToken', 'refresh_token']),
+      accessExpiresAt: _readDateTime(json, const [
+        'accessExpiresAt',
+        'expiresAt',
+        'access_expires_at',
+      ]),
+      refreshExpiresAt: _readDateTime(json, const [
+        'refreshExpiresAt',
+        'refresh_expires_at',
+      ]),
+      tokenVersion:
+          _readInt(json, const ['tokenVersion', 'token_version']) ??
+          _readJwtTokenVersion(accessToken),
+      session: sessionJson == null
+          ? null
+          : DeviceSessionModel.fromJson(sessionJson),
       user: AppUserModel.fromJson(userJson),
     );
   }
 
   final String token;
+  final String accessToken;
+  final String? refreshToken;
+  final DateTime? accessExpiresAt;
+  final DateTime? refreshExpiresAt;
+  final int? tokenVersion;
+  final DeviceSessionModel? session;
   final AppUserModel user;
+
+  bool get hasRotatingCredential =>
+      refreshToken != null &&
+      accessExpiresAt != null &&
+      refreshExpiresAt != null &&
+      tokenVersion != null &&
+      session != null;
+}
+
+final class DeviceSessionModel {
+  const DeviceSessionModel({
+    required this.id,
+    required this.deviceLabel,
+    required this.platform,
+    required this.userAgentFamily,
+    required this.createdAt,
+    required this.lastUsedAt,
+    required this.expiresAt,
+    required this.current,
+    this.revokedAt,
+  });
+
+  factory DeviceSessionModel.fromJson(Map<dynamic, dynamic> json) {
+    final id = _readString(json, const ['id', 'sessionId', 'session_id']);
+    final createdAt = _readDateTime(json, const ['createdAt', 'created_at']);
+    final lastUsedAt = _readDateTime(json, const [
+      'lastUsedAt',
+      'last_used_at',
+    ]);
+    final expiresAt = _readDateTime(json, const ['expiresAt', 'expires_at']);
+    if (id == null ||
+        createdAt == null ||
+        lastUsedAt == null ||
+        expiresAt == null) {
+      throw const FormatException('Invalid device session response');
+    }
+    return DeviceSessionModel(
+      id: id,
+      deviceLabel:
+          _readString(json, const ['deviceLabel', 'device_label']) ??
+          'Unknown device',
+      platform: _readString(json, const ['platform']) ?? 'unknown',
+      userAgentFamily:
+          _readString(json, const ['userAgentFamily', 'user_agent_family']) ??
+          'unknown',
+      createdAt: createdAt,
+      lastUsedAt: lastUsedAt,
+      expiresAt: expiresAt,
+      revokedAt: _readDateTime(json, const ['revokedAt', 'revoked_at']),
+      current: _readBool(json, const ['current']) ?? false,
+    );
+  }
+
+  final String id;
+  final String deviceLabel;
+  final String platform;
+  final String userAgentFamily;
+  final DateTime createdAt;
+  final DateTime lastUsedAt;
+  final DateTime expiresAt;
+  final DateTime? revokedAt;
+  final bool current;
+
+  DeviceSession toEntity() => DeviceSession(
+    id: id,
+    deviceLabel: deviceLabel,
+    platform: platform,
+    userAgentFamily: userAgentFamily,
+    createdAt: createdAt,
+    lastUsedAt: lastUsedAt,
+    expiresAt: expiresAt,
+    revokedAt: revokedAt,
+    current: current,
+  );
 }
 
 final class AppUserModel {
@@ -240,4 +352,38 @@ bool? _readBool(Map<dynamic, dynamic> json, List<String> keys) {
   }
 
   return null;
+}
+
+DateTime? _readDateTime(Map<dynamic, dynamic> json, List<String> keys) {
+  for (final key in keys) {
+    final value = json[key];
+    if (value is int) {
+      final milliseconds = value.abs() < 100000000000 ? value * 1000 : value;
+      return DateTime.fromMillisecondsSinceEpoch(milliseconds, isUtc: true);
+    }
+    if (value is num) {
+      final raw = value.round();
+      final milliseconds = raw.abs() < 100000000000 ? raw * 1000 : raw;
+      return DateTime.fromMillisecondsSinceEpoch(milliseconds, isUtc: true);
+    }
+    if (value is String) {
+      final parsed = DateTime.tryParse(value);
+      if (parsed != null) return parsed.toUtc();
+    }
+  }
+  return null;
+}
+
+int? _readJwtTokenVersion(String token) {
+  final parts = token.split('.');
+  if (parts.length != 3) return null;
+  try {
+    final normalized = base64Url.normalize(parts[1]);
+    final payload = jsonDecode(utf8.decode(base64Url.decode(normalized)));
+    return payload is Map
+        ? _readInt(payload, const ['ver', 'token_version'])
+        : null;
+  } on Object {
+    return null;
+  }
 }

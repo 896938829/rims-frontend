@@ -1,4 +1,5 @@
 import '../../../../core/result/result.dart';
+import '../../../../core/storage/app_secure_storage.dart';
 import '../entities/auth_session.dart';
 import '../entities/warehouse.dart';
 
@@ -14,6 +15,10 @@ abstract interface class AuthSessionRestoreMetadata {
 
 abstract interface class AuthCredentialInvalidator {
   Future<void> expireCredentials();
+}
+
+abstract interface class SessionCredentialRepository {
+  Future<Result<DeviceCredential>> refreshCredential(DeviceCredential current);
 }
 
 abstract interface class AuthSessionTransaction {

@@ -4,6 +4,8 @@ abstract final class ApiEndpoints {
   }
 
   static const String login = '/auth/login';
+  static const String refresh = '/auth/refresh';
+  static const String logout = '/auth/logout';
   static const String currentUser = '/users/me';
   static const String currentUserPassword = '/users/me/password';
   static const String users = '/users';

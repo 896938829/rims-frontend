@@ -1,5 +1,6 @@
 import 'package:flutter/foundation.dart';
 
+import '../../../../core/network/auth_request_policy.dart';
 import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
 import '../../domain/entities/outbox_operation.dart';
@@ -473,12 +474,14 @@ final class SyncCenterViewModel extends ChangeNotifier {
           return;
         }
       }
-      final report = await executor.execute(
-        OutboxReview(
-          operationIds: Set.unmodifiable(eligibleOperationIds),
-          accountId: context.accountId,
-          warehouseId: context.warehouseId,
-          permissionStamp: context.permissionStamp,
+      final report = await AuthRequestPolicy.runExplicitSyncCenter(
+        () => executor.execute(
+          OutboxReview(
+            operationIds: Set.unmodifiable(eligibleOperationIds),
+            accountId: context.accountId,
+            warehouseId: context.warehouseId,
+            permissionStamp: context.permissionStamp,
+          ),
         ),
       );
       if (!_acceptResult(snapshot.generation, context)) return;

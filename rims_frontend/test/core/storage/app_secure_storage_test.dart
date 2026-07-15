@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rims_frontend/core/result/failure.dart';
@@ -10,6 +12,234 @@ import 'package:rims_frontend/features/offline/data/repositories/cached_auth_rep
 import 'package:rims_frontend/features/offline/data/repositories/memory_offline_store.dart';
 
 void main() {
+  group('device credential record v3', () {
+    test('migrates a complete v2 owner-bound record to strict v3', () async {
+      final raw = _MemoryFlutterSecureStorage()
+        ..values[AppSecureStorage.kDeviceCredentialKey] = jsonEncode({
+          'version': 2,
+          'state': 'committed',
+          'owner_id': 'owner-7',
+          'attempt_version': 4,
+          'latest_attempt_version': 4,
+          'access_token': 'access-7',
+          'refresh_token': 'refresh-7',
+          'account_id': '7',
+          'session_id': 'session-7',
+          'access_expires_at': '2026-07-15T03:00:00.000Z',
+          'refresh_expires_at': '2026-08-15T03:00:00.000Z',
+          'token_version': 3,
+          'generation': 9,
+        });
+      final storage = AppSecureStorage(storage: raw);
+
+      final restored = await storage.readDeviceCredential();
+
+      expect(restored, isNotNull);
+      expect(restored!.accessToken, 'access-7');
+      expect(restored.refreshToken, 'refresh-7');
+      expect(restored.accountId, '7');
+      expect(restored.sessionId, 'session-7');
+      expect(restored.tokenVersion, 3);
+      expect(restored.generation, 9);
+      expect(restored.biometricPolicy, BiometricCredentialPolicy.disabled);
+      expect(
+        jsonDecode(
+          raw.values[AppSecureStorage.kDeviceCredentialKey]!,
+        )['version'],
+        3,
+      );
+    });
+
+    test('commits access and refresh atomically for one owner', () async {
+      final raw = _MemoryFlutterSecureStorage();
+      final storage = AppSecureStorage(storage: raw);
+      final attempt = await storage.beginAccessTokenAttempt('owner-7');
+
+      expect(
+        await storage.savePendingDeviceCredentialForOwner(
+          credential: _credential(),
+          ownerId: 'owner-7',
+          attemptVersion: attempt,
+        ),
+        isTrue,
+      );
+      expect(await storage.readDeviceCredential(), isNull);
+      expect(
+        await storage.commitAccessTokenForOwner(
+          'owner-7',
+          attemptVersion: attempt,
+        ),
+        isTrue,
+      );
+
+      final restored = await storage.readDeviceCredential();
+      expect(restored?.accessToken, 'access-1');
+      expect(restored?.refreshToken, 'refresh-1');
+      final encoded = raw.values[AppSecureStorage.kDeviceCredentialKey]!;
+      expect(encoded, contains('access-1'));
+      expect(encoded, contains('refresh-1'));
+    });
+
+    test(
+      'pending device credential quarantines a prior legacy token',
+      () async {
+        final raw = _MemoryFlutterSecureStorage()
+          ..values[AppSecureStorage.kAccessTokenKey] = 'legacy-access';
+        final storage = AppSecureStorage(storage: raw);
+        final attempt = await storage.beginAccessTokenAttempt('owner-7');
+
+        expect(
+          await storage.savePendingDeviceCredentialForOwner(
+            credential: _credential(),
+            ownerId: 'owner-7',
+            attemptVersion: attempt,
+          ),
+          isTrue,
+        );
+        expect(await storage.readAccessToken(), isNull);
+        expect(
+          await storage.clearAccessTokenForOwner(
+            'owner-7',
+            attemptVersion: attempt,
+          ),
+          isTrue,
+        );
+        expect(await storage.readAccessToken(), isNull);
+      },
+    );
+
+    test('rotation requires matching owner session and generation', () async {
+      final storage = AppSecureStorage(storage: _MemoryFlutterSecureStorage());
+      final attempt = await storage.beginAccessTokenAttempt('owner-7');
+      await storage.savePendingDeviceCredentialForOwner(
+        credential: _credential(),
+        ownerId: 'owner-7',
+        attemptVersion: attempt,
+      );
+      await storage.commitAccessTokenForOwner(
+        'owner-7',
+        attemptVersion: attempt,
+      );
+
+      expect(
+        await storage.rotateDeviceCredential(
+          credential: _credential(
+            accessToken: 'access-2',
+            refreshToken: 'refresh-2',
+            generation: 2,
+          ),
+          expectedAccountId: '8',
+          expectedSessionId: 'session-7',
+          expectedGeneration: 1,
+        ),
+        isFalse,
+      );
+      expect(
+        await storage.rotateDeviceCredential(
+          credential: _credential(
+            accessToken: 'access-2',
+            refreshToken: 'refresh-2',
+            generation: 2,
+          ),
+          expectedAccountId: '7',
+          expectedSessionId: 'other-session',
+          expectedGeneration: 1,
+        ),
+        isFalse,
+      );
+      expect(
+        await storage.rotateDeviceCredential(
+          credential: _credential(
+            accessToken: 'access-2',
+            refreshToken: 'refresh-2',
+            generation: 2,
+          ),
+          expectedAccountId: '7',
+          expectedSessionId: 'session-7',
+          expectedGeneration: 0,
+        ),
+        isFalse,
+      );
+      expect(
+        await storage.rotateDeviceCredential(
+          credential: _credential(
+            accessToken: 'access-2',
+            refreshToken: 'refresh-2',
+            generation: 2,
+          ),
+          expectedAccountId: '7',
+          expectedSessionId: 'session-7',
+          expectedGeneration: 1,
+        ),
+        isTrue,
+      );
+      expect((await storage.readDeviceCredential())?.refreshToken, 'refresh-2');
+    });
+
+    test('failed atomic rotation leaves the previous pair intact', () async {
+      final raw = _MemoryFlutterSecureStorage();
+      final storage = AppSecureStorage(storage: raw);
+      final attempt = await storage.beginAccessTokenAttempt('owner-7');
+      await storage.savePendingDeviceCredentialForOwner(
+        credential: _credential(),
+        ownerId: 'owner-7',
+        attemptVersion: attempt,
+      );
+      await storage.commitAccessTokenForOwner(
+        'owner-7',
+        attemptVersion: attempt,
+      );
+      raw.writeError = StateError('injected secure write failure');
+
+      await expectLater(
+        storage.rotateDeviceCredential(
+          credential: _credential(
+            accessToken: 'access-2',
+            refreshToken: 'refresh-2',
+            generation: 2,
+          ),
+          expectedAccountId: '7',
+          expectedSessionId: 'session-7',
+          expectedGeneration: 1,
+        ),
+        throwsStateError,
+      );
+      raw.writeError = null;
+      final restored = await storage.readDeviceCredential();
+      expect(restored?.accessToken, 'access-1');
+      expect(restored?.refreshToken, 'refresh-1');
+    });
+
+    for (final fixture in <(String, Matcher)>[
+      ('{broken', isA<MalformedCredentialRecordException>()),
+      (
+        jsonEncode({'version': 99}),
+        isA<UnsupportedCredentialRecordException>(),
+      ),
+    ]) {
+      test(
+        'typed restore failure clears unsafe record ${fixture.$1}',
+        () async {
+          final raw = _MemoryFlutterSecureStorage()
+            ..values[AppSecureStorage.kAccessTokenKey] = 'legacy-access'
+            ..values[AppSecureStorage.kDeviceCredentialKey] = fixture.$1;
+          final storage = AppSecureStorage(storage: raw);
+
+          await expectLater(
+            storage.readDeviceCredential(),
+            throwsA(fixture.$2),
+          );
+
+          expect(
+            raw.values,
+            isNot(contains(AppSecureStorage.kDeviceCredentialKey)),
+          );
+          expect(await storage.readAccessToken(), isNull);
+        },
+      );
+    }
+  });
+
   test(
     'newer auth attempt rejects an older late response with the same token',
     () async {
@@ -288,6 +518,7 @@ final class _MemoryFlutterSecureStorage extends FlutterSecureStorage {
   _MemoryFlutterSecureStorage();
 
   final Map<String, String> values = {};
+  Object? writeError;
 
   @override
   Future<void> delete({
@@ -324,6 +555,7 @@ final class _MemoryFlutterSecureStorage extends FlutterSecureStorage {
     AppleOptions? mOptions,
     WindowsOptions? wOptions,
   }) async {
+    if (writeError case final error?) throw error;
     if (value == null) {
       values.remove(key);
     } else {
@@ -331,6 +563,22 @@ final class _MemoryFlutterSecureStorage extends FlutterSecureStorage {
     }
   }
 }
+
+DeviceCredential _credential({
+  String accessToken = 'access-1',
+  String refreshToken = 'refresh-1',
+  int generation = 1,
+}) => DeviceCredential(
+  accessToken: accessToken,
+  refreshToken: refreshToken,
+  accountId: '7',
+  sessionId: 'session-7',
+  accessExpiresAt: DateTime.utc(2026, 7, 15, 3),
+  refreshExpiresAt: DateTime.utc(2026, 8, 15, 3),
+  tokenVersion: 3,
+  generation: generation,
+  biometricPolicy: BiometricCredentialPolicy.disabled,
+);
 
 final class _NullAuthRepository implements AuthRepository {
   const _NullAuthRepository();

@@ -2,6 +2,7 @@ import 'dart:async';
 
 import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
+import '../../../../core/network/auth_request_policy.dart';
 import '../../data/datasources/operation_status_remote_datasource.dart';
 import '../entities/network_reachability.dart';
 import '../entities/outbox_operation.dart';
@@ -211,6 +212,14 @@ final class OutboxExecutor
 
   @override
   Future<OutboxExecutionReport> execute(OutboxReview requestedReview) {
+    return AuthRequestPolicy.runQueuedWrite(
+      () => _executeInQueuedWriteScope(requestedReview),
+    );
+  }
+
+  Future<OutboxExecutionReport> _executeInQueuedWriteScope(
+    OutboxReview requestedReview,
+  ) {
     if (_mutationBlocks.any(
       (block) => block.scope.contains(requestedReview.accountId),
     )) {

@@ -1,5 +1,7 @@
 import 'dart:async';
+import 'dart:convert';
 
+import 'package:drift/native.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rims_frontend/core/events/app_event.dart';
 import 'package:rims_frontend/core/events/app_event_bus.dart';
@@ -16,6 +18,7 @@ import 'package:rims_frontend/features/auth/domain/entities/warehouse.dart';
 import 'package:rims_frontend/features/auth/domain/repositories/auth_repository.dart';
 import 'package:rims_frontend/features/auth/presentation/view_models/auth_session_controller.dart';
 import 'package:rims_frontend/features/offline/data/repositories/cached_auth_repository.dart';
+import 'package:rims_frontend/features/offline/data/database/offline_database.dart';
 import 'package:rims_frontend/features/offline/data/repositories/memory_offline_store.dart';
 import 'package:rims_frontend/features/offline/domain/entities/cache_snapshot.dart';
 import 'package:rims_frontend/features/offline/domain/entities/document_draft.dart';
@@ -227,6 +230,40 @@ void main() {
     await controller.restoreSession(repository);
     expect(controller.sessionSource, AuthSessionSource.cache);
     expect(controller.sessionFetchedAt, now);
+  });
+
+  test('Drift auth projection never persists device credentials', () async {
+    final database = OfflineDatabase.forTesting(NativeDatabase.memory());
+    addTearDown(database.close);
+    final delegate = _FakeAuthRepository(
+      restoreResult: const Success(_session),
+    );
+    final storage = _FakeSessionStorage(token: 'access-secret');
+    final repository = _repository(
+      delegate,
+      storage,
+      store: database,
+      now: now,
+    );
+
+    expect(_sessionFrom(await repository.restoreSession()), _session);
+    final record = await database.readCache(
+      const CacheKey(
+        accountId: '7',
+        namespace: 'auth.session',
+        entityKey: 'projection',
+      ),
+    );
+    final persisted = jsonEncode(record?.payload);
+
+    expect(record, isNotNull);
+    expect(persisted, isNot(contains('access-secret')));
+    expect(persisted, isNot(contains('access_token')));
+    expect(persisted, isNot(contains('refresh_token')));
+    expect(persisted, isNot(contains('session_id')));
+    expect(persisted, isNot(contains('token_version')));
+    expect(persisted, isNot(contains('generation')));
+    expect(persisted, isNot(contains('biometric_policy')));
   });
 
   test('cached session is rejected when secure token is absent', () async {
@@ -1798,7 +1835,7 @@ void main() {
 CachedAuthRepository _repository(
   _FakeAuthRepository delegate,
   _FakeSessionStorage storage, {
-  MemoryOfflineStore? store,
+  OfflineStore? store,
   OfflineOwnershipCoordinator? ownership,
   void Function()? onSessionRevoked,
   required DateTime now,

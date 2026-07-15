@@ -8,9 +8,94 @@ import 'package:rims_frontend/features/auth/data/datasources/auth_remote_datasou
 import 'package:rims_frontend/features/auth/data/models/auth_models.dart';
 import 'package:rims_frontend/features/auth/data/repositories/auth_repository_impl.dart';
 import 'package:rims_frontend/features/auth/domain/entities/auth_session.dart';
+import 'package:rims_frontend/features/auth/domain/repositories/auth_repository.dart';
 
 void main() {
   group('AuthRepositoryImpl', () {
+    test('rotating login commits one owner-bound device credential', () async {
+      final storage = _FakeDeviceCredentialStorage();
+      final remoteDataSource = _FakeAuthRemoteDataSource(
+        loginResult: Success(_rotatingLoginModel()),
+        warehousesResult: const Success([]),
+      );
+      final repository = AuthRepositoryImpl(
+        remoteDataSource: remoteDataSource,
+        secureStorage: storage,
+        tokenOwnerFactory: () => 'login-owner',
+      );
+
+      final result = await repository.login(
+        username: 'alice',
+        password: 'secret',
+      );
+
+      expect(result.isSuccess, isTrue);
+      expect(storage.credential?.accessToken, 'access-1');
+      expect(storage.credential?.refreshToken, 'refresh-1');
+      expect(storage.credential?.accountId, '7');
+      expect(storage.credential?.sessionId, 'session-7');
+      expect(storage.credential?.generation, 1);
+      expect(storage.tokenCommitted, isTrue);
+    });
+
+    test(
+      'rotation candidate preserves identity and increments generation',
+      () async {
+        final remoteDataSource = _FakeRotatingAuthRemoteDataSource(
+          refreshResult: Success(
+            _rotatingLoginModel(
+              accessToken: 'access-2',
+              refreshToken: 'refresh-2',
+              tokenVersion: 6,
+            ),
+          ),
+        );
+        final repository = AuthRepositoryImpl(
+          remoteDataSource: remoteDataSource,
+          secureStorage: _FakeDeviceCredentialStorage(),
+        );
+
+        final result = await (repository as SessionCredentialRepository)
+            .refreshCredential(_deviceCredential());
+
+        final next = result.when(
+          success: (value) => value,
+          failure: (failure) => throw TestFailure(failure.message),
+        );
+        expect(remoteDataSource.lastRefreshToken, 'refresh-1');
+        expect(next.accessToken, 'access-2');
+        expect(next.refreshToken, 'refresh-2');
+        expect(next.accountId, '7');
+        expect(next.sessionId, 'session-7');
+        expect(next.generation, 2);
+        expect(next.biometricPolicy, BiometricCredentialPolicy.requireUnlock);
+      },
+    );
+
+    test(
+      'failed remote logout quarantines the rotating credential locally',
+      () async {
+        final storage = _FakeDeviceCredentialStorage()
+          ..credential = _deviceCredential()
+          ..accessToken = 'access-1'
+          ..tokenCommitted = true;
+        final remoteDataSource = _FakeRotatingAuthRemoteDataSource(
+          refreshResult: const FailureResult(AuthenticationFailure()),
+          logoutResult: const FailureResult(NetworkFailure()),
+        );
+        final repository = AuthRepositoryImpl(
+          remoteDataSource: remoteDataSource,
+          secureStorage: storage,
+        );
+
+        await repository.logout();
+
+        expect(storage.credential, isNull);
+        expect(storage.readAccessToken(), completion(isNull));
+        expect(storage.pendingAccountId, '7');
+      },
+    );
+
     test(
       'restoreSession rebuilds session from stored token and backend data',
       () async {
@@ -663,7 +748,7 @@ void main() {
   });
 }
 
-final class _FakeTokenStorage
+class _FakeTokenStorage
     implements
         TokenStorage,
         ConditionalTokenStorage,
@@ -779,7 +864,89 @@ final class _FakeTokenStorage
   }
 }
 
-final class _FakeAuthRemoteDataSource implements AuthRemoteDataSource {
+final class _FakeDeviceCredentialStorage extends _FakeTokenStorage
+    implements DeviceCredentialStorage, PendingRevocationStorage {
+  DeviceCredential? credential;
+  String? pendingAccountId;
+
+  @override
+  Future<void> clearAccessToken() async {
+    credential = null;
+    await super.clearAccessToken();
+  }
+
+  @override
+  Future<bool> savePendingDeviceCredentialForOwner({
+    required DeviceCredential credential,
+    required String ownerId,
+    required int attemptVersion,
+  }) async {
+    if (failWrites) throw StateError('credential write failed');
+    if (attemptVersion != latestAttemptVersion) return false;
+    this.credential = credential;
+    accessToken = credential.accessToken;
+    this.ownerId = ownerId;
+    tokenAttemptVersion = attemptVersion;
+    tokenCommitted = false;
+    saveCallCount += 1;
+    return true;
+  }
+
+  @override
+  Future<DeviceCredential?> readDeviceCredential() async =>
+      tokenCommitted ? credential : null;
+
+  @override
+  Future<bool> rotateDeviceCredential({
+    required DeviceCredential credential,
+    required String expectedAccountId,
+    required String expectedSessionId,
+    required int expectedGeneration,
+  }) async {
+    final current = this.credential;
+    if (current == null ||
+        current.accountId != expectedAccountId ||
+        current.sessionId != expectedSessionId ||
+        current.generation != expectedGeneration) {
+      return false;
+    }
+    this.credential = credential;
+    accessToken = credential.accessToken;
+    return true;
+  }
+
+  @override
+  Future<bool> clearDeviceCredentialIfMatches({
+    required String accountId,
+    required String sessionId,
+    required int generation,
+  }) async {
+    final current = credential;
+    if (current?.accountId != accountId ||
+        current?.sessionId != sessionId ||
+        current?.generation != generation) {
+      return false;
+    }
+    credential = null;
+    await clearAccessToken();
+    return true;
+  }
+
+  @override
+  Future<void> clearPendingRevocationAccountId() async {
+    pendingAccountId = null;
+  }
+
+  @override
+  Future<String?> readPendingRevocationAccountId() async => pendingAccountId;
+
+  @override
+  Future<void> savePendingRevocationAccountId(String accountId) async {
+    pendingAccountId = accountId;
+  }
+}
+
+class _FakeAuthRemoteDataSource implements AuthRemoteDataSource {
   _FakeAuthRemoteDataSource({
     this.currentUserResult = const FailureResult<AppUserModel>(
       UnknownFailure(),
@@ -842,6 +1009,29 @@ final class _FakeAuthRemoteDataSource implements AuthRemoteDataSource {
   }
 }
 
+final class _FakeRotatingAuthRemoteDataSource extends _FakeAuthRemoteDataSource
+    implements RotatingAuthRemoteDataSource {
+  _FakeRotatingAuthRemoteDataSource({
+    required this.refreshResult,
+    this.logoutResult = const Success(null),
+  });
+
+  final Result<LoginResponseModel> refreshResult;
+  final Result<void> logoutResult;
+  String? lastRefreshToken;
+
+  @override
+  Future<Result<LoginResponseModel>> refresh({
+    required String refreshToken,
+  }) async {
+    lastRefreshToken = refreshToken;
+    return refreshResult;
+  }
+
+  @override
+  Future<Result<void>> logout() async => logoutResult;
+}
+
 final class _DelayedLoginRemoteDataSource implements AuthRemoteDataSource {
   final Completer<void> aliceStarted = Completer<void>();
   final Completer<void> releaseAlice = Completer<void>();
@@ -885,3 +1075,45 @@ final class _DelayedLoginRemoteDataSource implements AuthRemoteDataSource {
     int warehouseId,
   ) async => const FailureResult(UnknownFailure());
 }
+
+LoginResponseModel _rotatingLoginModel({
+  String accessToken = 'access-1',
+  String refreshToken = 'refresh-1',
+  int tokenVersion = 5,
+}) => LoginResponseModel(
+  token: accessToken,
+  accessToken: accessToken,
+  refreshToken: refreshToken,
+  accessExpiresAt: DateTime.utc(2026, 7, 15, 3),
+  refreshExpiresAt: DateTime.utc(2026, 8, 15, 3),
+  tokenVersion: tokenVersion,
+  session: DeviceSessionModel(
+    id: 'session-7',
+    deviceLabel: 'Tablet',
+    platform: 'android',
+    userAgentFamily: 'RIMS',
+    createdAt: DateTime.utc(2026, 7, 15, 2),
+    lastUsedAt: DateTime.utc(2026, 7, 15, 2, 1),
+    expiresAt: DateTime.utc(2026, 8, 14, 2),
+    current: true,
+  ),
+  user: const AppUserModel(
+    id: 7,
+    username: 'alice',
+    realName: 'Alice',
+    roleCode: 'operator',
+    roleName: 'Operator',
+  ),
+);
+
+DeviceCredential _deviceCredential() => DeviceCredential(
+  accessToken: 'access-1',
+  refreshToken: 'refresh-1',
+  accountId: '7',
+  sessionId: 'session-7',
+  accessExpiresAt: DateTime.utc(2026, 7, 15, 3),
+  refreshExpiresAt: DateTime.utc(2026, 8, 15, 3),
+  tokenVersion: 5,
+  generation: 1,
+  biometricPolicy: BiometricCredentialPolicy.requireUnlock,
+);

@@ -2,6 +2,7 @@ import 'package:dio/dio.dart';
 
 import '../../../../core/network/api_client.dart';
 import '../../../../core/network/api_endpoints.dart';
+import '../../../../core/network/auth_request_policy.dart';
 import '../../../../core/network/api_envelope.dart';
 import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
@@ -20,7 +21,14 @@ abstract interface class AuthRemoteDataSource {
   Future<Result<WarehouseModel?>> switchCurrentWarehouse(int warehouseId);
 }
 
-final class ApiAuthRemoteDataSource implements AuthRemoteDataSource {
+abstract interface class RotatingAuthRemoteDataSource {
+  Future<Result<LoginResponseModel>> refresh({required String refreshToken});
+
+  Future<Result<void>> logout();
+}
+
+final class ApiAuthRemoteDataSource
+    implements AuthRemoteDataSource, RotatingAuthRemoteDataSource {
   const ApiAuthRemoteDataSource(this._apiClient);
 
   final ApiClient _apiClient;
@@ -49,6 +57,30 @@ final class ApiAuthRemoteDataSource implements AuthRemoteDataSource {
       result,
       (data) => LoginResponseModel.fromJson(_requiredMap(data, 'login')),
     );
+  }
+
+  @override
+  Future<Result<LoginResponseModel>> refresh({
+    required String refreshToken,
+  }) async {
+    final result = await _apiClient.post<dynamic>(
+      ApiEndpoints.refresh,
+      data: {'refreshToken': refreshToken},
+      options: Options(
+        headers: {'Authorization': null},
+        extra: {AuthRequestPolicy.skipRefresh: true},
+      ),
+    );
+    return _mapEnvelope(
+      result,
+      (data) => LoginResponseModel.fromJson(_requiredMap(data, 'refresh')),
+    );
+  }
+
+  @override
+  Future<Result<void>> logout() async {
+    final result = await _apiClient.post<dynamic>(ApiEndpoints.logout);
+    return _mapEnvelope<void>(result, (_) {});
   }
 
   @override
