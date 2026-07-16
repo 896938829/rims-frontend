@@ -277,21 +277,23 @@ Completed in frontend commits `e8242c9`, `c578f26`, `02b75f6`, `de342bd`, and `9
 - Modify: `rims_frontend/lib/features/auth/presentation/view_models/login_view_model.dart`
 - Modify: `rims_frontend/lib/features/profile/presentation/view_models/profile_security_view_model.dart`
 
-- [ ] **Step 1: Write RED policy/abuse tests**
+- [x] **Step 1: Write RED policy/abuse tests**
 
 Use injected clock. Cover 12-128 length, username inclusion, Unicode normalization, local seed restriction outside local/test, compromised blocklist, generic absent/wrong/locked/disabled result, bounded delay, persisted lock expiry/reset, privacy network key, history categories/retention, and no credentials.
 
-- [ ] **Step 2: Implement server authority**
+- [x] **Step 2: Implement server authority**
 
 Apply policy to create/change/reset. Persist guard state for multi-process behavior. Add current-account paginated `GET /auth/login-history`; cross-account admin access requires explicit permission and audit.
 
-- [ ] **Step 3: Add frontend ergonomic validation**
+- [x] **Step 3: Add frontend ergonomic validation**
 
 Frontend checks length/match but backend remains authority. Clear password fields on terminal submit/dispose and never persist them.
 
-- [ ] **Step 4: Verify and commit per repository**
+- [x] **Step 4: Verify and commit per repository**
 
 Backend commit: `feat: enforce login security policy`. Frontend commit: `feat: surface server password policy`.
+
+Completed in backend commits `ac449d3`, `78347fa`, `de391f0`, `682b067`, `13286c1`, and `1b6bf98`, and frontend commits `eb66799`, `d715ca4`, and `a679bfb`. The final implementation provides versioned password hashing with legacy upgrade, exact account and independent network login authorities, production known-fixture credential rejection, concurrency-safe local seeding, bounded login-history pagination, canonical schema preflight, attempt-scoped frontend cancellation, and fail-closed owner-bound credential cleanup without remote logout. Independent verification passed the non-skipped PostgreSQL authentication script, `go test ./... -count=1`, `go vet ./...`, `go build ./...`, `flutter analyze --no-pub`, all 1462 Flutter tests, and both repositories' `git diff --check`; specification and final quality reviews approved the task with no remaining Critical, Important, Moderate, or Minor findings.
 
 ## Task 11: Optional TOTP, Recovery Codes, And Biometric Unlock
 
