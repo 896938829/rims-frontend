@@ -20,6 +20,7 @@ final class LoginViewModel extends ChangeNotifier {
   String? _errorMessage;
   bool _isDisposed = false;
   int _generation = 0;
+  AuthLoginAttempt? _activeLoginAttempt;
 
   String get title => 'RIMS';
   String get subtitle => '零售端智能库存管理系统';
@@ -67,11 +68,14 @@ final class LoginViewModel extends ChangeNotifier {
     _errorMessage = null;
     _notifyListeners();
 
+    final attempt = sessionController.createLoginAttempt();
+    _activeLoginAttempt = attempt;
     try {
       final result = await sessionController.login(
         authRepository: authRepository,
         username: username,
         password: password,
+        attempt: attempt,
       );
       if (!_isCurrent(generation)) return false;
       _isLoading = false;
@@ -85,6 +89,10 @@ final class LoginViewModel extends ChangeNotifier {
       _errorMessage = '登录失败，请重试';
       _notifyListeners();
       return false;
+    } finally {
+      if (identical(_activeLoginAttempt, attempt)) {
+        _activeLoginAttempt = null;
+      }
     }
   }
 
@@ -109,6 +117,8 @@ final class LoginViewModel extends ChangeNotifier {
   void dispose() {
     _isDisposed = true;
     _generation += 1;
+    _activeLoginAttempt?.cancel();
+    _activeLoginAttempt = null;
     _password = '';
     _isLoading = false;
     super.dispose();

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rims_frontend/core/result/failure.dart';
 import 'package:rims_frontend/core/result/result.dart';
+import 'package:rims_frontend/core/storage/app_secure_storage.dart';
 import 'package:rims_frontend/features/auth/domain/entities/app_user.dart';
 import 'package:rims_frontend/features/auth/domain/entities/auth_session.dart';
 import 'package:rims_frontend/features/auth/domain/entities/warehouse.dart';
@@ -404,28 +405,172 @@ void main() {
     }
 
     test(
-      'dispose invalidates a delayed login without retaining or notifying',
+      'dispose aborts its delayed prepared login once without notifying',
       () async {
-        final pending = Completer<Result<AuthSession>>();
-        final repository = _FakeAuthRepository(loginFuture: pending.future);
+        final pending = Completer<Result<AuthSessionTransaction>>();
+        final transaction = _FakeAuthSessionTransaction();
+        final repository = _TransactionalAuthRepository(
+          transaction: transaction,
+          prepared: pending.future,
+        );
+        final controller = AuthSessionController();
         final viewModel =
             LoginViewModel(
                 authRepository: repository,
-                sessionController: AuthSessionController(),
+                sessionController: controller,
               )
               ..updateUsername('admin')
               ..updatePassword('one-time-secret');
         var notifications = 0;
         viewModel.addListener(() => notifications += 1);
         final login = viewModel.login();
+        while (repository.prepareCalls == 0) {
+          await Future<void>.delayed(Duration.zero);
+        }
         final notificationsBeforeDispose = notifications;
+        viewModel.dispose();
+        pending.complete(Success<AuthSessionTransaction>(transaction));
+
+        expect(await login, isFalse);
+        expect(notifications, notificationsBeforeDispose);
+        expect(transaction.commitCalls, 0);
+        expect(transaction.abortCalls, 1);
+        expect(controller.session, isNull);
+      },
+    );
+
+    test(
+      'dispose during prepared commit aborts before session publish',
+      () async {
+        final commitBlocker = Completer<void>();
+        final transaction = _FakeAuthSessionTransaction(
+          commitBlocker: commitBlocker,
+        );
+        final repository = _TransactionalAuthRepository(
+          transaction: transaction,
+        );
+        final controller = AuthSessionController();
+        final viewModel =
+            LoginViewModel(
+                authRepository: repository,
+                sessionController: controller,
+              )
+              ..updateUsername('admin')
+              ..updatePassword('one-time-secret');
+
+        final login = viewModel.login();
+        await transaction.commitStarted.future;
+        viewModel.dispose();
+        commitBlocker.complete();
+
+        expect(await login, isFalse);
+        expect(transaction.commitCalls, 1);
+        expect(transaction.abortCalls, 1);
+        expect(controller.session, isNull);
+      },
+    );
+
+    test(
+      'dispose quarantines only its delayed fallback credential without logout',
+      () async {
+        final pending = Completer<Result<AuthSession>>();
+        final repository = _FallbackCredentialAuthRepository(pending.future);
+        final controller = AuthSessionController();
+        final viewModel =
+            LoginViewModel(
+                authRepository: repository,
+                sessionController: controller,
+              )
+              ..updateUsername('admin')
+              ..updatePassword('one-time-secret');
+
+        final login = viewModel.login();
+        while (repository.loginCalls == 0) {
+          await Future<void>.delayed(Duration.zero);
+        }
         viewModel.dispose();
         pending.complete(Success<AuthSession>(_session));
 
         expect(await login, isFalse);
-        expect(notifications, notificationsBeforeDispose);
+        expect(controller.session, isNull);
+        expect(repository.credential, isNull);
+        expect(repository.quarantineCalls, 1);
+        expect(repository.logoutCalls, 0);
       },
     );
+
+    test('fallback cleanup does not delete a newer owner credential', () async {
+      final pending = Completer<Result<AuthSession>>();
+      final repository = _FallbackCredentialAuthRepository(
+        pending.future,
+        replaceWithNewerCredentialOnCapture: true,
+      );
+      final controller = AuthSessionController();
+      final viewModel =
+          LoginViewModel(
+              authRepository: repository,
+              sessionController: controller,
+            )
+            ..updateUsername('admin')
+            ..updatePassword('one-time-secret');
+
+      final login = viewModel.login();
+      while (repository.loginCalls == 0) {
+        await Future<void>.delayed(Duration.zero);
+      }
+      viewModel.dispose();
+      pending.complete(Success<AuthSession>(_session));
+
+      expect(await login, isFalse);
+      expect(controller.session, isNull);
+      expect(repository.credential?.accessToken, 'newer-owner-token');
+      expect(repository.quarantineCalls, 0);
+      expect(repository.logoutCalls, 0);
+    });
+
+    test('cancelled VM attempt does not cancel a newer VM attempt', () async {
+      final pending = Completer<Result<AuthSessionTransaction>>();
+      final staleTransaction = _FakeAuthSessionTransaction();
+      final staleRepository = _TransactionalAuthRepository(
+        transaction: staleTransaction,
+        prepared: pending.future,
+      );
+      final currentTransaction = _FakeAuthSessionTransaction();
+      final currentRepository = _TransactionalAuthRepository(
+        transaction: currentTransaction,
+      );
+      final controller = AuthSessionController();
+      final staleViewModel =
+          LoginViewModel(
+              authRepository: staleRepository,
+              sessionController: controller,
+            )
+            ..updateUsername('stale')
+            ..updatePassword('stale-secret');
+      final currentViewModel =
+          LoginViewModel(
+              authRepository: currentRepository,
+              sessionController: controller,
+            )
+            ..updateUsername('current')
+            ..updatePassword('current-secret');
+
+      final staleLogin = staleViewModel.login();
+      while (staleRepository.prepareCalls == 0) {
+        await Future<void>.delayed(Duration.zero);
+      }
+      staleViewModel.dispose();
+      final currentLogin = currentViewModel.login();
+      pending.complete(Success<AuthSessionTransaction>(staleTransaction));
+
+      expect(await staleLogin, isFalse);
+      expect(await currentLogin, isTrue);
+      expect(staleTransaction.abortCalls, 1);
+      expect(staleTransaction.commitCalls, 0);
+      expect(currentTransaction.commitCalls, 1);
+      expect(currentTransaction.abortCalls, 0);
+      expect(controller.session, _session);
+    });
 
     testWidgets('login page clears password after a terminal failure', (
       tester,
@@ -903,7 +1048,6 @@ final class _FakeAuthRepository
     this.restoreFuture,
     this.switchFuture,
     this.logoutFuture,
-    this.loginFuture,
     this.throwOnLogin = false,
   }) : _result = result ?? const FailureResult<AuthSession>(UnknownFailure()),
        _restoreResult =
@@ -915,7 +1059,6 @@ final class _FakeAuthRepository
   final Future<Result<AuthSession?>>? restoreFuture;
   final Future<Result<Warehouse>>? switchFuture;
   final Future<void>? logoutFuture;
-  final Future<Result<AuthSession>>? loginFuture;
   final bool throwOnLogin;
   int loginCallCount = 0;
   int restoreCallCount = 0;
@@ -933,7 +1076,6 @@ final class _FakeAuthRepository
     lastUsername = username;
     lastPassword = password;
     if (throwOnLogin) throw StateError('injected login failure');
-    if (loginFuture != null) return loginFuture!;
     return _result;
   }
 
@@ -986,6 +1128,92 @@ final class _TransactionalAuthRepository
 
   @override
   Future<void> logout() async {}
+
+  @override
+  Future<Result<AuthSession?>> restoreSession() async => const Success(null);
+
+  @override
+  Future<Result<Warehouse>> switchCurrentWarehouse(Warehouse warehouse) async =>
+      Success(warehouse);
+}
+
+final class _FallbackCredentialAuthRepository
+    with UnsupportedDeviceSessions
+    implements AuthRepository, OwnerBoundCredentialQuarantine {
+  _FallbackCredentialAuthRepository(
+    this.pending, {
+    this.replaceWithNewerCredentialOnCapture = false,
+  });
+
+  final Future<Result<AuthSession>> pending;
+  final bool replaceWithNewerCredentialOnCapture;
+  DeviceCredential? credential;
+  bool _captureReplacementApplied = false;
+  int loginCalls = 0;
+  int quarantineCalls = 0;
+  int logoutCalls = 0;
+
+  @override
+  Future<Result<AuthSession>> login({
+    required String username,
+    required String password,
+  }) async {
+    loginCalls += 1;
+    final result = await pending;
+    if (result case Success<AuthSession>(data: final session)) {
+      credential = DeviceCredential(
+        accessToken: session.accessToken,
+        refreshToken: 'refresh-token',
+        accountId: session.user.id.toString(),
+        sessionId: 'session-id',
+        accessExpiresAt: DateTime.utc(2026, 7, 16, 1),
+        refreshExpiresAt: DateTime.utc(2026, 7, 17, 1),
+        tokenVersion: 1,
+        generation: 7,
+        biometricPolicy: BiometricCredentialPolicy.disabled,
+      );
+    }
+    return result;
+  }
+
+  @override
+  Future<DeviceCredential?> captureCredentialForQuarantine() async {
+    if (replaceWithNewerCredentialOnCapture && !_captureReplacementApplied) {
+      _captureReplacementApplied = true;
+      credential = DeviceCredential(
+        accessToken: 'newer-owner-token',
+        refreshToken: 'newer-refresh-token',
+        accountId: '999',
+        sessionId: 'newer-session-id',
+        accessExpiresAt: DateTime.utc(2026, 7, 16, 2),
+        refreshExpiresAt: DateTime.utc(2026, 7, 17, 2),
+        tokenVersion: 2,
+        generation: 8,
+        biometricPolicy: BiometricCredentialPolicy.disabled,
+      );
+    }
+    return credential;
+  }
+
+  @override
+  Future<bool> quarantineCredential(DeviceCredential expected) async {
+    quarantineCalls += 1;
+    final current = credential;
+    if (current == null ||
+        current.accessToken != expected.accessToken ||
+        current.accountId != expected.accountId ||
+        current.sessionId != expected.sessionId ||
+        current.generation != expected.generation) {
+      return false;
+    }
+    credential = null;
+    return true;
+  }
+
+  @override
+  Future<void> logout() async {
+    logoutCalls += 1;
+  }
 
   @override
   Future<Result<AuthSession?>> restoreSession() async => const Success(null);

@@ -16,6 +16,22 @@ import '../../domain/services/auth_session_lifecycle_gate.dart';
 import '../../domain/services/session_refresh_coordinator.dart';
 import '../../../offline/domain/services/offline_ownership_service.dart';
 
+final class AuthLoginAttempt {
+  AuthLoginAttempt._(this._owner);
+
+  AuthSessionController? _owner;
+  bool _cancelled = false;
+
+  void cancel() => _cancelled = true;
+
+  bool _isActiveFor(AuthSessionController owner) =>
+      identical(_owner, owner) && !_cancelled;
+
+  void _complete(AuthSessionController owner) {
+    if (identical(_owner, owner)) _owner = null;
+  }
+}
+
 final class AuthSessionController extends ChangeNotifier {
   AuthSessionController({
     this.eventBus,
@@ -66,11 +82,24 @@ final class AuthSessionController extends ChangeNotifier {
 
   int beginAuthenticationAttempt() => ++_authEpoch;
 
+  AuthLoginAttempt createLoginAttempt() {
+    final attempt = AuthLoginAttempt._(this);
+    if (_disposed) attempt.cancel();
+    return attempt;
+  }
+
   Future<Result<void>> login({
     required AuthRepository authRepository,
     required String username,
     required String password,
+    AuthLoginAttempt? attempt,
   }) => lifecycleGate.run(() async {
+    final loginAttempt = attempt ?? createLoginAttempt();
+    if (!loginAttempt._isActiveFor(this)) {
+      return const FailureResult<void>(
+        StateFailure(message: 'Login attempt was cancelled.'),
+      );
+    }
     final epoch = ++_authEpoch;
     try {
       if (authRepository case final TransactionalAuthRepository transactional) {
@@ -84,6 +113,7 @@ final class AuthSessionController extends ChangeNotifier {
                   transaction.session,
                   expectedEpoch: epoch,
                   transaction: transaction,
+                  loginAttempt: loginAttempt,
                 )
                 ? const Success<void>(null)
                 : FailureResult<void>(
@@ -98,17 +128,25 @@ final class AuthSessionController extends ChangeNotifier {
         username: username,
         password: password,
       );
-      return switch (result) {
-        Success<AuthSession>(data: final session) =>
-          await _startSession(session, expectedEpoch: epoch)
-              ? const Success<void>(null)
-              : FailureResult<void>(
-                  _ownershipFailure ??
-                      const StateFailure(message: 'Unable to start session.'),
-                ),
-        FailureResult<AuthSession>(failure: final failure) =>
-          FailureResult<void>(failure),
-      };
+      if (result case FailureResult<AuthSession>(failure: final failure)) {
+        return FailureResult<void>(failure);
+      }
+      final session = (result as Success<AuthSession>).data;
+      final accepted = await _startSession(
+        session,
+        expectedEpoch: epoch,
+        loginAttempt: loginAttempt,
+      );
+      if (accepted) return const Success<void>(null);
+      final cleanupFailure = await _quarantineFallbackLogin(
+        authRepository,
+        session,
+      );
+      return FailureResult<void>(
+        cleanupFailure ??
+            _ownershipFailure ??
+            const StateFailure(message: 'Unable to start session.'),
+      );
     } on Object catch (error) {
       return FailureResult<void>(
         UnknownFailure(
@@ -116,6 +154,8 @@ final class AuthSessionController extends ChangeNotifier {
           cause: sanitizeTransportCause(error),
         ),
       );
+    } finally {
+      loginAttempt._complete(this);
     }
   });
   bool get canAccessOfflineData {
@@ -276,8 +316,11 @@ final class AuthSessionController extends ChangeNotifier {
     AuthSession session, {
     int? expectedEpoch,
     AuthSessionTransaction? transaction,
+    AuthLoginAttempt? loginAttempt,
   }) async {
-    if (_disposed || (expectedEpoch != null && expectedEpoch != _authEpoch)) {
+    if (_disposed ||
+        (expectedEpoch != null && expectedEpoch != _authEpoch) ||
+        !_isLoginAttemptActive(loginAttempt)) {
       final rejectionEpoch = _authEpoch;
       final abortFailure = await _abortTransaction(
         transaction,
@@ -308,7 +351,7 @@ final class AuthSessionController extends ChangeNotifier {
       session,
       skipReauthentication: preparedOwnership,
     );
-    if (!_isCurrent(epoch)) {
+    if (!_isCurrentLogin(epoch, loginAttempt)) {
       await _abortTransaction(transaction, reportFailure: false);
       return false;
     }
@@ -316,7 +359,7 @@ final class AuthSessionController extends ChangeNotifier {
       await _abortTransaction(transaction, expectedEpoch: epoch);
       return false;
     }
-    if (!_isCurrent(epoch)) {
+    if (!_isCurrentLogin(epoch, loginAttempt)) {
       await _abortTransaction(transaction, reportFailure: false);
       return false;
     }
@@ -325,7 +368,7 @@ final class AuthSessionController extends ChangeNotifier {
       try {
         commitResult = await transaction.commit();
       } on Object catch (error) {
-        if (!_isCurrent(epoch)) {
+        if (!_isCurrentLogin(epoch, loginAttempt)) {
           await _abortTransaction(transaction, reportFailure: false);
           return false;
         }
@@ -333,13 +376,14 @@ final class AuthSessionController extends ChangeNotifier {
           epoch: epoch,
           previous: previous,
           transaction: transaction,
+          loginAttempt: loginAttempt,
           failure: LocalStorageFailure(
             message: 'credential commit failed',
             cause: sanitizeTransportCause(error),
           ),
         );
       }
-      if (!_isCurrent(epoch)) {
+      if (!_isCurrentLogin(epoch, loginAttempt)) {
         await _abortTransaction(transaction, reportFailure: false);
         return false;
       }
@@ -348,6 +392,7 @@ final class AuthSessionController extends ChangeNotifier {
           epoch: epoch,
           previous: previous,
           transaction: transaction,
+          loginAttempt: loginAttempt,
           failure: failure,
         );
       }
@@ -357,7 +402,7 @@ final class AuthSessionController extends ChangeNotifier {
         try {
           finalized = await owned.finalizeReauthentication();
         } on Object catch (error) {
-          if (!_isCurrent(epoch)) {
+          if (!_isCurrentLogin(epoch, loginAttempt)) {
             await _abortTransaction(transaction, reportFailure: false);
             return false;
           }
@@ -365,13 +410,14 @@ final class AuthSessionController extends ChangeNotifier {
             epoch: epoch,
             previous: previous,
             transaction: transaction,
+            loginAttempt: loginAttempt,
             failure: LocalStorageFailure(
               message: 'ownership finalize failed',
               cause: sanitizeTransportCause(error),
             ),
           );
         }
-        if (!_isCurrent(epoch)) {
+        if (!_isCurrentLogin(epoch, loginAttempt)) {
           await _abortTransaction(transaction, reportFailure: false);
           return false;
         }
@@ -380,12 +426,13 @@ final class AuthSessionController extends ChangeNotifier {
             epoch: epoch,
             previous: previous,
             transaction: transaction,
+            loginAttempt: loginAttempt,
             failure: failure,
           );
         }
       }
     }
-    if (!_isCurrent(epoch)) return false;
+    if (!_isCurrentLogin(epoch, loginAttempt)) return false;
     _session = session;
     _credentialsInvalidated = false;
     _ownershipFailure = null;
@@ -405,13 +452,14 @@ final class AuthSessionController extends ChangeNotifier {
     required AuthSession? previous,
     required AuthSessionTransaction transaction,
     required Failure failure,
+    AuthLoginAttempt? loginAttempt,
   }) async {
     final abortFailure = await _abortTransaction(
       transaction,
       expectedEpoch: epoch,
       reportFailure: false,
     );
-    if (!_isCurrent(epoch)) return false;
+    if (!_isCurrentLogin(epoch, loginAttempt)) return false;
     final visibleFailure = abortFailure ?? failure;
     _session = previous;
     _credentialsInvalidated = previous == null;
@@ -419,6 +467,37 @@ final class AuthSessionController extends ChangeNotifier {
     _sessionMessage = visibleFailure.message;
     notifyListeners();
     return false;
+  }
+
+  Future<Failure?> _quarantineFallbackLogin(
+    AuthRepository authRepository,
+    AuthSession rejectedSession,
+  ) async {
+    final quarantine = switch (authRepository) {
+      final OwnerBoundCredentialQuarantine value => value,
+      _ => null,
+    };
+    if (quarantine == null) {
+      return const LocalStorageFailure(
+        message: 'Unable to quarantine the abandoned credential.',
+      );
+    }
+    try {
+      final credential = await quarantine.captureCredentialForQuarantine();
+      if (credential == null ||
+          credential.accessToken != rejectedSession.accessToken) {
+        return null;
+      }
+      if (await quarantine.quarantineCredential(credential)) return null;
+      return const LocalStorageFailure(
+        message: 'Unable to quarantine the abandoned credential.',
+      );
+    } on Object catch (error) {
+      return LocalStorageFailure(
+        message: 'Unable to quarantine the abandoned credential.',
+        cause: sanitizeTransportCause(error),
+      );
+    }
   }
 
   Future<Failure?> _abortTransaction(
@@ -1002,6 +1081,12 @@ final class AuthSessionController extends ChangeNotifier {
   }
 
   bool _isCurrent(int epoch) => !_disposed && epoch == _authEpoch;
+
+  bool _isLoginAttemptActive(AuthLoginAttempt? attempt) =>
+      attempt == null || attempt._isActiveFor(this);
+
+  bool _isCurrentLogin(int epoch, AuthLoginAttempt? attempt) =>
+      _isCurrent(epoch) && _isLoginAttemptActive(attempt);
 
   @override
   void dispose() {
