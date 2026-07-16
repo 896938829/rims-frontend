@@ -4,15 +4,20 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import '../core/events/app_event_bus.dart';
+import '../core/security/local_authenticator.dart';
 import '../features/admin/domain/repositories/admin_repository.dart';
 import '../features/attachments/domain/repositories/attachments_repository.dart';
 import '../features/attachments/domain/services/attachment_picker.dart';
 import '../features/attachments/domain/services/attachment_share_service.dart';
 import '../features/attachments/domain/services/attachment_staging_store.dart';
 import '../features/auth/domain/repositories/auth_repository.dart';
+import '../features/auth/domain/repositories/local_unlock_repository.dart';
+import '../features/auth/domain/repositories/second_factor_repository.dart';
 import '../features/auth/presentation/pages/device_sessions_page.dart';
 import '../features/auth/presentation/pages/login_page.dart';
+import '../features/auth/presentation/pages/two_factor_page.dart';
 import '../features/auth/presentation/view_models/auth_session_controller.dart';
+import '../features/auth/presentation/view_models/two_factor_view_model.dart';
 import '../features/documents/domain/repositories/documents_repository.dart';
 import '../features/inventory/domain/repositories/inventory_repository.dart';
 import '../features/offline/domain/repositories/document_draft_repository.dart';
@@ -33,6 +38,10 @@ import 'route_paths.dart';
 GoRouter createAppRouter({
   required AuthRepository authRepository,
   required AuthSessionController sessionController,
+  SecondFactorRepository? secondFactorRepository,
+  LocalUnlockCoordinator? localUnlockCoordinator,
+  UnlockedCredentialSessionRepository? unlockedCredentialSessionRepository,
+  BiometricSettingsRepository? biometricSettingsRepository,
   DocumentsRepository? documentsRepository,
   InventoryRepository? inventoryRepository,
   ReportsRepository? reportsRepository,
@@ -56,20 +65,23 @@ GoRouter createAppRouter({
     redirect: (context, state) {
       final isAuthenticated = sessionController.isAuthenticated;
       final isLoginRoute = state.matchedLocation == RoutePaths.login;
+      final isLoginChallengeRoute =
+          state.matchedLocation == RoutePaths.secondFactorLogin;
+      final isPublicAuthRoute = isLoginRoute || isLoginChallengeRoute;
 
       if (sessionController.isRestoring) {
-        if (!isAuthenticated && !isLoginRoute) {
+        if (!isAuthenticated && !isPublicAuthRoute) {
           return RoutePaths.login;
         }
 
         return null;
       }
 
-      if (!isAuthenticated && !isLoginRoute) {
+      if (!isAuthenticated && !isPublicAuthRoute) {
         return RoutePaths.login;
       }
 
-      if (isAuthenticated && isLoginRoute) {
+      if (isAuthenticated && isPublicAuthRoute) {
         return RoutePaths.shell;
       }
 
@@ -81,7 +93,41 @@ GoRouter createAppRouter({
         builder: (context, state) => LoginPage(
           authRepository: authRepository,
           sessionController: sessionController,
+          localUnlockCoordinator: localUnlockCoordinator,
+          unlockedCredentialSessionRepository:
+              unlockedCredentialSessionRepository,
         ),
+      ),
+      GoRoute(
+        path: RoutePaths.secondFactorLogin,
+        builder: (context, state) {
+          final challenge = state.extra;
+          if (challenge is! SecondFactorLoginChallenge) {
+            return LoginPage(
+              authRepository: authRepository,
+              sessionController: sessionController,
+              localUnlockCoordinator: localUnlockCoordinator,
+              unlockedCredentialSessionRepository:
+                  unlockedCredentialSessionRepository,
+            );
+          }
+          return TwoFactorPage(
+            viewModel: TwoFactorViewModel.login(challenge: challenge),
+            onLoginCompleted: () => context.go(RoutePaths.shell),
+          );
+        },
+      ),
+      GoRoute(
+        path: RoutePaths.secondFactorSettings,
+        builder: (context, state) {
+          final repository = secondFactorRepository;
+          if (repository == null) {
+            return const Scaffold(body: Center(child: Text('二次验证服务不可用')));
+          }
+          return TwoFactorPage(
+            viewModel: TwoFactorViewModel.management(repository: repository),
+          );
+        },
       ),
       GoRoute(
         path: RoutePaths.drafts,
@@ -125,6 +171,7 @@ GoRouter createAppRouter({
           outboxRepository: outboxRepository,
           offlineOwnershipService: offlineOwnershipService,
           networkStatusService: networkStatusService,
+          biometricSettingsRepository: biometricSettingsRepository,
           initialDraftId: state.uri.queryParameters['draft'],
         ),
       ),

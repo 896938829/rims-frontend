@@ -6,6 +6,15 @@ abstract final class ApiEndpoints {
   static const String login = '/auth/login';
   static const String refresh = '/auth/refresh';
   static const String logout = '/auth/logout';
+  static const String secondFactorChallengeComplete =
+      '/auth/2fa/challenge/complete';
+  static const String secondFactorStatus = '/auth/2fa/status';
+  static const String secondFactorEnrollment = '/auth/2fa/enrollment';
+  static const String secondFactorEnrollmentConfirm =
+      '/auth/2fa/enrollment/confirm';
+  static const String secondFactorRecoveryRegenerate =
+      '/auth/2fa/recovery/regenerate';
+  static const String secondFactorDisable = '/auth/2fa/disable';
   static const String authSessions = '/auth/sessions';
   static String authSession(String sessionId) =>
       '$authSessions/${Uri.encodeComponent(sessionId)}';

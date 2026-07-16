@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:rims_frontend/core/storage/app_secure_storage.dart';
 import 'package:rims_frontend/core/config/app_environment.dart';
 import 'package:rims_frontend/main.dart';
 import 'package:rims_frontend/features/offline/data/repositories/memory_offline_store.dart';
@@ -11,6 +12,7 @@ void main() {
     await tester.pumpWidget(
       MainApp(
         offlineStore: MemoryOfflineStore(),
+        secureStorage: AppSecureStorage(),
         configuration: AppConfiguration.localTest(),
         networkStatusService: _OnlineNetworkStatusService(),
       ),
@@ -30,6 +32,7 @@ void main() {
     await tester.pumpWidget(
       MainApp(
         offlineStore: MemoryOfflineStore(),
+        secureStorage: AppSecureStorage(),
         configuration: AppConfiguration.localTest(),
         networkStatusService: _OnlineNetworkStatusService(),
       ),

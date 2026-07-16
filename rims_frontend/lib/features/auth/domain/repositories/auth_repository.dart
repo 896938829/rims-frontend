@@ -65,6 +65,40 @@ abstract interface class ProvisionalAuthSessionTransaction
   int get transactionAttemptVersion;
 }
 
+sealed class AuthLoginPreparation {
+  const AuthLoginPreparation();
+}
+
+final class PreparedAuthLoginPreparation extends AuthLoginPreparation {
+  const PreparedAuthLoginPreparation(this.transaction);
+
+  final AuthSessionTransaction transaction;
+}
+
+final class SecondFactorAuthLoginPreparation extends AuthLoginPreparation {
+  const SecondFactorAuthLoginPreparation(this.continuation);
+
+  final PendingSecondFactorLogin continuation;
+}
+
+abstract interface class PendingSecondFactorLogin {
+  DateTime get expiresAt;
+
+  Future<Result<AuthSessionTransaction>> complete({
+    String? code,
+    String? recoveryCode,
+  });
+
+  Future<void> cancel();
+}
+
+abstract interface class SecondFactorTransactionalAuthRepository {
+  Future<Result<AuthLoginPreparation>> prepareLoginFlow({
+    required String username,
+    required String password,
+  });
+}
+
 abstract interface class AuthRepository {
   Future<Result<AuthSession?>> restoreSession();
 

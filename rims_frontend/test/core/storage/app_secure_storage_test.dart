@@ -9,6 +9,7 @@ import 'package:rims_frontend/core/storage/pending_revocation_journal.dart';
 import 'package:rims_frontend/features/auth/domain/entities/auth_session.dart';
 import 'package:rims_frontend/features/auth/domain/entities/warehouse.dart';
 import 'package:rims_frontend/features/auth/domain/repositories/auth_repository.dart';
+import 'package:rims_frontend/features/auth/domain/services/authenticated_request_lease.dart';
 import 'package:rims_frontend/features/offline/data/repositories/cached_auth_repository.dart';
 import 'package:rims_frontend/features/offline/data/repositories/memory_offline_store.dart';
 import 'package:shared_preferences_platform_interface/in_memory_shared_preferences_async.dart';
@@ -17,6 +18,180 @@ import 'package:shared_preferences_platform_interface/shared_preferences_async_p
 import '../../support/unsupported_device_sessions.dart';
 
 void main() {
+  group('biometric runtime access lease', () {
+    Future<AppSecureStorage> commitLocked(
+      _MemoryFlutterSecureStorage raw, {
+      DeviceCredential? credential,
+      String ownerId = 'owner-7',
+    }) async {
+      final storage = AppSecureStorage(storage: raw);
+      final attempt = await storage.beginAccessTokenAttempt(ownerId);
+      await storage.savePendingDeviceCredentialForOwner(
+        credential:
+            credential ??
+            _credential(
+              accessExpiresAt: DateTime.utc(2099, 7, 15, 3),
+              refreshExpiresAt: DateTime.utc(2099, 8, 15, 3),
+              biometricPolicy: BiometricCredentialPolicy.requireUnlock,
+            ),
+        ownerId: ownerId,
+        attemptVersion: attempt,
+      );
+      await storage.commitAccessTokenForOwner(ownerId, attemptVersion: attempt);
+      return storage;
+    }
+
+    StableAuthenticatedRequestLeaseReader reader(
+      AppSecureStorage storage, {
+      String accountId = '7',
+    }) => StableAuthenticatedRequestLeaseReader(
+      credentialStorage: storage,
+      tokenStorage: storage,
+      authEpochReader: () => 4,
+      canAuthenticateReader: () => true,
+      accountIdReader: () => accountId,
+    );
+
+    Future<void> unlock(AppSecureStorage storage) async {
+      final inspection = await storage.inspectForBiometricUnlock(
+        DateTime.utc(2026, 7, 16),
+      );
+      expect(
+        inspection.availability,
+        BiometricCredentialAvailability.available,
+      );
+      expect(
+        await storage.releaseAfterBiometric(
+          expected: inspection.metadata!,
+          now: DateTime.utc(2026, 7, 16),
+        ),
+        isNotNull,
+      );
+    }
+
+    test(
+      'biometric release authorizes the stable request reader only in this process',
+      () async {
+        final raw = _MemoryFlutterSecureStorage();
+        final storage = await commitLocked(raw);
+
+        expect(await reader(storage).read(), isNull);
+        await unlock(storage);
+        expect((await reader(storage).read())?.token, 'access-1');
+
+        final restarted = AppSecureStorage(storage: raw);
+        expect(await reader(restarted).read(), isNull);
+      },
+    );
+
+    test(
+      'new login owner and credential rotation invalidate the lease',
+      () async {
+        final raw = _MemoryFlutterSecureStorage();
+        final storage = await commitLocked(raw);
+        await unlock(storage);
+        expect((await reader(storage).read())?.token, 'access-1');
+
+        await storage.beginAccessTokenAttempt('owner-new');
+        expect(await reader(storage).read(), isNull);
+
+        final rotatedStorage = await commitLocked(
+          _MemoryFlutterSecureStorage(),
+        );
+        await unlock(rotatedStorage);
+        expect((await reader(rotatedStorage).read())?.token, 'access-1');
+        final current = (await rotatedStorage.readDeviceCredential())!;
+        expect(
+          await rotatedStorage.rotateDeviceCredential(
+            credential: _credential(
+              accessToken: 'access-2',
+              refreshToken: 'refresh-2',
+              generation: 2,
+              accessExpiresAt: DateTime.utc(2099, 7, 15, 3),
+              refreshExpiresAt: DateTime.utc(2099, 8, 15, 3),
+              biometricPolicy: BiometricCredentialPolicy.requireUnlock,
+            ),
+            expectedAccountId: current.accountId,
+            expectedSessionId: current.sessionId,
+            expectedGeneration: current.generation,
+          ),
+          isTrue,
+        );
+        expect(await reader(rotatedStorage).read(), isNull);
+      },
+    );
+
+    test(
+      'revocation debt and logout immediately invalidate the lease',
+      () async {
+        final revoked = await commitLocked(_MemoryFlutterSecureStorage());
+        await unlock(revoked);
+        expect((await reader(revoked).read())?.token, 'access-1');
+        await revoked.savePendingRevocationLease(
+          const SessionRevocationLease(
+            accountId: '7',
+            sessionId: 'session-7',
+            generation: 1,
+            authEpoch: 4,
+          ),
+        );
+        expect(await reader(revoked).read(), isNull);
+
+        final loggedOut = await commitLocked(_MemoryFlutterSecureStorage());
+        await unlock(loggedOut);
+        expect((await reader(loggedOut).read())?.token, 'access-1');
+        await loggedOut.clearAccessToken();
+        expect(await reader(loggedOut).read(), isNull);
+      },
+    );
+
+    test(
+      'policy changes and a different account session cannot inherit the lease',
+      () async {
+        final raw = _MemoryFlutterSecureStorage();
+        final storage = await commitLocked(raw);
+        await unlock(storage);
+        expect((await reader(storage).read())?.token, 'access-1');
+        final first = (await storage.readDeviceCredential())!;
+
+        expect(
+          await storage.setBiometricPolicy(
+            expected: LockedCredentialMetadata.fromCredential(first),
+            policy: BiometricCredentialPolicy.disabled,
+          ),
+          isTrue,
+        );
+        final disabled = (await storage.readDeviceCredential())!;
+        expect(
+          await storage.setBiometricPolicy(
+            expected: LockedCredentialMetadata.fromCredential(disabled),
+            policy: BiometricCredentialPolicy.requireUnlock,
+          ),
+          isTrue,
+        );
+        expect(await reader(storage).read(), isNull);
+
+        final attempt = await storage.beginAccessTokenAttempt('owner-8');
+        await storage.savePendingDeviceCredentialForOwner(
+          credential: _credential(
+            accountId: '8',
+            sessionId: 'session-8',
+            accessExpiresAt: DateTime.utc(2099, 7, 15, 3),
+            refreshExpiresAt: DateTime.utc(2099, 8, 15, 3),
+            biometricPolicy: BiometricCredentialPolicy.requireUnlock,
+          ),
+          ownerId: 'owner-8',
+          attemptVersion: attempt,
+        );
+        await storage.commitAccessTokenForOwner(
+          'owner-8',
+          attemptVersion: attempt,
+        );
+        expect(await reader(storage, accountId: '8').read(), isNull);
+      },
+    );
+  });
+
   group('session revocation cleanup leases', () {
     const oldLease = SessionRevocationLease(
       accountId: '7',
@@ -315,6 +490,186 @@ void main() {
         },
       );
     }
+  });
+
+  group('biometric credential vault', () {
+    test(
+      'locked credential is invisible to normal token reads and released by exact CAS',
+      () async {
+        final raw = _MemoryFlutterSecureStorage();
+        final storage = AppSecureStorage(storage: raw);
+        final attempt = await storage.beginAccessTokenAttempt('owner-7');
+        expect(
+          await storage.savePendingDeviceCredentialForOwner(
+            credential: _credential(
+              accessExpiresAt: DateTime.utc(2026, 7, 20),
+              biometricPolicy: BiometricCredentialPolicy.requireUnlock,
+            ),
+            ownerId: 'owner-7',
+            attemptVersion: attempt,
+          ),
+          isTrue,
+        );
+        expect(
+          await storage.commitAccessTokenForOwner(
+            'owner-7',
+            attemptVersion: attempt,
+          ),
+          isTrue,
+        );
+
+        expect(await storage.readAccessToken(), isNull);
+        final inspection = await storage.inspectForBiometricUnlock(
+          DateTime.utc(2026, 7, 16),
+        );
+        expect(
+          inspection.availability,
+          BiometricCredentialAvailability.available,
+        );
+        final released = await storage.releaseAfterBiometric(
+          expected: inspection.metadata!,
+          now: DateTime.utc(2026, 7, 16),
+        );
+        expect(released?.accessToken, 'access-1');
+
+        final wrong = LockedCredentialMetadata(
+          accountId: '7',
+          sessionId: 'other',
+          generation: 1,
+          tokenVersion: 3,
+          refreshExpiresAt: DateTime.utc(2026, 8, 15, 3),
+        );
+        expect(
+          await storage.releaseAfterBiometric(
+            expected: wrong,
+            now: DateTime.utc(2026, 7, 16),
+          ),
+          isNull,
+        );
+      },
+    );
+
+    test('expiry revocation debt and pending state fail closed', () async {
+      Future<AppSecureStorage> committed(DeviceCredential credential) async {
+        final storage = AppSecureStorage(
+          storage: _MemoryFlutterSecureStorage(),
+        );
+        final attempt = await storage.beginAccessTokenAttempt('owner-7');
+        await storage.savePendingDeviceCredentialForOwner(
+          credential: credential,
+          ownerId: 'owner-7',
+          attemptVersion: attempt,
+        );
+        await storage.commitAccessTokenForOwner(
+          'owner-7',
+          attemptVersion: attempt,
+        );
+        return storage;
+      }
+
+      final expired = await committed(
+        _credential(
+          biometricPolicy: BiometricCredentialPolicy.requireUnlock,
+          refreshExpiresAt: DateTime.utc(2026, 7, 15, 4),
+        ),
+      );
+      expect(
+        (await expired.inspectForBiometricUnlock(
+          DateTime.utc(2026, 7, 16),
+        )).availability,
+        BiometricCredentialAvailability.expired,
+      );
+
+      final accessExpired = await committed(
+        _credential(
+          accessExpiresAt: DateTime.utc(2026, 7, 15, 4),
+          refreshExpiresAt: DateTime.utc(2026, 8, 15, 4),
+          biometricPolicy: BiometricCredentialPolicy.requireUnlock,
+        ),
+      );
+      expect(
+        (await accessExpired.inspectForBiometricUnlock(
+          DateTime.utc(2026, 7, 16),
+        )).availability,
+        BiometricCredentialAvailability.expired,
+      );
+
+      final revoked = await committed(
+        _credential(
+          accessExpiresAt: DateTime.utc(2026, 7, 20),
+          biometricPolicy: BiometricCredentialPolicy.requireUnlock,
+        ),
+      );
+      await revoked.savePendingRevocationLease(
+        const SessionRevocationLease(
+          accountId: '7',
+          sessionId: 'session-7',
+          generation: 1,
+          authEpoch: 4,
+        ),
+      );
+      expect(
+        (await revoked.inspectForBiometricUnlock(
+          DateTime.utc(2026, 7, 16),
+        )).availability,
+        BiometricCredentialAvailability.revoked,
+      );
+
+      final pending = AppSecureStorage(storage: _MemoryFlutterSecureStorage());
+      final attempt = await pending.beginAccessTokenAttempt('owner-7');
+      await pending.savePendingDeviceCredentialForOwner(
+        credential: _credential(
+          biometricPolicy: BiometricCredentialPolicy.requireUnlock,
+        ),
+        ownerId: 'owner-7',
+        attemptVersion: attempt,
+      );
+      expect(
+        (await pending.inspectForBiometricUnlock(
+          DateTime.utc(2026, 7, 16),
+        )).availability,
+        BiometricCredentialAvailability.pending,
+      );
+    });
+
+    test(
+      'policy update preserves token expiry version and generation',
+      () async {
+        final storage = AppSecureStorage(
+          storage: _MemoryFlutterSecureStorage(),
+        );
+        final attempt = await storage.beginAccessTokenAttempt('owner-7');
+        await storage.savePendingDeviceCredentialForOwner(
+          credential: _credential(accessExpiresAt: DateTime.utc(2026, 7, 20)),
+          ownerId: 'owner-7',
+          attemptVersion: attempt,
+        );
+        await storage.commitAccessTokenForOwner(
+          'owner-7',
+          attemptVersion: attempt,
+        );
+        final before = (await storage.readDeviceCredential())!;
+
+        expect(
+          await storage.setBiometricPolicy(
+            expected: LockedCredentialMetadata.fromCredential(before),
+            policy: BiometricCredentialPolicy.requireUnlock,
+          ),
+          isTrue,
+        );
+        final rawInspection = await storage.inspectForBiometricUnlock(
+          DateTime.utc(2026, 7, 16),
+        );
+        final after = await storage.releaseAfterBiometric(
+          expected: rawInspection.metadata!,
+          now: DateTime.utc(2026, 7, 16),
+        );
+        expect(after?.generation, before.generation);
+        expect(after?.refreshExpiresAt, before.refreshExpiresAt);
+        expect(after?.tokenVersion, before.tokenVersion);
+        expect(after?.biometricPolicy, BiometricCredentialPolicy.requireUnlock);
+      },
+    );
   });
 
   test(
@@ -677,17 +1032,24 @@ final class _MemoryFlutterSecureStorage extends FlutterSecureStorage {
 DeviceCredential _credential({
   String accessToken = 'access-1',
   String refreshToken = 'refresh-1',
+  String accountId = '7',
+  String sessionId = 'session-7',
   int generation = 1,
+  int tokenVersion = 3,
+  DateTime? accessExpiresAt,
+  DateTime? refreshExpiresAt,
+  BiometricCredentialPolicy biometricPolicy =
+      BiometricCredentialPolicy.disabled,
 }) => DeviceCredential(
   accessToken: accessToken,
   refreshToken: refreshToken,
-  accountId: '7',
-  sessionId: 'session-7',
-  accessExpiresAt: DateTime.utc(2026, 7, 15, 3),
-  refreshExpiresAt: DateTime.utc(2026, 8, 15, 3),
-  tokenVersion: 3,
+  accountId: accountId,
+  sessionId: sessionId,
+  accessExpiresAt: accessExpiresAt ?? DateTime.utc(2026, 7, 15, 3),
+  refreshExpiresAt: refreshExpiresAt ?? DateTime.utc(2026, 8, 15, 3),
+  tokenVersion: tokenVersion,
   generation: generation,
-  biometricPolicy: BiometricCredentialPolicy.disabled,
+  biometricPolicy: biometricPolicy,
 );
 
 final class _NullAuthRepository

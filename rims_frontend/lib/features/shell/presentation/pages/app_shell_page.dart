@@ -14,6 +14,7 @@ import '../../../attachments/domain/services/attachment_share_service.dart';
 import '../../../attachments/domain/services/attachment_staging_store.dart';
 import '../../../auth/domain/entities/warehouse.dart';
 import '../../../auth/domain/repositories/auth_repository.dart';
+import '../../../auth/domain/repositories/local_unlock_repository.dart';
 import '../../../auth/presentation/view_models/auth_session_controller.dart';
 import '../../../documents/domain/repositories/documents_repository.dart';
 import '../../../documents/presentation/pages/documents_page.dart';
@@ -65,6 +66,7 @@ final class AppShellPage extends StatefulWidget {
     this.outboxRepository,
     this.offlineOwnershipService,
     this.networkStatusService,
+    this.biometricSettingsRepository,
     super.key,
   });
 
@@ -85,6 +87,7 @@ final class AppShellPage extends StatefulWidget {
   final OutboxRepository? outboxRepository;
   final OfflineOwnershipService? offlineOwnershipService;
   final NetworkStatusService? networkStatusService;
+  final BiometricSettingsRepository? biometricSettingsRepository;
 
   @override
   State<AppShellPage> createState() => _AppShellPageState();
@@ -291,6 +294,7 @@ final class _AppShellPageState extends State<AppShellPage> {
         attachmentShareService: widget.attachmentShareService,
         attachmentUserId: widget.sessionController.currentUser?.id.toString(),
         eventBus: widget.eventBus,
+        biometricSettingsRepository: widget.biometricSettingsRepository,
       ),
     };
   }

@@ -6,8 +6,9 @@ import '../../../../core/storage/app_secure_storage.dart';
 import '../../domain/services/offline_store.dart';
 import '../database/offline_database_factory.dart';
 
-Future<OfflineStore> createOfflineStore() async {
-  const secureStorage = AppSecureStorage();
+Future<OfflineStore> createOfflineStore({
+  required OfflineDatabaseKeyStorage secureStorage,
+}) async {
   final directory = await getApplicationSupportDirectory();
   final factory = OfflineDatabaseFactory(
     readKey: secureStorage.readOfflineDatabaseKey,

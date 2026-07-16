@@ -2,9 +2,36 @@ import 'dart:convert';
 
 import '../../domain/entities/app_user.dart';
 import '../../domain/entities/device_session.dart';
+import '../../domain/entities/second_factor.dart';
 import '../../domain/entities/warehouse.dart';
 
-final class LoginResponseModel {
+sealed class LoginStartResponseModel {
+  const LoginStartResponseModel();
+}
+
+final class LoginChallengeResponseModel extends LoginStartResponseModel {
+  const LoginChallengeResponseModel({
+    required this.challenge,
+    required this.expiresAt,
+  });
+
+  factory LoginChallengeResponseModel.fromJson(Map<dynamic, dynamic> json) {
+    final challenge = _readString(json, const ['secondFactorChallenge']);
+    final expiresAt = _readDateTime(json, const ['secondFactorExpiresAt']);
+    if (challenge == null || challenge.length != 43 || expiresAt == null) {
+      throw const FormatException('Invalid second-factor challenge response');
+    }
+    return LoginChallengeResponseModel(
+      challenge: challenge,
+      expiresAt: expiresAt,
+    );
+  }
+
+  final String challenge;
+  final DateTime expiresAt;
+}
+
+final class LoginResponseModel extends LoginStartResponseModel {
   const LoginResponseModel({
     required String token,
     required this.user,
@@ -69,6 +96,104 @@ final class LoginResponseModel {
       refreshExpiresAt != null &&
       tokenVersion != null &&
       session != null;
+}
+
+final class SecondFactorStatusModel {
+  const SecondFactorStatusModel({
+    required this.enabled,
+    required this.pending,
+    required this.recoveryCodesRemaining,
+    this.pendingUntil,
+  });
+
+  factory SecondFactorStatusModel.fromJson(Map<dynamic, dynamic> json) {
+    final enabled = _readBool(json, const ['enabled']);
+    final pending = _readBool(json, const ['pending']);
+    final remaining = _readInt(json, const ['recoveryCodesRemaining']);
+    if (enabled == null ||
+        pending == null ||
+        remaining == null ||
+        remaining < 0) {
+      throw const FormatException('Invalid second-factor status response');
+    }
+    return SecondFactorStatusModel(
+      enabled: enabled,
+      pending: pending,
+      recoveryCodesRemaining: remaining,
+      pendingUntil: _readDateTime(json, const ['pendingUntil']),
+    );
+  }
+
+  final bool enabled;
+  final bool pending;
+  final int recoveryCodesRemaining;
+  final DateTime? pendingUntil;
+
+  SecondFactorStatus toEntity() => SecondFactorStatus(
+    enabled: enabled,
+    pending: pending,
+    recoveryCodesRemaining: recoveryCodesRemaining,
+    pendingUntil: pendingUntil,
+  );
+}
+
+final class TOTPEnrollmentModel {
+  const TOTPEnrollmentModel({
+    required this.secret,
+    required this.otpAuthUri,
+    required this.expiresAt,
+  });
+
+  factory TOTPEnrollmentModel.fromJson(Map<dynamic, dynamic> json) {
+    final secret = _readString(json, const ['secret']);
+    final uriValue = _readString(json, const ['otpauthUri']);
+    final expiresAt = _readDateTime(json, const ['expiresAt']);
+    final uri = uriValue == null ? null : Uri.tryParse(uriValue);
+    if (secret == null ||
+        uri == null ||
+        uri.scheme != 'otpauth' ||
+        expiresAt == null) {
+      throw const FormatException('Invalid TOTP enrollment response');
+    }
+    return TOTPEnrollmentModel(
+      secret: secret,
+      otpAuthUri: uri,
+      expiresAt: expiresAt,
+    );
+  }
+
+  final String secret;
+  final Uri otpAuthUri;
+  final DateTime expiresAt;
+
+  TOTPEnrollment toEntity() => TOTPEnrollment(
+    secret: secret,
+    otpAuthUri: otpAuthUri,
+    expiresAt: expiresAt,
+  );
+}
+
+final class RecoveryCodeSetModel {
+  const RecoveryCodeSetModel(this.codes);
+
+  factory RecoveryCodeSetModel.fromJson(Map<dynamic, dynamic> json) {
+    final values = json['recoveryCodes'];
+    if (values is! List ||
+        values.isEmpty ||
+        values.any((value) => value is! String || value.trim().isEmpty)) {
+      throw const FormatException('Invalid recovery codes response');
+    }
+    return RecoveryCodeSetModel(
+      values
+          .cast<String>()
+          .map((value) => value.trim())
+          .toList(growable: false),
+    );
+  }
+
+  final List<String> codes;
+
+  RecoveryCodeSet toEntity() => RecoveryCodeSet(List.unmodifiable(codes));
 }
 
 final class DeviceSessionModel {

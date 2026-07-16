@@ -27,6 +27,7 @@ final class CachedAuthRepository
         AuthCredentialInvalidator,
         OwnerBoundCredentialQuarantine,
         TransactionalAuthRepository,
+        SecondFactorTransactionalAuthRepository,
         SessionFailureRecovery {
   CachedAuthRepository({
     required this.delegate,
@@ -257,6 +258,197 @@ final class CachedAuthRepository
       );
     }
   }
+
+  @override
+  Future<Result<AuthLoginPreparation>> prepareLoginFlow({
+    required String username,
+    required String password,
+  }) async {
+    try {
+      final configuredCoordinator = ownershipCoordinator;
+      final operationEpoch = authEpochReader?.call();
+      final pendingFailure = await _retryPendingRevocation();
+      if (pendingFailure != null) return FailureResult(pendingFailure);
+      await _clearAbandonedPendingToken();
+      if (configuredCoordinator != null &&
+          configuredCoordinator is! OfflineReauthenticationCoordinator) {
+        return const FailureResult(
+          LocalStorageFailure(
+            message:
+                'Offline ownership coordinator does not support provisional reauthentication.',
+          ),
+        );
+      }
+      if (configuredCoordinator != null) {
+        final capabilityFailure = _provisionalCapabilityFailure();
+        if (capabilityFailure != null) return FailureResult(capabilityFailure);
+      }
+      if (delegate
+          case final SecondFactorTransactionalAuthRepository transactional) {
+        final started = await transactional.prepareLoginFlow(
+          username: username,
+          password: password,
+        );
+        return switch (started) {
+          Success<AuthLoginPreparation>(
+            data: PreparedAuthLoginPreparation(transaction: final transaction),
+          ) =>
+            _wrapSecondFactorTransaction(
+              transaction,
+              configuredCoordinator: configuredCoordinator,
+              operationEpoch: operationEpoch,
+            ),
+          Success<AuthLoginPreparation>(
+            data: SecondFactorAuthLoginPreparation(
+              continuation: final continuation,
+            ),
+          ) =>
+            Success(
+              SecondFactorAuthLoginPreparation(
+                _CachedSecondFactorContinuation(
+                  upstream: continuation,
+                  wrap: (transaction) => _wrapSecondFactorTransaction(
+                    transaction,
+                    configuredCoordinator: configuredCoordinator,
+                    operationEpoch: operationEpoch,
+                  ),
+                ),
+              ),
+            ),
+          FailureResult<AuthLoginPreparation>(failure: final failure) =>
+            FailureResult(failure),
+        };
+      }
+      final prepared = await _prepareLogin(
+        username: username,
+        password: password,
+      );
+      return prepared.when(
+        success: (transaction) =>
+            Success(PreparedAuthLoginPreparation(transaction)),
+        failure: FailureResult<AuthLoginPreparation>.new,
+      );
+    } on Object catch (error) {
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to complete the local authentication transaction.',
+          cause: sanitizeTransportCause(error),
+        ),
+      );
+    }
+  }
+
+  Future<Result<AuthLoginPreparation>> _wrapSecondFactorTransaction(
+    AuthSessionTransaction upstream, {
+    required OfflineOwnershipCoordinator? configuredCoordinator,
+    required int? operationEpoch,
+  }) async {
+    final provisional = switch (upstream) {
+      final ProvisionalAuthSessionTransaction value => value,
+      _ => null,
+    };
+    if (configuredCoordinator != null && provisional == null) {
+      await upstream.abort();
+      return const FailureResult(
+        LocalStorageFailure(
+          message:
+              'Authentication repository returned a non-provisional login transaction.',
+        ),
+      );
+    }
+    final data = upstream.session;
+    if (!_isCurrentEpoch(operationEpoch)) {
+      await upstream.abort();
+      return _staleLoginPreparationFailure();
+    }
+    final previousAccountId = await accountStorage.readAuthenticatedAccountId();
+    final accountId = data.user.id.toString();
+    if (previousAccountId != null && previousAccountId != accountId) {
+      final ownershipFailure = await _applyOwnership(
+        OfflineOwnershipIntent.accountSwitch(
+          previousAccountId: previousAccountId,
+          currentAccountId: accountId,
+        ),
+      );
+      if (ownershipFailure != null) {
+        await upstream.abort();
+        return FailureResult(ownershipFailure);
+      }
+    }
+    OfflineReauthenticationLease? reauthenticationLease;
+    final coordinator = configuredCoordinator;
+    if (coordinator case final OfflineReauthenticationCoordinator preparer) {
+      reauthenticationLease = await preparer.prepareReauthentication(
+        accountId: accountId,
+      );
+      if (!reauthenticationLease.report.completed) {
+        _safeRollbackLease(reauthenticationLease);
+        await upstream.abort();
+        return FailureResult(
+          _ownershipFailureFrom(reauthenticationLease.report),
+        );
+      }
+    }
+    if (!_isCurrentEpoch(operationEpoch)) {
+      _safeRollbackLease(reauthenticationLease);
+      await upstream.abort();
+      return _staleLoginPreparationFailure();
+    }
+    final projectionId = authTransactionOwnerFactory();
+    final projectionAttemptVersion = configuredCoordinator != null
+        ? provisional?.transactionAttemptVersion
+        : null;
+    try {
+      Future<CacheRecord> writeProjection() => _writeSession(
+        data,
+        expectedEpoch: operationEpoch,
+        projectionId: projectionId,
+        projectionAttemptVersion: projectionAttemptVersion,
+      );
+      if (reauthenticationLease == null) {
+        await writeProjection();
+      } else {
+        await reauthenticationLease.runScopedWrite(writeProjection);
+      }
+    } on _StaleAuthOperation {
+      _safeRollbackLease(reauthenticationLease);
+      await upstream.abort();
+      return _staleLoginPreparationFailure();
+    } on Object {
+      await upstream.abort();
+      await _runWithLease(
+        reauthenticationLease,
+        () => _rollbackFailedSessionProjection(
+          accountId,
+          projectionId,
+          projectionAttemptVersion: projectionAttemptVersion,
+          propagateFailure: true,
+        ),
+      );
+      _safeRollbackLease(reauthenticationLease);
+      rethrow;
+    }
+    return Success(
+      PreparedAuthLoginPreparation(
+        _CachedAuthSessionTransaction(
+          session: data,
+          upstream: upstream,
+          rollbackProjection: () => _rollbackFailedSessionProjection(
+            accountId,
+            projectionId,
+            projectionAttemptVersion: projectionAttemptVersion,
+            propagateFailure: true,
+          ),
+          reauthenticationLease: reauthenticationLease,
+        ),
+      ),
+    );
+  }
+
+  FailureResult<AuthLoginPreparation> _staleLoginPreparationFailure() =>
+      const FailureResult(
+        StateFailure(message: 'Authentication operation was superseded.'),
+      );
 
   Future<Result<AuthSessionTransaction>> _prepareLogin({
     required String username,
@@ -1573,6 +1765,56 @@ final class CachedAuthRepository
 }
 
 String _newAuthTransactionOwnerId() => const Uuid().v4();
+
+final class _CachedSecondFactorContinuation
+    implements PendingSecondFactorLogin {
+  const _CachedSecondFactorContinuation({
+    required this.upstream,
+    required this.wrap,
+  });
+
+  final PendingSecondFactorLogin upstream;
+  final Future<Result<AuthLoginPreparation>> Function(
+    AuthSessionTransaction transaction,
+  )
+  wrap;
+
+  @override
+  DateTime get expiresAt => upstream.expiresAt;
+
+  @override
+  Future<Result<AuthSessionTransaction>> complete({
+    String? code,
+    String? recoveryCode,
+  }) async {
+    final completed = await upstream.complete(
+      code: code,
+      recoveryCode: recoveryCode,
+    );
+    if (completed case FailureResult<AuthSessionTransaction>(
+      failure: final failure,
+    )) {
+      return FailureResult(failure);
+    }
+    final wrapped = await wrap(
+      (completed as Success<AuthSessionTransaction>).data,
+    );
+    return switch (wrapped) {
+      Success<AuthLoginPreparation>(
+        data: PreparedAuthLoginPreparation(transaction: final transaction),
+      ) =>
+        Success(transaction),
+      FailureResult<AuthLoginPreparation>(failure: final failure) =>
+        FailureResult(failure),
+      _ => const FailureResult(
+        StateFailure(message: 'Invalid authentication transaction state.'),
+      ),
+    };
+  }
+
+  @override
+  Future<void> cancel() => upstream.cancel();
+}
 
 final class _CachedAuthSessionTransaction
     implements AuthSessionTransaction, OwnershipPreparedAuthSessionTransaction {

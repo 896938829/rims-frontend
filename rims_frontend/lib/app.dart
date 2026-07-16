@@ -14,6 +14,7 @@ import 'core/events/app_event_bus.dart';
 import 'core/network/api_client.dart';
 import 'core/network/api_endpoints.dart';
 import 'core/result/result.dart';
+import 'core/security/local_authenticator.dart';
 import 'core/storage/app_secure_storage.dart';
 import 'core/storage/pending_revocation_journal.dart';
 import 'core/theme/app_theme.dart';
@@ -28,7 +29,11 @@ import 'features/attachments/data/services/file_attachment_staging_store.dart';
 import 'features/attachments/domain/services/attachment_picker.dart';
 import 'features/auth/data/datasources/auth_remote_datasource.dart';
 import 'features/auth/data/repositories/auth_repository_impl.dart';
+import 'features/auth/data/repositories/biometric_settings_repository_impl.dart';
+import 'features/auth/data/repositories/second_factor_repository_impl.dart';
 import 'features/auth/domain/repositories/auth_repository.dart';
+import 'features/auth/domain/repositories/local_unlock_repository.dart';
+import 'features/auth/domain/repositories/second_factor_repository.dart';
 import 'features/auth/domain/services/session_refresh_coordinator.dart';
 import 'features/auth/domain/services/auth_session_lifecycle_gate.dart';
 import 'features/auth/domain/services/authenticated_request_lease.dart';
@@ -76,6 +81,7 @@ class MainApp extends StatefulWidget {
   const MainApp({
     required this.offlineStore,
     required this.configuration,
+    required this.secureStorage,
     this.networkStatusService,
     this.outboxHandlers = const [],
     this.offlineDatabaseKeyManager,
@@ -83,6 +89,7 @@ class MainApp extends StatefulWidget {
   });
 
   final OfflineStore offlineStore;
+  final AppSecureStorage secureStorage;
   final NetworkStatusService? networkStatusService;
   final List<OutboxOperationHandler> outboxHandlers;
   final OfflineDatabaseKeyManager? offlineDatabaseKeyManager;
@@ -94,7 +101,7 @@ class MainApp extends StatefulWidget {
 
 final class _MainAppState extends State<MainApp> {
   late final AuthSessionController _sessionController;
-  final AppSecureStorage _secureStorage = const AppSecureStorage();
+  late final AppSecureStorage _secureStorage;
   final AppEventBus _eventBus = AppEventBus();
   final OutboxPermissionPolicy _outboxPermissionPolicy =
       const OutboxPermissionPolicy();
@@ -109,6 +116,11 @@ final class _MainAppState extends State<MainApp> {
   StreamSubscription<TokenExpiredEvent>? _tokenExpiredSubscription;
   late final ApiClient _apiClient;
   late final AuthRepository _authRepository;
+  late final SecondFactorRepository _secondFactorRepository;
+  late final LocalUnlockCoordinator _localUnlockCoordinator;
+  late final UnlockedCredentialSessionRepository
+  _unlockedCredentialSessionRepository;
+  late final BiometricSettingsRepository _biometricSettingsRepository;
   late final SessionRefreshCoordinator _sessionRefreshCoordinator;
   late final DocumentsRepository _documentsRepository;
   late final InventoryRepository _inventoryRepository;
@@ -128,6 +140,7 @@ final class _MainAppState extends State<MainApp> {
   @override
   void initState() {
     super.initState();
+    _secureStorage = widget.secureStorage;
     _configuration = widget.configuration;
     _networkStatusService =
         widget.networkStatusService ?? _createNetworkStatusService();
@@ -228,10 +241,25 @@ final class _MainAppState extends State<MainApp> {
         );
       },
     );
+    final authRemoteDataSource = ApiAuthRemoteDataSource(_apiClient);
     final authRepository = AuthRepositoryImpl(
-      remoteDataSource: ApiAuthRemoteDataSource(_apiClient),
+      remoteDataSource: authRemoteDataSource,
       secureStorage: _secureStorage,
       authEpochReader: () => _sessionController.authEpoch,
+    );
+    _secondFactorRepository = SecondFactorRepositoryImpl(authRemoteDataSource);
+    _unlockedCredentialSessionRepository = authRepository;
+    final localAuthenticator = PlatformLocalAuthenticator();
+    _localUnlockCoordinator = LocalUnlockCoordinator(
+      authenticator: localAuthenticator,
+      vault: _secureStorage,
+      now: () => DateTime.now().toUtc(),
+    );
+    _biometricSettingsRepository = BiometricSettingsRepositoryImpl(
+      credentialStorage: _secureStorage,
+      vault: _secureStorage,
+      authenticator: localAuthenticator,
+      now: () => DateTime.now().toUtc(),
     );
     final cachedAuthRepository = CachedAuthRepository(
       delegate: authRepository,
@@ -342,6 +370,10 @@ final class _MainAppState extends State<MainApp> {
     );
     _router = createAppRouter(
       authRepository: _authRepository,
+      secondFactorRepository: _secondFactorRepository,
+      localUnlockCoordinator: _localUnlockCoordinator,
+      unlockedCredentialSessionRepository: _unlockedCredentialSessionRepository,
+      biometricSettingsRepository: _biometricSettingsRepository,
       documentsRepository: _documentsRepository,
       inventoryRepository: _inventoryRepository,
       reportsRepository: _reportsRepository,

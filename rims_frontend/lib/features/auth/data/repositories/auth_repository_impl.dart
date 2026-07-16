@@ -10,6 +10,7 @@ import '../../domain/entities/auth_session.dart';
 import '../../domain/entities/device_session.dart';
 import '../../domain/entities/warehouse.dart';
 import '../../domain/repositories/auth_repository.dart';
+import '../../domain/repositories/local_unlock_repository.dart';
 import '../datasources/auth_remote_datasource.dart';
 import '../models/auth_models.dart';
 
@@ -19,12 +20,15 @@ class AuthRepositoryImpl
         AuthCredentialInvalidator,
         OwnerBoundCredentialQuarantine,
         AbandonedLoginCredentialCleaner,
-        SessionCredentialRepository {
+        SessionCredentialRepository,
+        UnlockedCredentialSessionRepository,
+        SecondFactorTransactionalAuthRepository {
   factory AuthRepositoryImpl({
     required AuthRemoteDataSource remoteDataSource,
     required TokenStorage secureStorage,
     String Function() tokenOwnerFactory = _newTokenOwnerId,
     int Function()? authEpochReader,
+    DateTime Function() now = _now,
   }) {
     if (secureStorage is AuthTokenTransactionStorage) {
       return _TransactionalAuthRepositoryImpl(
@@ -32,6 +36,7 @@ class AuthRepositoryImpl
         secureStorage: secureStorage,
         tokenOwnerFactory: tokenOwnerFactory,
         authEpochReader: authEpochReader,
+        now: now,
       );
     }
     return AuthRepositoryImpl._(
@@ -39,6 +44,7 @@ class AuthRepositoryImpl
       secureStorage: secureStorage,
       tokenOwnerFactory: tokenOwnerFactory,
       authEpochReader: authEpochReader,
+      now: now,
     );
   }
 
@@ -47,12 +53,14 @@ class AuthRepositoryImpl
     required this.secureStorage,
     required this.tokenOwnerFactory,
     this.authEpochReader,
+    required this.now,
   });
 
   final AuthRemoteDataSource remoteDataSource;
   final TokenStorage secureStorage;
   final String Function() tokenOwnerFactory;
   final int Function()? authEpochReader;
+  final DateTime Function() now;
   final Expando<_PlainAuthSessionTransaction> _plainTransactions = Expando();
 
   Object get tokenTransactionStorageIdentity => secureStorage;
@@ -95,6 +103,90 @@ class AuthRepositoryImpl
   }
 
   @override
+  Future<Result<AuthSession>> restoreUnlockedCredential(
+    DeviceCredential credential,
+  ) async {
+    final currentTime = now().toUtc();
+    if (!credential.accessExpiresAt.isAfter(currentTime) ||
+        !credential.refreshExpiresAt.isAfter(currentTime) ||
+        credential.biometricPolicy != BiometricCredentialPolicy.requireUnlock) {
+      return const FailureResult(AuthenticationFailure(message: '本机登录凭据已过期'));
+    }
+    final remote = remoteDataSource is ExplicitCredentialAuthRemoteDataSource
+        ? remoteDataSource as ExplicitCredentialAuthRemoteDataSource
+        : null;
+    if (remote == null) {
+      return const FailureResult(StateFailure(message: '本机解锁服务不可用'));
+    }
+    try {
+      final userResult = await remote.loadCurrentUserWithAccessToken(
+        credential.accessToken,
+      );
+      return await userResult.when(
+        success: (model) async {
+          final user = model.toEntity();
+          final userFailure = _validateUser(user);
+          if (userFailure != null ||
+              user.id.toString() != credential.accountId) {
+            return FailureResult<AuthSession>(
+              userFailure ??
+                  const AuthenticationFailure(message: '本机登录凭据与账号不匹配'),
+            );
+          }
+          return _sessionFromUserAndToken(
+            token: credential.accessToken,
+            user: user,
+            clearTokenOnAnyFailure: false,
+            bootstrapAccessToken: credential.accessToken,
+          );
+        },
+        failure: (failure) async => FailureResult<AuthSession>(failure),
+      );
+    } on Object catch (error) {
+      return FailureResult(
+        UnknownFailure(
+          message: '无法验证本机登录凭据',
+          cause: sanitizeTransportCause(error),
+        ),
+      );
+    }
+  }
+
+  @override
+  Future<Result<void>> quarantineRejectedCredential(
+    DeviceCredential credential,
+  ) async {
+    final storage = secureStorage is DeviceCredentialStorage
+        ? secureStorage as DeviceCredentialStorage
+        : null;
+    if (storage == null) {
+      return const FailureResult(LocalStorageFailure(message: '本机凭据隔离服务不可用'));
+    }
+    try {
+      final active = await storage.readDeviceCredential();
+      if (!_sameFullCredential(active, credential) ||
+          active?.tokenVersion != credential.tokenVersion) {
+        return const Success(null);
+      }
+      final cleared = await storage.clearDeviceCredentialIfMatches(
+        accountId: credential.accountId,
+        sessionId: credential.sessionId,
+        generation: credential.generation,
+      );
+      return cleared
+          ? const Success(null)
+          : const FailureResult(LocalStorageFailure(message: '本机凭据已变化，未执行清理'));
+    } on Object catch (error) {
+      return FailureResult(
+        LocalStorageFailure(
+          message: '无法隔离旧的本机凭据',
+          cause: sanitizeTransportCause(error),
+        ),
+      );
+    }
+  }
+
+  @override
   Future<Result<AuthSession>> login({
     required String username,
     required String password,
@@ -111,17 +203,38 @@ class AuthRepositoryImpl
   Future<Result<AuthSessionTransaction>> prepareLogin({
     required String username,
     required String password,
-  }) => _prepareLoginTransaction(
-    username: username,
-    password: password,
-    ownerId: tokenOwnerFactory(),
-  );
+  }) async {
+    final result = await prepareLoginFlow(
+      username: username,
+      password: password,
+    );
+    return switch (result) {
+      Success<AuthLoginPreparation>(
+        data: PreparedAuthLoginPreparation(transaction: final transaction),
+      ) =>
+        Success(transaction),
+      Success<AuthLoginPreparation>(
+        data: SecondFactorAuthLoginPreparation(
+          continuation: final continuation,
+        ),
+      ) =>
+        () async {
+          await continuation.cancel();
+          return const FailureResult<AuthSessionTransaction>(
+            AuthenticationFailure(message: 'Second-factor proof is required.'),
+          );
+        }(),
+      FailureResult<AuthLoginPreparation>(failure: final failure) =>
+        FailureResult(failure),
+    };
+  }
 
-  Future<Result<AuthSessionTransaction>> _prepareLoginTransaction({
+  @override
+  Future<Result<AuthLoginPreparation>> prepareLoginFlow({
     required String username,
     required String password,
-    required String ownerId,
   }) async {
+    final ownerId = tokenOwnerFactory();
     int? attemptVersion;
     _PlainTokenAttempt? plainAttempt;
     try {
@@ -131,39 +244,52 @@ class AuthRepositoryImpl
       } else {
         plainAttempt = await _plainTokenAuthority(secureStorage).begin(ownerId);
       }
+      if (remoteDataSource case final SecondFactorAuthRemoteDataSource remote) {
+        final started = await remote.beginLogin(
+          username: username,
+          password: password,
+        );
+        return await started.when(
+          success: (response) async {
+            if (response case final LoginChallengeResponseModel challenge) {
+              return Success<AuthLoginPreparation>(
+                SecondFactorAuthLoginPreparation(
+                  _RepositorySecondFactorContinuation(
+                    repository: this,
+                    remote: remote,
+                    challenge: challenge,
+                    ownerId: ownerId,
+                    attemptVersion: attemptVersion,
+                    plainAttempt: plainAttempt,
+                  ),
+                ),
+              );
+            }
+            return _prepareAuthenticatedLogin(
+              response as LoginResponseModel,
+              ownerId: ownerId,
+              attemptVersion: attemptVersion,
+              plainAttempt: plainAttempt,
+            );
+          },
+          failure: (failure) async =>
+              FailureResult<AuthLoginPreparation>(failure),
+        );
+      }
       final loginResult = await remoteDataSource.login(
         username: username,
         password: password,
       );
-      final sessionResult = await _sessionFromLoginResult(
-        loginResult,
-        ownerId: ownerId,
-        attemptVersion: attemptVersion,
-      );
-      return switch (sessionResult) {
-        Success<AuthSession>(data: final session) => Success(() {
-          if (secureStorage is AuthTokenTransactionStorage &&
-              attemptVersion != null) {
-            return _StoredAuthSessionTransaction(
-              session: session,
-              storage: secureStorage as AuthTokenTransactionStorage,
-              ownerId: ownerId,
-              attemptVersion: attemptVersion,
-            );
-          }
-          final transaction = _PlainAuthSessionTransaction(
-            session: session,
-            storage: secureStorage,
-            authority: _plainTokenAuthority(secureStorage),
-            attempt: plainAttempt!,
-          );
-          _plainTransactions[session] = transaction;
-          return transaction;
-        }()),
-        FailureResult<AuthSession>(failure: final failure) => FailureResult(
-          failure,
+      return await loginResult.when(
+        success: (login) => _prepareAuthenticatedLogin(
+          login,
+          ownerId: ownerId,
+          attemptVersion: attemptVersion,
+          plainAttempt: plainAttempt,
         ),
-      };
+        failure: (failure) async =>
+            FailureResult<AuthLoginPreparation>(failure),
+      );
     } on Object catch (error) {
       try {
         await _clearLoginToken(
@@ -179,6 +305,59 @@ class AuthRepositoryImpl
         error,
       );
     }
+  }
+
+  Future<Result<AuthLoginPreparation>> _prepareAuthenticatedLogin(
+    LoginResponseModel login, {
+    required String ownerId,
+    required int? attemptVersion,
+    required _PlainTokenAttempt? plainAttempt,
+  }) async {
+    final sessionResult = await _sessionFromLoginResult(
+      Success(login),
+      ownerId: ownerId,
+      attemptVersion: attemptVersion,
+    );
+    return switch (sessionResult) {
+      Success<AuthSession>(data: final session) => Success(
+        PreparedAuthLoginPreparation(
+          _transactionForSession(
+            session,
+            ownerId: ownerId,
+            attemptVersion: attemptVersion,
+            plainAttempt: plainAttempt,
+          ),
+        ),
+      ),
+      FailureResult<AuthSession>(failure: final failure) => FailureResult(
+        failure,
+      ),
+    };
+  }
+
+  AuthSessionTransaction _transactionForSession(
+    AuthSession session, {
+    required String ownerId,
+    required int? attemptVersion,
+    required _PlainTokenAttempt? plainAttempt,
+  }) {
+    if (secureStorage is AuthTokenTransactionStorage &&
+        attemptVersion != null) {
+      return _StoredAuthSessionTransaction(
+        session: session,
+        storage: secureStorage as AuthTokenTransactionStorage,
+        ownerId: ownerId,
+        attemptVersion: attemptVersion,
+      );
+    }
+    final transaction = _PlainAuthSessionTransaction(
+      session: session,
+      storage: secureStorage,
+      authority: _plainTokenAuthority(secureStorage),
+      attempt: plainAttempt!,
+    );
+    _plainTransactions[session] = transaction;
+    return transaction;
   }
 
   @override
@@ -375,9 +554,11 @@ class AuthRepositoryImpl
     required bool clearTokenOnAnyFailure,
     String? tokenOwnerId,
     int? tokenAttemptVersion,
+    String? bootstrapAccessToken,
   }) async {
     final warehouseResult = await remoteDataSource.loadWarehouses(
-      accessToken: clearTokenOnAnyFailure ? token : null,
+      accessToken:
+          bootstrapAccessToken ?? (clearTokenOnAnyFailure ? token : null),
     );
     return warehouseResult.when(
       success: (warehouseModels) {
@@ -713,6 +894,7 @@ final class _TransactionalAuthRepositoryImpl extends AuthRepositoryImpl
     required super.secureStorage,
     required super.tokenOwnerFactory,
     super.authEpochReader,
+    required super.now,
   }) : super._();
 }
 
@@ -742,6 +924,129 @@ DeviceCredential _credentialFromLogin(
 }
 
 String _newTokenOwnerId() => const Uuid().v4();
+DateTime _now() => DateTime.now().toUtc();
+
+final class _RepositorySecondFactorContinuation
+    implements PendingSecondFactorLogin {
+  _RepositorySecondFactorContinuation({
+    required this.repository,
+    required this.remote,
+    required this.challenge,
+    required this.ownerId,
+    required this.attemptVersion,
+    required this.plainAttempt,
+  });
+
+  final AuthRepositoryImpl repository;
+  final SecondFactorAuthRemoteDataSource remote;
+  final LoginChallengeResponseModel challenge;
+  final String ownerId;
+  final int? attemptVersion;
+  final _PlainTokenAttempt? plainAttempt;
+  bool _cancelled = false;
+  bool _completed = false;
+  bool _inFlight = false;
+
+  @override
+  DateTime get expiresAt => challenge.expiresAt;
+
+  @override
+  Future<Result<AuthSessionTransaction>> complete({
+    String? code,
+    String? recoveryCode,
+  }) async {
+    if (_cancelled || _completed || _inFlight) {
+      return const FailureResult(
+        StateFailure(message: 'Second-factor challenge is unavailable.'),
+      );
+    }
+    if (!expiresAt.isAfter(repository.now().toUtc())) {
+      await cancel();
+      return const FailureResult(
+        AuthenticationFailure(message: 'Second-factor challenge expired.'),
+      );
+    }
+    if (!_validSecondFactor(code, recoveryCode)) {
+      return const FailureResult(
+        AuthenticationFailure(message: 'Second-factor proof is invalid.'),
+      );
+    }
+    _inFlight = true;
+    final response = await remote.completeSecondFactorChallenge(
+      challenge: challenge.challenge,
+      code: code,
+      recoveryCode: recoveryCode,
+    );
+    _inFlight = false;
+    if (_cancelled) {
+      return const FailureResult(
+        StateFailure(message: 'Second-factor challenge was cancelled.'),
+      );
+    }
+    if (response case FailureResult<LoginResponseModel>(
+      failure: final failure,
+    )) {
+      if (!expiresAt.isAfter(repository.now().toUtc())) await cancel();
+      return FailureResult(failure);
+    }
+    final prepared = await response.when(
+      success: (login) => repository._prepareAuthenticatedLogin(
+        login,
+        ownerId: ownerId,
+        attemptVersion: attemptVersion,
+        plainAttempt: plainAttempt,
+      ),
+      failure: (failure) async => FailureResult<AuthLoginPreparation>(failure),
+    );
+    if (_cancelled) {
+      if (prepared case Success<AuthLoginPreparation>(
+        data: PreparedAuthLoginPreparation(transaction: final transaction),
+      )) {
+        await transaction.abort();
+      }
+      return const FailureResult(
+        StateFailure(message: 'Second-factor challenge was cancelled.'),
+      );
+    }
+    _completed = true;
+    return switch (prepared) {
+      Success<AuthLoginPreparation>(
+        data: PreparedAuthLoginPreparation(transaction: final transaction),
+      ) =>
+        Success(transaction),
+      FailureResult<AuthLoginPreparation>(failure: final failure) => () async {
+        await repository._clearLoginToken(
+          token: '',
+          ownerId: ownerId,
+          attemptVersion: attemptVersion,
+        );
+        return FailureResult<AuthSessionTransaction>(failure);
+      }(),
+      _ => const FailureResult(
+        AuthenticationFailure(message: 'Second-factor proof is invalid.'),
+      ),
+    };
+  }
+
+  @override
+  Future<void> cancel() async {
+    if (_cancelled || _completed) return;
+    _cancelled = true;
+    await repository._clearLoginToken(
+      token: '',
+      ownerId: ownerId,
+      attemptVersion: attemptVersion,
+    );
+  }
+
+  bool _validSecondFactor(String? code, String? recoveryCode) {
+    final hasCode = code != null && RegExp(r'^\d{6}$').hasMatch(code);
+    final hasRecovery =
+        recoveryCode != null &&
+        recoveryCode.replaceAll(RegExp(r'[\s-]'), '').length == 26;
+    return hasCode != hasRecovery;
+  }
+}
 
 final class _StoredAuthSessionTransaction
     implements AuthSessionTransaction, ProvisionalAuthSessionTransaction {

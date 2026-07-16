@@ -5,12 +5,15 @@ import '../../../../core/events/app_event_bus.dart';
 import '../../../../core/network/sanitized_transport_cause.dart';
 import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
+import '../../../../core/security/local_authenticator.dart';
 import '../../../../core/storage/app_secure_storage.dart';
 import '../../domain/entities/app_user.dart';
 import '../../domain/entities/auth_session.dart';
 import '../../domain/entities/terminal_session_revocation.dart';
 import '../../domain/entities/warehouse.dart';
 import '../../domain/repositories/auth_repository.dart';
+import '../../domain/repositories/local_unlock_repository.dart';
+import '../../domain/repositories/second_factor_repository.dart';
 import '../../domain/services/authenticated_request_lease.dart';
 import '../../domain/services/auth_session_lifecycle_gate.dart';
 import '../../domain/services/session_refresh_coordinator.dart';
@@ -30,6 +33,20 @@ final class AuthLoginAttempt {
   void _complete(AuthSessionController owner) {
     if (identical(_owner, owner)) _owner = null;
   }
+}
+
+sealed class AuthLoginStart {
+  const AuthLoginStart();
+}
+
+final class AuthLoginCompleted extends AuthLoginStart {
+  const AuthLoginCompleted();
+}
+
+final class AuthLoginChallengeRequired extends AuthLoginStart {
+  const AuthLoginChallengeRequired(this.challenge);
+
+  final SecondFactorLoginChallenge challenge;
 }
 
 final class AuthSessionController extends ChangeNotifier {
@@ -93,15 +110,88 @@ final class AuthSessionController extends ChangeNotifier {
     required String username,
     required String password,
     AuthLoginAttempt? attempt,
+  }) async {
+    final started = await beginLogin(
+      authRepository: authRepository,
+      username: username,
+      password: password,
+      attempt: attempt,
+    );
+    return switch (started) {
+      Success<AuthLoginStart>(data: AuthLoginCompleted()) =>
+        const Success<void>(null),
+      Success<AuthLoginStart>(
+        data: AuthLoginChallengeRequired(challenge: final challenge),
+      ) =>
+        () async {
+          await challenge.cancel();
+          return const FailureResult<void>(
+            AuthenticationFailure(message: 'Second-factor proof is required.'),
+          );
+        }(),
+      FailureResult<AuthLoginStart>(failure: final failure) =>
+        FailureResult<void>(failure),
+    };
+  }
+
+  Future<Result<AuthLoginStart>> beginLogin({
+    required AuthRepository authRepository,
+    required String username,
+    required String password,
+    AuthLoginAttempt? attempt,
   }) => lifecycleGate.run(() async {
     final loginAttempt = attempt ?? createLoginAttempt();
     if (!loginAttempt._isActiveFor(this)) {
-      return const FailureResult<void>(
+      return const FailureResult<AuthLoginStart>(
         StateFailure(message: 'Login attempt was cancelled.'),
       );
     }
     final epoch = ++_authEpoch;
+    var challengeIssued = false;
     try {
+      if (authRepository
+          case final SecondFactorTransactionalAuthRepository transactional) {
+        final prepared = await transactional.prepareLoginFlow(
+          username: username,
+          password: password,
+        );
+        return switch (prepared) {
+          Success<AuthLoginPreparation>(
+            data: PreparedAuthLoginPreparation(transaction: final transaction),
+          ) =>
+            await _startSession(
+                  transaction.session,
+                  expectedEpoch: epoch,
+                  transaction: transaction,
+                  loginAttempt: loginAttempt,
+                )
+                ? const Success<AuthLoginStart>(AuthLoginCompleted())
+                : FailureResult<AuthLoginStart>(
+                    _ownershipFailure ??
+                        const StateFailure(message: 'Unable to start session.'),
+                  ),
+          Success<AuthLoginPreparation>(
+            data: SecondFactorAuthLoginPreparation(
+              continuation: final continuation,
+            ),
+          ) =>
+            () {
+              challengeIssued = true;
+              return Success<AuthLoginStart>(
+                AuthLoginChallengeRequired(
+                  _ControllerSecondFactorLoginChallenge(
+                    controller: this,
+                    continuation: continuation,
+                    loginAttempt: loginAttempt,
+                    expectedEpoch: epoch,
+                  ),
+                ),
+              );
+            }(),
+          FailureResult<AuthLoginPreparation>(failure: final failure) =>
+            FailureResult<AuthLoginStart>(failure),
+        };
+      }
       if (authRepository case final TransactionalAuthRepository transactional) {
         final prepared = await transactional.prepareLogin(
           username: username,
@@ -115,13 +205,13 @@ final class AuthSessionController extends ChangeNotifier {
                   transaction: transaction,
                   loginAttempt: loginAttempt,
                 )
-                ? const Success<void>(null)
-                : FailureResult<void>(
+                ? const Success<AuthLoginStart>(AuthLoginCompleted())
+                : FailureResult<AuthLoginStart>(
                     _ownershipFailure ??
                         const StateFailure(message: 'Unable to start session.'),
                   ),
           FailureResult<AuthSessionTransaction>(failure: final failure) =>
-            FailureResult<void>(failure),
+            FailureResult<AuthLoginStart>(failure),
         };
       }
       final result = await authRepository.login(
@@ -129,7 +219,7 @@ final class AuthSessionController extends ChangeNotifier {
         password: password,
       );
       if (result case FailureResult<AuthSession>(failure: final failure)) {
-        return FailureResult<void>(failure);
+        return FailureResult<AuthLoginStart>(failure);
       }
       final session = (result as Success<AuthSession>).data;
       final accepted = await _startSession(
@@ -137,25 +227,27 @@ final class AuthSessionController extends ChangeNotifier {
         expectedEpoch: epoch,
         loginAttempt: loginAttempt,
       );
-      if (accepted) return const Success<void>(null);
+      if (accepted) {
+        return const Success<AuthLoginStart>(AuthLoginCompleted());
+      }
       final cleanupFailure = await _quarantineFallbackLogin(
         authRepository,
         session,
       );
-      return FailureResult<void>(
+      return FailureResult<AuthLoginStart>(
         cleanupFailure ??
             _ownershipFailure ??
             const StateFailure(message: 'Unable to start session.'),
       );
     } on Object catch (error) {
-      return FailureResult<void>(
+      return FailureResult<AuthLoginStart>(
         UnknownFailure(
           message: 'Unable to sign in.',
           cause: sanitizeTransportCause(error),
         ),
       );
     } finally {
-      loginAttempt._complete(this);
+      if (!challengeIssued) loginAttempt._complete(this);
     }
   });
   bool get canAccessOfflineData {
@@ -179,6 +271,50 @@ final class AuthSessionController extends ChangeNotifier {
           preserveActiveSessionOnFailure: false,
         ),
       );
+
+  Future<Result<void>> unlockWithBiometrics({
+    required LocalUnlockCoordinator coordinator,
+    required UnlockedCredentialSessionRepository repository,
+  }) => lifecycleGate.run(() async {
+    final epoch = ++_authEpoch;
+    final unlocked = await coordinator.unlock();
+    if (unlocked case FailureResult<DeviceCredential>(failure: final failure)) {
+      return FailureResult(failure);
+    }
+    if (!_isCurrent(epoch)) {
+      return const FailureResult(
+        StateFailure(message: 'Local unlock was superseded.'),
+      );
+    }
+    final credential = (unlocked as Success<DeviceCredential>).data;
+    final sessionResult = await repository.restoreUnlockedCredential(
+      credential,
+    );
+    if (sessionResult case FailureResult<AuthSession>(failure: final failure)) {
+      if (failure is AuthenticationFailure || failure is AuthorizationFailure) {
+        final cleanup = await repository.quarantineRejectedCredential(
+          credential,
+        );
+        if (cleanup case FailureResult<void>(failure: final cleanupFailure)) {
+          return FailureResult(
+            RevocationCleanupFailure(
+              message: '旧的本机登录凭据清理失败',
+              cause: sanitizeTransportCause(cleanupFailure),
+            ),
+          );
+        }
+      }
+      return FailureResult(failure);
+    }
+    final session = (sessionResult as Success<AuthSession>).data;
+    final accepted = await _startSession(session, expectedEpoch: epoch);
+    return accepted
+        ? const Success(null)
+        : FailureResult(
+            _ownershipFailure ??
+                const StateFailure(message: 'Unable to start session.'),
+          );
+  });
 
   Future<void> refreshSession(AuthRepository authRepository) =>
       lifecycleGate.run(
@@ -1108,5 +1244,90 @@ final class AuthSessionController extends ChangeNotifier {
     _disposed = true;
     ++_authEpoch;
     super.dispose();
+  }
+}
+
+final class _ControllerSecondFactorLoginChallenge
+    implements SecondFactorLoginChallenge {
+  _ControllerSecondFactorLoginChallenge({
+    required this.controller,
+    required this.continuation,
+    required this.loginAttempt,
+    required this.expectedEpoch,
+  });
+
+  final AuthSessionController controller;
+  final PendingSecondFactorLogin continuation;
+  final AuthLoginAttempt loginAttempt;
+  final int expectedEpoch;
+  bool _cancelled = false;
+  bool _completed = false;
+  bool _inFlight = false;
+
+  @override
+  DateTime get expiresAt => continuation.expiresAt;
+
+  @override
+  Future<Result<void>> complete({String? code, String? recoveryCode}) async {
+    if (_cancelled ||
+        _completed ||
+        _inFlight ||
+        !loginAttempt._isActiveFor(controller)) {
+      return const FailureResult(
+        StateFailure(message: 'Login attempt was cancelled.'),
+      );
+    }
+    _inFlight = true;
+    final prepared = await continuation.complete(
+      code: code,
+      recoveryCode: recoveryCode,
+    );
+    _inFlight = false;
+    if (prepared case FailureResult<AuthSessionTransaction>(
+      failure: final failure,
+    )) {
+      return _cancelled
+          ? const FailureResult(
+              StateFailure(message: 'Login attempt was cancelled.'),
+            )
+          : FailureResult(failure);
+    }
+    final transaction = (prepared as Success<AuthSessionTransaction>).data;
+    if (_cancelled || !loginAttempt._isActiveFor(controller)) {
+      await transaction.abort();
+      return const FailureResult(
+        StateFailure(message: 'Login attempt was cancelled.'),
+      );
+    }
+    final accepted = await controller.lifecycleGate.run(
+      () => controller._startSession(
+        transaction.session,
+        expectedEpoch: expectedEpoch,
+        transaction: transaction,
+        loginAttempt: loginAttempt,
+      ),
+    );
+    _completed = true;
+    if (!_cancelled) {
+      loginAttempt._complete(controller);
+    }
+    return accepted
+        ? const Success(null)
+        : FailureResult(
+            controller._ownershipFailure ??
+                const StateFailure(message: 'Unable to start session.'),
+          );
+  }
+
+  @override
+  Future<void> cancel() async {
+    if (_cancelled || _completed) return;
+    _cancelled = true;
+    loginAttempt.cancel();
+    try {
+      await continuation.cancel();
+    } finally {
+      loginAttempt._complete(controller);
+    }
   }
 }

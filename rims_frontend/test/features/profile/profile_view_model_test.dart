@@ -537,9 +537,11 @@ void main() {
 
       await tester.scrollUntilVisible(
         find.byKey(const Key('profile-logout-button')),
-        300,
+        200,
         scrollable: find.byType(Scrollable).first,
       );
+      await tester.drag(find.byType(Scrollable).first, const Offset(0, -80));
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('profile-logout-button')));
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('profile-logout-delete-drafts')));
@@ -592,9 +594,11 @@ void main() {
 
       await tester.scrollUntilVisible(
         find.byKey(const Key('profile-logout-button')),
-        300,
+        200,
         scrollable: find.byType(Scrollable).first,
       );
+      await tester.drag(find.byType(Scrollable).first, const Offset(0, -80));
+      await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('profile-logout-button')));
       await tester.pumpAndSettle();
 

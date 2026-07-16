@@ -32,7 +32,7 @@ void main() {
 
       final login = viewModel.login();
       await ownership.started.future;
-      expect(await storage.readAccessToken(), 'access-1');
+      expect(await storage.readAccessToken(), isNull);
       viewModel.dispose();
       ownership.release.complete();
 
@@ -186,7 +186,7 @@ void main() {
 
     final oldLogin = oldViewModel.login();
     await oldOwnership.started.future;
-    expect(await storage.readAccessToken(), 'access-1');
+    expect(await storage.readAccessToken(), isNull);
 
     final newRemote = _CleanupRemote(rotating: false)
       ..nextAccessToken = 'access-2';

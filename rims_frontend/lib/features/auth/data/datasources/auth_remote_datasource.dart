@@ -28,6 +28,45 @@ abstract interface class RotatingAuthRemoteDataSource {
   Future<Result<void>> logout({required String accessToken});
 }
 
+abstract interface class ExplicitCredentialAuthRemoteDataSource {
+  Future<Result<AppUserModel>> loadCurrentUserWithAccessToken(
+    String accessToken,
+  );
+}
+
+abstract interface class SecondFactorAuthRemoteDataSource {
+  Future<Result<LoginStartResponseModel>> beginLogin({
+    required String username,
+    required String password,
+  });
+
+  Future<Result<LoginResponseModel>> completeSecondFactorChallenge({
+    required String challenge,
+    String? code,
+    String? recoveryCode,
+  });
+
+  Future<Result<SecondFactorStatusModel>> getSecondFactorStatus();
+
+  Future<Result<TOTPEnrollmentModel>> beginSecondFactorEnrollment();
+
+  Future<Result<RecoveryCodeSetModel>> confirmSecondFactorEnrollment({
+    required String code,
+  });
+
+  Future<Result<RecoveryCodeSetModel>> regenerateSecondFactorRecoveryCodes({
+    required String password,
+    String? code,
+    String? recoveryCode,
+  });
+
+  Future<Result<void>> disableSecondFactor({
+    required String password,
+    String? code,
+    String? recoveryCode,
+  });
+}
+
 abstract interface class DeviceSessionsRemoteDataSource {
   Future<Result<List<DeviceSessionModel>>> listDeviceSessions();
 
@@ -42,7 +81,9 @@ final class ApiAuthRemoteDataSource
     implements
         AuthRemoteDataSource,
         RotatingAuthRemoteDataSource,
-        DeviceSessionsRemoteDataSource {
+        ExplicitCredentialAuthRemoteDataSource,
+        DeviceSessionsRemoteDataSource,
+        SecondFactorAuthRemoteDataSource {
   const ApiAuthRemoteDataSource(this._apiClient);
 
   final ApiClient _apiClient;
@@ -51,6 +92,20 @@ final class ApiAuthRemoteDataSource
   Future<Result<AppUserModel>> loadCurrentUser() async {
     final result = await _apiClient.get<dynamic>(ApiEndpoints.currentUser);
 
+    return _mapEnvelope(
+      result,
+      (data) => AppUserModel.fromJson(_requiredMap(data, 'current user')),
+    );
+  }
+
+  @override
+  Future<Result<AppUserModel>> loadCurrentUserWithAccessToken(
+    String accessToken,
+  ) async {
+    final result = await _apiClient.get<dynamic>(
+      ApiEndpoints.currentUser,
+      options: Options(headers: {'Authorization': 'Bearer $accessToken'}),
+    );
     return _mapEnvelope(
       result,
       (data) => AppUserModel.fromJson(_requiredMap(data, 'current user')),
@@ -72,6 +127,129 @@ final class ApiAuthRemoteDataSource
       (data) => LoginResponseModel.fromJson(_requiredMap(data, 'login')),
     );
   }
+
+  @override
+  Future<Result<LoginStartResponseModel>> beginLogin({
+    required String username,
+    required String password,
+  }) async {
+    final result = await _apiClient.post<dynamic>(
+      ApiEndpoints.login,
+      data: {'username': username, 'password': password},
+    );
+    return _mapEnvelope(result, (data) {
+      final payload = _requiredMap(data, 'login');
+      if (payload['secondFactorRequired'] == true) {
+        return LoginChallengeResponseModel.fromJson(payload);
+      }
+      return LoginResponseModel.fromJson(payload);
+    });
+  }
+
+  @override
+  Future<Result<LoginResponseModel>> completeSecondFactorChallenge({
+    required String challenge,
+    String? code,
+    String? recoveryCode,
+  }) async {
+    final result = await _apiClient.post<dynamic>(
+      ApiEndpoints.secondFactorChallengeComplete,
+      data: {
+        'challenge': challenge,
+        'code': ?code,
+        'recoveryCode': ?recoveryCode,
+      },
+    );
+    return _mapEnvelope(
+      result,
+      (data) => LoginResponseModel.fromJson(_requiredMap(data, 'login')),
+    );
+  }
+
+  @override
+  Future<Result<SecondFactorStatusModel>> getSecondFactorStatus() async {
+    final result = await _apiClient.get<dynamic>(
+      ApiEndpoints.secondFactorStatus,
+    );
+    return _mapEnvelope(
+      result,
+      (data) => SecondFactorStatusModel.fromJson(
+        _requiredMap(data, 'second-factor status'),
+      ),
+    );
+  }
+
+  @override
+  Future<Result<TOTPEnrollmentModel>> beginSecondFactorEnrollment() async {
+    final result = await _apiClient.post<dynamic>(
+      ApiEndpoints.secondFactorEnrollment,
+      data: const <String, Object?>{},
+    );
+    return _mapEnvelope(
+      result,
+      (data) =>
+          TOTPEnrollmentModel.fromJson(_requiredMap(data, 'TOTP enrollment')),
+    );
+  }
+
+  @override
+  Future<Result<RecoveryCodeSetModel>> confirmSecondFactorEnrollment({
+    required String code,
+  }) async {
+    final result = await _apiClient.post<dynamic>(
+      ApiEndpoints.secondFactorEnrollmentConfirm,
+      data: {'code': code},
+    );
+    return _mapRecoveryCodes(result);
+  }
+
+  @override
+  Future<Result<RecoveryCodeSetModel>> regenerateSecondFactorRecoveryCodes({
+    required String password,
+    String? code,
+    String? recoveryCode,
+  }) async {
+    final result = await _apiClient.post<dynamic>(
+      ApiEndpoints.secondFactorRecoveryRegenerate,
+      data: _secondFactorMutationBody(
+        password: password,
+        code: code,
+        recoveryCode: recoveryCode,
+      ),
+    );
+    return _mapRecoveryCodes(result);
+  }
+
+  @override
+  Future<Result<void>> disableSecondFactor({
+    required String password,
+    String? code,
+    String? recoveryCode,
+  }) async {
+    final result = await _apiClient.post<dynamic>(
+      ApiEndpoints.secondFactorDisable,
+      data: _secondFactorMutationBody(
+        password: password,
+        code: code,
+        recoveryCode: recoveryCode,
+      ),
+    );
+    return _mapNoContent(result);
+  }
+
+  Result<RecoveryCodeSetModel> _mapRecoveryCodes(
+    Result<Response<dynamic>> result,
+  ) => _mapEnvelope(
+    result,
+    (data) =>
+        RecoveryCodeSetModel.fromJson(_requiredMap(data, 'recovery codes')),
+  );
+
+  Map<String, String> _secondFactorMutationBody({
+    required String password,
+    String? code,
+    String? recoveryCode,
+  }) => {'password': password, 'code': ?code, 'recoveryCode': ?recoveryCode};
 
   @override
   Future<Result<LoginResponseModel>> refresh({

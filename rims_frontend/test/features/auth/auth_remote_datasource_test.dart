@@ -244,6 +244,110 @@ void main() {
   );
 
   test(
+    'begin login maps an opaque second-factor challenge without tokens',
+    () async {
+      final adapter = _CapturingAdapter(
+        body:
+            '{"code":0,"message":"ok","data":{"token":"","accessToken":"","refreshToken":"","secondFactorRequired":true,"secondFactorChallenge":"abcdefghijklmnopqrstuvwxyzABCDEFGH123456789","secondFactorExpiresAt":1784189100,"session":{},"user":{}}}',
+      );
+      final dataSource = ApiAuthRemoteDataSource(
+        ApiClient.test(
+          dio: Dio()..httpClientAdapter = adapter,
+          enableLogging: false,
+        ),
+      );
+
+      final result = await dataSource.beginLogin(
+        username: 'alice',
+        password: 'secret',
+      );
+
+      expect(adapter.lastPath, '/auth/login');
+      expect(result, isA<Success<LoginStartResponseModel>>());
+      final challenge = (result as Success<LoginStartResponseModel>).data;
+      expect(challenge, isA<LoginChallengeResponseModel>());
+      final typedChallenge = challenge as LoginChallengeResponseModel;
+      expect(typedChallenge.challenge, hasLength(43));
+      expect(typedChallenge.expiresAt, DateTime.utc(2026, 7, 16, 8, 5));
+    },
+  );
+
+  test(
+    'challenge completion sends exactly one factor to centralized route',
+    () async {
+      final adapter = _CapturingAdapter(
+        body:
+            '{"code":0,"message":"ok","data":{"accessToken":"access","refreshToken":"refresh","accessExpiresAt":1784190000,"refreshExpiresAt":1786782000,"tokenVersion":3,"session":{"id":"session-7","createdAt":"2026-07-16T03:00:00Z","lastUsedAt":"2026-07-16T03:00:00Z","expiresAt":"2026-08-15T03:00:00Z","current":true},"user":{"id":7,"username":"alice"}}}',
+      );
+      final dataSource = ApiAuthRemoteDataSource(
+        ApiClient.test(
+          dio: Dio()..httpClientAdapter = adapter,
+          enableLogging: false,
+        ),
+      );
+
+      final result = await dataSource.completeSecondFactorChallenge(
+        challenge: 'abcdefghijklmnopqrstuvwxyzABCDEFGH123456789',
+        recoveryCode: 'AAAAA-BBBBB-CCCCC-DDDDD-EEEEEE',
+      );
+
+      expect(result.isSuccess, isTrue);
+      expect(adapter.lastPath, '/auth/2fa/challenge/complete');
+      expect(adapter.lastBody, contains('recoveryCode'));
+      expect(adapter.lastBody, isNot(contains('"code"')));
+    },
+  );
+
+  test(
+    'second-factor management routes map status enrollment and recovery codes',
+    () async {
+      final statusAdapter = _CapturingAdapter(
+        body:
+            '{"code":0,"message":"ok","data":{"enabled":true,"pending":false,"recoveryCodesRemaining":7}}',
+      );
+      final statusSource = ApiAuthRemoteDataSource(
+        ApiClient.test(
+          dio: Dio()..httpClientAdapter = statusAdapter,
+          enableLogging: false,
+        ),
+      );
+      final status = await statusSource.getSecondFactorStatus();
+      expect(status.isSuccess, isTrue);
+      expect(statusAdapter.lastPath, '/auth/2fa/status');
+
+      final enrollmentAdapter = _CapturingAdapter(
+        body:
+            '{"code":0,"message":"ok","data":{"secret":"JBSWY3DPEHPK3PXP","otpauthUri":"otpauth://totp/RIMS:alice?secret=JBSWY3DPEHPK3PXP","expiresAt":"2026-07-16T03:10:00Z"}}',
+      );
+      final enrollmentSource = ApiAuthRemoteDataSource(
+        ApiClient.test(
+          dio: Dio()..httpClientAdapter = enrollmentAdapter,
+          enableLogging: false,
+        ),
+      );
+      final enrollment = await enrollmentSource.beginSecondFactorEnrollment();
+      expect(enrollment.isSuccess, isTrue);
+      expect(enrollmentAdapter.lastPath, '/auth/2fa/enrollment');
+
+      final recoveryAdapter = _CapturingAdapter(
+        body:
+            '{"code":0,"message":"ok","data":{"recoveryCodes":["AAAAA-BBBBB-CCCCC-DDDDD-EEEEEE"]}}',
+      );
+      final recoverySource = ApiAuthRemoteDataSource(
+        ApiClient.test(
+          dio: Dio()..httpClientAdapter = recoveryAdapter,
+          enableLogging: false,
+        ),
+      );
+      final recovery = await recoverySource.confirmSecondFactorEnrollment(
+        code: '123456',
+      );
+      expect(recovery.isSuccess, isTrue);
+      expect(recoveryAdapter.lastPath, '/auth/2fa/enrollment/confirm');
+    },
+  );
+
+  test(
     'switchCurrentWarehouse accepts success envelope without warehouse payload',
     () async {
       final adapter = _CapturingAdapter(

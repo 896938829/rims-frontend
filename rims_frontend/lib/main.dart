@@ -3,6 +3,7 @@ import 'package:flutter/material.dart';
 
 import 'app.dart';
 import 'core/config/app_environment.dart';
+import 'core/storage/app_secure_storage.dart';
 import 'features/offline/data/bootstrap/offline_store_bootstrap.dart';
 
 export 'app.dart' show MainApp;
@@ -12,6 +13,13 @@ Future<void> main() async {
     isReleaseMode: kReleaseMode,
   );
   WidgetsFlutterBinding.ensureInitialized();
-  final offlineStore = await createOfflineStore();
-  runApp(MainApp(offlineStore: offlineStore, configuration: configuration));
+  final secureStorage = AppSecureStorage();
+  final offlineStore = await createOfflineStore(secureStorage: secureStorage);
+  runApp(
+    MainApp(
+      offlineStore: offlineStore,
+      configuration: configuration,
+      secureStorage: secureStorage,
+    ),
+  );
 }

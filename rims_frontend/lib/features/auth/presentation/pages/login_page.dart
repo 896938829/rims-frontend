@@ -2,12 +2,14 @@ import 'package:flutter/material.dart';
 import 'package:go_router/go_router.dart';
 
 import '../../../../core/resources/app_images.dart';
+import '../../../../core/security/local_authenticator.dart';
 import '../../../../core/theme/app_colors.dart';
 import '../../../../core/theme/app_text_styles.dart';
 import '../../../../core/widgets/rims_card.dart';
 import '../../../../core/widgets/rims_page_scaffold.dart';
 import '../../../../routes/route_paths.dart';
 import '../../domain/repositories/auth_repository.dart';
+import '../../domain/repositories/local_unlock_repository.dart';
 import '../view_models/auth_session_controller.dart';
 import '../view_models/login_view_model.dart';
 
@@ -15,11 +17,16 @@ final class LoginPage extends StatefulWidget {
   const LoginPage({
     required this.authRepository,
     required this.sessionController,
+    this.localUnlockCoordinator,
+    this.unlockedCredentialSessionRepository,
     super.key,
   });
 
   final AuthRepository authRepository;
   final AuthSessionController sessionController;
+  final LocalUnlockCoordinator? localUnlockCoordinator;
+  final UnlockedCredentialSessionRepository?
+  unlockedCredentialSessionRepository;
 
   @override
   State<LoginPage> createState() => _LoginPageState();
@@ -38,6 +45,9 @@ final class _LoginPageState extends State<LoginPage> {
     _viewModel = LoginViewModel(
       authRepository: widget.authRepository,
       sessionController: widget.sessionController,
+      localUnlockCoordinator: widget.localUnlockCoordinator,
+      unlockedCredentialSessionRepository:
+          widget.unlockedCredentialSessionRepository,
     );
   }
 
@@ -107,6 +117,8 @@ final class _LoginPageState extends State<LoginPage> {
                           passwordController: _passwordController,
                           isRestoringSession: isRestoringSession,
                           onSubmit: () => _submitLogin(context),
+                          onBiometricUnlock: () =>
+                              _submitBiometricUnlock(context),
                         ),
                       ],
                     ),
@@ -130,9 +142,20 @@ final class _LoginPageState extends State<LoginPage> {
       }
     }
 
+    if (!context.mounted) return;
+    final challenge = _viewModel.takeSecondFactorChallenge();
+    if (challenge != null) {
+      await context.push(RoutePaths.secondFactorLogin, extra: challenge);
+      return;
+    }
     if (success && context.mounted) {
       context.go(RoutePaths.shell);
     }
+  }
+
+  Future<void> _submitBiometricUnlock(BuildContext context) async {
+    final success = await _viewModel.unlockWithBiometrics();
+    if (success && context.mounted) context.go(RoutePaths.shell);
   }
 }
 
@@ -143,6 +166,7 @@ final class _LoginForm extends StatelessWidget {
     required this.passwordController,
     required this.isRestoringSession,
     required this.onSubmit,
+    required this.onBiometricUnlock,
   });
 
   final LoginViewModel viewModel;
@@ -150,6 +174,7 @@ final class _LoginForm extends StatelessWidget {
   final TextEditingController passwordController;
   final bool isRestoringSession;
   final VoidCallback onSubmit;
+  final VoidCallback onBiometricUnlock;
 
   @override
   Widget build(BuildContext context) {
@@ -183,6 +208,21 @@ final class _LoginForm extends StatelessWidget {
           style: _primaryButtonStyle,
           child: Text(viewModel.isLoading ? '登录中...' : '登录'),
         ),
+        if (viewModel.canUseBiometricUnlock) ...[
+          const SizedBox(height: 8),
+          OutlinedButton.icon(
+            key: const Key('login-biometric-unlock'),
+            onPressed: viewModel.isLoading || isRestoringSession
+                ? null
+                : onBiometricUnlock,
+            style: _primaryButtonStyle.copyWith(
+              backgroundColor: const WidgetStatePropertyAll(Colors.transparent),
+              foregroundColor: const WidgetStatePropertyAll(AppColors.primary),
+            ),
+            icon: const Icon(Icons.fingerprint),
+            label: const Text('使用本机生物识别解锁'),
+          ),
+        ],
       ],
     );
   }

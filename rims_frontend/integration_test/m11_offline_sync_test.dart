@@ -10,6 +10,7 @@ import 'package:integration_test/integration_test.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:rims_frontend/app.dart';
 import 'package:rims_frontend/core/config/app_environment.dart';
+import 'package:rims_frontend/core/storage/app_secure_storage.dart';
 import 'package:rims_frontend/features/attachments/presentation/view_models/attachments_view_model.dart';
 import 'package:rims_frontend/features/documents/presentation/view_models/documents_view_model.dart';
 import 'package:rims_frontend/features/inventory/presentation/view_models/inventory_view_model.dart';
@@ -57,7 +58,8 @@ void main() {
       final checkpoint = await _readCheckpoint(checkpointFile);
       final nextStage = checkpoint?['nextStage']?.toString() ?? 'seed';
       expect(nextStage, expectedStage);
-      final store = await createOfflineStore();
+      final secureStorage = AppSecureStorage();
+      final store = await createOfflineStore(secureStorage: secureStorage);
       final outbox = outboxRepositoryForOfflineStore(store);
       final runId =
           checkpoint?['runId']?.toString() ??
@@ -112,7 +114,7 @@ void main() {
         if (nextStage == 'seed') {
           final corruptionQuarantined = await _verifyCorruptionQuarantine();
           await _fault('reset');
-          await _pumpApp(tester, store, 'm11-seed');
+          await _pumpApp(tester, store, secureStorage, 'm11-seed');
           await _normalizeLoggedOutState(tester);
           await _login(tester);
           await waitForKey(tester, const Key('bottom-nav-home'));
@@ -180,7 +182,7 @@ void main() {
 
         if (nextStage == 'offline-draft') {
           await _fault('unreachable');
-          await _pumpApp(tester, store, 'm11-offline-draft');
+          await _pumpApp(tester, store, secureStorage, 'm11-offline-draft');
           await waitForKey(tester, const Key('bottom-nav-home'));
           await tapAndSettle(tester, const Key('bottom-nav-documents'));
           final documents = await _documentsViewModel(tester);
@@ -241,7 +243,7 @@ void main() {
         scannerCallbackCompleted =
             checkpoint['scannerCallbackCompleted'] == true;
         autosaveCompleted = checkpoint['autosaveCompleted'] == true;
-        await _pumpApp(tester, store, 'm11-recovery');
+        await _pumpApp(tester, store, secureStorage, 'm11-recovery');
         await waitForKey(tester, const Key('bottom-nav-home'));
         nativeDatabaseReopened = store is OfflineDatabase;
         await tapAndSettle(tester, const Key('bottom-nav-profile'));
@@ -1077,6 +1079,7 @@ Future<void> _probeBackendHealth() async {
 Future<void> _pumpApp(
   WidgetTester tester,
   OfflineStore store,
+  AppSecureStorage secureStorage,
   String instance,
 ) async {
   await tester.pumpWidget(const SizedBox.shrink());
@@ -1085,6 +1088,7 @@ Future<void> _pumpApp(
     MainApp(
       key: ValueKey(instance),
       offlineStore: store,
+      secureStorage: secureStorage,
       configuration: AppConfiguration.fromCompileTimeDefines(
         isReleaseMode: kReleaseMode,
       ),

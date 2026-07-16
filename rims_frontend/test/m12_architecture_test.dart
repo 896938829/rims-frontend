@@ -13,6 +13,9 @@ const _pubspecLockPath = 'pubspec.lock';
 const _mainAndroidManifestPath = 'android/app/src/main/AndroidManifest.xml';
 const _androidBuildPath = 'build/app/intermediates';
 const _appCompositionPath = 'lib/app.dart';
+const _mainPath = 'lib/main.dart';
+const _nativeOfflineBootstrapPath =
+    'lib/features/offline/data/bootstrap/offline_store_bootstrap_native.dart';
 
 const _dataClassIds = <String>{
   'credential.access',
@@ -45,12 +48,22 @@ const _allowedAndroidPermissions = <String>{
   'android.permission.INTERNET',
   'android.permission.ACCESS_NETWORK_STATE',
   'android.permission.CAMERA',
+  'android.permission.USE_BIOMETRIC',
+  'android.permission.USE_FINGERPRINT',
   'com.example.rims_frontend.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION',
 };
 
 const _mainManifestPermissions = <String>{
   'android.permission.INTERNET',
   'android.permission.CAMERA',
+  'android.permission.USE_BIOMETRIC',
+};
+
+const _preM12AllowedAndroidPermissions = <String>{
+  'android.permission.INTERNET',
+  'android.permission.ACCESS_NETWORK_STATE',
+  'android.permission.CAMERA',
+  'com.example.rims_frontend.DYNAMIC_RECEIVER_NOT_EXPORTED_PERMISSION',
 };
 
 const _providerIds = <String>{
@@ -81,6 +94,24 @@ const _externalApprovalIds = <String>{
 };
 
 void main() {
+  test('production shares one AppSecureStorage instance across bootstrap', () {
+    final mainSource = _readRequiredFile(_mainPath);
+    final appSource = _readRequiredFile(_appCompositionPath);
+    final bootstrapSource = _readRequiredFile(_nativeOfflineBootstrapPath);
+
+    expect(
+      RegExp(r'AppSecureStorage\(\)').allMatches(mainSource),
+      hasLength(1),
+    );
+    expect(
+      mainSource,
+      contains('createOfflineStore(secureStorage: secureStorage)'),
+    );
+    expect(mainSource, contains('secureStorage: secureStorage'));
+    expect(appSource, isNot(contains('AppSecureStorage()')));
+    expect(bootstrapSource, isNot(contains('AppSecureStorage()')));
+  });
+
   test('production refresh fail closed enters cached M11 cleanup', () {
     final source = _readRequiredFile(_appCompositionPath);
 
@@ -516,7 +547,7 @@ Future<void> main(List<String> arguments) async {
     expect(behavior, contains('main manifest'));
     expect(behavior, contains('effective merged permissions'));
     expect(behavior, contains('processreleasemainmanifest'));
-    for (final permission in _allowedAndroidPermissions) {
+    for (final permission in _preM12AllowedAndroidPermissions) {
       expect(runtimePermissions[1], contains(permission));
     }
   });

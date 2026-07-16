@@ -6,6 +6,65 @@ import 'package:uuid/uuid.dart';
 
 enum BiometricCredentialPolicy { disabled, requireUnlock }
 
+enum BiometricCredentialAvailability {
+  available,
+  absent,
+  disabled,
+  expired,
+  revoked,
+  malformed,
+  pending,
+}
+
+final class LockedCredentialMetadata {
+  const LockedCredentialMetadata({
+    required this.accountId,
+    required this.sessionId,
+    required this.generation,
+    required this.tokenVersion,
+    required this.refreshExpiresAt,
+  });
+
+  factory LockedCredentialMetadata.fromCredential(
+    DeviceCredential credential,
+  ) => LockedCredentialMetadata(
+    accountId: credential.accountId,
+    sessionId: credential.sessionId,
+    generation: credential.generation,
+    tokenVersion: credential.tokenVersion,
+    refreshExpiresAt: credential.refreshExpiresAt,
+  );
+
+  final String accountId;
+  final String sessionId;
+  final int generation;
+  final int tokenVersion;
+  final DateTime refreshExpiresAt;
+}
+
+final class BiometricCredentialInspection {
+  const BiometricCredentialInspection({
+    required this.availability,
+    this.metadata,
+  });
+  final BiometricCredentialAvailability availability;
+  final LockedCredentialMetadata? metadata;
+}
+
+abstract interface class BiometricCredentialVault {
+  Future<BiometricCredentialInspection> inspectForBiometricUnlock(DateTime now);
+
+  Future<DeviceCredential?> releaseAfterBiometric({
+    required LockedCredentialMetadata expected,
+    required DateTime now,
+  });
+
+  Future<bool> setBiometricPolicy({
+    required LockedCredentialMetadata expected,
+    required BiometricCredentialPolicy policy,
+  });
+}
+
 final class DeviceCredential {
   const DeviceCredential({
     required this.accessToken,
@@ -204,8 +263,9 @@ final class AppSecureStorage
         PendingRevocationStorage,
         ConditionalPendingRevocationStorage,
         SessionPendingRevocationStorage,
-        DeviceCredentialStorage {
-  const AppSecureStorage({FlutterSecureStorage? storage})
+        DeviceCredentialStorage,
+        BiometricCredentialVault {
+  AppSecureStorage({FlutterSecureStorage? storage})
     : _storage = storage ?? const FlutterSecureStorage();
 
   static const String kAccessTokenKey = 'access_token';
@@ -216,6 +276,11 @@ final class AppSecureStorage
       'pending_revocation_account_id';
 
   final FlutterSecureStorage _storage;
+  _RuntimeBiometricUnlockLease? _biometricUnlockLease;
+
+  void _invalidateBiometricUnlockLease() {
+    _biometricUnlockLease = null;
+  }
 
   @override
   Future<void> saveAccessToken(String token) async {
@@ -240,6 +305,7 @@ final class AppSecureStorage
   @override
   Future<int> beginAccessTokenAttempt(String ownerId) =>
       _SecureStorageKeyMutex.run(kAccessTokenKey, () async {
+        _invalidateBiometricUnlockLease();
         final record = await _readAccessTokenStoreRecord();
         final deviceRecord = await _readDeviceCredentialStoreRecord();
         final nextVersion =
@@ -267,6 +333,7 @@ final class AppSecureStorage
     required String ownerId,
     required int attemptVersion,
   }) => _SecureStorageKeyMutex.run(kAccessTokenKey, () async {
+    _invalidateBiometricUnlockLease();
     _validateDeviceCredential(credential);
     if (ownerId.isEmpty || attemptVersion < 1) return false;
     final tokenRecord = await _readAccessTokenStoreRecord();
@@ -297,6 +364,7 @@ final class AppSecureStorage
     required String ownerId,
     required int attemptVersion,
   }) => _SecureStorageKeyMutex.run(kAccessTokenKey, () async {
+    _invalidateBiometricUnlockLease();
     final record = await _readAccessTokenStoreRecord();
     if (record.latestAttemptVersion != attemptVersion) return false;
     await _writeAccessTokenStoreRecord(
@@ -326,10 +394,28 @@ final class AppSecureStorage
         );
       }
       if (deviceRecord.credential != null) {
-        return deviceRecord.state == _AccessTokenState.committed
-            ? deviceRecord.credential?.accessToken
-            : null;
+        final credential = deviceRecord.credential!;
+        if (deviceRecord.state != _AccessTokenState.committed) {
+          _invalidateBiometricUnlockLease();
+          return null;
+        }
+        if (credential.biometricPolicy == BiometricCredentialPolicy.disabled) {
+          _invalidateBiometricUnlockLease();
+          return credential.accessToken;
+        }
+        final lease = _biometricUnlockLease;
+        final now = DateTime.now().toUtc();
+        if (lease == null ||
+            !lease.matches(deviceRecord, credential) ||
+            !credential.accessExpiresAt.isAfter(now) ||
+            !credential.refreshExpiresAt.isAfter(now) ||
+            await _hasBlockingRevocationDebt(credential)) {
+          _invalidateBiometricUnlockLease();
+          return null;
+        }
+        return credential.accessToken;
       }
+      _invalidateBiometricUnlockLease();
     } on CredentialRestoreException {
       await _clearUnsafeCredentialRecords();
       rethrow;
@@ -347,6 +433,7 @@ final class AppSecureStorage
     String ownerId, {
     required int attemptVersion,
   }) => _SecureStorageKeyMutex.run(kAccessTokenKey, () async {
+    _invalidateBiometricUnlockLease();
     final deviceRecord = await _readDeviceCredentialStoreRecord();
     if (deviceRecord.ownerId == ownerId &&
         deviceRecord.attemptVersion == attemptVersion &&
@@ -385,6 +472,7 @@ final class AppSecureStorage
   @override
   Future<void> clearAccessToken() =>
       _SecureStorageKeyMutex.run(kAccessTokenKey, () async {
+        _invalidateBiometricUnlockLease();
         await _storage.delete(key: kDeviceCredentialKey);
         final record = await _readAccessTokenStoreRecord();
         await _writeAccessTokenStoreRecord(
@@ -397,6 +485,7 @@ final class AppSecureStorage
   @override
   Future<bool> clearAccessTokenIfMatches(String expectedToken) =>
       _SecureStorageKeyMutex.run(kAccessTokenKey, () async {
+        _invalidateBiometricUnlockLease();
         final deviceRecord = await _readDeviceCredentialStoreRecord();
         if (deviceRecord.credential?.accessToken == expectedToken) {
           await _writeDeviceCredentialStoreRecord(
@@ -433,6 +522,7 @@ final class AppSecureStorage
     String ownerId, {
     required int attemptVersion,
   }) => _SecureStorageKeyMutex.run(kAccessTokenKey, () async {
+    _invalidateBiometricUnlockLease();
     final deviceRecord = await _readDeviceCredentialStoreRecord();
     if (deviceRecord.ownerId == ownerId &&
         deviceRecord.attemptVersion == attemptVersion) {
@@ -470,6 +560,7 @@ final class AppSecureStorage
   @override
   Future<bool> clearPendingAccessToken() =>
       _SecureStorageKeyMutex.run(kAccessTokenKey, () async {
+        _invalidateBiometricUnlockLease();
         final deviceRecord = await _readDeviceCredentialStoreRecord();
         if (deviceRecord.state == _AccessTokenState.pending) {
           await _storage.delete(key: kDeviceCredentialKey);
@@ -520,6 +611,7 @@ final class AppSecureStorage
   }
 
   Future<void> _clearUnsafeCredentialRecords() async {
+    _invalidateBiometricUnlockLease();
     await _storage.delete(key: kDeviceCredentialKey);
     await _storage.delete(key: kAccessTokenKey);
   }
@@ -531,6 +623,7 @@ final class AppSecureStorage
     required String expectedSessionId,
     required int expectedGeneration,
   }) => _SecureStorageKeyMutex.run(kAccessTokenKey, () async {
+    _invalidateBiometricUnlockLease();
     _validateDeviceCredential(credential);
     final record = await _readDeviceCredentialStoreRecord();
     final current = record.state == _AccessTokenState.committed
@@ -560,6 +653,7 @@ final class AppSecureStorage
     required String sessionId,
     required int generation,
   }) => _SecureStorageKeyMutex.run(kAccessTokenKey, () async {
+    _invalidateBiometricUnlockLease();
     final record = await _readDeviceCredentialStoreRecord();
     final current = record.credential;
     if (current?.accountId != accountId ||
@@ -570,6 +664,134 @@ final class AppSecureStorage
     await _storage.delete(key: kDeviceCredentialKey);
     return true;
   });
+
+  @override
+  Future<BiometricCredentialInspection> inspectForBiometricUnlock(
+    DateTime now,
+  ) => _SecureStorageKeyMutex.run(kAccessTokenKey, () async {
+    final _DeviceCredentialStoreRecord record;
+    try {
+      record = await _readDeviceCredentialStoreRecord();
+    } on CredentialRestoreException {
+      await _clearUnsafeCredentialRecords();
+      return const BiometricCredentialInspection(
+        availability: BiometricCredentialAvailability.malformed,
+      );
+    }
+    final credential = record.credential;
+    if (credential == null) {
+      return const BiometricCredentialInspection(
+        availability: BiometricCredentialAvailability.absent,
+      );
+    }
+    if (record.state != _AccessTokenState.committed) {
+      return const BiometricCredentialInspection(
+        availability: BiometricCredentialAvailability.pending,
+      );
+    }
+    if (credential.biometricPolicy != BiometricCredentialPolicy.requireUnlock) {
+      return const BiometricCredentialInspection(
+        availability: BiometricCredentialAvailability.disabled,
+      );
+    }
+    if (!credential.accessExpiresAt.isAfter(now.toUtc()) ||
+        !credential.refreshExpiresAt.isAfter(now.toUtc())) {
+      return const BiometricCredentialInspection(
+        availability: BiometricCredentialAvailability.expired,
+      );
+    }
+    if (await _hasBlockingRevocationDebt(credential)) {
+      return const BiometricCredentialInspection(
+        availability: BiometricCredentialAvailability.revoked,
+      );
+    }
+    return BiometricCredentialInspection(
+      availability: BiometricCredentialAvailability.available,
+      metadata: LockedCredentialMetadata.fromCredential(credential),
+    );
+  });
+
+  @override
+  Future<DeviceCredential?> releaseAfterBiometric({
+    required LockedCredentialMetadata expected,
+    required DateTime now,
+  }) => _SecureStorageKeyMutex.run(kAccessTokenKey, () async {
+    final _DeviceCredentialStoreRecord record;
+    try {
+      record = await _readDeviceCredentialStoreRecord();
+    } on CredentialRestoreException {
+      await _clearUnsafeCredentialRecords();
+      return null;
+    }
+    final credential = record.state == _AccessTokenState.committed
+        ? record.credential
+        : null;
+    if (credential == null ||
+        credential.biometricPolicy != BiometricCredentialPolicy.requireUnlock ||
+        !credential.accessExpiresAt.isAfter(now.toUtc()) ||
+        !credential.refreshExpiresAt.isAfter(now.toUtc()) ||
+        !_matchesLockedCredential(credential, expected) ||
+        await _hasBlockingRevocationDebt(credential)) {
+      return null;
+    }
+    final ownerId = record.ownerId;
+    final attemptVersion = record.attemptVersion;
+    if (ownerId == null || attemptVersion == null) return null;
+    _biometricUnlockLease = _RuntimeBiometricUnlockLease(
+      ownerId: ownerId,
+      attemptVersion: attemptVersion,
+      accountId: credential.accountId,
+      sessionId: credential.sessionId,
+      generation: credential.generation,
+      tokenVersion: credential.tokenVersion,
+      accessToken: credential.accessToken,
+    );
+    return credential;
+  });
+
+  @override
+  Future<bool> setBiometricPolicy({
+    required LockedCredentialMetadata expected,
+    required BiometricCredentialPolicy policy,
+  }) => _SecureStorageKeyMutex.run(kAccessTokenKey, () async {
+    _invalidateBiometricUnlockLease();
+    final record = await _readDeviceCredentialStoreRecord();
+    final credential = record.state == _AccessTokenState.committed
+        ? record.credential
+        : null;
+    if (credential == null || !_matchesLockedCredential(credential, expected)) {
+      return false;
+    }
+    await _writeDeviceCredentialStoreRecord(
+      record.copyWith(
+        credential: DeviceCredential(
+          accessToken: credential.accessToken,
+          refreshToken: credential.refreshToken,
+          accountId: credential.accountId,
+          sessionId: credential.sessionId,
+          accessExpiresAt: credential.accessExpiresAt,
+          refreshExpiresAt: credential.refreshExpiresAt,
+          tokenVersion: credential.tokenVersion,
+          generation: credential.generation,
+          biometricPolicy: policy,
+        ),
+      ),
+    );
+    return true;
+  });
+
+  Future<bool> _hasBlockingRevocationDebt(DeviceCredential credential) async {
+    final raw = await _storage.read(key: kPendingRevocationAccountIdKey);
+    if (raw == null) return false;
+    if (!raw.trimLeft().startsWith('{')) {
+      return raw == credential.accountId;
+    }
+    final lease = _tryDecodeSessionRevocationLease(raw);
+    if (lease == null) return true;
+    return lease.accountId == credential.accountId &&
+        lease.sessionId == credential.sessionId &&
+        lease.generation == credential.generation;
+  }
 
   Future<_DeviceCredentialStoreRecord>
   _readDeviceCredentialStoreRecord() async {
@@ -599,10 +821,13 @@ final class AppSecureStorage
 
   @override
   Future<void> saveAuthenticatedAccountId(String accountId) =>
-      _SecureStorageKeyMutex.run(
-        kAuthenticatedAccountIdKey,
-        () => _storage.write(key: kAuthenticatedAccountIdKey, value: accountId),
-      );
+      _SecureStorageKeyMutex.run(kAuthenticatedAccountIdKey, () {
+        _invalidateBiometricUnlockLease();
+        return _storage.write(
+          key: kAuthenticatedAccountIdKey,
+          value: accountId,
+        );
+      });
 
   @override
   Future<bool> saveAuthenticatedAccountProjection({
@@ -611,6 +836,7 @@ final class AppSecureStorage
     required int attemptVersion,
     int? authEpoch,
   }) => _SecureStorageKeyMutex.run(kAuthenticatedAccountIdKey, () async {
+    _invalidateBiometricUnlockLease();
     final raw = await _storage.read(key: kAuthenticatedAccountIdKey);
     if (raw != null && raw.trimLeft().startsWith('{')) {
       final decoded = jsonDecode(raw);
@@ -659,16 +885,18 @@ final class AppSecureStorage
   }
 
   @override
-  Future<void> clearAuthenticatedAccountId() => _SecureStorageKeyMutex.run(
-    kAuthenticatedAccountIdKey,
-    () => _storage.delete(key: kAuthenticatedAccountIdKey),
-  );
+  Future<void> clearAuthenticatedAccountId() =>
+      _SecureStorageKeyMutex.run(kAuthenticatedAccountIdKey, () {
+        _invalidateBiometricUnlockLease();
+        return _storage.delete(key: kAuthenticatedAccountIdKey);
+      });
 
   @override
   Future<bool> clearAuthenticatedAccountIfMatches({
     required String accountId,
     required int authEpoch,
   }) => _SecureStorageKeyMutex.run(kAuthenticatedAccountIdKey, () async {
+    _invalidateBiometricUnlockLease();
     final raw = await _storage.read(key: kAuthenticatedAccountIdKey);
     if (raw == null || !raw.trimLeft().startsWith('{')) return false;
     final decoded = jsonDecode(raw);
@@ -687,6 +915,7 @@ final class AppSecureStorage
     required String ownerId,
     required int attemptVersion,
   }) => _SecureStorageKeyMutex.run(kAuthenticatedAccountIdKey, () async {
+    _invalidateBiometricUnlockLease();
     final raw = await _storage.read(key: kAuthenticatedAccountIdKey);
     if (raw == null || !raw.trimLeft().startsWith('{')) return false;
     final decoded = jsonDecode(raw);
@@ -701,23 +930,23 @@ final class AppSecureStorage
 
   @override
   Future<void> savePendingRevocationAccountId(String accountId) =>
-      _SecureStorageKeyMutex.run(
-        kPendingRevocationAccountIdKey,
-        () => _storage.write(
+      _SecureStorageKeyMutex.run(kPendingRevocationAccountIdKey, () {
+        _invalidateBiometricUnlockLease();
+        return _storage.write(
           key: kPendingRevocationAccountIdKey,
           value: accountId,
-        ),
-      );
+        );
+      });
 
   @override
   Future<void> savePendingRevocationLease(SessionRevocationLease lease) =>
-      _SecureStorageKeyMutex.run(
-        kPendingRevocationAccountIdKey,
-        () => _storage.write(
+      _SecureStorageKeyMutex.run(kPendingRevocationAccountIdKey, () {
+        _invalidateBiometricUnlockLease();
+        return _storage.write(
           key: kPendingRevocationAccountIdKey,
           value: _encodeSessionRevocationLease(lease),
-        ),
-      );
+        );
+      });
 
   @override
   Future<String?> readPendingRevocationAccountId() {
@@ -763,6 +992,49 @@ final class AppSecureStorage
     return true;
   });
 }
+
+final class _RuntimeBiometricUnlockLease {
+  const _RuntimeBiometricUnlockLease({
+    required this.ownerId,
+    required this.attemptVersion,
+    required this.accountId,
+    required this.sessionId,
+    required this.generation,
+    required this.tokenVersion,
+    required this.accessToken,
+  });
+
+  final String ownerId;
+  final int attemptVersion;
+  final String accountId;
+  final String sessionId;
+  final int generation;
+  final int tokenVersion;
+  final String accessToken;
+
+  bool matches(
+    _DeviceCredentialStoreRecord record,
+    DeviceCredential credential,
+  ) =>
+      record.ownerId == ownerId &&
+      record.attemptVersion == attemptVersion &&
+      record.latestAttemptVersion == attemptVersion &&
+      credential.accountId == accountId &&
+      credential.sessionId == sessionId &&
+      credential.generation == generation &&
+      credential.tokenVersion == tokenVersion &&
+      credential.accessToken == accessToken;
+}
+
+bool _matchesLockedCredential(
+  DeviceCredential credential,
+  LockedCredentialMetadata expected,
+) =>
+    credential.accountId == expected.accountId &&
+    credential.sessionId == expected.sessionId &&
+    credential.generation == expected.generation &&
+    credential.tokenVersion == expected.tokenVersion &&
+    credential.refreshExpiresAt == expected.refreshExpiresAt;
 
 String _encodeSessionRevocationLease(SessionRevocationLease lease) =>
     jsonEncode({

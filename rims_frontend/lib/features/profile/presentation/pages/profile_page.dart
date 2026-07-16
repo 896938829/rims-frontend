@@ -19,6 +19,8 @@ import '../../../attachments/domain/services/attachment_share_service.dart';
 import '../../../attachments/domain/services/attachment_staging_store.dart';
 import '../../../auth/domain/entities/app_user.dart';
 import '../../../auth/domain/entities/warehouse.dart';
+import '../../../auth/domain/repositories/local_unlock_repository.dart';
+import '../../../auth/presentation/view_models/biometric_unlock_view_model.dart';
 import '../../../offline/domain/services/offline_ownership_service.dart';
 import '../view_models/profile_security_view_model.dart';
 import '../view_models/profile_view_model.dart';
@@ -52,6 +54,7 @@ final class ProfilePage extends StatelessWidget {
     this.attachmentUserId,
     this.previewOfflineData,
     this.executeOfflineClear,
+    this.biometricSettingsRepository,
     super.key,
   });
 
@@ -74,6 +77,7 @@ final class ProfilePage extends StatelessWidget {
   final String? attachmentUserId;
   final PreviewOfflineData? previewOfflineData;
   final ExecuteOfflineClear? executeOfflineClear;
+  final BiometricSettingsRepository? biometricSettingsRepository;
 
   @override
   Widget build(BuildContext context) {
@@ -102,6 +106,7 @@ final class ProfilePage extends StatelessWidget {
               onWarehouseSelected: onWarehouseSelected,
               isSwitchingWarehouse: isSwitchingWarehouse,
               warehouseSwitchMessage: warehouseSwitchMessage,
+              biometricSettingsRepository: biometricSettingsRepository,
             ),
           if (effectiveViewModel != null && adminRepository != null) ...[
             const SizedBox(height: 14),
@@ -454,12 +459,14 @@ final class _SettingsCard extends StatelessWidget {
     this.onWarehouseSelected,
     this.isSwitchingWarehouse = false,
     this.warehouseSwitchMessage,
+    this.biometricSettingsRepository,
   });
 
   final ProfileViewModel viewModel;
   final ValueChanged<Warehouse>? onWarehouseSelected;
   final bool isSwitchingWarehouse;
   final String? warehouseSwitchMessage;
+  final BiometricSettingsRepository? biometricSettingsRepository;
 
   @override
   Widget build(BuildContext context) {
@@ -482,6 +489,18 @@ final class _SettingsCard extends StatelessWidget {
               label: const Text('登录设备'),
             ),
           ),
+          _SettingRow(
+            label: '账号安全',
+            value: '二次验证',
+            action: IconButton(
+              key: const Key('profile-two-factor-entry'),
+              onPressed: () => context.push(RoutePaths.secondFactorSettings),
+              tooltip: '管理二次验证',
+              icon: const Icon(Icons.security_outlined),
+            ),
+          ),
+          if (biometricSettingsRepository case final repository?)
+            _BiometricUnlockRow(repository: repository),
           if (viewModel.canSwitchWarehouse)
             _WarehouseSelectorRow(
               viewModel: viewModel,
@@ -892,6 +911,64 @@ final class _ChangePasswordDialogState extends State<_ChangePasswordDialog> {
     _oldPasswordController.clear();
     _newPasswordController.clear();
     _confirmPasswordController.clear();
+  }
+}
+
+final class _BiometricUnlockRow extends StatefulWidget {
+  const _BiometricUnlockRow({required this.repository});
+
+  final BiometricSettingsRepository repository;
+
+  @override
+  State<_BiometricUnlockRow> createState() => _BiometricUnlockRowState();
+}
+
+final class _BiometricUnlockRowState extends State<_BiometricUnlockRow> {
+  late final BiometricUnlockViewModel _viewModel;
+
+  @override
+  void initState() {
+    super.initState();
+    _viewModel = BiometricUnlockViewModel(repository: widget.repository);
+    _viewModel.addListener(_refresh);
+    _viewModel.load();
+  }
+
+  void _refresh() {
+    if (mounted) setState(() {});
+  }
+
+  @override
+  void dispose() {
+    _viewModel.removeListener(_refresh);
+    _viewModel.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        SwitchListTile(
+          key: const Key('profile-biometric-unlock-toggle'),
+          contentPadding: EdgeInsets.zero,
+          title: const Text('本机生物识别解锁'),
+          subtitle: const Text('仅解锁当前设备上已有且未过期的登录凭据'),
+          secondary: const Icon(Icons.fingerprint),
+          value: _viewModel.enabled,
+          onChanged: _viewModel.loading ? null : _viewModel.setEnabled,
+        ),
+        if (_viewModel.errorMessage case final message?)
+          Padding(
+            padding: const EdgeInsets.only(bottom: 8),
+            child: Text(
+              message,
+              style: AppTextStyles.bodySmall.copyWith(color: AppColors.error),
+            ),
+          ),
+      ],
+    );
   }
 }
 
