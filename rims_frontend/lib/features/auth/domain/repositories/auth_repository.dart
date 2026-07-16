@@ -24,6 +24,10 @@ abstract interface class OwnerBoundCredentialQuarantine {
   Future<bool> quarantineCredential(DeviceCredential expected);
 }
 
+abstract interface class AbandonedLoginCredentialCleaner {
+  Future<Result<void>> cleanupAbandonedLogin(AuthSession rejectedSession);
+}
+
 abstract interface class SessionCredentialRepository {
   Future<Result<DeviceCredential>> refreshCredential(DeviceCredential current);
 }

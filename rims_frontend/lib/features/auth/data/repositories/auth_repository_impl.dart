@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import '../../../../core/network/sanitized_transport_cause.dart';
 import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
@@ -11,18 +13,39 @@ import '../../domain/repositories/auth_repository.dart';
 import '../datasources/auth_remote_datasource.dart';
 import '../models/auth_models.dart';
 
-final class AuthRepositoryImpl
+class AuthRepositoryImpl
     implements
         AuthRepository,
         AuthCredentialInvalidator,
         OwnerBoundCredentialQuarantine,
-        TransactionalAuthRepository,
-        ProvisionalTransactionalAuthRepository,
+        AbandonedLoginCredentialCleaner,
         SessionCredentialRepository {
-  const AuthRepositoryImpl({
+  factory AuthRepositoryImpl({
+    required AuthRemoteDataSource remoteDataSource,
+    required TokenStorage secureStorage,
+    String Function() tokenOwnerFactory = _newTokenOwnerId,
+    int Function()? authEpochReader,
+  }) {
+    if (secureStorage is AuthTokenTransactionStorage) {
+      return _TransactionalAuthRepositoryImpl(
+        remoteDataSource: remoteDataSource,
+        secureStorage: secureStorage,
+        tokenOwnerFactory: tokenOwnerFactory,
+        authEpochReader: authEpochReader,
+      );
+    }
+    return AuthRepositoryImpl._(
+      remoteDataSource: remoteDataSource,
+      secureStorage: secureStorage,
+      tokenOwnerFactory: tokenOwnerFactory,
+      authEpochReader: authEpochReader,
+    );
+  }
+
+  AuthRepositoryImpl._({
     required this.remoteDataSource,
     required this.secureStorage,
-    this.tokenOwnerFactory = _newTokenOwnerId,
+    required this.tokenOwnerFactory,
     this.authEpochReader,
   });
 
@@ -30,8 +53,8 @@ final class AuthRepositoryImpl
   final TokenStorage secureStorage;
   final String Function() tokenOwnerFactory;
   final int Function()? authEpochReader;
+  final Expando<_PlainAuthSessionTransaction> _plainTransactions = Expando();
 
-  @override
   Object get tokenTransactionStorageIdentity => secureStorage;
 
   @override
@@ -85,7 +108,6 @@ final class AuthRepositoryImpl
     };
   }
 
-  @override
   Future<Result<AuthSessionTransaction>> prepareLogin({
     required String username,
     required String password,
@@ -101,10 +123,13 @@ final class AuthRepositoryImpl
     required String ownerId,
   }) async {
     int? attemptVersion;
+    _PlainTokenAttempt? plainAttempt;
     try {
       await _clearAbandonedPendingToken();
       if (secureStorage case final AuthTokenTransactionStorage transaction) {
         attemptVersion = await transaction.beginAccessTokenAttempt(ownerId);
+      } else {
+        plainAttempt = await _plainTokenAuthority(secureStorage).begin(ownerId);
       }
       final loginResult = await remoteDataSource.login(
         username: username,
@@ -116,16 +141,25 @@ final class AuthRepositoryImpl
         attemptVersion: attemptVersion,
       );
       return switch (sessionResult) {
-        Success<AuthSession>(data: final session) => Success(
-          secureStorage is AuthTokenTransactionStorage && attemptVersion != null
-              ? _StoredAuthSessionTransaction(
-                  session: session,
-                  storage: secureStorage as AuthTokenTransactionStorage,
-                  ownerId: ownerId,
-                  attemptVersion: attemptVersion,
-                )
-              : _CommittedAuthSessionTransaction(session),
-        ),
+        Success<AuthSession>(data: final session) => Success(() {
+          if (secureStorage is AuthTokenTransactionStorage &&
+              attemptVersion != null) {
+            return _StoredAuthSessionTransaction(
+              session: session,
+              storage: secureStorage as AuthTokenTransactionStorage,
+              ownerId: ownerId,
+              attemptVersion: attemptVersion,
+            );
+          }
+          final transaction = _PlainAuthSessionTransaction(
+            session: session,
+            storage: secureStorage,
+            authority: _plainTokenAuthority(secureStorage),
+            attempt: plainAttempt!,
+          );
+          _plainTransactions[session] = transaction;
+          return transaction;
+        }()),
         FailureResult<AuthSession>(failure: final failure) => FailureResult(
           failure,
         ),
@@ -312,8 +346,6 @@ final class AuthRepositoryImpl
                 ),
               );
             }
-          } else {
-            await secureStorage.saveAccessToken(token);
           }
         } on Object catch (error) {
           return FailureResult<AuthSession>(
@@ -495,6 +527,30 @@ final class AuthRepositoryImpl
   }
 
   @override
+  Future<Result<void>> cleanupAbandonedLogin(
+    AuthSession rejectedSession,
+  ) async {
+    final transaction = _plainTransactions[rejectedSession];
+    if (transaction == null) {
+      return const FailureResult(
+        RevocationCleanupFailure(
+          message: 'Unable to identify the abandoned credential owner.',
+        ),
+      );
+    }
+    final result = await transaction.abort();
+    return switch (result) {
+      Success<void>() => const Success(null),
+      FailureResult<void>(failure: final failure) => FailureResult(
+        RevocationCleanupFailure(
+          message: 'Unable to quarantine the abandoned credential.',
+          cause: sanitizeTransportCause(failure),
+        ),
+      ),
+    };
+  }
+
+  @override
   Future<void> expireCredentials() async {
     final expected = await captureCredentialForQuarantine();
     if (expected != null) {
@@ -648,6 +704,18 @@ final class AuthRepositoryImpl
   }
 }
 
+final class _TransactionalAuthRepositoryImpl extends AuthRepositoryImpl
+    implements
+        TransactionalAuthRepository,
+        ProvisionalTransactionalAuthRepository {
+  _TransactionalAuthRepositoryImpl({
+    required super.remoteDataSource,
+    required super.secureStorage,
+    required super.tokenOwnerFactory,
+    super.authEpochReader,
+  }) : super._();
+}
+
 DeviceCredential _credentialFromLogin(
   LoginResponseModel login, {
   required int generation,
@@ -723,15 +791,16 @@ final class _StoredAuthSessionTransaction
   @override
   Future<Result<void>> abort() async {
     try {
-      await storage.clearAccessTokenForOwner(
+      final cleared = await storage.clearAccessTokenForOwner(
         ownerId,
         attemptVersion: attemptVersion,
       );
+      if (!cleared) return const Success(null);
       return const Success(null);
     } on Object catch (error) {
       return FailureResult(
-        LocalStorageFailure(
-          message: 'Unable to abort the authenticated credential.',
+        RevocationCleanupFailure(
+          message: 'Unable to quarantine the authenticated credential.',
           cause: sanitizeTransportCause(error),
         ),
       );
@@ -739,15 +808,127 @@ final class _StoredAuthSessionTransaction
   }
 }
 
-final class _CommittedAuthSessionTransaction implements AuthSessionTransaction {
-  const _CommittedAuthSessionTransaction(this.session);
+final Expando<_PlainTokenAuthority> _plainTokenAuthorities = Expando();
+
+_PlainTokenAuthority _plainTokenAuthority(TokenStorage storage) =>
+    _plainTokenAuthorities[storage] ??= _PlainTokenAuthority();
+
+final class _PlainTokenAttempt {
+  const _PlainTokenAttempt(this.ownerId, this.version);
+
+  final String ownerId;
+  final int version;
+}
+
+final class _PlainTokenAuthority {
+  Future<void> _tail = Future<void>.value();
+  int _latestVersion = 0;
+  String? _committedOwnerId;
+  int? _committedVersion;
+
+  Future<T> _run<T>(Future<T> Function() operation) {
+    final previous = _tail;
+    final completed = Completer<void>();
+    _tail = completed.future;
+    return previous.then((_) => operation()).whenComplete(completed.complete);
+  }
+
+  Future<_PlainTokenAttempt> begin(String ownerId) => _run(() async {
+    _latestVersion += 1;
+    return _PlainTokenAttempt(ownerId, _latestVersion);
+  });
+
+  Future<bool> commit(
+    TokenStorage storage,
+    _PlainTokenAttempt attempt,
+    String token,
+  ) => _run(() async {
+    if (attempt.version != _latestVersion) return false;
+    await storage.saveAccessToken(token);
+    _committedOwnerId = attempt.ownerId;
+    _committedVersion = attempt.version;
+    return true;
+  });
+
+  Future<bool> abort(
+    TokenStorage storage,
+    _PlainTokenAttempt attempt,
+    String token,
+  ) => _run(() async {
+    if (_committedOwnerId != attempt.ownerId ||
+        _committedVersion != attempt.version) {
+      return true;
+    }
+    if (await storage.readAccessToken() != token) return true;
+    await storage.clearAccessToken();
+    if (await storage.readAccessToken() != null) return false;
+    _committedOwnerId = null;
+    _committedVersion = null;
+    return true;
+  });
+}
+
+final class _PlainAuthSessionTransaction implements AuthSessionTransaction {
+  const _PlainAuthSessionTransaction({
+    required this.session,
+    required this.storage,
+    required this.authority,
+    required this.attempt,
+  });
 
   @override
   final AuthSession session;
+  final TokenStorage storage;
+  final _PlainTokenAuthority authority;
+  final _PlainTokenAttempt attempt;
 
   @override
-  Future<Result<void>> abort() async => const Success(null);
+  Future<Result<void>> abort() async {
+    try {
+      final cleared = await authority.abort(
+        storage,
+        attempt,
+        session.accessToken,
+      );
+      return cleared
+          ? const Success(null)
+          : const FailureResult(
+              RevocationCleanupFailure(
+                message: 'Unable to quarantine the abandoned credential.',
+              ),
+            );
+    } on Object catch (error) {
+      return FailureResult(
+        RevocationCleanupFailure(
+          message: 'Unable to quarantine the abandoned credential.',
+          cause: sanitizeTransportCause(error),
+        ),
+      );
+    }
+  }
 
   @override
-  Future<Result<void>> commit() async => const Success(null);
+  Future<Result<void>> commit() async {
+    try {
+      final committed = await authority.commit(
+        storage,
+        attempt,
+        session.accessToken,
+      );
+      return committed
+          ? const Success(null)
+          : const FailureResult(
+              LocalStorageFailure(
+                message: 'The authenticated credential was superseded.',
+              ),
+            );
+    } on Object catch (error) {
+      return FailureResult(
+        LocalStorageFailure(
+          message: 'Unable to commit the authenticated credential.',
+          cause: sanitizeTransportCause(error),
+        ),
+      );
+    }
+  }
 }

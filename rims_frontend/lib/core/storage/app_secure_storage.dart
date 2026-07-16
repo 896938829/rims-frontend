@@ -399,6 +399,9 @@ final class AppSecureStorage
       _SecureStorageKeyMutex.run(kAccessTokenKey, () async {
         final deviceRecord = await _readDeviceCredentialStoreRecord();
         if (deviceRecord.credential?.accessToken == expectedToken) {
+          await _writeDeviceCredentialStoreRecord(
+            deviceRecord.copyWith(state: _AccessTokenState.pending),
+          );
           await _storage.delete(key: kDeviceCredentialKey);
           return true;
         }
@@ -406,6 +409,17 @@ final class AppSecureStorage
         if (record.credential?.token != expectedToken) {
           return false;
         }
+        await _writeAccessTokenStoreRecord(
+          _AccessTokenStoreRecord(
+            latestAttemptVersion: record.latestAttemptVersion,
+            credential: _AccessTokenCredential(
+              token: record.credential!.token,
+              ownerId: record.credential!.ownerId,
+              attemptVersion: record.credential!.attemptVersion,
+              state: _AccessTokenState.pending,
+            ),
+          ),
+        );
         await _writeAccessTokenStoreRecord(
           _AccessTokenStoreRecord(
             latestAttemptVersion: record.latestAttemptVersion,
@@ -422,6 +436,9 @@ final class AppSecureStorage
     final deviceRecord = await _readDeviceCredentialStoreRecord();
     if (deviceRecord.ownerId == ownerId &&
         deviceRecord.attemptVersion == attemptVersion) {
+      await _writeDeviceCredentialStoreRecord(
+        deviceRecord.copyWith(state: _AccessTokenState.pending),
+      );
       await _storage.delete(key: kDeviceCredentialKey);
       return true;
     }
@@ -431,6 +448,17 @@ final class AppSecureStorage
         credential?.attemptVersion != attemptVersion) {
       return false;
     }
+    await _writeAccessTokenStoreRecord(
+      _AccessTokenStoreRecord(
+        latestAttemptVersion: record.latestAttemptVersion,
+        credential: _AccessTokenCredential(
+          token: credential!.token,
+          ownerId: credential.ownerId,
+          attemptVersion: credential.attemptVersion,
+          state: _AccessTokenState.pending,
+        ),
+      ),
+    );
     await _writeAccessTokenStoreRecord(
       _AccessTokenStoreRecord(
         latestAttemptVersion: record.latestAttemptVersion,

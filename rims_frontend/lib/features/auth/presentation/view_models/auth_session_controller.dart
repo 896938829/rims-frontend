@@ -321,21 +321,7 @@ final class AuthSessionController extends ChangeNotifier {
     if (_disposed ||
         (expectedEpoch != null && expectedEpoch != _authEpoch) ||
         !_isLoginAttemptActive(loginAttempt)) {
-      final rejectionEpoch = _authEpoch;
-      final abortFailure = await _abortTransaction(
-        transaction,
-        reportFailure: false,
-      );
-      if (!_disposed &&
-          rejectionEpoch == _authEpoch &&
-          abortFailure != null &&
-          _ownershipFailure == null &&
-          _restoreFailure == null &&
-          _switchWarehouseFailure == null) {
-        _ownershipFailure = abortFailure;
-        _sessionMessage = abortFailure.message;
-        notifyListeners();
-      }
+      await _abortCancelledTransaction(transaction);
       return false;
     }
     final epoch = expectedEpoch ?? ++_authEpoch;
@@ -352,7 +338,7 @@ final class AuthSessionController extends ChangeNotifier {
       skipReauthentication: preparedOwnership,
     );
     if (!_isCurrentLogin(epoch, loginAttempt)) {
-      await _abortTransaction(transaction, reportFailure: false);
+      await _abortCancelledTransaction(transaction);
       return false;
     }
     if (!ownershipReady) {
@@ -360,7 +346,7 @@ final class AuthSessionController extends ChangeNotifier {
       return false;
     }
     if (!_isCurrentLogin(epoch, loginAttempt)) {
-      await _abortTransaction(transaction, reportFailure: false);
+      await _abortCancelledTransaction(transaction);
       return false;
     }
     if (transaction != null) {
@@ -369,7 +355,7 @@ final class AuthSessionController extends ChangeNotifier {
         commitResult = await transaction.commit();
       } on Object catch (error) {
         if (!_isCurrentLogin(epoch, loginAttempt)) {
-          await _abortTransaction(transaction, reportFailure: false);
+          await _abortCancelledTransaction(transaction);
           return false;
         }
         return _failSessionTransaction(
@@ -384,7 +370,7 @@ final class AuthSessionController extends ChangeNotifier {
         );
       }
       if (!_isCurrentLogin(epoch, loginAttempt)) {
-        await _abortTransaction(transaction, reportFailure: false);
+        await _abortCancelledTransaction(transaction);
         return false;
       }
       if (commitResult case FailureResult<void>(failure: final failure)) {
@@ -403,7 +389,7 @@ final class AuthSessionController extends ChangeNotifier {
           finalized = await owned.finalizeReauthentication();
         } on Object catch (error) {
           if (!_isCurrentLogin(epoch, loginAttempt)) {
-            await _abortTransaction(transaction, reportFailure: false);
+            await _abortCancelledTransaction(transaction);
             return false;
           }
           return _failSessionTransaction(
@@ -418,7 +404,7 @@ final class AuthSessionController extends ChangeNotifier {
           );
         }
         if (!_isCurrentLogin(epoch, loginAttempt)) {
-          await _abortTransaction(transaction, reportFailure: false);
+          await _abortCancelledTransaction(transaction);
           return false;
         }
         if (finalized case FailureResult<void>(failure: final failure)) {
@@ -432,7 +418,10 @@ final class AuthSessionController extends ChangeNotifier {
         }
       }
     }
-    if (!_isCurrentLogin(epoch, loginAttempt)) return false;
+    if (!_isCurrentLogin(epoch, loginAttempt)) {
+      await _abortCancelledTransaction(transaction);
+      return false;
+    }
     _session = session;
     _credentialsInvalidated = false;
     _ownershipFailure = null;
@@ -473,6 +462,20 @@ final class AuthSessionController extends ChangeNotifier {
     AuthRepository authRepository,
     AuthSession rejectedSession,
   ) async {
+    if (authRepository case final AbandonedLoginCredentialCleaner cleaner) {
+      try {
+        final result = await cleaner.cleanupAbandonedLogin(rejectedSession);
+        return switch (result) {
+          Success<void>() => null,
+          FailureResult<void>(failure: final failure) => failure,
+        };
+      } on Object catch (error) {
+        return RevocationCleanupFailure(
+          message: 'Unable to quarantine the abandoned credential.',
+          cause: sanitizeTransportCause(error),
+        );
+      }
+    }
     final quarantine = switch (authRepository) {
       final OwnerBoundCredentialQuarantine value => value,
       _ => null,
@@ -498,6 +501,18 @@ final class AuthSessionController extends ChangeNotifier {
         cause: sanitizeTransportCause(error),
       );
     }
+  }
+
+  Future<Failure?> _abortCancelledTransaction(
+    AuthSessionTransaction? transaction,
+  ) async {
+    final failure = await _abortTransaction(transaction, reportFailure: false);
+    if (failure == null || _disposed) return failure;
+    _credentialsInvalidated = true;
+    _ownershipFailure = failure;
+    _sessionMessage = failure.message;
+    notifyListeners();
+    return failure;
   }
 
   Future<Failure?> _abortTransaction(
