@@ -9,12 +9,14 @@ final class TwoFactorPage extends StatefulWidget {
   const TwoFactorPage({
     required this.viewModel,
     this.onLoginCompleted,
+    this.onChallengeTerminated,
     this.disposeViewModel = true,
     super.key,
   });
 
   final TwoFactorViewModel viewModel;
   final VoidCallback? onLoginCompleted;
+  final VoidCallback? onChallengeTerminated;
   final bool disposeViewModel;
 
   @override
@@ -263,6 +265,9 @@ final class _TwoFactorPageState extends State<TwoFactorPage> {
     final success = await widget.viewModel.completeLogin();
     _clearFactorControllers();
     if (success && mounted) widget.onLoginCompleted?.call();
+    if (!success && mounted && widget.viewModel.challengeTerminated) {
+      widget.onChallengeTerminated?.call();
+    }
   }
 
   Future<void> _confirmEnrollment() async {
@@ -278,72 +283,102 @@ final class _TwoFactorPageState extends State<TwoFactorPage> {
       await showDialog<void>(
         context: context,
         builder: (dialogContext) => StatefulBuilder(
-          builder: (context, setDialogState) => AlertDialog(
-            title: Text(regenerate ? '重新生成恢复代码' : '停用二次验证'),
-            content: SingleChildScrollView(
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  TextField(
-                    key: const Key('two-factor-proof-password'),
-                    controller: password,
-                    obscureText: true,
-                    onChanged: widget.viewModel.updatePassword,
-                    decoration: const InputDecoration(labelText: '当前密码'),
-                  ),
-                  const SizedBox(height: 12),
-                  SwitchListTile(
-                    contentPadding: EdgeInsets.zero,
-                    title: const Text('使用恢复代码'),
-                    value: useRecovery,
-                    onChanged: (value) {
-                      factor.clear();
-                      widget.viewModel.updateCode('');
-                      widget.viewModel.updateRecoveryCode('');
-                      setDialogState(() => useRecovery = value);
-                    },
-                  ),
-                  TextField(
-                    key: const Key('two-factor-proof-factor'),
-                    controller: factor,
-                    keyboardType: useRecovery
-                        ? TextInputType.text
-                        : TextInputType.number,
-                    inputFormatters: useRecovery
-                        ? null
-                        : [
-                            FilteringTextInputFormatter.digitsOnly,
-                            LengthLimitingTextInputFormatter(6),
-                          ],
-                    onChanged: useRecovery
-                        ? widget.viewModel.updateRecoveryCode
-                        : widget.viewModel.updateCode,
-                    decoration: InputDecoration(
-                      labelText: useRecovery ? '恢复代码' : '6位动态验证码',
+          builder: (context, setDialogState) => ListenableBuilder(
+            listenable: widget.viewModel,
+            builder: (context, _) => AlertDialog(
+              title: Text(regenerate ? '重新生成恢复代码' : '停用二次验证'),
+              content: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    TextField(
+                      key: const Key('two-factor-proof-password'),
+                      controller: password,
+                      enabled: !widget.viewModel.isLoading,
+                      obscureText: true,
+                      onChanged: widget.viewModel.updatePassword,
+                      decoration: const InputDecoration(labelText: '当前密码'),
                     ),
+                    const SizedBox(height: 12),
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('使用恢复代码'),
+                      value: useRecovery,
+                      onChanged: widget.viewModel.isLoading
+                          ? null
+                          : (value) {
+                              factor.clear();
+                              widget.viewModel.updateCode('');
+                              widget.viewModel.updateRecoveryCode('');
+                              setDialogState(() => useRecovery = value);
+                            },
+                    ),
+                    TextField(
+                      key: const Key('two-factor-proof-factor'),
+                      controller: factor,
+                      enabled: !widget.viewModel.isLoading,
+                      keyboardType: useRecovery
+                          ? TextInputType.text
+                          : TextInputType.number,
+                      inputFormatters: useRecovery
+                          ? null
+                          : [
+                              FilteringTextInputFormatter.digitsOnly,
+                              LengthLimitingTextInputFormatter(6),
+                            ],
+                      onChanged: useRecovery
+                          ? widget.viewModel.updateRecoveryCode
+                          : widget.viewModel.updateCode,
+                      decoration: InputDecoration(
+                        labelText: useRecovery ? '恢复代码' : '6位动态验证码',
+                      ),
+                    ),
+                    if (widget.viewModel.errorMessage case final message?) ...[
+                      const SizedBox(height: 12),
+                      KeyedSubtree(
+                        key: const Key('two-factor-proof-error'),
+                        child: _ErrorText(message),
+                      ),
+                    ],
+                    if (widget.viewModel.isLoading) ...[
+                      const SizedBox(height: 16),
+                      const LinearProgressIndicator(
+                        key: Key('two-factor-proof-progress'),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: widget.viewModel.isLoading
+                      ? null
+                      : () => Navigator.pop(dialogContext),
+                  child: const Text('取消'),
+                ),
+                FilledButton(
+                  onPressed: widget.viewModel.isLoading
+                      ? null
+                      : () async {
+                          final success = regenerate
+                              ? await widget.viewModel.regenerateRecoveryCodes()
+                              : await widget.viewModel.disable();
+                          password.clear();
+                          factor.clear();
+                          if (success && dialogContext.mounted) {
+                            Navigator.pop(dialogContext);
+                          }
+                        },
+                  child: Text(
+                    widget.viewModel.isLoading
+                        ? '提交中...'
+                        : regenerate
+                        ? '确认生成'
+                        : '确认停用',
                   ),
-                ],
-              ),
+                ),
+              ],
             ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(dialogContext),
-                child: const Text('取消'),
-              ),
-              FilledButton(
-                onPressed: () async {
-                  final success = regenerate
-                      ? await widget.viewModel.regenerateRecoveryCodes()
-                      : await widget.viewModel.disable();
-                  password.clear();
-                  factor.clear();
-                  if (success && dialogContext.mounted) {
-                    Navigator.pop(dialogContext);
-                  }
-                },
-                child: Text(regenerate ? '确认生成' : '确认停用'),
-              ),
-            ],
           ),
         ),
       );

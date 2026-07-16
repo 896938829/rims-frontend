@@ -161,6 +161,51 @@ void main() {
       expect(remote.completeCalls, 3);
     },
   );
+
+  test(
+    'terminal server challenge aborts continuation and cannot retry',
+    () async {
+      final storage = _OwnedTokenStorage();
+      final remote = _ChallengeRemote(
+        completionResults: const [
+          FailureResult(
+            AuthenticationFailure(
+              message: '认证失败',
+              statusCode: 401,
+              businessCode: 10006,
+            ),
+          ),
+        ],
+      );
+      final repository =
+          AuthRepositoryImpl(
+                remoteDataSource: remote,
+                secureStorage: storage,
+                tokenOwnerFactory: () => 'owner-1',
+                now: () => DateTime.utc(2026, 7, 16, 12),
+              )
+              as SecondFactorTransactionalAuthRepository;
+      final challenge =
+          (await repository.prepareLoginFlow(
+                        username: 'alice',
+                        password: 'secret',
+                      )
+                      as Success<AuthLoginPreparation>)
+                  .data
+              as SecondFactorAuthLoginPreparation;
+
+      expect(
+        (await challenge.continuation.complete(code: '111111')).isFailure,
+        isTrue,
+      );
+      expect(
+        (await challenge.continuation.complete(code: '222222')).isFailure,
+        isTrue,
+      );
+      expect(remote.completeCalls, 1);
+      expect(await storage.readAccessToken(), isNull);
+    },
+  );
 }
 
 final class _ChallengeRemote

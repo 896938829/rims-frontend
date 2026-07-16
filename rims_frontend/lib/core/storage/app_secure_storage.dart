@@ -62,6 +62,7 @@ abstract interface class BiometricCredentialVault {
   Future<bool> setBiometricPolicy({
     required LockedCredentialMetadata expected,
     required BiometricCredentialPolicy policy,
+    DateTime? authenticatedAt,
   });
 }
 
@@ -623,7 +624,6 @@ final class AppSecureStorage
     required String expectedSessionId,
     required int expectedGeneration,
   }) => _SecureStorageKeyMutex.run(kAccessTokenKey, () async {
-    _invalidateBiometricUnlockLease();
     _validateDeviceCredential(credential);
     final record = await _readDeviceCredentialStoreRecord();
     final current = record.state == _AccessTokenState.committed
@@ -635,15 +635,28 @@ final class AppSecureStorage
         current.generation != expectedGeneration ||
         credential.accountId != expectedAccountId ||
         credential.sessionId != expectedSessionId ||
-        credential.generation != expectedGeneration + 1) {
+        credential.generation != expectedGeneration + 1 ||
+        credential.tokenVersion != current.tokenVersion ||
+        credential.biometricPolicy != current.biometricPolicy) {
+      _invalidateBiometricUnlockLease();
       return false;
     }
+    final previousLease = _biometricUnlockLease;
+    final migrateLease =
+        previousLease != null &&
+        previousLease.matches(record, current) &&
+        current.biometricPolicy == BiometricCredentialPolicy.requireUnlock &&
+        !await _hasBlockingRevocationDebt(current);
+    if (!migrateLease) _invalidateBiometricUnlockLease();
     await _writeDeviceCredentialStoreRecord(
       record.copyWith(
         state: _AccessTokenState.committed,
         credential: credential,
       ),
     );
+    if (migrateLease) {
+      _biometricUnlockLease = previousLease.withCredential(credential);
+    }
     return true;
   });
 
@@ -753,30 +766,55 @@ final class AppSecureStorage
   Future<bool> setBiometricPolicy({
     required LockedCredentialMetadata expected,
     required BiometricCredentialPolicy policy,
+    DateTime? authenticatedAt,
   }) => _SecureStorageKeyMutex.run(kAccessTokenKey, () async {
-    _invalidateBiometricUnlockLease();
     final record = await _readDeviceCredentialStoreRecord();
     final credential = record.state == _AccessTokenState.committed
         ? record.credential
         : null;
     if (credential == null || !_matchesLockedCredential(credential, expected)) {
+      _invalidateBiometricUnlockLease();
       return false;
     }
-    await _writeDeviceCredentialStoreRecord(
-      record.copyWith(
-        credential: DeviceCredential(
-          accessToken: credential.accessToken,
-          refreshToken: credential.refreshToken,
-          accountId: credential.accountId,
-          sessionId: credential.sessionId,
-          accessExpiresAt: credential.accessExpiresAt,
-          refreshExpiresAt: credential.refreshExpiresAt,
-          tokenVersion: credential.tokenVersion,
-          generation: credential.generation,
-          biometricPolicy: policy,
-        ),
-      ),
+
+    final releasesRuntimeLease = authenticatedAt != null;
+    if (releasesRuntimeLease &&
+        (policy != BiometricCredentialPolicy.requireUnlock ||
+            !credential.accessExpiresAt.isAfter(authenticatedAt.toUtc()) ||
+            !credential.refreshExpiresAt.isAfter(authenticatedAt.toUtc()) ||
+            await _hasBlockingRevocationDebt(credential) ||
+            record.ownerId == null ||
+            record.attemptVersion == null)) {
+      _invalidateBiometricUnlockLease();
+      return false;
+    }
+    final updated = DeviceCredential(
+      accessToken: credential.accessToken,
+      refreshToken: credential.refreshToken,
+      accountId: credential.accountId,
+      sessionId: credential.sessionId,
+      accessExpiresAt: credential.accessExpiresAt,
+      refreshExpiresAt: credential.refreshExpiresAt,
+      tokenVersion: credential.tokenVersion,
+      generation: credential.generation,
+      biometricPolicy: policy,
     );
+    await _writeDeviceCredentialStoreRecord(
+      record.copyWith(credential: updated),
+    );
+    if (releasesRuntimeLease) {
+      _biometricUnlockLease = _RuntimeBiometricUnlockLease(
+        ownerId: record.ownerId!,
+        attemptVersion: record.attemptVersion!,
+        accountId: updated.accountId,
+        sessionId: updated.sessionId,
+        generation: updated.generation,
+        tokenVersion: updated.tokenVersion,
+        accessToken: updated.accessToken,
+      );
+    } else {
+      _invalidateBiometricUnlockLease();
+    }
     return true;
   });
 
@@ -1024,6 +1062,17 @@ final class _RuntimeBiometricUnlockLease {
       credential.generation == generation &&
       credential.tokenVersion == tokenVersion &&
       credential.accessToken == accessToken;
+
+  _RuntimeBiometricUnlockLease withCredential(DeviceCredential credential) =>
+      _RuntimeBiometricUnlockLease(
+        ownerId: ownerId,
+        attemptVersion: attemptVersion,
+        accountId: credential.accountId,
+        sessionId: credential.sessionId,
+        generation: credential.generation,
+        tokenVersion: credential.tokenVersion,
+        accessToken: credential.accessToken,
+      );
 }
 
 bool _matchesLockedCredential(

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 
 import '../../../../core/result/result.dart';
+import '../../../../core/result/failure.dart';
 import '../../domain/entities/second_factor.dart';
 import '../../domain/repositories/second_factor_repository.dart';
 
@@ -27,6 +28,7 @@ final class TwoFactorViewModel extends ChangeNotifier {
   bool _isLoading = false;
   bool _useRecoveryCode = false;
   bool _loginCompleted = false;
+  bool _challengeTerminated = false;
   bool _disposed = false;
   int _generation = 0;
 
@@ -39,6 +41,7 @@ final class TwoFactorViewModel extends ChangeNotifier {
   String? get errorMessage => _errorMessage;
   bool get isLoading => _isLoading;
   bool get isLoginChallenge => _loginChallenge != null;
+  bool get challengeTerminated => _challengeTerminated;
   DateTime? get challengeExpiresAt => _loginChallenge?.expiresAt;
   bool get useRecoveryCode => _useRecoveryCode;
   set useRecoveryCode(bool value) {
@@ -189,6 +192,9 @@ final class TwoFactorViewModel extends ChangeNotifier {
         },
         failure: (failure) {
           _errorMessage = failure.message;
+          if (failure is SecondFactorChallengeTerminatedFailure) {
+            _challengeTerminated = true;
+          }
           return false;
         },
       );

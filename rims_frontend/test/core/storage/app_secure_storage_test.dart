@@ -1,15 +1,19 @@
 import 'dart:convert';
+import 'dart:typed_data';
 
+import 'package:dio/dio.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rims_frontend/core/result/failure.dart';
 import 'package:rims_frontend/core/result/result.dart';
+import 'package:rims_frontend/core/network/interceptors/auth_interceptor.dart';
 import 'package:rims_frontend/core/storage/app_secure_storage.dart';
 import 'package:rims_frontend/core/storage/pending_revocation_journal.dart';
 import 'package:rims_frontend/features/auth/domain/entities/auth_session.dart';
 import 'package:rims_frontend/features/auth/domain/entities/warehouse.dart';
 import 'package:rims_frontend/features/auth/domain/repositories/auth_repository.dart';
 import 'package:rims_frontend/features/auth/domain/services/authenticated_request_lease.dart';
+import 'package:rims_frontend/features/auth/domain/services/session_refresh_coordinator.dart';
 import 'package:rims_frontend/features/offline/data/repositories/cached_auth_repository.dart';
 import 'package:rims_frontend/features/offline/data/repositories/memory_offline_store.dart';
 import 'package:shared_preferences_platform_interface/in_memory_shared_preferences_async.dart';
@@ -85,7 +89,7 @@ void main() {
     );
 
     test(
-      'new login owner and credential rotation invalidate the lease',
+      'new login owner invalidates while exact refresh rotation migrates the lease',
       () async {
         final raw = _MemoryFlutterSecureStorage();
         final storage = await commitLocked(raw);
@@ -95,9 +99,8 @@ void main() {
         await storage.beginAccessTokenAttempt('owner-new');
         expect(await reader(storage).read(), isNull);
 
-        final rotatedStorage = await commitLocked(
-          _MemoryFlutterSecureStorage(),
-        );
+        final rotatedRaw = _MemoryFlutterSecureStorage();
+        final rotatedStorage = await commitLocked(rotatedRaw);
         await unlock(rotatedStorage);
         expect((await reader(rotatedStorage).read())?.token, 'access-1');
         final current = (await rotatedStorage.readDeviceCredential())!;
@@ -117,7 +120,103 @@ void main() {
           ),
           isTrue,
         );
-        expect(await reader(rotatedStorage).read(), isNull);
+        expect((await reader(rotatedStorage).read())?.token, 'access-2');
+        expect(
+          await reader(AppSecureStorage(storage: rotatedRaw)).read(),
+          isNull,
+        );
+      },
+    );
+
+    test(
+      'authenticated policy enable grants only the current exact session a lease',
+      () async {
+        final raw = _MemoryFlutterSecureStorage();
+        final storage = await commitLocked(
+          raw,
+          credential: _credential(
+            accessExpiresAt: DateTime.utc(2099, 7, 15, 3),
+            refreshExpiresAt: DateTime.utc(2099, 8, 15, 3),
+            biometricPolicy: BiometricCredentialPolicy.disabled,
+          ),
+        );
+        final current = (await storage.readDeviceCredential())!;
+
+        expect(
+          await storage.setBiometricPolicy(
+            expected: LockedCredentialMetadata.fromCredential(current),
+            policy: BiometricCredentialPolicy.requireUnlock,
+            authenticatedAt: DateTime.utc(2026, 7, 16),
+          ),
+          isTrue,
+        );
+        expect((await reader(storage).read())?.token, 'access-1');
+        expect(await reader(AppSecureStorage(storage: raw)).read(), isNull);
+      },
+    );
+
+    test(
+      'unlocked 401 refresh replays and keeps later requests authorized',
+      () async {
+        final raw = _MemoryFlutterSecureStorage();
+        final storage = await commitLocked(raw);
+        await unlock(storage);
+        final leaseReader = reader(storage);
+        final repository = _RotatingCredentialRepository();
+        final coordinator = SessionRefreshCoordinator(
+          credentialStorage: storage,
+          tokenStorage: storage,
+          pendingRevocationStorage: storage,
+          repository: repository,
+          authenticatedRequestLeaseReader: leaseReader.read,
+        );
+        final adapter = _BiometricRotationAdapter();
+        final dio = Dio()..httpClientAdapter = adapter;
+        dio.interceptors.add(
+          AuthInterceptor(
+            authenticatedRequestLeaseReader: leaseReader.read,
+            refreshCoordinator: coordinator,
+            requestExecutor: dio.fetch,
+          ),
+        );
+
+        expect((await dio.get<dynamic>('/first')).statusCode, 200);
+        expect((await leaseReader.read())?.token, 'access-2');
+        expect((await dio.get<dynamic>('/later')).statusCode, 200);
+        expect(repository.calls, 1);
+        expect(adapter.authorizations, [
+          'Bearer access-1',
+          'Bearer access-2',
+          'Bearer access-2',
+        ]);
+      },
+    );
+
+    test(
+      'rotation security mismatch rejects and clears the runtime lease',
+      () async {
+        final storage = await commitLocked(_MemoryFlutterSecureStorage());
+        await unlock(storage);
+        final current = (await storage.readDeviceCredential())!;
+
+        expect(
+          await storage.rotateDeviceCredential(
+            credential: _credential(
+              accessToken: 'access-2',
+              refreshToken: 'refresh-2',
+              generation: 2,
+              tokenVersion: current.tokenVersion + 1,
+              accessExpiresAt: DateTime.utc(2099, 7, 15, 3),
+              refreshExpiresAt: DateTime.utc(2099, 8, 15, 3),
+              biometricPolicy: BiometricCredentialPolicy.requireUnlock,
+            ),
+            expectedAccountId: current.accountId,
+            expectedSessionId: current.sessionId,
+            expectedGeneration: current.generation,
+          ),
+          isFalse,
+        );
+        expect(await reader(storage).read(), isNull);
       },
     );
 
@@ -977,6 +1076,52 @@ void main() {
       );
     },
   );
+}
+
+final class _RotatingCredentialRepository
+    implements SessionCredentialRepository {
+  int calls = 0;
+
+  @override
+  Future<Result<DeviceCredential>> refreshCredential(
+    DeviceCredential current,
+  ) async {
+    calls += 1;
+    return Success(
+      DeviceCredential(
+        accessToken: 'access-2',
+        refreshToken: 'refresh-2',
+        accountId: current.accountId,
+        sessionId: current.sessionId,
+        accessExpiresAt: DateTime.utc(2099, 7, 15, 4),
+        refreshExpiresAt: current.refreshExpiresAt,
+        tokenVersion: current.tokenVersion,
+        generation: current.generation + 1,
+        biometricPolicy: current.biometricPolicy,
+      ),
+    );
+  }
+}
+
+final class _BiometricRotationAdapter implements HttpClientAdapter {
+  final List<String?> authorizations = [];
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    final authorization = options.headers['Authorization'] as String?;
+    authorizations.add(authorization);
+    return ResponseBody.fromString(
+      'response',
+      authorization == 'Bearer access-1' ? 401 : 200,
+    );
+  }
+
+  @override
+  void close({bool force = false}) {}
 }
 
 final class _MemoryFlutterSecureStorage extends FlutterSecureStorage {

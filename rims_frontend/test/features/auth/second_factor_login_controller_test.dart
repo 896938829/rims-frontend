@@ -140,6 +140,39 @@ void main() {
     expect(controller.isAuthenticated, isTrue);
     expect(repository.transaction.commits, 1);
   });
+
+  test(
+    'terminal challenge closes controller attempt and returns to full login',
+    () async {
+      final continuation = _TerminalChallenge();
+      final repository = _ChallengeRepository(continuation: continuation);
+      final controller = AuthSessionController();
+      final login =
+          LoginViewModel(
+              authRepository: repository,
+              sessionController: controller,
+            )
+            ..updateUsername('alice')
+            ..updatePassword('secret');
+      await login.login();
+      final challenge = login.takeSecondFactorChallenge()!;
+
+      final terminated = await challenge.complete(code: '111111');
+
+      expect(
+        (terminated as FailureResult<void>).failure,
+        isA<SecondFactorChallengeTerminatedFailure>(),
+      );
+      expect(continuation.completeCalls, 1);
+      expect(continuation.cancelCalls, 1);
+      expect((await challenge.complete(code: '222222')).isFailure, isTrue);
+      expect(continuation.completeCalls, 1);
+      expect(repository.logoutCalls, 0);
+      login.updatePassword('secret');
+      expect(await login.login(), isFalse);
+      expect(repository.prepareCalls, 2);
+    },
+  );
 }
 
 final class _ChallengeRepository
@@ -150,12 +183,16 @@ final class _ChallengeRepository
   final PendingSecondFactorLogin continuation;
   late final transaction = continuation.transaction;
   int logoutCalls = 0;
+  int prepareCalls = 0;
 
   @override
   Future<Result<AuthLoginPreparation>> prepareLoginFlow({
     required String username,
     required String password,
-  }) async => Success(SecondFactorAuthLoginPreparation(continuation));
+  }) async {
+    prepareCalls += 1;
+    return Success(SecondFactorAuthLoginPreparation(continuation));
+  }
 
   @override
   Future<void> logout() async {
@@ -238,10 +275,39 @@ final class _RetryingChallenge implements PendingSecondFactorLogin {
   Future<void> cancel() async {}
 }
 
+final class _TerminalChallenge implements PendingSecondFactorLogin {
+  final transaction = _Transaction();
+  int completeCalls = 0;
+  int cancelCalls = 0;
+
+  @override
+  DateTime get expiresAt => DateTime.utc(2026, 7, 16, 12, 5);
+
+  @override
+  Future<Result<AuthSessionTransaction>> complete({
+    String? code,
+    String? recoveryCode,
+  }) async {
+    completeCalls += 1;
+    return const FailureResult(
+      SecondFactorChallengeTerminatedFailure(
+        message: '认证失败',
+        businessCode: 10006,
+      ),
+    );
+  }
+
+  @override
+  Future<void> cancel() async {
+    cancelCalls += 1;
+  }
+}
+
 extension on PendingSecondFactorLogin {
   _Transaction get transaction => switch (this) {
     _PendingChallenge(:final transaction) => transaction,
     _RetryingChallenge(:final transaction) => transaction,
+    _TerminalChallenge(:final transaction) => transaction,
     _ => throw StateError('Unknown test continuation'),
   };
 }

@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import '../../../../core/network/sanitized_transport_cause.dart';
+import '../../../../core/network/api_business_codes.dart';
 import '../../../../core/result/failure.dart';
 import '../../../../core/result/result.dart';
 import '../../../../core/storage/app_secure_storage.dart';
@@ -986,6 +987,11 @@ final class _RepositorySecondFactorContinuation
     if (response case FailureResult<LoginResponseModel>(
       failure: final failure,
     )) {
+      if (failure is SecondFactorChallengeTerminatedFailure ||
+          failure.businessCode ==
+              ApiBusinessCodes.secondFactorChallengeTerminated) {
+        await cancel();
+      }
       if (!expiresAt.isAfter(repository.now().toUtc())) await cancel();
       return FailureResult(failure);
     }

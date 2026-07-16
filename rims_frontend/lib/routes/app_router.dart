@@ -114,6 +114,7 @@ GoRouter createAppRouter({
           return TwoFactorPage(
             viewModel: TwoFactorViewModel.login(challenge: challenge),
             onLoginCompleted: () => context.go(RoutePaths.shell),
+            onChallengeTerminated: () => context.go(RoutePaths.login),
           );
         },
       ),

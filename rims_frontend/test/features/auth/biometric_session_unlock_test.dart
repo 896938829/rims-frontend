@@ -221,6 +221,7 @@ final class _Vault implements BiometricCredentialVault {
   Future<bool> setBiometricPolicy({
     required LockedCredentialMetadata expected,
     required BiometricCredentialPolicy policy,
+    DateTime? authenticatedAt,
   }) async => false;
 }
 

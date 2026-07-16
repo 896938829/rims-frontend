@@ -1286,11 +1286,10 @@ final class _ControllerSecondFactorLoginChallenge
     if (prepared case FailureResult<AuthSessionTransaction>(
       failure: final failure,
     )) {
-      return _cancelled
-          ? const FailureResult(
-              StateFailure(message: 'Login attempt was cancelled.'),
-            )
-          : FailureResult(failure);
+      if (failure is SecondFactorChallengeTerminatedFailure) {
+        await cancel();
+      }
+      return FailureResult(failure);
     }
     final transaction = (prepared as Success<AuthSessionTransaction>).data;
     if (_cancelled || !loginAttempt._isActiveFor(controller)) {

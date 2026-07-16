@@ -80,8 +80,19 @@ final class AttachmentFailure extends Failure {
   const AttachmentFailure({required super.message, super.cause});
 }
 
-final class AuthenticationFailure extends Failure {
+class AuthenticationFailure extends Failure {
   const AuthenticationFailure({
+    super.message = 'Authentication required',
+    super.statusCode,
+    super.businessCode,
+    super.traceId,
+    super.cause,
+  });
+}
+
+final class SecondFactorChallengeTerminatedFailure
+    extends AuthenticationFailure {
+  const SecondFactorChallengeTerminatedFailure({
     super.message = 'Authentication required',
     super.statusCode,
     super.businessCode,

@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:rims_frontend/core/result/failure.dart';
@@ -68,6 +70,40 @@ void main() {
     expect(tester.takeException(), isNull);
   });
 
+  testWidgets('terminal login challenge requests the full-login path', (
+    tester,
+  ) async {
+    var fullLoginRequests = 0;
+    final challenge = _LoginChallenge(
+      result: const FailureResult(
+        SecondFactorChallengeTerminatedFailure(
+          message: '认证失败',
+          businessCode: 10006,
+        ),
+      ),
+    );
+    final viewModel = TwoFactorViewModel.login(challenge: challenge);
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: TwoFactorPage(
+          viewModel: viewModel,
+          onChallengeTerminated: () => fullLoginRequests += 1,
+        ),
+      ),
+    );
+    await tester.enterText(
+      find.byKey(const Key('two-factor-totp-field')),
+      '123456',
+    );
+    await tester.tap(find.widgetWithText(FilledButton, '验证并登录'));
+    await tester.pump();
+
+    expect(challenge.completeCalls, 1);
+    expect(viewModel.challengeTerminated, isTrue);
+    expect(fullLoginRequests, 1);
+  });
+
   testWidgets(
     'management shows recovery codes once and requires acknowledgement',
     (tester) async {
@@ -121,6 +157,105 @@ void main() {
       await tester.pump();
 
       expect(find.byType(AlertDialog), findsOneWidget);
+      expect(find.byKey(const Key('two-factor-proof-error')), findsOneWidget);
+      expect(
+        find.descendant(
+          of: find.byKey(const Key('two-factor-proof-error')),
+          matching: find.text('验证失败'),
+        ),
+        findsOneWidget,
+      );
+      expect(
+        tester
+            .widget<TextField>(
+              find.byKey(const Key('two-factor-proof-password')),
+            )
+            .controller
+            ?.text,
+        isEmpty,
+      );
+      expect(
+        tester
+            .widget<TextField>(find.byKey(const Key('two-factor-proof-factor')))
+            .controller
+            ?.text,
+        isEmpty,
+      );
+      await tester.enterText(
+        find.byKey(const Key('two-factor-proof-password')),
+        'Retry-Password-2026',
+      );
+      await tester.enterText(
+        find.byKey(const Key('two-factor-proof-factor')),
+        '654321',
+      );
+      expect(
+        tester
+            .widget<TextField>(
+              find.byKey(const Key('two-factor-proof-password')),
+            )
+            .controller
+            ?.text,
+        'Retry-Password-2026',
+      );
+    },
+  );
+
+  testWidgets(
+    'mutation disables duplicate submission and retains errors after loading',
+    (tester) async {
+      final pending = Completer<Result<RecoveryCodeSet>>();
+      final repository = _ManagementRepository(
+        enabled: true,
+        regeneration: pending,
+      );
+      final viewModel = TwoFactorViewModel.management(repository: repository);
+      await tester.pumpWidget(
+        MaterialApp(home: TwoFactorPage(viewModel: viewModel)),
+      );
+      await tester.pump();
+
+      await tester.tap(find.text('重新生成恢复代码'));
+      await tester.pumpAndSettle();
+      await tester.enterText(
+        find.byKey(const Key('two-factor-proof-password')),
+        'Password-2026',
+      );
+      await tester.enterText(
+        find.byKey(const Key('two-factor-proof-factor')),
+        '123456',
+      );
+      await tester.tap(find.text('确认生成'));
+      await tester.pump();
+
+      expect(repository.regenerateCalls, 1);
+      expect(
+        find.byKey(const Key('two-factor-proof-progress')),
+        findsOneWidget,
+      );
+      expect(find.text('提交中...'), findsOneWidget);
+      expect(
+        tester
+            .widget<TextField>(
+              find.byKey(const Key('two-factor-proof-password')),
+            )
+            .enabled,
+        isFalse,
+      );
+      expect(
+        tester
+            .widget<FilledButton>(find.widgetWithText(FilledButton, '提交中...'))
+            .onPressed,
+        isNull,
+      );
+
+      pending.complete(const FailureResult(StateFailure(message: '验证失败')));
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.byKey(const Key('two-factor-proof-progress')), findsNothing);
+      expect(find.byKey(const Key('two-factor-proof-error')), findsOneWidget);
+      expect(repository.regenerateCalls, 1);
       expect(
         tester
             .widget<TextField>(
@@ -142,6 +277,9 @@ void main() {
 }
 
 final class _LoginChallenge implements SecondFactorLoginChallenge {
+  _LoginChallenge({this.result = const Success(null)});
+
+  final Result<void> result;
   int completeCalls = 0;
 
   @override
@@ -153,15 +291,21 @@ final class _LoginChallenge implements SecondFactorLoginChallenge {
   @override
   Future<Result<void>> complete({String? code, String? recoveryCode}) async {
     completeCalls += 1;
-    return const Success(null);
+    return result;
   }
 }
 
 final class _ManagementRepository implements SecondFactorRepository {
-  _ManagementRepository({this.enabled = false, this.failMutation = false});
+  _ManagementRepository({
+    this.enabled = false,
+    this.failMutation = false,
+    this.regeneration,
+  });
 
   final bool enabled;
   final bool failMutation;
+  final Completer<Result<RecoveryCodeSet>>? regeneration;
+  int regenerateCalls = 0;
 
   @override
   Future<Result<TOTPEnrollment>> beginEnrollment() async => Success(
@@ -193,7 +337,12 @@ final class _ManagementRepository implements SecondFactorRepository {
   @override
   Future<Result<RecoveryCodeSet>> regenerateRecoveryCodes(
     SecondFactorProof proof,
-  ) async => failMutation
-      ? const FailureResult(StateFailure(message: '验证失败'))
-      : const Success(RecoveryCodeSet(['FFFFF-GGGGG-HHHHH-IIIII-JJJJJJ']));
+  ) async {
+    regenerateCalls += 1;
+    final pending = regeneration;
+    if (pending != null) return pending.future;
+    return failMutation
+        ? const FailureResult(StateFailure(message: '验证失败'))
+        : const Success(RecoveryCodeSet(['FFFFF-GGGGG-HHHHH-IIIII-JJJJJJ']));
+  }
 }

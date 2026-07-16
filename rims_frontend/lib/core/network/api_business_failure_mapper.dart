@@ -1,4 +1,5 @@
 import '../result/failure.dart';
+import 'api_business_codes.dart';
 
 final class ApiBusinessFailureMapper {
   const ApiBusinessFailureMapper();
@@ -11,13 +12,21 @@ final class ApiBusinessFailureMapper {
     Object? cause,
   }) {
     return switch (businessCode) {
-      10001 => AuthenticationFailure(
+      ApiBusinessCodes.authenticationFailed => AuthenticationFailure(
         message: message,
         statusCode: statusCode,
         businessCode: businessCode,
         traceId: traceId,
         cause: cause,
       ),
+      ApiBusinessCodes.secondFactorChallengeTerminated =>
+        SecondFactorChallengeTerminatedFailure(
+          message: message,
+          statusCode: statusCode,
+          businessCode: businessCode,
+          traceId: traceId,
+          cause: cause,
+        ),
       10002 => AuthorizationFailure(
         message: message,
         statusCode: statusCode,

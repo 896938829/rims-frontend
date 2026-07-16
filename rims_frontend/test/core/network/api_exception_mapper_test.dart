@@ -32,6 +32,16 @@ void main() {
       expect(failure.traceId, 'trace-auth');
     });
 
+    test('maps terminal MFA challenge to a recognizable auth failure', () {
+      final failure = const ApiExceptionMapper().map(
+        exceptionForStatus(401, data: {'code': 10006, 'message': '认证失败'}),
+      );
+
+      expect(failure, isA<SecondFactorChallengeTerminatedFailure>());
+      expect(failure.businessCode, 10006);
+      expect(failure.message, '认证失败');
+    });
+
     test('maps RIMS inventory code to InventoryFailure', () {
       final failure = const ApiExceptionMapper().map(
         exceptionForStatus(

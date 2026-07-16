@@ -65,6 +65,7 @@ final class BiometricSettingsRepositoryImpl
         policy: value
             ? BiometricCredentialPolicy.requireUnlock
             : BiometricCredentialPolicy.disabled,
+        authenticatedAt: value ? currentTime : null,
       );
       return updated
           ? const Success(null)

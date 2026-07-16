@@ -43,6 +43,7 @@ void main() {
       expect(authenticator.calls, 1);
       expect(vault.setCalls, 1);
       expect(vault.policy, BiometricCredentialPolicy.requireUnlock);
+      expect(vault.authenticatedAt, DateTime.utc(2026, 7, 16, 12));
     },
   );
 
@@ -80,14 +81,17 @@ final class _Authenticator implements LocalAuthenticator {
 final class _PolicyVault implements BiometricCredentialVault {
   int setCalls = 0;
   BiometricCredentialPolicy? policy;
+  DateTime? authenticatedAt;
 
   @override
   Future<bool> setBiometricPolicy({
     required LockedCredentialMetadata expected,
     required BiometricCredentialPolicy policy,
+    DateTime? authenticatedAt,
   }) async {
     setCalls += 1;
     this.policy = policy;
+    this.authenticatedAt = authenticatedAt;
     return true;
   }
 
