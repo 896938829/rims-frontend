@@ -266,8 +266,9 @@ final class AppSecureStorage
         SessionPendingRevocationStorage,
         DeviceCredentialStorage,
         BiometricCredentialVault {
-  AppSecureStorage({FlutterSecureStorage? storage})
-    : _storage = storage ?? const FlutterSecureStorage();
+  AppSecureStorage({FlutterSecureStorage? storage, DateTime Function()? now})
+    : _storage = storage ?? const FlutterSecureStorage(),
+      _now = now ?? _currentUtcTime;
 
   static const String kAccessTokenKey = 'access_token';
   static const String kDeviceCredentialKey = 'device_credential_v3';
@@ -277,6 +278,7 @@ final class AppSecureStorage
       'pending_revocation_account_id';
 
   final FlutterSecureStorage _storage;
+  final DateTime Function() _now;
   _RuntimeBiometricUnlockLease? _biometricUnlockLease;
 
   void _invalidateBiometricUnlockLease() {
@@ -405,11 +407,9 @@ final class AppSecureStorage
           return credential.accessToken;
         }
         final lease = _biometricUnlockLease;
-        final now = DateTime.now().toUtc();
         if (lease == null ||
             !lease.matches(deviceRecord, credential) ||
-            !credential.accessExpiresAt.isAfter(now) ||
-            !credential.refreshExpiresAt.isAfter(now) ||
+            !_isCredentialUnexpired(credential) ||
             await _hasBlockingRevocationDebt(credential)) {
           _invalidateBiometricUnlockLease();
           return null;
@@ -646,6 +646,7 @@ final class AppSecureStorage
         previousLease != null &&
         previousLease.matches(record, current) &&
         current.biometricPolicy == BiometricCredentialPolicy.requireUnlock &&
+        _isCredentialUnexpired(credential) &&
         !await _hasBlockingRevocationDebt(current);
     if (!migrateLease) _invalidateBiometricUnlockLease();
     await _writeDeviceCredentialStoreRecord(
@@ -707,8 +708,7 @@ final class AppSecureStorage
         availability: BiometricCredentialAvailability.disabled,
       );
     }
-    if (!credential.accessExpiresAt.isAfter(now.toUtc()) ||
-        !credential.refreshExpiresAt.isAfter(now.toUtc())) {
+    if (!_isCredentialUnexpired(credential)) {
       return const BiometricCredentialInspection(
         availability: BiometricCredentialAvailability.expired,
       );
@@ -741,8 +741,7 @@ final class AppSecureStorage
         : null;
     if (credential == null ||
         credential.biometricPolicy != BiometricCredentialPolicy.requireUnlock ||
-        !credential.accessExpiresAt.isAfter(now.toUtc()) ||
-        !credential.refreshExpiresAt.isAfter(now.toUtc()) ||
+        !_isCredentialUnexpired(credential) ||
         !_matchesLockedCredential(credential, expected) ||
         await _hasBlockingRevocationDebt(credential)) {
       return null;
@@ -780,8 +779,7 @@ final class AppSecureStorage
     final releasesRuntimeLease = authenticatedAt != null;
     if (releasesRuntimeLease &&
         (policy != BiometricCredentialPolicy.requireUnlock ||
-            !credential.accessExpiresAt.isAfter(authenticatedAt.toUtc()) ||
-            !credential.refreshExpiresAt.isAfter(authenticatedAt.toUtc()) ||
+            !_isCredentialUnexpired(credential) ||
             await _hasBlockingRevocationDebt(credential) ||
             record.ownerId == null ||
             record.attemptVersion == null)) {
@@ -829,6 +827,12 @@ final class AppSecureStorage
     return lease.accountId == credential.accountId &&
         lease.sessionId == credential.sessionId &&
         lease.generation == credential.generation;
+  }
+
+  bool _isCredentialUnexpired(DeviceCredential credential) {
+    final currentTime = _now().toUtc();
+    return credential.accessExpiresAt.isAfter(currentTime) &&
+        credential.refreshExpiresAt.isAfter(currentTime);
   }
 
   Future<_DeviceCredentialStoreRecord>
@@ -1074,6 +1078,8 @@ final class _RuntimeBiometricUnlockLease {
         accessToken: credential.accessToken,
       );
 }
+
+DateTime _currentUtcTime() => DateTime.now().toUtc();
 
 bool _matchesLockedCredential(
   DeviceCredential credential,

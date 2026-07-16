@@ -27,8 +27,9 @@ void main() {
       _MemoryFlutterSecureStorage raw, {
       DeviceCredential? credential,
       String ownerId = 'owner-7',
+      DateTime Function()? now,
     }) async {
-      final storage = AppSecureStorage(storage: raw);
+      final storage = AppSecureStorage(storage: raw, now: now);
       final attempt = await storage.beginAccessTokenAttempt(ownerId);
       await storage.savePendingDeviceCredentialForOwner(
         credential:
@@ -72,6 +73,131 @@ void main() {
         isNotNull,
       );
     }
+
+    test(
+      'injected clock expires a released biometric lease deterministically',
+      () async {
+        var currentTime = DateTime.utc(2026, 7, 16, 12);
+        final raw = _MemoryFlutterSecureStorage();
+        final storage = await commitLocked(
+          raw,
+          now: () => currentTime,
+          credential: _credential(
+            accessExpiresAt: currentTime.add(const Duration(minutes: 1)),
+            refreshExpiresAt: currentTime.add(const Duration(days: 1)),
+            biometricPolicy: BiometricCredentialPolicy.requireUnlock,
+          ),
+        );
+        final inspection = await storage.inspectForBiometricUnlock(currentTime);
+        expect(
+          await storage.releaseAfterBiometric(
+            expected: inspection.metadata!,
+            now: currentTime,
+          ),
+          isNotNull,
+        );
+
+        expect((await reader(storage).read())?.token, 'access-1');
+        currentTime = currentTime.add(const Duration(minutes: 1));
+        expect(await reader(storage).read(), isNull);
+        final staleCallerTime = currentTime.subtract(
+          const Duration(minutes: 1),
+        );
+        expect(
+          (await storage.inspectForBiometricUnlock(
+            staleCallerTime,
+          )).availability,
+          BiometricCredentialAvailability.expired,
+        );
+        expect(
+          await storage.releaseAfterBiometric(
+            expected: inspection.metadata!,
+            now: staleCallerTime,
+          ),
+          isNull,
+        );
+      },
+    );
+
+    test(
+      'injected clock rejects policy release after credential expiry',
+      () async {
+        var currentTime = DateTime.utc(2026, 7, 16, 12);
+        final raw = _MemoryFlutterSecureStorage();
+        final storage = await commitLocked(
+          raw,
+          now: () => currentTime,
+          credential: _credential(
+            accessExpiresAt: currentTime.add(const Duration(minutes: 1)),
+            refreshExpiresAt: currentTime.add(const Duration(days: 1)),
+            biometricPolicy: BiometricCredentialPolicy.disabled,
+          ),
+        );
+        final credential = (await storage.readDeviceCredential())!;
+        final authenticatedAt = currentTime;
+        currentTime = currentTime.add(const Duration(minutes: 1));
+
+        expect(
+          await storage.setBiometricPolicy(
+            expected: LockedCredentialMetadata.fromCredential(credential),
+            policy: BiometricCredentialPolicy.requireUnlock,
+            authenticatedAt: authenticatedAt,
+          ),
+          isFalse,
+        );
+        expect(
+          (await storage.readDeviceCredential())?.biometricPolicy,
+          BiometricCredentialPolicy.disabled,
+        );
+      },
+    );
+
+    test(
+      'injected clock preserves exact refresh lease but not a new storage instance',
+      () async {
+        final currentTime = DateTime.utc(2026, 7, 16, 12);
+        final raw = _MemoryFlutterSecureStorage();
+        final storage = await commitLocked(
+          raw,
+          now: () => currentTime,
+          credential: _credential(
+            accessExpiresAt: currentTime.add(const Duration(hours: 1)),
+            refreshExpiresAt: currentTime.add(const Duration(days: 1)),
+            biometricPolicy: BiometricCredentialPolicy.requireUnlock,
+          ),
+        );
+        final inspection = await storage.inspectForBiometricUnlock(currentTime);
+        await storage.releaseAfterBiometric(
+          expected: inspection.metadata!,
+          now: currentTime,
+        );
+        final before = (await storage.readDeviceCredential())!;
+
+        expect(
+          await storage.rotateDeviceCredential(
+            credential: _credential(
+              accessToken: 'access-2',
+              refreshToken: 'refresh-2',
+              generation: before.generation + 1,
+              accessExpiresAt: currentTime.add(const Duration(hours: 1)),
+              refreshExpiresAt: currentTime.add(const Duration(days: 1)),
+              biometricPolicy: BiometricCredentialPolicy.requireUnlock,
+            ),
+            expectedAccountId: before.accountId,
+            expectedSessionId: before.sessionId,
+            expectedGeneration: before.generation,
+          ),
+          isTrue,
+        );
+        expect((await reader(storage).read())?.token, 'access-2');
+
+        final restarted = AppSecureStorage(
+          storage: raw,
+          now: () => currentTime,
+        );
+        expect(await reader(restarted).read(), isNull);
+      },
+    );
 
     test(
       'biometric release authorizes the stable request reader only in this process',
